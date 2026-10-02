@@ -1,30 +1,32 @@
 import { describe, expect, test } from "bun:test";
-import { FindingSchema, type GateRequest, gate, RISK_CLASSES, refuseDryRun, rerunWithYes } from "./index.ts";
+import * as contract from "./index.ts";
+import { checkInvocation, FindingSchema, type Invocation, RISK_CLASSES, rerunWithYes } from "./index.ts";
 
-const req = (over: Partial<GateRequest> = {}): GateRequest => ({
+const inv = (over: Partial<Invocation> = {}): Invocation => ({
   command: "offload",
   argv: ["offload", "web"],
   risk: "confirm",
+  supportsDryRun: true,
   yes: false,
   plan: false,
   dryRun: false,
   ...over,
 });
 
-describe("risk gate (D15)", () => {
+describe("checkInvocation: the one gate the CLI calls (D15, D18)", () => {
   test("read and safe_write run freely", () => {
-    expect(gate(req({ risk: "read" }))).toEqual({ verdict: "allow", riskClass: "read" });
-    expect(gate(req({ risk: "safe_write" }))).toEqual({ verdict: "allow", riskClass: "safe_write" });
+    expect(checkInvocation(inv({ risk: "read" }))).toEqual({ ok: true, value: { riskClass: "read" } });
+    expect(checkInvocation(inv({ risk: "safe_write" }))).toEqual({
+      ok: true,
+      value: { riskClass: "safe_write" },
+    });
   });
 
-  test("confirm without --yes is refused with exit 3 and the exact re-run", () => {
-    const verdict = gate(req());
-    expect(verdict).toEqual({
-      verdict: "confirm",
-      riskClass: "confirm",
+  test("confirm without --yes is refused with exit 3, and the finding's fix is the exact re-run", () => {
+    const result = checkInvocation(inv());
+    expect(result).toEqual({
+      ok: false,
       exitCode: 3,
-      rerun: "plainport offload web --yes",
-      hint: "re-run: plainport offload web --yes",
       finding: {
         code: "risk.needs-yes",
         severity: "block",
@@ -33,61 +35,85 @@ describe("risk gate (D15)", () => {
         allowable: false,
       },
     });
-    if (verdict.verdict === "confirm") expect(FindingSchema.parse(verdict.finding)).toEqual(verdict.finding);
+    if (!result.ok) expect(FindingSchema.parse(result.finding)).toEqual(result.finding);
   });
 
   test("confirm with --yes, or with an approved --plan, is allowed", () => {
-    expect(gate(req({ yes: true }))).toEqual({ verdict: "allow", riskClass: "confirm" });
-    expect(gate(req({ plan: true }))).toEqual({ verdict: "allow", riskClass: "confirm" });
+    expect(checkInvocation(inv({ yes: true }))).toEqual({ ok: true, value: { riskClass: "confirm" } });
+    expect(checkInvocation(inv({ plan: true }))).toEqual({ ok: true, value: { riskClass: "confirm" } });
   });
 
   test("a command that declares no risk class is confirm", () => {
-    expect(gate(req({ risk: undefined })).verdict).toBe("confirm");
-    expect(gate(req({ risk: undefined, yes: true }))).toEqual({ verdict: "allow", riskClass: "confirm" });
+    expect(checkInvocation(inv({ risk: undefined })).ok).toBe(false);
+    expect(checkInvocation(inv({ risk: undefined, yes: true }))).toEqual({
+      ok: true,
+      value: { riskClass: "confirm" },
+    });
   });
 
-  test("D18: --dry-run is always read", () => {
+  test("D18: --dry-run on a command that supports it is always read", () => {
     for (const risk of [...RISK_CLASSES, undefined]) {
-      expect(gate(req({ risk, dryRun: true }))).toEqual({ verdict: "allow", riskClass: "read" });
+      expect(checkInvocation(inv({ risk, dryRun: true }))).toEqual({
+        ok: true,
+        value: { riskClass: "read" },
+      });
     }
   });
 
-  test("D18: a command without dry-run support refuses --dry-run as a usage error before it runs", () => {
-    const refusal = refuseDryRun({
-      command: "gc",
-      argv: ["gc", "--dry-run", "--now"],
-      supportsDryRun: false,
-      dryRun: true,
-    });
-    expect(refusal).toEqual({
-      ok: false,
-      exitCode: 2,
-      finding: {
-        code: "usage.dry-run-unsupported",
-        severity: "block",
-        message: "gc has no --dry-run preview",
-        fix: "plainport gc --now",
-        allowable: false,
-      },
-    });
-    if (refusal.ok === false) expect(FindingSchema.parse(refusal.finding)).toEqual(refusal.finding);
-    expect(
-      refuseDryRun({ command: "gc", argv: ["gc", "--now"], supportsDryRun: false, dryRun: false }),
-    ).toEqual({
-      ok: true,
-      value: null,
-    });
-    expect(
-      refuseDryRun({
-        command: "offload",
-        argv: ["offload", "web", "--dry-run"],
-        supportsDryRun: true,
-        dryRun: true,
-      }),
-    ).toEqual({
-      ok: true,
-      value: null,
-    });
+  test("D18: --dry-run on a command without a preview is a usage error, whatever else is given", () => {
+    for (const risk of [...RISK_CLASSES, undefined])
+      for (const yes of [false, true]) {
+        const result = checkInvocation(inv({ risk, yes, supportsDryRun: false, dryRun: true }));
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.exitCode).toBe(2);
+          expect(result.finding.code).toBe("usage.dry-run-unsupported");
+          expect(FindingSchema.parse(result.finding)).toEqual(result.finding);
+        }
+      }
+  });
+
+  test("the dry-run refusal never invites running the command blind", () => {
+    const at = (risk: "read" | "safe_write" | "confirm") => {
+      const result = checkInvocation(
+        inv({ command: "gc", argv: ["gc", "--dry-run", "--now"], risk, supportsDryRun: false, dryRun: true }),
+      );
+      if (result.ok) throw new Error("expected a refusal");
+      return result.finding;
+    };
+    for (const risk of ["read", "safe_write", "confirm"] as const) {
+      expect(at(risk).message).toBe("gc has no --dry-run preview");
+    }
+    expect(at("read").fix).toBe("it only reads, so run it without --dry-run: plainport gc --now");
+    expect(at("safe_write").fix).toBe(
+      "without --dry-run it changes files straight away; see what it does first: plainport help gc",
+    );
+    expect(at("confirm").fix).toBe(
+      "without --dry-run it still asks for --yes before changing anything: plainport gc --now",
+    );
+  });
+
+  test("the separate steps are not public: the CLI can only call the combined check", () => {
+    expect("gate" in contract).toBe(false);
+    expect("refuseDryRun" in contract).toBe(false);
+  });
+
+  test("checkInvocation is total: every combination is a verdict, and only a refused one fails", () => {
+    const bools = [false, true];
+    for (const risk of [...RISK_CLASSES, undefined])
+      for (const yes of bools)
+        for (const plan of bools)
+          for (const dryRun of bools)
+            for (const supportsDryRun of bools) {
+              const result = checkInvocation(inv({ risk, yes, plan, dryRun, supportsDryRun }));
+              const expected =
+                dryRun && !supportsDryRun
+                  ? 2
+                  : !dryRun && (risk ?? "confirm") === "confirm" && !yes && !plan
+                    ? 3
+                    : 0;
+              expect(result.ok ? 0 : result.exitCode).toBe(expected);
+            }
   });
 
   test("the re-run is shell-exact: odd arguments are quoted and --yes goes before --", () => {
@@ -99,19 +125,6 @@ describe("risk gate (D15)", () => {
     );
     expect(rerunWithYes(["offload", "--", "--odd-name"])).toBe("plainport offload --yes -- --odd-name");
     expect(rerunWithYes(["offload", "$HOME", "a;b"])).toBe("plainport offload '$HOME' 'a;b' --yes");
-  });
-
-  test("the gate is total: every combination returns a verdict without throwing", () => {
-    const bools = [false, true];
-    for (const risk of [...RISK_CLASSES, undefined])
-      for (const yes of bools)
-        for (const plan of bools)
-          for (const dryRun of bools) {
-            const verdict = gate(req({ risk, yes, plan, dryRun }));
-            expect(["allow", "confirm"]).toContain(verdict.verdict);
-            const refused = (risk ?? "confirm") === "confirm" && !yes && !plan && !dryRun;
-            expect(verdict.verdict === "confirm").toBe(refused);
-          }
   });
 });
 
@@ -153,15 +166,21 @@ describe("re-run line in real shells", () => {
     return run.stdout.toString().split("\0").slice(0, -1);
   };
 
+  // CI installs both shells and must never skip this (scripts/ci-workflow.test.ts pins the install); a laptop
+  // without one of them skips it.
   for (const shell of ["zsh", "bash"]) {
-    test(`${shell} reads the re-run back as the same arguments`, () => {
-      expect(parse(shell, rerunWithYes(awkward))).toEqual([...awkward, "--yes"]);
-      expect(parse(shell, rerunWithYes(["offload", "--", "=odd"]))).toEqual([
-        "offload",
-        "--yes",
-        "--",
-        "=odd",
-      ]);
-    });
+    test.skipIf(!Bun.which(shell) && !process.env.CI)(
+      `${shell} reads the re-run back as the same arguments`,
+      () => {
+        expect(Bun.which(shell)).not.toBeNull();
+        expect(parse(shell, rerunWithYes(awkward))).toEqual([...awkward, "--yes"]);
+        expect(parse(shell, rerunWithYes(["offload", "--", "=odd"]))).toEqual([
+          "offload",
+          "--yes",
+          "--",
+          "=odd",
+        ]);
+      },
+    );
   }
 });
