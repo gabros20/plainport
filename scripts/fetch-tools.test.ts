@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Fetcher, fetchTools, type Lock, parseLock } from "./fetch-tools.ts";
@@ -72,7 +81,7 @@ describe("tools: fetch-tools", () => {
     tampered[tampered.length - 1] = (tampered.at(-1) ?? 0) ^ 0xff;
     const fetcher = fixtureFetcher({ [RESTIC_URL]: tampered });
 
-    const result = await fetchTools({ lock: fixtureLock(), target: "darwin-arm64", destRoot, fetcher });
+    const result = await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -87,7 +96,7 @@ describe("tools: fetch-tools", () => {
   test("a mismatch on an existing install leaves the installed binary alone", async () => {
     const first = await fetchTools({
       lock: fixtureLock(),
-      target: "darwin-arm64",
+      targets: ["darwin-arm64"],
       destRoot,
       fetcher: fixtureFetcher(),
     });
@@ -97,7 +106,7 @@ describe("tools: fetch-tools", () => {
 
     const lock = fixtureLock();
     lock.tools.restic.targets["darwin-arm64"].sha256 = "0".repeat(64);
-    const result = await fetchTools({ lock, target: "darwin-arm64", destRoot, fetcher: fixtureFetcher() });
+    const result = await fetchTools({ lock, targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
 
     expect(result).toMatchObject({ ok: false, code: "tool.checksum_mismatch" });
     expect(readFileSync(binary)).toEqual(before);
@@ -112,7 +121,7 @@ describe("tools: fetch-tools", () => {
   test("verified archives are unpacked into .tools/<os>-<arch>/ as executables", async () => {
     const result = await fetchTools({
       lock: fixtureLock(),
-      target: "linux-x64",
+      targets: ["linux-x64"],
       destRoot,
       fetcher: fixtureFetcher(),
     });
@@ -138,12 +147,12 @@ describe("tools: fetch-tools", () => {
   });
 
   test("a second run skips tools that are already verified, and re-fetches a binary that changed", async () => {
-    await fetchTools({ lock: fixtureLock(), target: "darwin-arm64", destRoot, fetcher: fixtureFetcher() });
+    await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
 
     const again = fixtureFetcher();
     const second = await fetchTools({
       lock: fixtureLock(),
-      target: "darwin-arm64",
+      targets: ["darwin-arm64"],
       destRoot,
       fetcher: again,
     });
@@ -154,7 +163,7 @@ describe("tools: fetch-tools", () => {
     const third = fixtureFetcher();
     const result = await fetchTools({
       lock: fixtureLock(),
-      target: "darwin-arm64",
+      targets: ["darwin-arm64"],
       destRoot,
       fetcher: third,
     });
@@ -169,7 +178,7 @@ describe("tools: fetch-tools", () => {
     const fetcher: Fetcher = async () => {
       throw new Error("HTTP 404");
     };
-    const result = await fetchTools({ lock: fixtureLock(), target: "darwin-arm64", destRoot, fetcher });
+    const result = await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher });
     expect(result).toMatchObject({ ok: false, code: "tool.download_failed" });
     if (!result.ok) expect(result.message).toContain("HTTP 404");
     expect(existsSync(destRoot)).toBe(false);
@@ -178,12 +187,81 @@ describe("tools: fetch-tools", () => {
   test("an archive without the expected member is a tool.extract_failed value and installs nothing", async () => {
     const lock = fixtureLock();
     lock.tools.rclone.targets["darwin-arm64"].member = "rclone-v0.0.0-fixture/missing";
-    const result = await fetchTools({ lock, target: "darwin-arm64", destRoot, fetcher: fixtureFetcher() });
+    const result = await fetchTools({ lock, targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
     expect(result).toMatchObject({ ok: false, code: "tool.extract_failed" });
-    expect(existsSync(join(destRoot, "darwin-arm64", "rclone"))).toBe(false);
-    expect(
-      readdirSync(join(destRoot, "darwin-arm64")).filter((entry) => entry.startsWith(".fetch-")),
-    ).toEqual([]);
+    // restic unpacked fine, but nothing is installed unless every tool is.
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("a mismatch on the second tool leaves no file behind, not even the first tool", async () => {
+    const tampered = new Uint8Array(rcloneArchive);
+    tampered[0] = (tampered[0] ?? 0) ^ 0xff;
+    const fetcher = fixtureFetcher({ [RCLONE_URL]: tampered });
+
+    const result = await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher });
+
+    expect(result).toMatchObject({ ok: false, code: "tool.checksum_mismatch" });
+    if (!result.ok) expect(result.message).toContain(RCLONE_URL);
+    expect(fetcher.calls).toEqual([RESTIC_URL, RCLONE_URL]);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("a mismatch on a later target leaves the earlier targets uninstalled", async () => {
+    const lock = fixtureLock();
+    const otherUrl = "https://example.invalid/rclone-v0.0.0-linux-amd64.zip";
+    lock.tools.rclone.targets["linux-x64"] = { ...lock.tools.rclone.targets["linux-x64"], url: otherUrl };
+    const fetcher = fixtureFetcher({ [otherUrl]: new Uint8Array([1, 2, 3]) });
+
+    const result = await fetchTools({ lock, targets: ["darwin-arm64", "linux-x64"], destRoot, fetcher });
+
+    expect(result).toMatchObject({ ok: false, code: "tool.checksum_mismatch" });
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("a mismatch beside an existing install adds no new file to it", async () => {
+    await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
+    const lock = fixtureLock();
+    lock.tools.restic.targets["linux-x64"] = {
+      ...lock.tools.restic.targets["linux-x64"],
+      sha256: "0".repeat(64),
+    };
+
+    const result = await fetchTools({ lock, targets: ["linux-x64"], destRoot, fetcher: fixtureFetcher() });
+
+    expect(result).toMatchObject({ ok: false, code: "tool.checksum_mismatch" });
+    expect(readdirSync(destRoot)).toEqual(["darwin-arm64"]);
+  });
+
+  test("a cached binary that lost its executable bit is installed again", async () => {
+    await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
+    const restic = join(destRoot, "darwin-arm64", "restic");
+    chmodSync(restic, 0o644);
+
+    const fetcher = fixtureFetcher();
+    const result = await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher });
+
+    expect(result).toMatchObject({ ok: true, tools: [{ status: "installed" }, { status: "current" }] });
+    expect(fetcher.calls).toEqual([RESTIC_URL]);
+    expect(statSync(restic).mode & 0o111).toBe(0o111);
+  });
+
+  test("several targets install in one run, each into its own folder", async () => {
+    const result = await fetchTools({
+      lock: fixtureLock(),
+      targets: ["darwin-arm64", "linux-arm64"],
+      destRoot,
+      fetcher: fixtureFetcher(),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      tools: [
+        { name: "restic", target: "darwin-arm64", status: "installed" },
+        { name: "rclone", target: "darwin-arm64", status: "installed" },
+        { name: "restic", target: "linux-arm64", status: "installed" },
+        { name: "rclone", target: "linux-arm64", status: "installed" },
+      ],
+    });
+    expect(readdirSync(destRoot).sort()).toEqual(["darwin-arm64", "linux-arm64"]);
   });
 });
 

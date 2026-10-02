@@ -2,14 +2,18 @@
 // .tools/<os>-<arch>/, where packages/core's toolPath finds them for development and tests. Flags: --target
 // <os>-<arch> or --target all (default: this machine), --dest <dir> (default: .tools in the checkout).
 //
-// Each archive is hashed in memory and checked against the lock before anything is written, so a mismatch leaves
-// no file behind. Archives are unpacked with the system's bunzip2 (restic ships .bz2) and unzip (rclone ships
-// .zip) into a temp folder beside the destination, then renamed into place. A `.<name>.pin` file records what was
-// installed, so a second run skips tools that are still intact. Scripts may spawn directly (run decision D8).
+// A run installs every tool for every requested target, or nothing: each archive is hashed in memory and checked
+// against the lock before anything is written, so a mismatch anywhere leaves no file behind. Archives are unpacked
+// with the system's bunzip2 (restic ships .bz2) and unzip (rclone ships .zip) into one temp folder beside the
+// destination, then renamed into place. A `.<name>.pin` file records what was installed, so a second run skips
+// tools that are still intact and executable. Scripts may spawn directly and validate their own dev-only
+// files by hand (run decisions D8 and D10).
 
 import { createHash } from "node:crypto";
 import {
+  accessSync,
   chmodSync,
+  constants,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -77,7 +81,13 @@ export const httpsFetcher: Fetcher = async (url) => {
   return new Uint8Array(await response.arrayBuffer());
 };
 
-export type FetchedTool = { name: ToolName; version: string; path: string; status: "installed" | "current" };
+export type FetchedTool = {
+  name: ToolName;
+  target: Target;
+  version: string;
+  path: string;
+  status: "installed" | "current";
+};
 export type FetchResult =
   | { ok: true; tools: FetchedTool[] }
   | {
@@ -101,7 +111,9 @@ const readPin = (path: string): Pin | undefined => {
 const isCurrent = (binary: string, pin: Pin | undefined, version: string, archiveSha256: string): boolean => {
   if (pin?.version !== version || pin.archiveSha256 !== archiveSha256) return false;
   try {
-    return statSync(binary).isFile() && sha256(readFileSync(binary)) === pin.binarySha256;
+    if (!statSync(binary).isFile()) return false;
+    accessSync(binary, constants.X_OK);
+    return sha256(readFileSync(binary)) === pin.binarySha256;
   } catch {
     return false;
   }
@@ -127,68 +139,94 @@ const unpack = (
   return undefined;
 };
 
+type Pending = FetchedTool & { tool: LockTool; entry: LockTarget; bytes: Uint8Array; pinPath: string };
+
+/**
+ * Installs the pinned tools for every target, or none of them. First it downloads every archive that isn't
+ * already installed and checks it against the lock in memory, so a mismatch anywhere returns before anything is
+ * written. Then it unpacks them all into one temp folder, and only when every one unpacked does it move them
+ * into place.
+ */
 export const fetchTools = async (options: {
   lock: Lock;
-  target: Target;
+  targets: Target[];
   destRoot: string;
   fetcher?: Fetcher;
 }): Promise<FetchResult> => {
-  const { lock, target, destRoot, fetcher = httpsFetcher } = options;
-  const destDir = join(destRoot, target);
-  const fetched: FetchedTool[] = [];
+  const { lock, targets, destRoot, fetcher = httpsFetcher } = options;
+  const tools: FetchedTool[] = [];
+  const pending: Pending[] = [];
 
-  for (const name of TOOL_NAMES) {
-    const tool = lock.tools[name];
-    const { url, sha256: expected, member } = tool.targets[target];
-    const binary = join(destDir, name);
-    const pinPath = join(destDir, `.${name}.pin`);
-    if (isCurrent(binary, readPin(pinPath), tool.version, expected)) {
-      fetched.push({ name, version: tool.version, path: binary, status: "current" });
-      continue;
-    }
-
-    let bytes: Uint8Array;
-    try {
-      bytes = await fetcher(url);
-    } catch (error) {
-      return {
-        ok: false,
-        code: "tool.download_failed",
-        message: `${name} ${target}: ${url}: ${(error as Error).message}`,
-      };
-    }
-    const actual = sha256(bytes);
-    if (actual !== expected) {
-      return {
-        ok: false,
-        code: "tool.checksum_mismatch",
-        message:
-          `${name} ${target}: ${url} has SHA-256 ${actual}, but tools.lock.json pins ${expected}. ` +
-          "Nothing was written. Check the url and the sum against the project's official SHA256SUMS.",
-      };
-    }
-
-    mkdirSync(destDir, { recursive: true });
-    const work = mkdtempSync(join(destDir, ".fetch-"));
-    try {
-      const archive = join(work, "archive");
-      const unpacked = join(work, name);
-      writeFileSync(archive, bytes);
-      const failure = unpack(tool.format, archive, unpacked, member);
-      if (failure !== undefined) {
-        return { ok: false, code: "tool.extract_failed", message: `${name} ${target}: ${failure}` };
+  for (const target of targets) {
+    for (const name of TOOL_NAMES) {
+      const tool = lock.tools[name];
+      const entry = tool.targets[target];
+      const path = join(destRoot, target, name);
+      const pinPath = join(destRoot, target, `.${name}.pin`);
+      if (isCurrent(path, readPin(pinPath), tool.version, entry.sha256)) {
+        tools.push({ name, target, version: tool.version, path, status: "current" });
+        continue;
       }
-      chmodSync(unpacked, 0o755);
-      const binarySha256 = sha256(readFileSync(unpacked));
-      renameSync(unpacked, binary);
-      const pin: Pin = { version: tool.version, archiveSha256: expected, binarySha256 };
-      writeFileSync(pinPath, `${JSON.stringify(pin)}\n`);
-    } finally {
-      rmSync(work, { recursive: true, force: true });
+      let bytes: Uint8Array;
+      try {
+        bytes = await fetcher(entry.url);
+      } catch (error) {
+        return {
+          ok: false,
+          code: "tool.download_failed",
+          message: `${name} ${target}: ${entry.url}: ${(error as Error).message}. Nothing was written.`,
+        };
+      }
+      const actual = sha256(bytes);
+      if (actual !== entry.sha256) {
+        return {
+          ok: false,
+          code: "tool.checksum_mismatch",
+          message:
+            `${name} ${target}: ${entry.url} has SHA-256 ${actual}, but tools.lock.json pins ${entry.sha256}. ` +
+            "Nothing was written. Check the url and the sum against the project's official SHA256SUMS.",
+        };
+      }
+      const fetched: FetchedTool = { name, target, version: tool.version, path, status: "installed" };
+      tools.push(fetched);
+      pending.push({ ...fetched, tool, entry, bytes, pinPath });
     }
-    fetched.push({ name, version: tool.version, path: binary, status: "installed" });
   }
-  return { ok: true, tools: fetched };
+  if (pending.length === 0) return { ok: true, tools };
+
+  const created = mkdirSync(destRoot, { recursive: true });
+  const work = mkdtempSync(join(destRoot, ".fetch-"));
+  try {
+    for (const [index, item] of pending.entries()) {
+      const archive = join(work, `${index}.archive`);
+      const out = join(work, `${index}.bin`);
+      writeFileSync(archive, item.bytes);
+      const failure = unpack(item.tool.format, archive, out, item.entry.member);
+      if (failure !== undefined) {
+        if (created !== undefined) rmSync(created, { recursive: true, force: true });
+        return {
+          ok: false,
+          code: "tool.extract_failed",
+          message: `${item.name} ${item.target}: ${failure}. Nothing was installed.`,
+        };
+      }
+      chmodSync(out, 0o755);
+    }
+    for (const [index, item] of pending.entries()) {
+      const out = join(work, `${index}.bin`);
+      const pin: Pin = {
+        version: item.version,
+        archiveSha256: item.entry.sha256,
+        binarySha256: sha256(readFileSync(out)),
+      };
+      mkdirSync(join(destRoot, item.target), { recursive: true });
+      renameSync(out, item.path);
+      writeFileSync(item.pinPath, `${JSON.stringify(pin)}\n`);
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+  return { ok: true, tools };
 };
 
 if (import.meta.main) {
@@ -220,16 +258,13 @@ if (import.meta.main) {
   }
   const destRoot = resolve(values.dest ?? join(root, ".tools"));
 
-  for (const target of targets) {
-    const result = await fetchTools({ lock, target, destRoot });
-    if (!result.ok) {
-      console.error(`fetch-tools: ${result.code}: ${result.message}`);
-      process.exit(1);
-    }
-    for (const tool of result.tools) {
-      const status =
-        tool.status === "installed" ? "installed, SHA-256 matches the lock" : "already installed";
-      console.log(`${tool.name} ${tool.version} ${target}: ${status}: ${tool.path}`);
-    }
+  const result = await fetchTools({ lock, targets, destRoot });
+  if (!result.ok) {
+    console.error(`fetch-tools: ${result.code}: ${result.message}`);
+    process.exit(1);
+  }
+  for (const tool of result.tools) {
+    const status = tool.status === "installed" ? "installed, SHA-256 matches the lock" : "already installed";
+    console.log(`${tool.name} ${tool.version} ${tool.target}: ${status}: ${tool.path}`);
   }
 }
