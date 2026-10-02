@@ -9,6 +9,12 @@ plainport was designed in a claude.ai conversation between 29 September and 2 Oc
 - **Design: complete.** `docs/DESIGN.md` is an export of the living design doc as of 2 October 2026 and is now the source of truth. The claude.ai doc stays as the archive: https://claude.ai/artifact/3qMK5CKtGksjZZwSVnb6iu
 - **Open questions: none.** All 16 were settled; the **Decisions** section of `DESIGN.md` lists the 26 decisions.
 - **Code: none yet.** The next step is milestone M1.
+- **M0 prep (2 October 2026, Claude Code session):** git repository created and pushed to the private
+  `gabros20/plainport`; ADRs in `docs/adr/` record every design decision plus three new ones (copy plainkeep's
+  contract, test-first with the crash matrix, delivery through `/orchestrate`); `docs/ROADMAP.md` stages
+  M0–M6; `docs/plans/M1-local-core.md` is the 16-task M1 plan for `/orchestrate`, awaiting approval.
+  ADR-0018 (test environments) waits on a research note in the plainkeep vault. SSH alias `mini` is set up
+  on the laptop but untested, because the mini was offline in Tailscale.
 
 ## Proposed stack details (not yet in DESIGN.md)
 
@@ -53,4 +59,5 @@ Out of scope for M1: remote stores, devices and moves, agent adapters, the kit, 
 
 ## First prompt for the coding agent
 
-> Read AGENTS.md, docs/HANDOFF.md and docs/DESIGN.md. Then propose a plan for milestone M1 following the suggested order, starting with the scaffold and the command contract. Don't write code until I approve the plan.
+> Read AGENTS.md, docs/HANDOFF.md, docs/ROADMAP.md and docs/adr/README.md. Then run
+> `/orchestrate docs/plans/M1-local-core.md strategy=staged review=dual` on branch `m1-local-core`, once the owner has approved the M1 plan.
