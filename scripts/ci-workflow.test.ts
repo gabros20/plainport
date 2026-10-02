@@ -43,3 +43,7 @@ test("the Linux job installs zsh, so the real-shell re-run test runs there too",
   expect(runs("linux")).toContain("apt-get install -y zsh");
   expect(runs("linux").indexOf("apt-get install -y zsh")).toBeLessThan(runs("linux").indexOf("bun run test"));
 });
+
+test("fails when plainport.json, schemas/ or completions/ are stale (ADR-0007, AGENTS.md rule 4)", () => {
+  expect(runs("macos")).toContain("bun run contract --check");
+});

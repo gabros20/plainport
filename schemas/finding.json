@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+      "title": "FindingCode",
+      "description": "Stable dotted code, e.g. git.unpushed"
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warn",
+        "block"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fix": {
+      "description": "The exact next step, e.g. a command to run",
+      "type": "string",
+      "minLength": 1
+    },
+    "allowable": {
+      "type": "boolean",
+      "description": "May --allow <code> override it?"
+    }
+  },
+  "required": [
+    "code",
+    "severity",
+    "message",
+    "allowable"
+  ],
+  "additionalProperties": {},
+  "title": "Finding"
+}

@@ -18,7 +18,7 @@ bun install
 bun run typecheck && bun run lint
 bun test              # T0: unit, fakes, in-process crash matrix
 bun run test:t1       # adds real restic and rclone (after `bun scripts/fetch-tools.ts`)
-bun run contract      # regenerates plainport.json and schemas/; commit the result
+bun run contract      # regenerates plainport.json, schemas/ and completions/; commit the result (CI runs --check)
 bun run build && ./dist/plainport --version
 ```
 

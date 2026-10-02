@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "plainport_json": {
+          "type": "number",
+          "const": 1
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "verb": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The command as registered, e.g. offload or root add"
+        },
+        "data": {
+          "$ref": "#/$defs/__schema0"
+        },
+        "error": {
+          "not": {}
+        }
+      },
+      "required": [
+        "plainport_json",
+        "ok",
+        "verb",
+        "data"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "type": "object",
+      "properties": {
+        "plainport_json": {
+          "type": "number",
+          "const": 1
+        },
+        "ok": {
+          "type": "boolean",
+          "const": false
+        },
+        "verb": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The command as registered, e.g. offload or root add"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "number",
+              "enum": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                130
+              ],
+              "title": "FailureExitCode",
+              "description": "Equal to the process exit code"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": {}
+        },
+        "data": {
+          "not": {}
+        }
+      },
+      "required": [
+        "plainport_json",
+        "ok",
+        "verb",
+        "error"
+      ],
+      "additionalProperties": {}
+    },
+    {
+      "type": "object",
+      "properties": {
+        "plainport_json": {
+          "type": "number",
+          "const": 1
+        },
+        "ok": {
+          "type": "boolean",
+          "const": false
+        },
+        "verb": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The command as registered, e.g. offload or root add"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "number",
+              "enum": [
+                8,
+                10
+              ],
+              "description": "Equal to the process exit code"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hint": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": {}
+        },
+        "data": {
+          "$ref": "#/$defs/__schema0"
+        }
+      },
+      "required": [
+        "plainport_json",
+        "ok",
+        "verb",
+        "error",
+        "data"
+      ],
+      "additionalProperties": {}
+    }
+  ],
+  "title": "Envelope",
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema0"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema0"
+          }
+        }
+      ]
+    }
+  }
+}

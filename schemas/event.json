@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "phase"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "start",
+                "end",
+                "skip"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "phase",
+            "status"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "progress"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            },
+            "bytesDone": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bytesTotal": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "etaSeconds": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "phase",
+            "bytesDone",
+            "bytesTotal"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "finding"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "finding": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "finding"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "log"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "debug",
+                "info",
+                "warn"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "level",
+            "message"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "result"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "exitCode": {
+                      "type": "number",
+                      "const": 0
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "local",
+                        "offloading",
+                        "shelved",
+                        "onloading",
+                        "restored-unhydrated",
+                        "conflicted",
+                        "unavailable"
+                      ],
+                      "title": "ProjectState"
+                    },
+                    "project": {
+                      "type": "string"
+                    },
+                    "snapshot": {
+                      "type": "string"
+                    },
+                    "freedBytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "exitCode",
+                    "state"
+                  ],
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "exitCode": {
+                      "type": "number",
+                      "enum": [
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7,
+                        8,
+                        9,
+                        10,
+                        11,
+                        130
+                      ],
+                      "title": "FailureExitCode",
+                      "description": "Any plainport exit code but 0"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "local",
+                        "offloading",
+                        "shelved",
+                        "onloading",
+                        "restored-unhydrated",
+                        "conflicted",
+                        "unavailable"
+                      ],
+                      "title": "ProjectState"
+                    },
+                    "project": {
+                      "type": "string"
+                    },
+                    "snapshot": {
+                      "type": "string"
+                    },
+                    "freedBytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "message": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "exitCode",
+                    "state"
+                  ],
+                  "additionalProperties": {}
+                }
+              ],
+              "title": "OperationResult"
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "result"
+          ],
+          "additionalProperties": {}
+        }
+      ],
+      "title": "PlainportEvent"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^(?!(?:phase|progress|finding|log|result)$).+$"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": {},
+      "title": "UnknownEvent"
+    }
+  ],
+  "title": "EventLine"
+}

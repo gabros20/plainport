@@ -130,7 +130,12 @@ Every command declares one risk class in the registry, and `plainport.json` publ
   `--dry-run` check before the risk check, so the CLI cannot do one without the other. It returns the risk class
   to run as, or a failure with exit 2 or 3 and the finding; the CLI parses the flags, prints the refusal and exits.
 - An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
-  `confirm` and is gated as such.
+  `confirm` and is gated as such. The registry resolves it before calling `checkInvocation()`: an option set on
+  the command line raises the class to the one it declares.
+- A refusal's `error.hint` is the finding's `fix`; for `risk.needs-yes` it is `re-run: <command>`. In human mode
+  the refusal goes to stderr as `plainport: <message>`, then `re-run: …` or `fix: …`.
+- Arguments are checked before the risk: a usage error exits 2 even on a `confirm` command without `--yes`. An
+  unregistered command exits 4 (`command.unknown`) with the closest registered name, if one is close.
 
 ## 5. Findings
 
@@ -155,10 +160,13 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
+| `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
+| `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
+| `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>` |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
 
@@ -190,6 +198,45 @@ runs freely. Under `--json`, its envelope's `data` is the plan. A command that h
 - Consumers should key on `plainport_json` and the schemas, not on the plainport version string.
 - Tests hold this: the exit-code table and the finding catalogue are frozen literals in
   `packages/contract`, and every command's `--json` output is validated against its declared schema in CI.
+
+## 8. `plainport.json` and completions
+
+`plainport.json` is generated from the command registry by `bun run contract`; nothing in it is edited by hand,
+and CI fails when the committed copy is stale (`bun run contract --check`). It holds no plainport version, so a
+release does not change it.
+
+```json
+{
+  "schema": "plainport.json/1",
+  "plainport_json": 1,
+  "globalOptions": [{"name": "json", "kind": "boolean", "summary": "…"}, {"name": "store", "kind": "string", "value": "name", "summary": "…"}],
+  "commands": [{"name": "help", "summary": "…", "usage": "plainport help [<command...>]", "risk": "read", "dryRun": false,
+                "positionals": [{"name": "command", "summary": "…", "required": false, "variadic": true}],
+                "options": [], "arguments": {"…": "JSON Schema"}, "output": {"…": "JSON Schema"},
+                "examples": [{"argv": ["help", "version"], "summary": "…"}]}],
+  "exitCodes": [{"code": 0, "name": "ok", "meaning": "Success"}],
+  "findings": [{"code": "risk.needs-yes", "severity": "block", "allowable": false, "exitCode": 3, "summary": "…"}]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schema` | The version of this file's shape; a breaking change to it bumps the number |
+| `plainport_json` | The envelope version (§1) |
+| `globalOptions` | The global flags, in DESIGN.md order; `kind` is `boolean` or `string` |
+| `commands[].risk` | The command's risk class (§4); an option that raises it carries its own `risk` in `options` |
+| `commands[].dryRun` | Whether `--dry-run` previews (§6); otherwise it is refused with exit 2 |
+| `commands[].options[].kind` | `boolean` (a flag), `string` (takes a value) or `strings` (repeatable) |
+| `commands[].arguments` | The strict JSON Schema of the parsed arguments: positional names and option names as keys |
+| `commands[].output` | The open JSON Schema of the success envelope's `data` |
+
+`plainport help --json` returns the same command entries without `arguments` and `output`; `help <command>`
+adds `topic`, the command asked about. `plainport --help`, `plainport <command> --help` and a bare `plainport`
+are `help`; `plainport --version` is `version`.
+
+`bun run contract` also writes `completions/_plainport` (zsh, for a folder on `$fpath`) and
+`completions/plainport.bash` (bash). They complete command names, the words of a command group, `help`'s argument
+and each command's options plus the global ones.
 
 ## JSON Schemas
 

@@ -29,6 +29,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
+      - name: generated contract files are fresh
+        # plainport.json, schemas/ and completions/ are generated from the command registry; never edited by hand.
+        run: bun run contract --check
       - run: bun run test
       - name: test:t1 (real restic and rclone)
         # fetch-tools downloads the restic and rclone tools.lock.json pins and refuses any checksum mismatch.

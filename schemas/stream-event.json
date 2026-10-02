@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "phase"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "start",
+                "end",
+                "skip"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "phase",
+            "status"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "progress"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "phase": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            },
+            "bytesDone": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bytesTotal": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "etaSeconds": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "phase",
+            "bytesDone",
+            "bytesTotal"
+          ],
+          "additionalProperties": {}
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "finding"
+            },
+            "op": {
+              "type": "string",
+              "minLength": 1
+            },
+            "finding": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "required": [
+            "type",
+            "op",
+            "finding"
+          ],
+          "additionalProperties": {}
+        }
+      ],
+      "title": "StreamEvent"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^(?!(?:phase|progress|finding|log|result)$).+$"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": {},
+      "title": "UnknownEvent"
+    }
+  ],
+  "title": "StreamLine"
+}

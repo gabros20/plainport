@@ -1,0 +1,394 @@
+{
+  "schema": "plainport.json/1",
+  "plainport_json": 1,
+  "globalOptions": [
+    {
+      "name": "json",
+      "kind": "boolean",
+      "summary": "Print NDJSON: event lines, then exactly one final envelope"
+    },
+    {
+      "name": "yes",
+      "kind": "boolean",
+      "summary": "Allow a confirm-class command to run"
+    },
+    {
+      "name": "no-input",
+      "kind": "boolean",
+      "summary": "Never prompt; implied when stdin is not a terminal"
+    },
+    {
+      "name": "dry-run",
+      "kind": "boolean",
+      "summary": "Preview only: build and print the plan, change nothing"
+    },
+    {
+      "name": "store",
+      "kind": "string",
+      "value": "name",
+      "summary": "Use this store instead of the default"
+    },
+    {
+      "name": "config",
+      "kind": "string",
+      "value": "path",
+      "summary": "Read this config file instead of the default"
+    },
+    {
+      "name": "quiet",
+      "kind": "boolean",
+      "summary": "Print only results, warnings and errors"
+    },
+    {
+      "name": "verbose",
+      "kind": "boolean",
+      "summary": "Print debug logs too"
+    }
+  ],
+  "commands": [
+    {
+      "name": "help",
+      "summary": "Show every command, or one command's arguments, options and risk class",
+      "usage": "plainport help [<command...>]",
+      "risk": "read",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "command",
+          "summary": "A command, e.g. version or root add",
+          "required": false,
+          "variadic": true
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "A command, e.g. version or root add",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "topic": {
+            "description": "The command asked about; absent for the full list",
+            "type": "string"
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "usage": {
+                  "type": "string"
+                },
+                "risk": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "safe_write",
+                    "confirm"
+                  ],
+                  "title": "RiskClass"
+                },
+                "dryRun": {
+                  "type": "boolean"
+                },
+                "positionals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "variadic": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "summary",
+                      "required",
+                      "variadic"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "boolean",
+                          "string",
+                          "strings"
+                        ]
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "risk": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "safe_write",
+                          "confirm"
+                        ],
+                        "title": "RiskClass"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "kind",
+                      "summary",
+                      "required"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "examples": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "argv": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "summary": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "argv",
+                      "summary"
+                    ],
+                    "additionalProperties": {}
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "summary",
+                "usage",
+                "risk",
+                "dryRun",
+                "positionals",
+                "options",
+                "examples"
+              ],
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "commands"
+        ],
+        "additionalProperties": {}
+      },
+      "examples": [
+        {
+          "argv": [
+            "help"
+          ],
+          "summary": "List every command"
+        },
+        {
+          "argv": [
+            "help",
+            "version"
+          ],
+          "summary": "Show one command"
+        }
+      ]
+    },
+    {
+      "name": "version",
+      "summary": "Print plainport's version",
+      "usage": "plainport version",
+      "risk": "read",
+      "dryRun": false,
+      "positionals": [],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "additionalProperties": {}
+      },
+      "examples": [
+        {
+          "argv": [
+            "version"
+          ],
+          "summary": "Print the version"
+        }
+      ]
+    }
+  ],
+  "exitCodes": [
+    {
+      "code": 0,
+      "name": "ok",
+      "meaning": "Success"
+    },
+    {
+      "code": 1,
+      "name": "unexpected",
+      "meaning": "Unexpected failure"
+    },
+    {
+      "code": 2,
+      "name": "usage",
+      "meaning": "Usage error, or an ambiguous project name"
+    },
+    {
+      "code": 3,
+      "name": "confirm",
+      "meaning": "Needs --yes; the message names the exact re-run"
+    },
+    {
+      "code": 4,
+      "name": "notFound",
+      "meaning": "Not found: project, snapshot, device or store"
+    },
+    {
+      "code": 5,
+      "name": "denied",
+      "meaning": "Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission"
+    },
+    {
+      "code": 6,
+      "name": "blocked",
+      "meaning": "Blocked by a preflight finding, or the plan is stale"
+    },
+    {
+      "code": 7,
+      "name": "verifyFailed",
+      "meaning": "Verification failed"
+    },
+    {
+      "code": 8,
+      "name": "conflict",
+      "meaning": "Conflict, or a strict lease held elsewhere"
+    },
+    {
+      "code": 9,
+      "name": "unreachable",
+      "meaning": "Store or peer unreachable"
+    },
+    {
+      "code": 10,
+      "name": "unhydrated",
+      "meaning": "Restored but not hydrated"
+    },
+    {
+      "code": 11,
+      "name": "locked",
+      "meaning": "Another operation holds the lock"
+    },
+    {
+      "code": 130,
+      "name": "cancelled",
+      "meaning": "Cancelled"
+    }
+  ],
+  "findings": [
+    {
+      "code": "command.unknown",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No registered command has this name; the message suggests the closest one"
+    },
+    {
+      "code": "contract.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A value crossing an edge did not match its schema"
+    },
+    {
+      "code": "internal.unexpected",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A bug: an exception escaped a command; the message names it"
+    },
+    {
+      "code": "risk.needs-yes",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 3,
+      "summary": "A confirm-class command ran without --yes or an approved --plan"
+    },
+    {
+      "code": "usage.dry-run-unsupported",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "--dry-run was given to a command that has no preview"
+    },
+    {
+      "code": "usage.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "The arguments or options do not match the command's declared arguments"
+    },
+    {
+      "code": "tool.missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A bundled binary (restic or rclone) was not found"
+    }
+  ]
+}
