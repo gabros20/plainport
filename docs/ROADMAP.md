@@ -37,25 +37,25 @@ git switch -c m1-local-core
 
 ## Test environment tiers
 
-ADR-0018 fixes the tools for each tier once the research note is in. The tiers themselves are settled:
+Tools per tier are proposed in ADR-0018, from the vault research note and live checks on the laptop:
 
 | Tier | What | Runs | Proves |
 | --- | --- | --- | --- |
 | **T0 · Unit and fakes** | `bun test`, fakes for every port, fast-check, fault injection through the host port | Every save, every CI run | Planner, fold, findings, saga logic, crash matrix (in-process) |
 | **T1 · Local real binaries** | Real restic and rclone on temp repositories; sandboxed `HOME`s; an `ssh` shim; `hdiutil` APFS images (case-sensitive and not) | Every CI run on macOS | Engine contract, round trips, crash matrix with real `SIGKILL`, two sandboxed instances talking through the shim |
-| **T2 · Local Linux peers** | Linux sshd peers with systemd and logind on the laptop; MinIO, SFTP and rest-server containers; Toxiproxy | CI on demand, milestone gates | Store contract, cross-OS round trips, detached jobs with `KillUserProcesses=yes`, network faults |
-| **T3 · Real hardware and buckets** | The Intel Mac mini over Tailscale (`ssh mini`); Backblaze B2 and Cloudflare R2 buckets with per-run prefixes and scoped keys | Milestone gates | darwin-x64 build, real Tailscale latency, real bucket semantics, append-only keys |
-| **T4 · Remote VPS** | One persistent or on-demand Linux VM reachable over Tailscale | M3 and M5 gates | The full MacBook → mini → VPS → MacBook move |
+| **T2 · Local Linux peers** | OrbStack Ubuntu machines `hub` and `vps` (cloud-init: sshd, forced-command keys, logind drop-in; about 11 s to recreate); MinIO, `atmoz/sftp`, `rest-server --append-only` and Toxiproxy containers | CI on demand, milestone gates | Store contract, cross-OS round trips, detached jobs with `KillUserProcesses=yes`, network faults |
+| **T3 · Real hardware and buckets** | The Intel Mac mini over Tailscale (`ssh mini`); Cloudflare R2 (`weur`, conditional writes); Backblaze B2 EU Central (offsite replica, native `b2:`); per-run prefixes and scoped keys | Milestone gates | darwin-x64 build, real Tailscale latency, real bucket semantics, append-only keys |
+| **T4 · Remote VPS** | One Hetzner Cloud CX23 (x86_64, Falkenstein or Nuremberg), SSH only over Tailscale; created for the M3 gate | M3 and M5 gates | The full MacBook → mini → VPS → MacBook move |
 
 ## M0 · Prep (now)
 
 | # | Task | Output | Status |
 | --- | --- | --- | --- |
 | 0.1 | Initialise git, push to private `gabros20/plainport` | `main` on GitHub | Done |
-| 0.2 | ADRs for every design decision plus this session's | `docs/adr/` | Done (0018 pending) |
+| 0.2 | ADRs for every design decision plus this session's | `docs/adr/` | Done |
 | 0.3 | This roadmap and the M1 plan file | `docs/ROADMAP.md`, `docs/plans/M1-local-core.md` | Done, awaiting owner review |
-| 0.4 | Research test hosts, sandboxes and stores (Grok lane, X bookmarks plus web) | Vault note `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` | Running |
-| 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Waiting on 0.4 |
+| 0.4 | Research test hosts, sandboxes and stores (Grok lane, X bookmarks plus web) | Vault note `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` | Done; OrbStack claims verified live on the laptop |
+| 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Filled; awaiting owner acceptance |
 | 0.6 | SSH alias `mini` on the laptop | `~/.ssh/config` entry | Done; untested, because the mini was offline in Tailscale on 2026-10-02 |
 | 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | First task of M1 phase 1 | Planned |
 
@@ -125,6 +125,6 @@ TUI over the same plans and events (Ink, re-check OpenTUI); SwiftUI desktop app 
 
 ## Open items
 
-- **ADR-0018** waits on the research note (M0 task 0.4).
+- **ADR-0018** is filled and awaits acceptance. Its open checks: `orb version` on the mini, and rclone's `If-None-Match` support on the pinned version (M2).
 - **The Mac mini** was offline in Tailscale on 2026-10-02, so `ssh mini` is configured but untested.
 - **plainkeep `archive` gap** (from HANDOFF): fix in the plainkeep repository, not here.
