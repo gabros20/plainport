@@ -26,7 +26,7 @@ Under `--json`, the **last line on stdout** is exactly one envelope object.
 **Failure:**
 
 ```json
-{"plainport_json": 1, "ok": false, "verb": "offload", "error": {"code": 3, "message": "offload is confirm-class", "hint": "re-run: plainport offload web --yes"}}
+{"plainport_json": 1, "ok": false, "verb": "offload", "error": {"code": 3, "message": "offload is confirm-class", "hint": "re-run: plainport offload web --yes", "finding": {"code": "risk.needs-yes", "severity": "block", "message": "offload is confirm-class", "fix": "plainport offload web --yes", "allowable": false}}}
 ```
 
 **Partial success** (the files are back, the dependencies are not):
@@ -46,7 +46,9 @@ The rules:
 - `verb` is the command as registered, such as `offload` or `root add`.
 - `data` is any JSON value; its shape is the command's declared output schema in `plainport.json`.
 - `error.code` **equals the process exit code**, always one of the failure codes in §3. `error.message` is one
-  plain sentence; `error.hint`, when present, is the exact next step, often a command to run.
+  plain sentence; `error.hint`, when present, is the exact next step, often a command to run. `error.finding`,
+  when present, is the finding behind the failure (§5), so a reader can branch on its stable `code`: every
+  refusal the CLI prints carries it.
 - With `ok: true` the process exits 0. With `ok: false` it exits `error.code`.
 
 Unlike plainkeep, plainport has no multi-row header form: a command that returns a list puts it in `data`.
@@ -92,7 +94,7 @@ plainkeep.
 | 1 | `unexpected` | Unexpected failure |
 | 2 | `usage` | Usage error, or an ambiguous project name |
 | 3 | `confirm` | Needs `--yes`; the message names the exact re-run |
-| 4 | `notFound` | Not found: project, snapshot, device or store |
+| 4 | `notFound` | Not found: project, snapshot, device, store or command |
 | 5 | `denied` | Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission |
 | 6 | `blocked` | Blocked by a preflight finding, or the plan is stale |
 | 7 | `verifyFailed` | Verification failed |
@@ -132,8 +134,14 @@ Every command declares one risk class in the registry, and `plainport.json` publ
 - An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
   `confirm` and is gated as such. The registry resolves it before calling `checkInvocation()`: an option set on
   the command line raises the class to the one it declares.
-- A refusal's `error.hint` is the finding's `fix`; for `risk.needs-yes` it is `re-run: <command>`. In human mode
-  the refusal goes to stderr as `plainport: <message>`, then `re-run: …` or `fix: …`.
+- A refusal names its finding. Under `--json`, `error.finding` is the finding and `error.hint` its `fix`; for
+  `risk.needs-yes` the hint is `re-run: <command>`. In human mode the refusal goes to stderr as
+  `plainport: <code>: <message>`, then `re-run: …` or `fix: …`.
+- `--plan <id>` exists only on a command whose registry entry declares `acceptsPlan`. It stands in for `--yes` only
+  when the plan store holds that id as approved for that command; any other id is refused like a missing `--yes`.
+  Until the plan store arrives (M1 Task 10), no id is approved.
+- A command's dry run declares its own schema: the plan, which is `data` under `--dry-run` (§6). The output schema
+  is the `data` of a real run.
 - Arguments are checked before the risk: a usage error exits 2 even on a `confirm` command without `--yes`. An
   unregistered command exits 4 (`command.unknown`) with the closest registered name, if one is close.
 
@@ -209,10 +217,11 @@ release does not change it.
 {
   "schema": "plainport.json/1",
   "plainport_json": 1,
-  "globalOptions": [{"name": "json", "kind": "boolean", "summary": "…"}, {"name": "store", "kind": "string", "value": "name", "summary": "…"}],
+  "globalOptions": [{"name": "json", "type": "boolean", "summary": "…"}, {"name": "store", "type": "string", "summary": "…"}],
   "commands": [{"name": "help", "summary": "…", "usage": "plainport help [<command...>]", "risk": "read", "dryRun": false,
                 "positionals": [{"name": "command", "summary": "…", "required": false, "variadic": true}],
-                "options": [], "arguments": {"…": "JSON Schema"}, "output": {"…": "JSON Schema"},
+                "options": [{"name": "allow", "type": "string", "multiple": true, "summary": "…"}],
+                "arguments": {"…": "JSON Schema"}, "output": {"…": "JSON Schema"}, "plan": null,
                 "examples": [{"argv": ["help", "version"], "summary": "…"}]}],
   "exitCodes": [{"code": 0, "name": "ok", "meaning": "Success"}],
   "findings": [{"code": "risk.needs-yes", "severity": "block", "allowable": false, "exitCode": 3, "summary": "…"}]
@@ -223,14 +232,15 @@ release does not change it.
 | --- | --- |
 | `schema` | The version of this file's shape; a breaking change to it bumps the number |
 | `plainport_json` | The envelope version (§1) |
-| `globalOptions` | The global flags, in DESIGN.md order; `kind` is `boolean` or `string` |
+| `globalOptions` | The global flags, in DESIGN.md order; `type` is `boolean` or `string` |
 | `commands[].risk` | The command's risk class (§4); an option that raises it carries its own `risk` in `options` |
 | `commands[].dryRun` | Whether `--dry-run` previews (§6); otherwise it is refused with exit 2 |
-| `commands[].options[].kind` | `boolean` (a flag), `string` (takes a value) or `strings` (repeatable) |
+| `commands[].options[]` | `type` is `boolean` (a flag) or `string` (takes a value); `multiple` is true when the option repeats (`--allow a --allow b`); `risk` appears only on an option that raises the command's class |
 | `commands[].arguments` | The strict JSON Schema of the parsed arguments: positional names and option names as keys |
-| `commands[].output` | The open JSON Schema of the success envelope's `data` |
+| `commands[].output` | The open JSON Schema of the success envelope's `data` on a real run |
+| `commands[].plan` | The open JSON Schema of `data` under `--dry-run` (the plan, §6); `null` when the command has no dry run |
 
-`plainport help --json` returns the same command entries without `arguments` and `output`; `help <command>`
+`plainport help --json` returns the same command entries without `arguments`, `output` and `plan`; `help <command>`
 adds `topic`, the command asked about. `plainport --help`, `plainport <command> --help` and a bare `plainport`
 are `help`; `plainport --version` is `version`.
 

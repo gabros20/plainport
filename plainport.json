@@ -4,44 +4,42 @@
   "globalOptions": [
     {
       "name": "json",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Print NDJSON: event lines, then exactly one final envelope"
     },
     {
       "name": "yes",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Allow a confirm-class command to run"
     },
     {
       "name": "no-input",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Never prompt; implied when stdin is not a terminal"
     },
     {
       "name": "dry-run",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Preview only: build and print the plan, change nothing"
     },
     {
       "name": "store",
-      "kind": "string",
-      "value": "name",
+      "type": "string",
       "summary": "Use this store instead of the default"
     },
     {
       "name": "config",
-      "kind": "string",
-      "value": "path",
+      "type": "string",
       "summary": "Read this config file instead of the default"
     },
     {
       "name": "quiet",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Print only results, warnings and errors"
     },
     {
       "name": "verbose",
-      "kind": "boolean",
+      "type": "boolean",
       "summary": "Print debug logs too"
     }
   ],
@@ -144,19 +142,18 @@
                       "name": {
                         "type": "string"
                       },
-                      "kind": {
+                      "type": {
                         "type": "string",
                         "enum": [
                           "boolean",
-                          "string",
-                          "strings"
+                          "string"
                         ]
+                      },
+                      "multiple": {
+                        "type": "boolean"
                       },
                       "summary": {
                         "type": "string"
-                      },
-                      "required": {
-                        "type": "boolean"
                       },
                       "risk": {
                         "type": "string",
@@ -170,9 +167,9 @@
                     },
                     "required": [
                       "name",
-                      "kind",
-                      "summary",
-                      "required"
+                      "type",
+                      "multiple",
+                      "summary"
                     ],
                     "additionalProperties": {}
                   }
@@ -219,6 +216,7 @@
         ],
         "additionalProperties": {}
       },
+      "plan": null,
       "examples": [
         {
           "argv": [
@@ -263,6 +261,7 @@
         ],
         "additionalProperties": {}
       },
+      "plan": null,
       "examples": [
         {
           "argv": [
@@ -297,7 +296,7 @@
     {
       "code": 4,
       "name": "notFound",
-      "meaning": "Not found: project, snapshot, device or store"
+      "meaning": "Not found: project, snapshot, device, store or command"
     },
     {
       "code": 5,

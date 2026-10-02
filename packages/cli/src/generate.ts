@@ -17,7 +17,9 @@ export const MANIFEST_SCHEMA = "plainport.json/1";
 /** Folders that hold only generated files: anything else found in them is stale. */
 const GENERATED_DIRS = ["schemas", "completions"] as const;
 
-const jsonSchema = (schema: z.ZodType) => z.toJSONSchema(schema, { target: "draft-2020-12" });
+/** Arguments are published as what a caller may pass (input); output and plans as what plainport prints. */
+const jsonSchema = (schema: z.ZodType, io: "input" | "output") =>
+  z.toJSONSchema(schema, { target: "draft-2020-12", io });
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -33,7 +35,13 @@ export const manifest = (registry: Registry) => {
     globalOptions: GLOBAL_OPTIONS,
     commands: registry.map((command) => {
       const { examples, ...info } = commandInfo(command);
-      return { ...info, arguments: jsonSchema(command.args), output: jsonSchema(command.output), examples };
+      return {
+        ...info,
+        arguments: jsonSchema(command.args, "input"),
+        output: jsonSchema(command.output, "output"),
+        plan: command.dryRun === false ? null : jsonSchema(command.dryRun.plan, "output"),
+        examples,
+      };
     }),
     exitCodes: Object.entries(EXIT).map(([name, code]) => ({
       code,
