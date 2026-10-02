@@ -1,0 +1,168 @@
+# The machine contract: `--json`, exit codes, risk classes
+
+**Reference.** The exact shapes a program or coding agent can rely on when driving `plainport`. Read this to
+build a frontend, an agent skill, or any tool that shells out to `plainport`.
+
+Everything here is public API (ADR-0007). The schemas live in `packages/contract` and are exported as JSON Schema;
+tests pin the exit-code table, the envelope and the finding catalogue. Sections 1 to 3 and 7 are adapted from
+plainkeep's `docs/machine-contract.md` §1–3 and §6 (`gabros20/plainkeep@d7eb27e`, ADR-0003); this file is
+authoritative for plainport.
+
+---
+
+## 1. The `--json` envelope
+
+Every command accepts the global `--json` flag. Without it, output is human text; the exit code is the same
+either way.
+
+Under `--json`, the **last line on stdout** is exactly one envelope object.
+
+**Success:**
+
+```json
+{"plainport_json": 1, "ok": true, "verb": "offload", "data": {"op": "01J9Z6K2", "freedBytes": 2746000000}}
+```
+
+**Failure:**
+
+```json
+{"plainport_json": 1, "ok": false, "verb": "offload", "error": {"code": 3, "message": "offload is confirm-class", "hint": "re-run: plainport offload web --yes"}}
+```
+
+The rules:
+
+- The keys are exactly `plainport_json`, `ok`, `verb`, and `data` (when `ok` is true) or `error` (when `ok` is
+  false). Nothing else appears at the top level. A failure carries no `data`.
+- `plainport_json` is the envelope version, `1`. It changes only on a breaking change to the envelope (§7).
+- `verb` is the command as registered, such as `offload` or `root add`.
+- `data` is any JSON value; its shape is the command's declared output schema in `plainport.json`.
+- `error.code` **equals the process exit code**, always one of the failure codes in §3. `error.message` is one
+  plain sentence; `error.hint`, when present, is the exact next step, often a command to run.
+- With `ok: true` the process exits 0. With `ok: false` it exits `error.code`.
+
+Unlike plainkeep, plainport has no multi-row header form: a command that returns a list puts it in `data`.
+
+## 2. Event lines
+
+A command that runs an operation streams events before the envelope. Under `--json`, stdout is NDJSON: zero or
+more event lines, then the envelope. Each line is one JSON object; nothing else is printed to stdout.
+
+```
+{"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
+{"type":"progress","op":"01J9Z6K2","phase":"snapshot","bytesDone":512000000,"bytesTotal":1934000000,"etaSeconds":41}
+{"type":"finding","op":"01J9Z6K2","finding":{"code":"git.unpushed","severity":"warn","message":"2 commits on feature/pricing are not on origin","allowable":true}}
+{"plainport_json":1,"ok":true,"verb":"offload","data":{"op":"01J9Z6K2","project":"work:clients/acme/web","snapshot":"01J9Z6K2","freedBytes":2746000000}}
+```
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `phase` | `op`, `phase`, `status`: `start`, `end` or `skip` | An operation entered, left or skipped a phase |
+| `progress` | `op`, `phase`, `bytesDone`, `bytesTotal`, optional `etaSeconds` | Bytes moved so far in a phase |
+| `finding` | `op`, `finding` (a Finding, §5) | Something the operation noticed: information, a warning or a blocker |
+
+`op` is the operation's ULID. `phase` is one of `resolve`, `preflight`, `scan`, `plan`, `snapshot`, `verify`,
+`commit`, `release`, `restore`, `swap`, `agents`, `toolchain`, `hydrate`, `hooks`.
+
+The core emits two more event types, which are not stdout lines: `log` events go to stderr as text, and the
+`result` event becomes the final envelope. Over JSON-RPC (`plainport serve --stdio`) all five arrive as `event`
+notifications.
+
+A reader should rely on two rules: every line but the last is an event line, and the last line is the envelope.
+`parseJsonLines` in `packages/contract` checks exactly that.
+
+## 3. Exit codes
+
+The exit code is the first thing to branch on. Codes never change meaning; 0 to 5 mean what they mean in
+plainkeep.
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 0 | `ok` | Success |
+| 1 | `unexpected` | Unexpected failure |
+| 2 | `usage` | Usage error, or an ambiguous project name |
+| 3 | `confirm` | Needs `--yes`; the message names the exact re-run |
+| 4 | `notFound` | Not found: project, snapshot, device or store |
+| 5 | `denied` | Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission |
+| 6 | `blocked` | Blocked by a preflight finding, or the plan is stale |
+| 7 | `verifyFailed` | Verification failed |
+| 8 | `conflict` | Conflict, or a strict lease held elsewhere |
+| 9 | `unreachable` | Store or peer unreachable |
+| 10 | `unhydrated` | Restored but not hydrated |
+| 11 | `locked` | Another operation holds the lock |
+| 130 | `cancelled` | Cancelled |
+
+The names are the keys of `EXIT` in `packages/contract`. Exit 1 means a bug or an unforeseen failure; every
+expected failure has a more specific code and a finding. A process killed by a signal other than an interrupt
+reports what the operating system reports; that is outside this table.
+
+## 4. Risk classes
+
+Every command declares one risk class in the registry, and `plainport.json` publishes it.
+
+| Class | Meaning | Gate |
+| --- | --- | --- |
+| `read` | Reads only | Runs freely |
+| `safe_write` | Changes files only inside your roots, in ways plainport can undo or regenerate | Runs freely |
+| `confirm` | Sends data off the machine or deletes it | Needs `--yes`, or an approved `--plan <id>` |
+
+- A `confirm` command without `--yes` (or `--plan <id>`) does nothing and exits 3. Its message ends with the exact
+  command to re-run, `--yes` added: `re-run: plainport offload web --yes`. Under `--json` that line is
+  `error.hint`.
+- A command that declares no risk class is treated as `confirm`.
+- An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
+  `confirm` and is gated as such.
+
+## 5. Findings
+
+A finding is something an operation noticed, with a stable code an agent can act on.
+
+```json
+{"code": "git.unpushed", "severity": "warn", "message": "2 commits on feature/pricing are not on origin", "fix": "git push", "allowable": true}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `code` | Stable dotted code: lower-case words joined by dots, words may contain hyphens (`git.in-progress`) |
+| `severity` | `info`, `warn` or `block` |
+| `message` | One plain sentence |
+| `paths` | Optional: the files or folders concerned |
+| `fix` | Optional: the exact next step |
+| `allowable` | Whether `--allow <code>` may override it |
+
+A `block` finding stops the operation before anything changes and exits 6, unless the finding's catalogue
+entry names another code. Each finding code is listed once in the catalogue (`FINDINGS` in
+`packages/contract`) with its severity, whether it is allowable, and its exit code. The catalogue so far:
+
+| Code | Severity | Allowable | Exit | Meaning |
+| --- | --- | --- | --- | --- |
+| `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
+| `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
+
+Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
+
+## 6. The `--dry-run` contract
+
+Every command that changes anything supports `--dry-run` as a true preview: it builds and prints the plan, then
+stops, writing nothing. A `--dry-run` run is a `read`, so it needs no `--yes`: `plainport offload web --dry-run`
+runs freely. Under `--json`, its envelope's `data` is the plan.
+
+## 7. Stability policy
+
+- The envelope, the event lines, the exit codes, the risk classes, finding codes and every command's schemas are
+  public API (ADR-0007).
+- A breaking change to the envelope or the event lines (a removed or renamed key, a changed meaning) needs a
+  `plainport_json` bump, and a release with a new major version.
+- Exit codes never change meaning, and a finding code, once released, keeps its meaning. A retired code is never
+  reused.
+- Additive changes, such as a new optional field, a new event type, a new finding code or a new command, keep
+  `plainport_json` at its value. The published JSON Schemas describe the current version exactly, so a strict
+  validator built from an older schema may reject a newer field: consumers should ignore keys they don't know.
+- Consumers should key on `plainport_json` and the schemas, not on the plainport version string.
+- Tests hold this: the exit-code table and the finding catalogue are frozen literals in
+  `packages/contract`, and every command's `--json` output is validated against its declared schema in CI.
+
+## JSON Schemas
+
+`contractJsonSchemas()` in `packages/contract` exports each schema as a draft 2020-12 JSON Schema document:
+`envelope`, `event`, `stream-event`, `finding`, `exit-code`, `risk-class`, `phase`, `project-state` and
+`operation-result`. `bun run contract` writes them to `schemas/`, next to `plainport.json`.
