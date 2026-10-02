@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describeT1 } from "../../../test/tiers.ts";
-import { hostTarget, type ToolPathContext, toolPath } from "./tools.ts";
+import { checkoutToolsDir, hostTarget, type ToolPathContext, toolPath } from "./tools.ts";
 
 const repo = resolve(import.meta.dir, "../../..");
 
@@ -83,6 +91,7 @@ describe("tools: toolPath resolver order", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.code).toBe("tool.missing");
+    expect(result.exitCode).toBe(6);
     expect(result.searched).toEqual([
       join(envDir, "restic"),
       join(binDir, "restic"),
@@ -114,6 +123,55 @@ describe("tools: toolPath resolver order", () => {
     expect(result.ok).toBe(false);
     expect(seen).toEqual([join(repo, ".tools", `${hostTarget()}`, "restic")]);
   });
+});
+
+describe("tools: a compiled binary finds the checkout's .tools/", () => {
+  let dir: string;
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("checkoutToolsDir walks up to the folder holding tools.lock.json", () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "plainport-checkout-")));
+    mkdirSync(join(dir, "repo", "dist", "nested"), { recursive: true });
+    mkdirSync(join(dir, "elsewhere"));
+    writeFileSync(join(dir, "repo", "tools.lock.json"), "{}");
+    expect(checkoutToolsDir(join(dir, "repo", "dist", "nested"))).toBe(join(dir, "repo", ".tools"));
+    expect(checkoutToolsDir(join(dir, "repo"))).toBe(join(dir, "repo", ".tools"));
+    expect(checkoutToolsDir(join(dir, "elsewhere"))).toBeUndefined();
+  });
+
+  test("a build in dist/ uses .tools/<target>/, after a tool beside the binary", () => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "plainport-compiled-")));
+    const target = hostTarget();
+    if (target === undefined) throw new Error(`no release target for ${process.platform}-${process.arch}`);
+    const checkout = join(dir, "repo");
+    mkdirSync(join(checkout, "dist"), { recursive: true });
+    mkdirSync(join(checkout, ".tools", target), { recursive: true });
+    writeFileSync(join(checkout, "tools.lock.json"), "{}");
+    const devTool = join(checkout, ".tools", target, "restic");
+    writeFileSync(devTool, "#!/bin/sh\n");
+    chmodSync(devTool, 0o755);
+
+    const entry = join(dir, "probe.ts");
+    writeFileSync(
+      entry,
+      `import { toolPath } from ${JSON.stringify(join(import.meta.dir, "tools.ts"))};\n` +
+        `console.log(JSON.stringify(toolPath("restic", { env: {} })));\n`,
+    );
+    const binary = join(checkout, "dist", "plainport");
+    const build = Bun.spawnSync([process.execPath, "build", "--compile", entry, "--outfile", binary], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (build.exitCode !== 0) throw new Error(`build failed: ${build.stderr.toString()}`);
+    const probe = () => JSON.parse(Bun.spawnSync([binary], { cwd: dir }).stdout.toString()) as unknown;
+
+    expect(probe()).toEqual({ ok: true, path: devTool, source: "dev-tools" });
+
+    const beside = join(checkout, "dist", "restic");
+    writeFileSync(beside, "#!/bin/sh\n");
+    chmodSync(beside, 0o755);
+    expect(probe()).toEqual({ ok: true, path: beside, source: "beside-binary" });
+  }, 120_000);
 });
 
 // Runs the binaries `bun scripts/fetch-tools.ts` put in .tools/ and checks they are the versions tools.lock.json pins.

@@ -1,9 +1,11 @@
 // Where plainport finds the pinned restic and rclone binaries (ADR-0006). The lookup order is:
 // 1. $PLAINPORT_TOOLS_DIR, a folder that holds the binaries (for tests and unusual installs);
 // 2. the folder of the running plainport binary, where releases bundle them (ADR-0020);
-// 3. the checkout's .tools/<os>-<arch>/, which `bun scripts/fetch-tools.ts` fills for development and tests.
+// 3. the checkout's .tools/<os>-<arch>/, which `bun scripts/fetch-tools.ts` fills for development and tests. From
+//    source that is this checkout's; a compiled build finds it by walking up from the binary to tools.lock.json,
+//    so `dist/plainport` in a checkout works after a fetch.
 
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export const TOOL_NAMES = ["restic", "rclone"] as const;
@@ -21,17 +23,28 @@ export const hostTarget = (
   return (TARGETS as readonly string[]).includes(key) ? (key as Target) : undefined;
 };
 
+/** The .tools/ folder of the nearest checkout at or above `start`: the first folder holding tools.lock.json. */
+export const checkoutToolsDir = (
+  start: string,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined => {
+  for (let dir = resolve(start); ; dir = dirname(dir)) {
+    if (exists(join(dir, "tools.lock.json"))) return join(dir, ".tools");
+    if (dirname(dir) === dir) return undefined;
+  }
+};
+
 export type ToolSource = "env" | "beside-binary" | "dev-tools";
 
 export type ToolPathResult =
   | { ok: true; path: string; source: ToolSource }
-  | { ok: false; code: "tool.missing"; message: string; fix: string; searched: string[] };
+  | { ok: false; code: "tool.missing"; exitCode: 6; message: string; fix: string; searched: string[] };
 
 export type ToolPathContext = {
   env?: Record<string, string | undefined>;
   /** The running plainport binary. Leave it out to use process.execPath when compiled, nothing from source. */
   execPath?: string | undefined;
-  /** The checkout's .tools/ folder. Leave it out to use this checkout's when running from source. */
+  /** The checkout's .tools/ folder. Leave it out to use this checkout's, or the compiled binary's checkout's. */
   devToolsDir?: string | undefined;
   target?: Target | undefined;
   isExecutable?: (path: string) => boolean;
@@ -50,15 +63,15 @@ const isExecutableFile = (path: string): boolean => {
   }
 };
 
+const defaultDevToolsDir = (execPath: string | undefined): string | undefined => {
+  if (!compiled) return resolve(import.meta.dir, "../../../.tools");
+  return execPath === undefined ? undefined : checkoutToolsDir(dirname(execPath));
+};
+
 export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPathResult => {
   const env = context.env ?? process.env;
   const execPath = "execPath" in context ? context.execPath : compiled ? process.execPath : undefined;
-  const devToolsDir =
-    "devToolsDir" in context
-      ? context.devToolsDir
-      : compiled
-        ? undefined
-        : resolve(import.meta.dir, "../../../.tools");
+  const devToolsDir = "devToolsDir" in context ? context.devToolsDir : defaultDevToolsDir(execPath);
   const target = "target" in context ? context.target : hostTarget();
   const isExecutable = context.isExecutable ?? isExecutableFile;
 
@@ -78,6 +91,8 @@ export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPat
   return {
     ok: false,
     code: "tool.missing",
+    // Exit code 6: blocked by a preflight finding (DESIGN.md "Exit codes"); nothing has been touched yet.
+    exitCode: 6,
     message: `${name} not found${searched.length > 0 ? `; looked for ${searched.join(", ")}` : ""}`,
     fix: `run \`bun scripts/fetch-tools.ts\` in the plainport checkout, or set PLAINPORT_TOOLS_DIR to a folder that holds ${name}`,
     searched,
