@@ -29,3 +29,16 @@ test("the compiled binary prints `plainport <VERSION>` and exits 0", () => {
   expect(run.stdout.toString()).toBe(`plainport ${version}\n`);
   expect(run.exitCode).toBe(0);
 });
+
+test("the compiled binary answers --help and refuses an unknown command with exit 4", () => {
+  const help = Bun.spawnSync([binary, "--help"], { cwd: outDir, stdout: "pipe", stderr: "pipe" });
+  expect(help.stdout.toString()).toContain("Usage: plainport <command> [options]");
+  expect(help.exitCode).toBe(0);
+  const unknown = Bun.spawnSync([binary, "verison", "--json"], {
+    cwd: outDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(JSON.parse(unknown.stdout.toString())).toMatchObject({ ok: false, error: { code: 4 } });
+  expect(unknown.exitCode).toBe(4);
+});
