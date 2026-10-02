@@ -45,8 +45,16 @@ const removeOrphans = async (io: LocalIo, paths: PlainportPaths): Promise<void> 
 };
 
 /** config.locked for managed.toml.lock, naming its holder. */
-const lockedFinding = (holder: LockHolder | undefined, path: string) =>
-  finding("config.locked", {
+const lockedFinding = (holder: LockHolder | undefined, path: string, ours: boolean) => {
+  if (ours) {
+    return finding("config.locked", {
+      message:
+        "this process already holds managed.toml.lock: an update is still running, or one update started another",
+      fix: "wait for the running update to finish and retry; an update that starts another inside itself is a bug",
+      paths: [path],
+    });
+  }
+  return finding("config.locked", {
     message: `managed.toml is locked by ${
       holder === undefined
         ? "an unreadable lock file"
@@ -58,6 +66,7 @@ const lockedFinding = (holder: LockHolder | undefined, path: string) =>
         : `wait for process ${holder.pid} on ${holder.host} to finish and re-run; if it is not plainport, delete ${path}`,
     paths: [path],
   });
+};
 
 /** What an update returns: the new contents, or a refusal that is returned as is, with nothing written. */
 export type ManagedUpdate = (managed: ConfigLayer) => Result<ConfigLayer> | Promise<Result<ConfigLayer>>;

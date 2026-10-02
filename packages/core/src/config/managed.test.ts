@@ -24,7 +24,8 @@ const io = nodeLocalIo;
 
 let sandbox: string;
 let paths: PlainportPaths;
-const sleepers: Bun.Subprocess[] = [];
+/** Every child a test starts; afterEach kills any still running, so a failed test leaves none behind. */
+const children: Bun.Subprocess[] = [];
 
 beforeEach(() => {
   sandbox = mkdtempSync(join(tmpdir(), "plainport-managed-"));
@@ -34,7 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  for (const child of sleepers.splice(0)) {
+  for (const child of children.splice(0)) {
     child.kill("SIGKILL");
     await child.exited;
   }
@@ -46,12 +47,15 @@ const write = (path: string, text: string): void => {
   writeFileSync(path, text);
 };
 
-const writer = (args: string[], env: Record<string, string> = {}) =>
-  Bun.spawn([process.execPath, WRITER, ...args], {
+const writer = (args: string[], env: Record<string, string> = {}) => {
+  const child = Bun.spawn([process.execPath, WRITER, ...args], {
     env: childEnv(sandbox, env),
     stdout: "pipe",
     stderr: "pipe",
   });
+  children.push(child);
+  return child;
+};
 
 const rootsIn = (path: string): string[] =>
   Object.keys((parse(readFileSync(path, "utf8")).roots ?? {}) as object).sort();
@@ -115,7 +119,7 @@ describe("config: managed.toml writes", () => {
 
   test("a lock held by another live process times out with config.locked (exit 11) naming the holder", async () => {
     const sleeper = Bun.spawn([process.execPath, "-e", "await Bun.sleep(60_000)"]);
-    sleepers.push(sleeper);
+    children.push(sleeper);
     write(
       paths.managedLock,
       JSON.stringify({ pid: sleeper.pid, host: hostname(), startedAt: "2026-10-03T00:00:00Z" }),
@@ -142,16 +146,44 @@ describe("config: managed.toml writes", () => {
     expect(existsSync(paths.managedLock)).toBe(false);
   });
 
-  test("concurrent writers in two processes serialize through the lock: no lost update, no overlap", async () => {
+  test("concurrent updates within one process serialize too: no root is lost", async () => {
+    const names = Array.from({ length: 20 }, (_, i) => `r${i}`);
+    const results = await Promise.all(
+      names.map((name) =>
+        updateManaged(io, paths, (managed) =>
+          ok({ ...managed, roots: { ...managed.roots, [name]: { label: name } } }),
+        ),
+      ),
+    );
+    expect(results.filter((result) => !result.ok)).toEqual([]);
+    expect(rootsIn(paths.managedFile)).toEqual([...names].sort());
+    expect(existsSync(paths.managedLock)).toBe(false);
+  });
+
+  test("a nested update in the same process times out with a message that says so, not 'delete the lock'", async () => {
+    let inner: Awaited<ReturnType<typeof updateManaged>> | undefined;
+    const outer = await updateManaged(io, paths, async (managed) => {
+      inner = await updateManaged(io, paths, (m) => ok(m), { timeoutMs: 100 });
+      return ok(managed);
+    });
+    expect(outer.ok).toBe(true);
+    expect(inner?.ok).toBe(false);
+    if (inner === undefined || inner.ok) return;
+    expect(inner.finding.code).toBe("config.locked");
+    expect(inner.finding.message).toContain("this process");
+    expect(inner.finding.fix).not.toContain("delete");
+  });
+
+  test("concurrent writers in two processes serialize through the lock: no lost update", async () => {
     const log = join(sandbox, "critical.log");
     const barrier = join(sandbox, "barrier");
     mkdirSync(barrier);
     const count = 15;
     const env = { MANAGED_WRITER_LOG: log, BARRIER_DIR: barrier };
-    const children = [writer(["a", String(count)], env), writer(["b", String(count)], env)];
+    const writers = [writer(["a", String(count)], env), writer(["b", String(count)], env)];
     await releaseWhenReady(barrier, ["a", "b"]);
-    const codes = await Promise.all(children.map((child) => child.exited));
-    const errors = await Promise.all(children.map((child) => new Response(child.stderr).text()));
+    const codes = await Promise.all(writers.map((child) => child.exited));
+    const errors = await Promise.all(writers.map((child) => new Response(child.stderr).text()));
     expect({ codes, errors }).toEqual({ codes: [0, 0], errors: ["", ""] });
 
     // No lost update: this is what proves the read-modify-write cycles were serialized.

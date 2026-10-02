@@ -26,9 +26,11 @@ afterEach(async () => {
 
 const options = (timeoutMs: number): LockOptions => ({
   timeoutMs,
-  held: (holder, path) =>
+  held: (holder, path, ours) =>
     finding("config.locked", {
-      message: `thing is locked by ${holder === undefined ? "an unreadable lock" : `process ${holder.pid}`}`,
+      message: ours
+        ? "this process holds thing"
+        : `thing is locked by ${holder === undefined ? "an unreadable lock" : `process ${holder.pid}`}`,
       fix: `delete ${path}`,
       paths: [path],
     }),
@@ -56,7 +58,12 @@ describe("lock: a lock file shared by processes on one machine", () => {
     const lock = await acquireLock(nodeLocalIo, lockPath, options(1000));
     if (!lock.ok) throw new Error(lock.finding.message);
     const holder = JSON.parse(readFileSync(lockPath, "utf8"));
-    expect(holder).toEqual({ pid: process.pid, host: hostname(), startedAt: expect.any(String) });
+    expect(holder).toEqual({
+      pid: process.pid,
+      host: hostname(),
+      startedAt: expect.any(String),
+      token: expect.any(String),
+    });
     expect(await lock.value.stillHeld()).toBe(true);
     await lock.value.release();
     expect(existsSync(lockPath)).toBe(false);
@@ -69,7 +76,7 @@ describe("lock: a lock file shared by processes on one machine", () => {
     if (!first.ok) throw new Error(first.finding.message);
     const busy = await acquireLock(nodeLocalIo, lockPath, options(100));
     expect(busy.ok).toBe(false);
-    if (!busy.ok) expect(busy.finding.message).toContain(String(process.pid));
+    if (!busy.ok) expect(busy.finding.message).toBe("this process holds thing");
     const second = acquireLock(nodeLocalIo, lockPath, options(10_000));
     await Bun.sleep(50);
     await first.value.release();
@@ -77,6 +84,40 @@ describe("lock: a lock file shared by processes on one machine", () => {
     if (!taken.ok) throw new Error(taken.finding.message);
     await taken.value.release();
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("acquisitions racing in one process take turns; none breaks another's live lock", async () => {
+    const order: string[] = [];
+    await Promise.all(
+      Array.from({ length: 10 }, async (_, i) => {
+        const lock = await acquireLock(nodeLocalIo, lockPath, options(10_000));
+        if (!lock.ok) throw new Error(lock.finding.message);
+        order.push(`+${i}`);
+        await Bun.sleep(1);
+        expect(await lock.value.stillHeld()).toBe(true);
+        order.push(`-${i}`);
+        await lock.value.release();
+      }),
+    );
+    for (let i = 0; i < order.length; i += 2) expect(order[i + 1]).toBe(`-${(order[i] as string).slice(1)}`);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("each acquisition's lock text carries its own token", async () => {
+    const first = await acquireLock(nodeLocalIo, lockPath, options(1000));
+    if (!first.ok) throw new Error(first.finding.message);
+    const a = JSON.parse(readFileSync(lockPath, "utf8"));
+    await first.value.release();
+    const second = await acquireLock(nodeLocalIo, lockPath, options(1000));
+    if (!second.ok) throw new Error(second.finding.message);
+    const b = JSON.parse(readFileSync(lockPath, "utf8"));
+    expect(typeof a.token).toBe("string");
+    expect(a.token).not.toBe(b.token);
+    // A lock rewritten with the same pid, host and start time but another token is no longer ours.
+    writeFileSync(lockPath, JSON.stringify({ ...b, token: "someone-else" }));
+    expect(await second.value.stillHeld()).toBe(false);
+    await second.value.release();
+    expect(existsSync(lockPath)).toBe(true);
   });
 
   test("a lock file naming this process's pid that this process does not hold is stale (pid reuse)", async () => {
