@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { FindingSchema } from "@plainport/contract";
 import { describeT1 } from "../../../test/tiers.ts";
 import { checkoutToolsDir, hostTarget, type ToolPathContext, toolPath } from "./tools.ts";
 
@@ -74,8 +75,7 @@ describe("tools: toolPath resolver order", () => {
     place(join(devDir, "darwin-arm64"), "restic");
     expect(toolPath("restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }))).toEqual({
       ok: true,
-      path: expected,
-      source: "env",
+      value: { path: expected, source: "env" },
     });
   });
 
@@ -84,40 +84,55 @@ describe("tools: toolPath resolver order", () => {
     place(binDir, "restic");
     place(join(devDir, "darwin-arm64"), "restic");
     const result = toolPath("restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }));
-    expect(result).toMatchObject({ ok: false, code: "tool.missing", searched: [join(envDir, "restic")] });
+    expect(result).toMatchObject({
+      ok: false,
+      exitCode: 6,
+      finding: { code: "tool.missing", paths: [join(envDir, "restic")] },
+    });
     if (result.ok) return;
-    expect(result.fix).toContain(envDir);
-    expect(result.fix).toContain("unset PLAINPORT_TOOLS_DIR");
+    expect(result.finding.fix).toContain(envDir);
+    expect(result.finding.fix).toContain("unset PLAINPORT_TOOLS_DIR");
   });
 
   test("the binary's own folder comes next", () => {
     const expected = place(binDir, "rclone");
     place(join(devDir, "darwin-arm64"), "rclone");
-    expect(toolPath("rclone", context())).toEqual({ ok: true, path: expected, source: "beside-binary" });
+    expect(toolPath("rclone", context())).toEqual({
+      ok: true,
+      value: { path: expected, source: "beside-binary" },
+    });
   });
 
   test(".tools/<os>-<arch>/ comes last", () => {
     const expected = place(join(devDir, "darwin-arm64"), "restic");
     place(join(devDir, "linux-x64"), "restic");
-    expect(toolPath("restic", context())).toEqual({ ok: true, path: expected, source: "dev-tools" });
+    expect(toolPath("restic", context())).toEqual({
+      ok: true,
+      value: { path: expected, source: "dev-tools" },
+    });
   });
 
   test("a file that is not executable doesn't count", () => {
     place(binDir, "restic", 0o644);
     const expected = place(join(devDir, "darwin-arm64"), "restic");
-    expect(toolPath("restic", context())).toEqual({ ok: true, path: expected, source: "dev-tools" });
+    expect(toolPath("restic", context())).toEqual({
+      ok: true,
+      value: { path: expected, source: "dev-tools" },
+    });
   });
 
   test("nothing found is a tool.missing value that lists every folder searched, in order", () => {
     const result = toolPath("restic", context());
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.code).toBe("tool.missing");
+    expect(result.finding.code).toBe("tool.missing");
+    expect(result.finding).toMatchObject({ severity: "block", allowable: false });
+    expect(FindingSchema.parse(result.finding)).toEqual(result.finding);
     expect(result.exitCode).toBe(6);
-    expect(result.searched).toEqual([join(binDir, "restic"), join(devDir, "darwin-arm64", "restic")]);
-    expect(result.message).toContain("restic");
-    expect(result.fix).toContain("bun scripts/fetch-tools.ts");
-    expect(result.fix).not.toContain("PLAINPORT_TOOLS_DIR");
+    expect(result.finding.paths).toEqual([join(binDir, "restic"), join(devDir, "darwin-arm64", "restic")]);
+    expect(result.finding.message).toContain("restic");
+    expect(result.finding.fix).toContain("bun scripts/fetch-tools.ts");
+    expect(result.finding.fix).not.toContain("PLAINPORT_TOOLS_DIR");
   });
 
   test("null means none: an empty $PLAINPORT_TOOLS_DIR, a null binary, .tools/ and target are skipped", () => {
@@ -125,10 +140,12 @@ describe("tools: toolPath resolver order", () => {
     const none = { env: { PLAINPORT_TOOLS_DIR: "" }, execPath: null, devToolsDir: null, target: null };
     expect(toolPath("rclone", { ...none, isExecutable: probe.isExecutable })).toMatchObject({
       ok: false,
-      code: "tool.missing",
-      searched: [],
+      finding: { code: "tool.missing", paths: [] },
     });
-    expect(toolPath("rclone", { ...none, devToolsDir: devDir })).toMatchObject({ ok: false, searched: [] });
+    expect(toolPath("rclone", { ...none, devToolsDir: devDir })).toMatchObject({
+      ok: false,
+      finding: { paths: [] },
+    });
     expect(probe.seen).toEqual([]);
   });
 
@@ -167,20 +184,18 @@ describe("tools: toolPath resolver order", () => {
 
     expect(toolPath("restic", { ...base, build: "dev" })).toEqual({
       ok: true,
-      path: devTool,
-      source: "dev-tools",
+      value: { path: devTool, source: "dev-tools" },
     });
 
     const release = toolPath("restic", { ...base, build: "release" });
     expect(release).toMatchObject({
       ok: false,
-      code: "tool.missing",
-      searched: [join(checkout, "dist", "restic")],
+      finding: { code: "tool.missing", paths: [join(checkout, "dist", "restic")] },
     });
     if (release.ok) return;
-    expect(release.fix).toContain("reinstall plainport");
-    expect(release.fix).not.toContain("fetch-tools");
-    expect(release.fix).not.toContain("PLAINPORT_TOOLS_DIR");
+    expect(release.finding.fix).toContain("reinstall plainport");
+    expect(release.finding.fix).not.toContain("fetch-tools");
+    expect(release.finding.fix).not.toContain("PLAINPORT_TOOLS_DIR");
   });
 });
 
@@ -209,6 +224,8 @@ describe("tools: compiled builds", () => {
   const compile = (version: string, outfile: string): void => {
     const tree = join(dir, `src-${version}`);
     mkdirSync(join(tree, "packages", "core", "src"), { recursive: true });
+    mkdirSync(join(tree, "node_modules", "@plainport"), { recursive: true });
+    symlinkSync(join(repo, "packages", "contract"), join(tree, "node_modules", "@plainport", "contract"));
     writeFileSync(join(tree, "VERSION"), `${version}\n`);
     for (const file of ["tools.ts", "version.ts"]) {
       copyFileSync(join(import.meta.dir, file), join(tree, "packages", "core", "src", file));
@@ -259,9 +276,9 @@ describe("tools: compiled builds", () => {
     const devTool = tool(join(checkout, ".tools", `${target}`, "restic"));
     const binary = install(builds.dev, join(checkout, "dist", "plainport"));
 
-    expect(probe(binary)).toEqual({ ok: true, path: devTool, source: "dev-tools" });
+    expect(probe(binary)).toEqual({ ok: true, value: { path: devTool, source: "dev-tools" } });
     const beside = tool(join(checkout, "dist", "restic"));
-    expect(probe(binary)).toEqual({ ok: true, path: beside, source: "beside-binary" });
+    expect(probe(binary)).toEqual({ ok: true, value: { path: beside, source: "beside-binary" } });
   });
 
   test("a release build never uses a parent folder's .tools/ and tells you to reinstall", () => {
@@ -272,10 +289,12 @@ describe("tools: compiled builds", () => {
 
     expect(probe(binary)).toMatchObject({
       ok: false,
-      code: "tool.missing",
       exitCode: 6,
-      searched: [join(checkout, "dist", "restic")],
-      fix: expect.stringContaining("reinstall plainport"),
+      finding: {
+        code: "tool.missing",
+        paths: [join(checkout, "dist", "restic")],
+        fix: expect.stringContaining("reinstall plainport"),
+      },
     });
   });
 
@@ -287,7 +306,10 @@ describe("tools: compiled builds", () => {
     mkdirSync(join(dir, "bin"));
     symlinkSync(join(dir, "share", "current", "plainport"), join(dir, "bin", "plainport"));
 
-    expect(probe(join(dir, "bin", "plainport"))).toEqual({ ok: true, path: restic, source: "beside-binary" });
+    expect(probe(join(dir, "bin", "plainport"))).toEqual({
+      ok: true,
+      value: { path: restic, source: "beside-binary" },
+    });
   });
 });
 
@@ -298,10 +320,10 @@ describeT1("tools: pinned binaries run from .tools/", () => {
   };
   const run = (name: "restic" | "rclone"): string => {
     const found = toolPath(name, { env: {} });
-    if (!found.ok) throw new Error(`${found.message} ${found.fix}`);
-    expect(found.source).toBe("dev-tools");
-    expect(found.path).toBe(join(repo, ".tools", `${hostTarget()}`, name));
-    const child = Bun.spawnSync([found.path, "version"], { stdout: "pipe", stderr: "pipe" });
+    if (!found.ok) throw new Error(`${found.finding.message} ${found.finding.fix}`);
+    expect(found.value.source).toBe("dev-tools");
+    expect(found.value.path).toBe(join(repo, ".tools", `${hostTarget()}`, name));
+    const child = Bun.spawnSync([found.value.path, "version"], { stdout: "pipe", stderr: "pipe" });
     expect(child.exitCode).toBe(0);
     return child.stdout.toString();
   };

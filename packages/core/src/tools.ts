@@ -10,6 +10,7 @@
 
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fail, finding, ok, type Result } from "@plainport/contract";
 import { VERSION } from "./version.ts";
 
 export const TOOL_NAMES = ["restic", "rclone"] as const;
@@ -40,9 +41,8 @@ export const checkoutToolsDir = (
 
 export type ToolSource = "env" | "beside-binary" | "dev-tools";
 
-export type ToolPathResult =
-  | { ok: true; path: string; source: ToolSource }
-  | { ok: false; code: "tool.missing"; exitCode: 6; message: string; fix: string; searched: string[] };
+// On failure, a tool.missing finding whose paths are every place searched, in order.
+export type ToolPathResult = Result<{ path: string; source: ToolSource }>;
 
 /** How this code is running: from source under bun, or as a compiled development or release binary. */
 export type BuildKind = "source" | "dev" | "release";
@@ -109,7 +109,7 @@ export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPat
   }
 
   for (const candidate of candidates) {
-    if (isExecutable(candidate.path)) return { ok: true, ...candidate };
+    if (isExecutable(candidate.path)) return ok(candidate);
   }
   const searched = candidates.map((candidate) => candidate.path);
   let fix: string;
@@ -120,13 +120,12 @@ export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPat
   } else {
     fix = "run `bun scripts/fetch-tools.ts` in the plainport checkout";
   }
-  return {
-    ok: false,
-    code: "tool.missing",
-    // Exit code 6: blocked by a preflight finding (DESIGN.md "Exit codes"); nothing has been touched yet.
-    exitCode: 6,
-    message: `${name} not found${searched.length > 0 ? `; looked for ${searched.join(", ")}` : ""}`,
-    fix,
-    searched,
-  };
+  // tool.missing exits 6, blocked by a preflight finding (DESIGN.md "Exit codes"): nothing has been touched yet.
+  return fail(
+    finding("tool.missing", {
+      message: `${name} not found${searched.length > 0 ? `; looked for ${searched.join(", ")}` : ""}`,
+      fix,
+      paths: searched,
+    }),
+  );
 };

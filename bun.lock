@@ -31,6 +31,9 @@
     },
     "packages/core": {
       "name": "@plainport/core",
+      "dependencies": {
+        "@plainport/contract": "workspace:*",
+      },
     },
     "packages/eco-node": {
       "name": "@plainport/eco-node",
