@@ -122,10 +122,13 @@ Every command declares one risk class in the registry, and `plainport.json` publ
   shell when it needs to be (`'my project'`), with `--yes` placed before any `--`.
 - A command that declares no risk class is treated as `confirm`.
 - `--dry-run` always runs as `read` (ADR-0007, §6). A command that has no dry run refuses the flag before it
-  runs: exit 2 with the finding `usage.dry-run-unsupported`, whose `fix` is the command without `--dry-run`
-  (run decision D18). It never runs for real as a read.
-- The gate is a pure function, `gate()` in `packages/contract`, with `refuseDryRun()` for the usage refusal
-  (run decision D15); the CLI parses the flags, prints the refusal and exits.
+  runs: exit 2 with the finding `usage.dry-run-unsupported` (run decision D18). It never runs for real as a read.
+  The `fix` never sends you to run it blind: for a `read` command it is the command without `--dry-run`; for a
+  `safe_write` command it is `plainport help <command>`; for a `confirm` command it is the command without
+  `--dry-run`, which still asks for `--yes` before changing anything.
+- The gate is one pure function, `checkInvocation()` in `packages/contract` (run decision D15). It makes the
+  `--dry-run` check before the risk check, so the CLI cannot do one without the other. It returns the risk class
+  to run as, or a failure with exit 2 or 3 and the finding; the CLI parses the flags, prints the refusal and exits.
 - An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
   `confirm` and is gated as such.
 
@@ -154,7 +157,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | --- | --- | --- | --- | --- |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
-| `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` is the command without it |
+| `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
