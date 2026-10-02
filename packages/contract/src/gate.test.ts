@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import * as contract from "./index.ts";
-import { checkInvocation, FindingSchema, type Invocation, RISK_CLASSES, rerunWithYes } from "./index.ts";
+import {
+  checkInvocation,
+  commandLine,
+  FindingSchema,
+  type Invocation,
+  RISK_CLASSES,
+  rerunWithYes,
+} from "./index.ts";
 
 const inv = (over: Partial<Invocation> = {}): Invocation => ({
   command: "offload",
@@ -125,6 +132,11 @@ describe("checkInvocation: the one gate the CLI calls (D15, D18)", () => {
     );
     expect(rerunWithYes(["offload", "--", "--odd-name"])).toBe("plainport offload --yes -- --odd-name");
     expect(rerunWithYes(["offload", "$HOME", "a;b"])).toBe("plainport offload '$HOME' 'a;b' --yes");
+  });
+
+  test("commandLine quotes the same way without adding --yes (the CLI's did-you-mean uses it)", () => {
+    expect(commandLine(["offload", "my project"])).toBe("plainport offload 'my project'");
+    expect(commandLine([])).toBe("plainport");
   });
 });
 

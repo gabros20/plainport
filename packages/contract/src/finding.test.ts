@@ -46,7 +46,14 @@ describe("findings", () => {
 
   test("the catalogue is frozen", () => {
     expect(FINDINGS as unknown).toEqual({
+      "command.unknown": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "internal.unexpected": {
+        severity: "block",
+        allowable: false,
+        exitCode: 1,
+        summary: expect.any(String),
+      },
       "risk.needs-yes": { severity: "block", allowable: false, exitCode: 3, summary: expect.any(String) },
       "tool.missing": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "usage.dry-run-unsupported": {
@@ -55,6 +62,7 @@ describe("findings", () => {
         exitCode: 2,
         summary: expect.any(String),
       },
+      "usage.invalid": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },
     });
     expect(Object.isFrozen(FINDINGS)).toBe(true);
   });

@@ -31,7 +31,9 @@ const SAFE_WORD = /^[A-Za-z0-9_@+:,./-][A-Za-z0-9_@%+=:,./-]*$/;
 /** A POSIX shell word that reads back as exactly `arg`. */
 const shellWord = (arg: string): string => (SAFE_WORD.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`);
 
-const commandLine = (argv: readonly string[]): string => ["plainport", ...argv].map(shellWord).join(" ");
+/** `plainport` and the arguments as one POSIX shell line that reads back as exactly those arguments. */
+export const commandLine = (argv: readonly string[]): string =>
+  ["plainport", ...argv].map(shellWord).join(" ");
 
 /** The exact command to re-run with --yes added, before any `--` so it stays a flag. */
 export const rerunWithYes = (argv: readonly string[]): string => {

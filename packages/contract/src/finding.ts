@@ -33,11 +33,23 @@ export interface FindingSpec {
 
 /** Every finding code plainport emits. A code, once listed, keeps its meaning; later tasks add entries. */
 export const FINDINGS = Object.freeze({
+  "command.unknown": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary: "No registered command has this name; the message suggests the closest one",
+  },
   "contract.invalid": {
     severity: "block",
     allowable: false,
     exitCode: 1,
     summary: "A value crossing an edge did not match its schema",
+  },
+  "internal.unexpected": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A bug: an exception escaped a command; the message names it",
   },
   "risk.needs-yes": {
     severity: "block",
@@ -50,6 +62,12 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 2,
     summary: "--dry-run was given to a command that has no preview",
+  },
+  "usage.invalid": {
+    severity: "block",
+    allowable: false,
+    exitCode: 2,
+    summary: "The arguments or options do not match the command's declared arguments",
   },
   "tool.missing": {
     severity: "block",
