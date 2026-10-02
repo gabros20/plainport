@@ -1,0 +1,8 @@
+# Bun settings for the plainport workspace.
+
+[install]
+exact = true
+
+[test]
+# The home tripwire (ADR-0021) must stay the first preload: it patches node:fs before anything imports it.
+preload = ["./test/home-tripwire.ts"]
