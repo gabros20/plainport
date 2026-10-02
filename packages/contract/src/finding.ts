@@ -45,6 +45,12 @@ export const FINDINGS = Object.freeze({
     exitCode: 3,
     summary: "A confirm-class command ran without --yes or an approved --plan",
   },
+  "usage.dry-run-unsupported": {
+    severity: "block",
+    allowable: false,
+    exitCode: 2,
+    summary: "--dry-run was given to a command that has no preview",
+  },
   "tool.missing": {
     severity: "block",
     allowable: false,

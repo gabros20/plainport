@@ -49,6 +49,12 @@ describe("findings", () => {
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "risk.needs-yes": { severity: "block", allowable: false, exitCode: 3, summary: expect.any(String) },
       "tool.missing": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "usage.dry-run-unsupported": {
+        severity: "block",
+        allowable: false,
+        exitCode: 2,
+        summary: expect.any(String),
+      },
     });
     expect(Object.isFrozen(FINDINGS)).toBe(true);
   });

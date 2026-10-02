@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { FindingSchema, type GateRequest, gate, RISK_CLASSES, rerunWithYes } from "./index.ts";
+import { FindingSchema, type GateRequest, gate, RISK_CLASSES, refuseDryRun, rerunWithYes } from "./index.ts";
 
 const req = (over: Partial<GateRequest> = {}): GateRequest => ({
   command: "offload",
   argv: ["offload", "web"],
   risk: "confirm",
-  supportsDryRun: true,
   yes: false,
   plan: false,
   dryRun: false,
@@ -47,14 +46,47 @@ describe("risk gate (D15)", () => {
     expect(gate(req({ risk: undefined, yes: true }))).toEqual({ verdict: "allow", riskClass: "confirm" });
   });
 
-  test("--dry-run runs as read, but only for a command that supports it", () => {
-    for (const risk of RISK_CLASSES) {
+  test("D18: --dry-run is always read", () => {
+    for (const risk of [...RISK_CLASSES, undefined]) {
       expect(gate(req({ risk, dryRun: true }))).toEqual({ verdict: "allow", riskClass: "read" });
     }
-    expect(gate(req({ dryRun: true, supportsDryRun: false })).verdict).toBe("confirm");
-    expect(gate(req({ risk: "safe_write", dryRun: true, supportsDryRun: false }))).toEqual({
-      verdict: "allow",
-      riskClass: "safe_write",
+  });
+
+  test("D18: a command without dry-run support refuses --dry-run as a usage error before it runs", () => {
+    const refusal = refuseDryRun({
+      command: "gc",
+      argv: ["gc", "--dry-run", "--now"],
+      supportsDryRun: false,
+      dryRun: true,
+    });
+    expect(refusal).toEqual({
+      ok: false,
+      exitCode: 2,
+      finding: {
+        code: "usage.dry-run-unsupported",
+        severity: "block",
+        message: "gc has no --dry-run preview",
+        fix: "plainport gc --now",
+        allowable: false,
+      },
+    });
+    if (refusal.ok === false) expect(FindingSchema.parse(refusal.finding)).toEqual(refusal.finding);
+    expect(
+      refuseDryRun({ command: "gc", argv: ["gc", "--now"], supportsDryRun: false, dryRun: false }),
+    ).toEqual({
+      ok: true,
+      value: null,
+    });
+    expect(
+      refuseDryRun({
+        command: "offload",
+        argv: ["offload", "web", "--dry-run"],
+        supportsDryRun: true,
+        dryRun: true,
+      }),
+    ).toEqual({
+      ok: true,
+      value: null,
     });
   });
 
@@ -74,13 +106,62 @@ describe("risk gate (D15)", () => {
     for (const risk of [...RISK_CLASSES, undefined])
       for (const yes of bools)
         for (const plan of bools)
-          for (const dryRun of bools)
-            for (const supportsDryRun of bools) {
-              const verdict = gate(req({ risk, yes, plan, dryRun, supportsDryRun }));
-              expect(["allow", "confirm"]).toContain(verdict.verdict);
-              const refused =
-                (risk ?? "confirm") === "confirm" && !yes && !plan && !(dryRun && supportsDryRun);
-              expect(verdict.verdict === "confirm").toBe(refused);
-            }
+          for (const dryRun of bools) {
+            const verdict = gate(req({ risk, yes, plan, dryRun }));
+            expect(["allow", "confirm"]).toContain(verdict.verdict);
+            const refused = (risk ?? "confirm") === "confirm" && !yes && !plan && !dryRun;
+            expect(verdict.verdict === "confirm").toBe(refused);
+          }
   });
+});
+
+// Runs the re-run line in a real shell, with `plainport` defined as a function that prints its arguments, and
+// checks the shell hands back exactly the arguments given (plus --yes).
+describe("re-run line in real shells", () => {
+  const awkward = [
+    "offload",
+    "=foo",
+    "=",
+    "%1",
+    "~",
+    "~root",
+    "a b",
+    "it's",
+    "",
+    "$HOME",
+    "`id`",
+    "$(id)",
+    "a;b",
+    "*",
+    "[a]",
+    "{a,b}",
+    "#x",
+    "!x",
+    "^x",
+    "a\nb",
+    "é",
+    "--store=mini-work",
+    "work:clients/acme/web",
+    "-",
+  ];
+  const parse = (shell: string, line: string): string[] => {
+    const script = `plainport() { for a in "$@"; do printf '%s\\0' "$a"; done; }; ${line}`;
+    const args =
+      shell === "zsh" ? ["zsh", "-f", "-c", script] : ["bash", "--noprofile", "--norc", "-c", script];
+    const run = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+    if (run.exitCode !== 0) throw new Error(`${shell} exited ${run.exitCode}: ${run.stderr.toString()}`);
+    return run.stdout.toString().split("\0").slice(0, -1);
+  };
+
+  for (const shell of ["zsh", "bash"]) {
+    test(`${shell} reads the re-run back as the same arguments`, () => {
+      expect(parse(shell, rerunWithYes(awkward))).toEqual([...awkward, "--yes"]);
+      expect(parse(shell, rerunWithYes(["offload", "--", "=odd"]))).toEqual([
+        "offload",
+        "--yes",
+        "--",
+        "=odd",
+      ]);
+    });
+  }
 });
