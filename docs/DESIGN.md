@@ -826,7 +826,7 @@ work:clients/acme/web → mini-work
 ```
 {"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
 {"type":"progress","op":"01J9Z6K2","phase":"snapshot","bytesDone":512000000,"bytesTotal":1934000000,"etaSeconds":41}
-{"type":"finding","op":"01J9Z6K2","code":"git.unpushed","severity":"warn","message":"2 commits on feature/pricing are not on origin"}
+{"type":"finding","op":"01J9Z6K2","finding":{"code":"git.unpushed","severity":"warn","message":"2 commits on feature/pricing are not on origin","allowable":true}}
 {"plainport_json":1,"ok":true,"verb":"offload","data":{"op":"01J9Z6K2","exitCode":0,"project":"work:clients/acme/web","snapshot":"01J9Z6K2","freedBytes":2746000000}}
 ```
 
