@@ -80,6 +80,24 @@ describe("home tripwire: sandbox", () => {
     expect(spawnSync("sh", ["-c", script]).stdout.toString()).toBe(sandbox);
   });
 
+  test("an explicit env without HOME still gets the sandboxed home and agent homes", () => {
+    const script = 'printf "%s|%s|%s|%s" "$HOME" "$XDG_CONFIG_HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"';
+    const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+    const expected = [
+      process.env.HOME,
+      process.env.XDG_CONFIG_HOME,
+      process.env.CLAUDE_CONFIG_DIR,
+      process.env.CODEX_HOME,
+    ].join("|");
+    expect(Bun.spawnSync(["sh", "-c", script], { env }).stdout.toString()).toBe(expected);
+    expect(spawnSync("sh", ["-c", script], { env }).stdout.toString()).toBe(expected);
+    // Variables the caller does set are kept.
+    const own = Bun.spawnSync(["sh", "-c", 'printf %s "$CODEX_HOME"'], {
+      env: { ...env, CODEX_HOME: join(sandbox, "own") },
+    });
+    expect(own.stdout.toString()).toBe(join(sandbox, "own"));
+  });
+
   test("writes inside the sandbox and reads inside the repository are allowed", () => {
     // Without a sandbox the path below would be relative and land in the working directory.
     expect(isAbsolute(sandbox)).toBe(true);

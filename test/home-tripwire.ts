@@ -300,10 +300,22 @@ bun.write = function (this: unknown, ...args: unknown[]) {
   return originalWrite.apply(this, args);
 };
 
-// Children get the sandboxed environment unless the caller passes one. node:child_process goes through these.
+// Children get the sandboxed environment. A caller's explicit env is kept, but the sandbox variables it leaves
+// out are filled in, so a minimal env (PATH and a few others) doesn't send the child back to the real home.
+// node:child_process goes through these.
+const sandboxVars = (): Record<string, string | undefined> => ({
+  ...sandboxEnv,
+  PLAINPORT_TEST_HOME: sandbox,
+  PLAINPORT_TRIPWIRE_REAL_HOME: realHome,
+});
 const withEnv = (options: unknown): Record<string, unknown> => {
   const given = (options ?? {}) as Record<string, unknown>;
-  return given.env == null ? { ...given, env: { ...process.env } } : given;
+  if (given.env == null) return { ...given, env: { ...process.env } };
+  const env = { ...(given.env as Record<string, string | undefined>) };
+  for (const [name, value] of Object.entries(sandboxVars())) {
+    if (env[name] === undefined) env[name] = value;
+  }
+  return { ...given, env };
 };
 for (const name of ["spawn", "spawnSync"]) {
   const original = bun[name] as Fn;
