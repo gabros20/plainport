@@ -142,6 +142,21 @@ test("fails, never passes, when it can't read the git history", () => {
   }
 });
 
+test("HEAD with a release VERSION must be the release commit", () => {
+  const problems = checkVersion({
+    version: "0.1.0",
+    changelog: releaseChangelog,
+    headSubject: "fix: x",
+    headTags: [],
+    isHead: true,
+  });
+  expect(problems.join("\n")).toContain('is not "release: 0.1.0"; set VERSION to the next -dev');
+  // Older commits were superseded, so the rule is HEAD's alone.
+  expect(
+    checkVersion({ version: "0.1.0", changelog: releaseChangelog, headSubject: "fix: x", headTags: [] }),
+  ).toEqual([]);
+});
+
 // The script checks the whole history, not only HEAD: a bad release commit followed by the next -dev commit,
 // or a bad tag on an older commit, must still fail.
 describe("bun scripts/check-version.ts over a git history", () => {
@@ -185,6 +200,14 @@ describe("bun scripts/check-version.ts over a git history", () => {
     const result = check();
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("release: X.Y.Z");
+  });
+
+  test("a fix pushed after the release commit, before the next -dev, fails", () => {
+    commit("release: 0.1.0", "0.1.0", releaseChangelog);
+    commit("fix: y", "0.1.0", `${releaseChangelog}- fix\n`);
+    const result = check();
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain('is not "release: 0.1.0"');
   });
 
   test("a bad release commit behind HEAD fails", () => {

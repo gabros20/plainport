@@ -10,6 +10,8 @@ export type VersionInput = {
   changelog: string;
   headSubject: string;
   headTags: string[];
+  /** HEAD only: a release VERSION there must be the release commit itself. */
+  isHead?: boolean;
 };
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -17,7 +19,13 @@ const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Checks one commit: its VERSION, CHANGELOG.md, subject and the v* tags on it. */
-export const checkVersion = ({ version, changelog, headSubject, headTags }: VersionInput): string[] => {
+export const checkVersion = ({
+  version,
+  changelog,
+  headSubject,
+  headTags,
+  isHead,
+}: VersionInput): string[] => {
   const problems: string[] = [];
   const dev = version.endsWith("-dev");
   if (!SEMVER.test(dev ? version.slice(0, -"-dev".length) : version)) {
@@ -46,6 +54,13 @@ export const checkVersion = ({ version, changelog, headSubject, headTags }: Vers
         `the commit is "release: ${release}", but CHANGELOG.md has no dated ## [${release}] — YYYY-MM-DD section`,
       );
     }
+  }
+  // Between releases VERSION carries -dev (ADR-0020); a later commit still at X.Y.Z would build a binary that
+  // claims to be the release.
+  if (isHead && !dev && release === undefined && !headSubject.startsWith("release:")) {
+    problems.push(
+      `VERSION ${version} is a release version, but the commit is not "release: ${version}"; set VERSION to the next -dev`,
+    );
   }
   for (const tag of headTags.filter((name) => name.startsWith("v"))) {
     if (dev)
@@ -109,6 +124,7 @@ if (import.meta.main) {
       changelog: at("CHANGELOG.md").out,
       headSubject: subject,
       headTags: tagsAt.get(sha) ?? [],
+      isHead: sha === head,
     });
     for (const problem of found) problems.push(`${sha.slice(0, 7)} (${subject}): ${problem}`);
   }
