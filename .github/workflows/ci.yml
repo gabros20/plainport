@@ -1,11 +1,12 @@
 # Shape adapted from plainkeep .github/workflows/ci.yml (gabros20/plainkeep@d7eb27e), ADR-0003.
-# CI for plainport (ADR-0020, ADR-0021): runs on every push to main and by hand. A red run on main stops the next
-# phase until it is fixed.
+# CI for plainport (ADR-0020, ADR-0021): runs on every push to main, on every v* tag push and by hand. A red run
+# on main stops the next phase until it is fixed. scripts/ci-workflow.test.ts pins the parts ADR-0020 requires.
 name: ci
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -58,9 +59,16 @@ jobs:
           out="$(./dist/plainport --version)"
           echo "$out"
           test "$out" = "plainport $(cat VERSION)"
+      - name: compile smoke for every release target
+        # Cross-compiled with Bun; only the runner's native binary is run (above and in the macos job).
+        run: |
+          bun scripts/build.ts --target all
+          ls -l dist/plainport-*
 
   version:
-    # VERSION, CHANGELOG.md, a `release: X.Y.Z` commit and any v* tag on it must agree (ADR-0020).
+    # VERSION, CHANGELOG.md, every `release: X.Y.Z` commit and every v* tag must agree (ADR-0020). It checks the
+    # whole history, so the release commit is covered even when the next -dev commit is pushed with it, and a
+    # tag push is checked against VERSION at the tagged commit.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
