@@ -838,7 +838,7 @@ work:clients/acme/web → mini-work
 | 1 | Unexpected failure |
 | 2 | Usage error, or an ambiguous project name |
 | 3 | Needs `--yes`; the message names the exact re-run |
-| 4 | Not found: project, snapshot, device or store |
+| 4 | Not found: project, snapshot, device, store or command |
 | 5 | Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission |
 | 6 | Blocked by a preflight finding, or the plan is stale |
 | 7 | Verification failed |

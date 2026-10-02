@@ -6,6 +6,7 @@ import {
   errorEnvelope,
   exitCodeOf,
   type FailureExitCode,
+  finding,
   type PartialExitCode,
   PLAINPORT_JSON,
   parseJsonLines,
@@ -41,6 +42,28 @@ describe("envelope", () => {
     expect(exitCodeOf(successEnvelope("ls", []))).toBe(0);
     expect(errorEnvelope("ls", 4, "no project 'x'")).not.toHaveProperty("error.hint");
     expect(errorEnvelope("ls", 4, "no project 'x'")).not.toHaveProperty("data");
+  });
+
+  test("a refusal names its finding: error.finding is the finding object (AGENTS.md: a refusal names its code)", () => {
+    const f = finding("risk.needs-yes", {
+      message: "offload is confirm-class",
+      fix: "plainport offload web --yes",
+    });
+    const env = errorEnvelope("offload", 3, f.message, { hint: `re-run: ${f.fix}`, finding: f });
+    expect(env).toEqual({
+      plainport_json: 1,
+      ok: false,
+      verb: "offload",
+      error: {
+        code: 3,
+        message: "offload is confirm-class",
+        hint: "re-run: plainport offload web --yes",
+        finding: f,
+      },
+    });
+    expect(EnvelopeSchema.parse(env)).toEqual(env);
+    const broken = { ...env, error: { code: 3, message: "m", finding: { code: "x" } } };
+    expect(EnvelopeSchema.safeParse(broken).success).toBe(false);
   });
 
   test("a partial success (D14) carries data next to error, checked against the verb's schema", () => {

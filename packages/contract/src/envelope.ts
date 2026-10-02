@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { type StreamEvent, StreamEventSchema, type UnknownEvent, UnknownEventSchema } from "./events.ts";
 import { EXIT, type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
-import { finding } from "./finding.ts";
+import { type Finding, FindingSchema, finding } from "./finding.ts";
 import { outputObject } from "./objects.ts";
 import { decode, fail, ok, type Result } from "./result.ts";
 
@@ -21,6 +21,9 @@ const errorObject = <C extends z.ZodType>(code: C) =>
     code: code.meta({ description: "Equal to the process exit code" }),
     message: z.string().min(1),
     hint: z.string().min(1).optional(),
+    finding: FindingSchema.optional().meta({
+      description: "The finding behind the failure, so a reader can branch on its code",
+    }),
   });
 
 export const ErrorObjectSchema = errorObject(FailureExitCodeSchema);
@@ -83,9 +86,14 @@ export const errorEnvelope = <C extends FailureExitCode, D = never>(
   verbName: string,
   code: C,
   message: string,
-  extra: { hint?: string; data?: [C] extends [PartialExitCode] ? D : never } = {},
+  extra: { hint?: string; finding?: Finding; data?: [C] extends [PartialExitCode] ? D : never } = {},
 ): Envelope<D> => {
-  const error = extra.hint === undefined ? { code, message } : { code, message, hint: extra.hint };
+  const error = {
+    code,
+    message,
+    ...(extra.hint === undefined ? {} : { hint: extra.hint }),
+    ...(extra.finding === undefined ? {} : { finding: extra.finding }),
+  };
   if (extra.data === undefined) return { plainport_json: PLAINPORT_JSON, ok: false, verb: verbName, error };
   if (!isPartial(code)) throw new TypeError(`exit ${code} cannot carry data; only 8 and 10 can (D14)`);
   return {
