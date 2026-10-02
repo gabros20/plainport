@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "defaultStore": {
+      "type": "string",
+      "minLength": 1
+    },
+    "roots": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "store": {
+            "type": "string",
+            "minLength": 1
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "secrets": {
+            "type": "string",
+            "enum": [
+              "include",
+              "envelope",
+              "exclude"
+            ]
+          },
+          "on": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "scan": {
+            "type": "object",
+            "properties": {
+              "depth": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "ignore": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "deps": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "strip",
+                  "keep"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "strip": {
+            "type": "object",
+            "properties": {
+              "extra": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "never": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "keep": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "retention": {
+            "type": "object",
+            "properties": {
+              "keepLast": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "stores": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "local",
+              "sftp",
+              "s3",
+              "peer"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "host": {
+            "type": "string",
+            "minLength": 1
+          },
+          "endpoint": {
+            "type": "string",
+            "format": "uri"
+          },
+          "bucket": {
+            "type": "string",
+            "minLength": 1
+          },
+          "secret": {
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "device": {
+            "type": "string",
+            "minLength": 1
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "full",
+              "append-only",
+              "read-only"
+            ]
+          },
+          "replicateTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "devices": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "worker",
+              "storage"
+            ]
+          },
+          "ssh": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "offload": {
+      "type": "object",
+      "properties": {
+        "verify": {
+          "type": "string",
+          "enum": [
+            "manifest",
+            "full"
+          ]
+        },
+        "keepLocalFor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*[smhdw])$"
+        },
+        "requirePushed": {
+          "type": "boolean"
+        },
+        "stub": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "onload": {
+      "type": "object",
+      "properties": {
+        "hydrate": {
+          "type": "boolean"
+        },
+        "leases": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "strict"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "deps": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "strip",
+            "keep"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "keepLast": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "strip": {
+      "type": "object",
+      "properties": {
+        "extra": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "never": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keep": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "include",
+            "envelope",
+            "exclude"
+          ]
+        },
+        "patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grant": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "worker",
+              "storage"
+            ]
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "recovery": {
+          "type": "string",
+          "pattern": "^(keychain|se|op|bw|file|env):.+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "deletion": {
+      "type": "object",
+      "properties": {
+        "delay": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*[smhdw])$"
+        },
+        "pruneKey": {
+          "type": "string",
+          "pattern": "^(keychain|se|op|bw|file|env):.+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "move": {
+      "type": "object",
+      "properties": {
+        "keepSource": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*[smhdw])$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "title": "Config",
+  "description": "config.toml and managed.toml"
+}

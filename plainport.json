@@ -348,11 +348,67 @@
       "summary": "No registered command has this name; the message suggests the closest one"
     },
     {
+      "code": "config.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A config file does not parse or does not match its schema, and there is no last good copy to keep"
+    },
+    {
+      "code": "config.kept-last-good",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A config file broke since it was last loaded; its last good contents stay in effect"
+    },
+    {
+      "code": "config.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another process holds managed.toml.lock"
+    },
+    {
+      "code": "config.no-home",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "HOME is unset or not an absolute path, so plainport cannot find its config and state"
+    },
+    {
+      "code": "config.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The config file named by --config or PLAINPORT_CONFIG does not exist"
+    },
+    {
+      "code": "config.read-only",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 5,
+      "summary": "A write would rewrite config.toml, which plainport never does"
+    },
+    {
+      "code": "config.write-failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "managed.toml or device.json could not be written; the old file is intact"
+    },
+    {
       "code": "contract.invalid",
       "severity": "block",
       "allowable": false,
       "exitCode": 1,
       "summary": "A value crossing an edge did not match its schema"
+    },
+    {
+      "code": "device.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "device.json, this device's identity, is unreadable; plainport never replaces it"
     },
     {
       "code": "internal.unexpected",
