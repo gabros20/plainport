@@ -6,6 +6,8 @@ export * from "./envelope.ts";
 export * from "./events.ts";
 export * from "./exit-codes.ts";
 export * from "./finding.ts";
+export * from "./gate.ts";
 export * from "./json-schema.ts";
+export * from "./objects.ts";
 export * from "./result.ts";
 export * from "./risk.ts";

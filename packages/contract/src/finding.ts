@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import type { FailureExitCode } from "./exit-codes.ts";
+import { outputObject } from "./objects.ts";
 
 /** Lower-case words joined by dots, at least two segments; a word may contain single hyphens (git.in-progress). */
 export const FindingCodeSchema = z
@@ -12,16 +13,14 @@ export const FindingCodeSchema = z
 export const SeveritySchema = z.enum(["info", "warn", "block"]);
 export type Severity = z.infer<typeof SeveritySchema>;
 
-export const FindingSchema = z
-  .strictObject({
-    code: FindingCodeSchema,
-    severity: SeveritySchema,
-    message: z.string().min(1),
-    paths: z.array(z.string()).optional(),
-    fix: z.string().min(1).optional().meta({ description: "The exact next step, e.g. a command to run" }),
-    allowable: z.boolean().meta({ description: "May --allow <code> override it?" }),
-  })
-  .meta({ title: "Finding" });
+export const FindingSchema = outputObject({
+  code: FindingCodeSchema,
+  severity: SeveritySchema,
+  message: z.string().min(1),
+  paths: z.array(z.string()).optional(),
+  fix: z.string().min(1).optional().meta({ description: "The exact next step, e.g. a command to run" }),
+  allowable: z.boolean().meta({ description: "May --allow <code> override it?" }),
+}).meta({ title: "Finding" });
 export type Finding = z.infer<typeof FindingSchema>;
 
 export interface FindingSpec {
@@ -40,6 +39,12 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A value crossing an edge did not match its schema",
   },
+  "risk.needs-yes": {
+    severity: "block",
+    allowable: false,
+    exitCode: 3,
+    summary: "A confirm-class command ran without --yes or an approved --plan",
+  },
   "tool.missing": {
     severity: "block",
     allowable: false,
@@ -50,15 +55,15 @@ export const FINDINGS = Object.freeze({
 
 export type FindingCode = keyof typeof FINDINGS;
 
-/** Builds a catalogued finding, taking severity and allowable from the catalogue unless overridden. */
+/** Builds a catalogued finding. Severity and allowable are properties of the code, so they come from the catalogue. */
 export const finding = (
   code: FindingCode,
-  detail: { message: string; fix?: string; paths?: string[]; severity?: Severity },
+  detail: { message: string; fix?: string; paths?: string[] },
 ): Finding => {
   const spec: FindingSpec = FINDINGS[code];
   return {
     code,
-    severity: detail.severity ?? spec.severity,
+    severity: spec.severity,
     message: detail.message,
     ...(detail.paths === undefined ? {} : { paths: detail.paths }),
     ...(detail.fix === undefined ? {} : { fix: detail.fix }),

@@ -27,7 +27,8 @@ describe("findings", () => {
     expect(FindingSchema.safeParse(withoutAllowable).success).toBe(false);
     expect(FindingSchema.safeParse({ ...valid, code: "unpushed" }).success).toBe(false);
     expect(FindingSchema.safeParse({ ...valid, severity: "error" }).success).toBe(false);
-    expect(FindingSchema.safeParse({ ...valid, extra: 1 }).success).toBe(false);
+    // D16: findings are output, so a field added later must not break an older reader.
+    expect(FindingSchema.safeParse({ ...valid, extra: 1 }).success).toBe(true);
     expect(FindingSchema.safeParse({ ...valid, fix: "git push", paths: ["a"] }).success).toBe(true);
   });
 
@@ -44,11 +45,18 @@ describe("findings", () => {
   });
 
   test("the catalogue is frozen", () => {
-    expect(FINDINGS).toEqual({
+    expect(FINDINGS as unknown).toEqual({
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "risk.needs-yes": { severity: "block", allowable: false, exitCode: 3, summary: expect.any(String) },
       "tool.missing": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
     });
     expect(Object.isFrozen(FINDINGS)).toBe(true);
+  });
+
+  test("finding() takes severity from the catalogue; a caller cannot override it", () => {
+    // @ts-expect-error severity is not a detail field
+    const f = finding("tool.missing", { message: "m", severity: "info" });
+    expect(f.severity).toBe("block");
   });
 
   test("finding() fills severity and allowable from the catalogue, and the result validates", () => {
