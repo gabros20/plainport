@@ -38,3 +38,8 @@ test("fetches the pinned tools and runs test:t1 on macOS and Linux", () => {
     );
   }
 });
+
+test("the Linux job installs zsh, so the real-shell re-run test runs there too", () => {
+  expect(runs("linux")).toContain("apt-get install -y zsh");
+  expect(runs("linux").indexOf("apt-get install -y zsh")).toBeLessThan(runs("linux").indexOf("bun run test"));
+});

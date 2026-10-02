@@ -49,6 +49,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
+      - name: install zsh
+        # The re-run quoting test parses the line in real zsh and bash; the runner image has no zsh.
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
