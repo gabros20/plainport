@@ -29,10 +29,19 @@ Under `--json`, the **last line on stdout** is exactly one envelope object.
 {"plainport_json": 1, "ok": false, "verb": "offload", "error": {"code": 3, "message": "offload is confirm-class", "hint": "re-run: plainport offload web --yes"}}
 ```
 
+**Partial success** (the files are back, the dependencies are not):
+
+```json
+{"plainport_json": 1, "ok": false, "verb": "onload", "error": {"code": 10, "message": "web is restored but its dependencies are not installed", "hint": "plainport hydrate web"}, "data": {"project": "work:clients/acme/web", "snapshot": "01J9Z6K2"}}
+```
+
 The rules:
 
 - The keys are exactly `plainport_json`, `ok`, `verb`, and `data` (when `ok` is true) or `error` (when `ok` is
-  false). Nothing else appears at the top level. A failure carries no `data`.
+  false). Nothing else appears at the top level.
+- A failure carries `data` next to `error` only when the operation partly succeeded: exit 10 carries the restored
+  project and snapshot, exit 8 the kept snapshot. Otherwise a failure has no `data`. When present, `data` has the
+  command's declared output shape.
 - `plainport_json` is the envelope version, `1`. It changes only on a breaking change to the envelope (§7).
 - `verb` is the command as registered, such as `offload` or `root add`.
 - `data` is any JSON value; its shape is the command's declared output schema in `plainport.json`.

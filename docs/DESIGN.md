@@ -821,7 +821,7 @@ work:clients/acme/web → mini-work
   plan      01J9Z6KB (valid 1h) → plainport offload web --plan 01J9Z6KB
 ```
 
-**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
+**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. A failure carries `data` too only when the operation partly succeeded: exit 10 carries the restored project and snapshot, exit 8 the kept snapshot. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
 
 ```
 {"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
