@@ -110,6 +110,38 @@ test("a v* tag must sit on a release commit", () => {
   expect(problems.join("\n")).toContain("not a release commit");
 });
 
+test("a subject starting with release: must be exactly `release: X.Y.Z`", () => {
+  for (const headSubject of ["release: 0.1.0 extra", "release:0.1.0", "release:  0.1.0", "release:"]) {
+    const problems = checkVersion({
+      version: "0.1.0-dev",
+      changelog: devChangelog,
+      headSubject,
+      headTags: [],
+    });
+    expect({ headSubject, flagged: problems.some((p) => p.includes("release: X.Y.Z")) }).toEqual({
+      headSubject,
+      flagged: true,
+    });
+  }
+});
+
+test("fails, never passes, when it can't read the git history", () => {
+  const outside = mkdtempSync(join(tmpdir(), "plainport-not-a-repo-"));
+  try {
+    const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "check-version.ts")], {
+      cwd: outside,
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir() },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr.toString()).toContain("version check: can't read the git history");
+    expect(run.stdout.toString()).not.toContain("version check: ok");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 // The script checks the whole history, not only HEAD: a bad release commit followed by the next -dev commit,
 // or a bad tag on an older commit, must still fail.
 describe("bun scripts/check-version.ts over a git history", () => {
@@ -145,6 +177,14 @@ describe("bun scripts/check-version.ts over a git history", () => {
     git("tag", "v0.1.0");
     commit("next: 0.2.0-dev", "0.2.0-dev", releaseChangelog);
     expect(check()).toEqual({ exitCode: 0, output: "version check: ok\n" });
+  });
+
+  test("a malformed release subject behind HEAD fails", () => {
+    commit("release: 0.1.0 extra", "0.1.0-dev", `${devChangelog}- a\n`);
+    commit("next", "0.1.0-dev", `${devChangelog}- b\n`);
+    const result = check();
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain("release: X.Y.Z");
   });
 
   test("a bad release commit behind HEAD fails", () => {

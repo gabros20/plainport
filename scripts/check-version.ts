@@ -27,6 +27,9 @@ export const checkVersion = ({ version, changelog, headSubject, headTags }: Vers
     problems.push("VERSION is a -dev version, but CHANGELOG.md has no ## [Unreleased] section");
   }
   const release = /^release: (\S+)$/.exec(headSubject)?.[1];
+  if (headSubject.startsWith("release:") && release === undefined) {
+    problems.push(`"${headSubject}" starts with release: but is not of the form release: X.Y.Z`);
+  }
   if (release !== undefined) {
     if (!SEMVER.test(release)) {
       problems.push(`"release: ${release}" must name a plain X.Y.Z version; a release commit drops -dev`);
@@ -56,28 +59,41 @@ export const checkVersion = ({ version, changelog, headSubject, headTags }: Vers
   return problems;
 };
 
-const git = (...args: string[]): { ok: boolean; out: string } => {
+const git = (...args: string[]): { ok: boolean; out: string; err: string } => {
   const run = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
-  return { ok: run.exitCode === 0, out: run.stdout.toString() };
+  return { ok: run.exitCode === 0, out: run.stdout.toString(), err: run.stderr.toString().trim() };
+};
+
+/** For the commands that discover the history: a failure ends the check as a failure, never as a pass. */
+const discover = (...args: string[]): string => {
+  const run = git(...args);
+  if (!run.ok) {
+    console.error(`version check: can't read the git history: git ${args.join(" ")} failed: ${run.err}`);
+    console.error(
+      "version check: run it inside the plainport checkout, with its full history (fetch-depth: 0)",
+    );
+    process.exit(1);
+  }
+  return run.out;
 };
 
 const lines = (text: string): string[] => text.split("\n").filter(Boolean);
 
 if (import.meta.main) {
-  const head = git("rev-parse", "HEAD").out.trim();
+  const head = discover("rev-parse", "HEAD").trim();
   const tagsAt = new Map<string, string[]>();
-  for (const tag of lines(git("tag", "-l", "v*").out)) {
-    const sha = git("rev-list", "-n", "1", tag).out.trim();
+  for (const tag of lines(discover("tag", "-l", "v*"))) {
+    const sha = discover("rev-list", "-n", "1", tag).trim();
     tagsAt.set(sha, [...(tagsAt.get(sha) ?? []), tag]);
   }
   // HEAD, every release commit, and every tagged commit (tags need not be reachable from HEAD).
   const subjects = new Map<string, string>();
-  for (const line of lines(git("log", "--format=%H%x1f%s", "HEAD").out)) {
+  for (const line of lines(discover("log", "--format=%H%x1f%s", "HEAD"))) {
     const [sha = "", subject = ""] = line.split("\x1f");
     if (sha === head || subject.startsWith("release:") || tagsAt.has(sha)) subjects.set(sha, subject);
   }
   for (const sha of tagsAt.keys()) {
-    if (!subjects.has(sha)) subjects.set(sha, git("log", "-1", "--format=%s", sha).out.trim());
+    if (!subjects.has(sha)) subjects.set(sha, discover("log", "-1", "--format=%s", sha).trim());
   }
 
   const problems: string[] = [];
