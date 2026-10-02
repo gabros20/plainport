@@ -2,3 +2,4 @@
 
 export const packageName = "@plainport/core";
 export * from "./tools.ts";
+export { VERSION } from "./version.ts";

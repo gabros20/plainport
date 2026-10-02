@@ -1,4 +1,2 @@
-// The app version (ADR-0020). Imported as text, so `bun build --compile` bakes VERSION into the binary.
-import raw from "../../../VERSION" with { type: "text" };
-
-export const VERSION = raw.trim();
+// The app version (ADR-0020), defined once in @plainport/core, which bakes VERSION into the binary.
+export { VERSION } from "@plainport/core";
