@@ -2,8 +2,12 @@
 //
 // It points HOME, XDG_*, CLAUDE_CONFIG_DIR, CODEX_HOME and GROK_HOME at a per-run temp directory, then patches
 // node:fs and Bun's file and spawn APIs so that any test resolving a path under the real home fails: the call
-// throws, and a global afterEach fails the test even if the test swallowed the error. Reads inside this
-// repository are allowed, because the checkout itself usually lives under the real home.
+// throws, and a global afterEach fails the test even if the test swallowed the error. Paths are compared after
+// resolving symlinks, and case-insensitively on macOS. Reads inside this repository are allowed, because the
+// checkout itself usually lives under the real home; writes to it are not (run decision D7).
+//
+// This is a best-effort net over JS file and spawn calls: a child process handed an absolute real-home path is
+// not caught here; the host port refuses those (Task 7, run decision D6).
 //
 // Bun quirks this works around (Bun 1.3.14):
 // - os.homedir() and the default environment of Bun.spawn and node:child_process are fixed at process start;
@@ -12,7 +16,7 @@
 //   must stay the first preload, so the patched functions are the ones every test file imports.
 
 import { afterEach } from "bun:test";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type Fn = (...args: unknown[]) => unknown;
@@ -27,6 +31,40 @@ const originalTmpdir = os.tmpdir as () => string;
 const mkdirSync = fs.mkdirSync as (path: string, options: { recursive: true }) => void;
 const mkdtempSync = fs.mkdtempSync as (prefix: string) => string;
 const rmSync = fs.rmSync as (path: string, options: { recursive: true; force: true }) => void;
+const realpathNative = (fs.realpathSync as { native: (path: string) => string }).native;
+const lstatSync = fs.lstatSync as (path: string) => { isSymbolicLink(): boolean };
+const readlinkSync = fs.readlinkSync as (path: string) => string;
+
+const foldCase =
+  process.platform === "darwin" ? (path: string) => path.toLowerCase() : (path: string) => path;
+
+/**
+ * The path as the filesystem will see it: the nearest existing ancestor with symlinks resolved (dangling ones
+ * followed too), plus the part that does not exist yet. Case-folded on macOS, whose volumes are case-insensitive.
+ */
+const canonical = (path: string, depth = 0): string => {
+  const missing: string[] = [];
+  let existing = resolve(path);
+  for (;;) {
+    try {
+      return foldCase(join(realpathNative(existing), ...missing.reverse()));
+    } catch {
+      // Does not exist (or is a dangling symlink): try its parent.
+    }
+    try {
+      if (depth < 40 && lstatSync(existing).isSymbolicLink()) {
+        const target = resolve(dirname(existing), readlinkSync(existing));
+        return canonical(join(target, ...missing.reverse()), depth + 1);
+      }
+    } catch {
+      // Not there at all.
+    }
+    const parent = dirname(existing);
+    if (parent === existing) return foldCase(join(existing, ...missing.reverse()));
+    missing.push(basename(existing));
+    existing = parent;
+  }
+};
 
 const repoRoot = resolve(import.meta.dir, "..");
 // A nested `bun test` (the tripwire's own test runs one) inherits a sandboxed HOME, so the outermost run passes
@@ -34,9 +72,11 @@ const repoRoot = resolve(import.meta.dir, "..");
 const realHome = resolve(process.env.PLAINPORT_TRIPWIRE_REAL_HOME ?? originalHomedir());
 
 const isUnder = (root: string, path: string): boolean => path === root || path.startsWith(root + sep);
+const realHomeKey = canonical(realHome);
+const repoKey = canonical(repoRoot);
 
 const tmp = resolve(originalTmpdir());
-if (isUnder(realHome, tmp)) {
+if (isUnder(realHomeKey, canonical(tmp))) {
   throw new Error(
     `home tripwire: the temp directory ${tmp} is under the real home ${realHome}; set TMPDIR outside it and re-run`,
   );
@@ -53,7 +93,15 @@ const sandboxEnv: Record<string, string> = {
   CLAUDE_CONFIG_DIR: join(sandbox, ".claude"),
   CODEX_HOME: join(sandbox, ".codex"),
   GROK_HOME: join(sandbox, ".grok"),
+  XDG_CONFIG_DIRS: join(sandbox, ".xdg", "config-dirs"),
+  XDG_DATA_DIRS: join(sandbox, ".xdg", "data-dirs"),
 };
+// Any other inherited XDG path variable (XDG_BIN_HOME, ...) is pointed into the sandbox as well.
+for (const name of Object.keys(process.env)) {
+  if (/^XDG_\w+_(HOME|DIRS?)$/.test(name) && !(name in sandboxEnv)) {
+    sandboxEnv[name] = join(sandbox, ".xdg", name.toLowerCase());
+  }
+}
 for (const [name, dir] of Object.entries(sandboxEnv)) {
   mkdirSync(dir, { recursive: true });
   process.env[name] = dir;
@@ -89,20 +137,23 @@ const toPath = (value: unknown): string | undefined => {
 
 const guard = (op: string, value: unknown, write: boolean): void => {
   const path = toPath(value);
-  if (path === undefined || !isUnder(realHome, path)) return;
-  if (!write && isUnder(repoRoot, path)) return;
+  if (path === undefined) return;
+  const key = canonical(path);
+  if (!isUnder(realHomeKey, key)) return;
+  if (!write && isUnder(repoKey, key)) return;
+  const resolved = key === foldCase(path) ? "" : ` (resolves to ${key})`;
   const message =
-    `home tripwire: ${op} ${path} is under the real home ${realHome}. ` +
+    `home tripwire: ${op} ${path}${resolved} is under the real home ${realHome}. ` +
     `Tests must not touch it: use a temp directory or the sandboxed HOME (${sandbox}). See AGENTS.md "Testing".`;
   violations.push(message);
   throw new Error(message);
 };
 
-// Which arguments of each node:fs function are paths.
+// Which arguments of each node:fs function are paths. readFile, createReadStream and open are classified by
+// their flags instead (below), since a write-capable flag turns them into writes.
 const reads: Record<string, number[]> = {
   access: [0],
   exists: [0],
-  readFile: [0],
   readdir: [0],
   stat: [0],
   lstat: [0],
@@ -110,7 +161,6 @@ const reads: Record<string, number[]> = {
   realpath: [0],
   readlink: [0],
   opendir: [0],
-  createReadStream: [0],
   watch: [0],
   watchFile: [0],
 };
@@ -139,6 +189,11 @@ const writes: Record<string, number[]> = {
 
 const isWriteFlag = (flags: unknown): boolean =>
   typeof flags === "number" ? (flags & 3) !== 0 : typeof flags === "string" && /[wa+]/.test(flags);
+// readFile takes { flag }, createReadStream takes { flags }; either may be an encoding string instead.
+const optionFlag = (options: unknown): unknown =>
+  typeof options === "object" && options !== null
+    ? ((options as { flag?: unknown; flags?: unknown }).flag ?? (options as { flags?: unknown }).flags)
+    : undefined;
 
 const wrap = (target: Patchable, name: string, check: (args: unknown[]) => void, async = false): void => {
   const original = target[name];
@@ -179,11 +234,33 @@ for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
   for (const variant of ["open", "openSync"]) {
     wrap(target, variant, (args) => guard(variant, args[0], isWriteFlag(args[1])), async);
   }
+  for (const variant of ["readFile", "readFileSync", "createReadStream"]) {
+    wrap(target, variant, (args) => guard(variant, args[0], isWriteFlag(optionFlag(args[1]))), async);
+  }
+}
+
+// realpath.native and realpathSync.native were copied onto the wrappers unguarded.
+for (const name of ["realpath", "realpathSync"]) {
+  wrap(fs[name] as Patchable, "native", (args) => guard(`${name}.native`, args[0], false));
 }
 
 const bun = Bun as unknown as Patchable;
 
-wrap(bun, "file", (args) => guard("Bun.file", args[0], false));
+// Bun.file is a read until one of its mutators is called.
+type BunFileLike = Patchable & { name?: unknown };
+const guardFile = (file: BunFileLike, path: unknown): BunFileLike => {
+  for (const name of ["write", "delete", "unlink"])
+    wrap(file, name, () => guard(`Bun.file().${name}`, path, true), true);
+  wrap(file, "writer", () => guard("Bun.file().writer", path, true));
+  const slice = file.slice as Fn;
+  file.slice = (...args: unknown[]) => guardFile(slice.apply(file, args) as BunFileLike, path);
+  return file;
+};
+const originalFile = bun.file as Fn;
+bun.file = function (this: unknown, ...args: unknown[]) {
+  guard("Bun.file", args[0], false);
+  return guardFile(originalFile.apply(this, args) as BunFileLike, args[0]);
+};
 
 const originalWrite = bun.write as Fn;
 bun.write = function (this: unknown, ...args: unknown[]) {

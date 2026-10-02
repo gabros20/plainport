@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpath,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { open, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import { takeViolations, tripwireInstalled } from "./home-tripwire.ts";
@@ -45,6 +55,18 @@ describe("home tripwire: sandbox", () => {
     }
     expect(process.env.HOME).toBe(sandbox);
     expect(homedir()).toBe(sandbox);
+  });
+
+  test("points the XDG search paths into the sandbox too", () => {
+    for (const name of ["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"]) {
+      expect({ name, set: (process.env[name] ?? "") !== "" }).toEqual({ name, set: true });
+    }
+    for (const [name, value] of Object.entries(process.env)) {
+      if (!/^XDG_\w+_(HOME|DIRS?)$/.test(name)) continue;
+      for (const entry of (value ?? "").split(":")) {
+        expect({ name, entry, inSandbox: under(sandbox, entry) }).toEqual({ name, entry, inSandbox: true });
+      }
+    }
   });
 
   test("child processes see the sandboxed home", async () => {
@@ -105,5 +127,75 @@ describe("home tripwire: refusals", () => {
     expect(output).toMatch(/\b2 fail\b/);
     // Nothing reached the real home: checked by a child process, which the tripwire does not patch.
     expect(Bun.spawnSync(["test", "-e", probe]).exitCode).not.toBe(0);
+  });
+});
+
+// The checkout normally lives under the real home; these cases only mean something when it does.
+const checkoutUnderHome = realHome !== "" && under(realHome, repoRoot);
+// A path inside the checkout whose parent is a regular file: nothing can ever be created there.
+const checkoutProbe = () => join(repoRoot, "VERSION", `probe-${randomUUID()}`);
+
+describe("home tripwire: paths are compared after resolving symlinks and case", () => {
+  test("a sandbox symlink into the real home is refused", () => {
+    expect(tripwireInstalled()).toBe(true);
+    const link = join(sandbox, `link-${randomUUID()}`);
+    symlinkSync(realHome, link);
+    expect(() => writeFileSync(join(link, `.plainport-tripwire-${randomUUID()}`, "probe.txt"), "x")).toThrow(
+      /home tripwire/,
+    );
+    expect(() => existsSync(join(link, ".claude"))).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(2);
+  });
+
+  test("a dangling sandbox symlink that points into the real home is refused", () => {
+    expect(tripwireInstalled()).toBe(true);
+    const link = join(sandbox, `dangling-${randomUUID()}`);
+    symlinkSync(realHomeProbe(), link);
+    expect(() => writeFileSync(link, "x")).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(1);
+  });
+
+  test.skipIf(process.platform !== "darwin")("other casings of the real home are refused on macOS", () => {
+    expect(tripwireInstalled()).toBe(true);
+    const upper = realHomeProbe().replace(realHome, realHome.toUpperCase());
+    expect(() => writeFileSync(upper, "x")).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(1);
+  });
+});
+
+describe("home tripwire: write-capable calls count as writes", () => {
+  test("realpath.native is guarded, sync and callback", () => {
+    expect(tripwireInstalled()).toBe(true);
+    expect(() => realpathSync.native(join(realHome, ".claude"))).toThrow(/home tripwire/);
+    expect(() => realpath.native(join(realHome, ".claude"), () => {})).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(2);
+  });
+
+  test.skipIf(!checkoutUnderHome)("writes into the checkout are refused", () => {
+    expect(() => writeFileSync(checkoutProbe(), "x")).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(1);
+  });
+
+  test.skipIf(!checkoutUnderHome)(
+    "read APIs with write-capable flags inside the checkout are refused",
+    async () => {
+      const version = join(repoRoot, "VERSION");
+      expect(() => readFileSync(version, { flag: "a" })).toThrow(/home tripwire/);
+      expect(() => createReadStream(version, { flags: "a" })).toThrow(/home tripwire/);
+      expect(() => openSync(version, "r+")).toThrow(/home tripwire/);
+      await expect(open(version, "a")).rejects.toThrow(/home tripwire/);
+      expect(takeViolations()).toHaveLength(4);
+      expect(readFileSync(version, { flag: "r" }).length).toBeGreaterThan(0);
+    },
+  );
+
+  test.skipIf(!checkoutUnderHome)("Bun.file mutators inside the checkout are refused", async () => {
+    const file = Bun.file(checkoutProbe());
+    expect(() => file.writer()).toThrow(/home tripwire/);
+    await expect(file.write("x")).rejects.toThrow(/home tripwire/);
+    await expect(file.delete()).rejects.toThrow(/home tripwire/);
+    await expect(file.unlink()).rejects.toThrow(/home tripwire/);
+    expect(() => file.slice(0, 1).writer()).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(5);
   });
 });
