@@ -29,3 +29,12 @@ test("compile-smokes all four targets and runs only the native binary", () => {
 test("checks version consistency", () => {
   expect(runs("version")).toContain("bun run check:version");
 });
+
+test("fetches the pinned tools and runs test:t1 on macOS and Linux", () => {
+  for (const job of ["macos", "linux"]) {
+    expect(runs(job)).toContain("bun scripts/fetch-tools.ts\n");
+    expect(runs(job).indexOf("bun scripts/fetch-tools.ts")).toBeLessThan(
+      runs(job).indexOf("bun run test:t1"),
+    );
+  }
+});
