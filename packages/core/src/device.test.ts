@@ -24,7 +24,14 @@ beforeEach(() => {
   paths = result.value;
 });
 
-afterEach(() => {
+/** Every child a test starts; afterEach kills any still running, so a failed test leaves none behind. */
+const spawned: Bun.Subprocess[] = [];
+
+afterEach(async () => {
+  for (const child of spawned.splice(0)) {
+    child.kill("SIGKILL");
+    await child.exited;
+  }
   rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -67,6 +74,7 @@ describe("config: device identity", () => {
         stderr: "pipe",
       }),
     );
+    spawned.push(...children);
     await releaseWhenReady(barrier, names);
     const codes = await Promise.all(children.map((child) => child.exited));
     const errors = await Promise.all(children.map((child) => new Response(child.stderr).text()));
