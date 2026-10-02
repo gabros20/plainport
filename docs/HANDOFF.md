@@ -13,8 +13,12 @@ plainport was designed in a claude.ai conversation between 29 September and 2 Oc
   `gabros20/plainport`; ADRs in `docs/adr/` record every design decision plus three new ones (copy plainkeep's
   contract, test-first with the crash matrix, delivery through `/orchestrate`); `docs/ROADMAP.md` stages
   M0–M6; `docs/plans/M1-local-core.md` is the 16-task M1 plan for `/orchestrate`, awaiting approval.
-  ADR-0018 (test environments) waits on a research note in the plainkeep vault. SSH alias `mini` is set up
-  on the laptop but untested, because the mini was offline in Tailscale.
+  ADR-0018 (test environments) is filled from the vault note
+  `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` and live OrbStack checks, and awaits the owner.
+  ADR-0020 (versioning, release and install, copied from plainkeep: no signing, no Homebrew, no Renovate) and
+  ADR-0021 (factory-floor guardrails) are accepted. `.claude/settings.json` and `CONTRIBUTING.md` (Definition of
+  Done, release routine) are in place. SSH alias `mini` is set up on the laptop but untested, because the mini
+  was offline in Tailscale.
 
 ## Proposed stack details (not yet in DESIGN.md)
 

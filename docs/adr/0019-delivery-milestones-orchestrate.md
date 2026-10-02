@@ -14,7 +14,7 @@ with spec and quality reviews.
 - Default run: `/orchestrate docs/plans/M<n>-….md strategy=staged review=dual`; tasks marked parallel-safe
   may run `strategy=parallel` in worktrees.
 - Git: work on a branch per milestone (`m1-local-core`), small commits per task, merge to `main` when the
-  gate passes, then tag the gate (`m1`). Phase-boundary commits land on the branch. `main` is pushed to the
+  gate passes, then cut the milestone's release (`v0.1.0` for M1, ADR-0020). Phase-boundary commits land on the branch. `main` is pushed to the
   private GitHub repository `gabros20/plainport`.
 - `.orchestrate/` run state is local and gitignored; durable outcomes go into `docs/HANDOFF.md` and the
   roadmap's status column.

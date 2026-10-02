@@ -1134,7 +1134,7 @@ Encrypt once, client-side, with restic, and don't wrap the package again. Add ex
 
 **1Password or Bitwarden?** Both work through their CLIs behind the same `SecretProvider`. 1Password adds an SSH agent and service accounts; Bitwarden is open source and can be self-hosted, which suits EU hosting. The choice only decides where recovery material lives.
 
-**Keychain prompts.** macOS ties Keychain access to the binary's code signature, so an unsigned CLI can trigger fresh prompts after every update. Release builds are signed with a stable Developer ID, and a Secure Enclave age key avoids Keychain prompts entirely.
+**Keychain prompts.** macOS ties a Keychain item's access list to the code signature of the program that reads it, so an unsigned CLI reading items directly would prompt again after every update. plainport never reads the Keychain itself: it creates and reads items only through Apple's `/usr/bin/security`, so the access list names Apple's signed tool and an updated plainport binary changes nothing. A Secure Enclave age key avoids Keychain prompts entirely. Builds are not Developer ID signed or notarized (ADR-0020): devices receive the binary from plainport's own installer or over SSH at pairing, which sets no quarantine flag.
 
 **Revocation.** `plainport device revoke mbp` removes the device's restic key, its forced-command SSH key and its envelope recipient; new envelopes leave it out. A device that already opened the repository could have kept its master key, so after a real compromise, create a new repository and `restic copy` into it, which re-encrypts everything.
 

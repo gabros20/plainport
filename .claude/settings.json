@@ -1,0 +1,32 @@
+{
+  "_comment": "Claude Code permissions for plainport, in plainkeep's shape (ADR-0021): allow the dev surface so orchestrated workers don't stall; deny reading secrets, force pushes and recursive deletes. Tests must still never touch the real home (AGENTS.md); the bun test preload enforces it.",
+  "permissions": {
+    "allow": [
+      "Bash(bun:*)",
+      "Bash(bunx:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git switch:*)",
+      "Bash(git worktree:*)",
+      "Bash(gh pr:*)",
+      "Bash(board:*)",
+      "Bash(orb:*)",
+      "Bash(docker:*)",
+      "Bash(./dist/plainport:*)",
+      "Bash(./.tools/:*)",
+      "Bash(gitleaks:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf:*)"
+    ]
+  }
+}

@@ -17,7 +17,8 @@ to cross-build.
 
 **Consequences.** Everything that would need a native binding goes through a pinned external binary run by the
 one process runner (restic, rclone, age, OpenSSH, git). The Intel mini needs the `darwin-x64` target in CI from
-M3 on. Release builds need a stable Developer ID signature so Keychain doesn't prompt after every update.
+M3 on. No Developer ID signing or notarization (amended 2026-10-02 by ADR-0020): Keychain access goes through Apple's
+`security` CLI, so plainport's own signature never matters to the Keychain.
 
 **Status.** Accepted (owner, 2026-09-30).
 

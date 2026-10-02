@@ -17,9 +17,10 @@ git switch -c m1-local-core
   then quality review. A task is done when its verification commands pass through `board exec`.
 - **Parallel only where marked.** Tasks tagged `parallel-safe` share no files and may run with
   `strategy=parallel` in worktrees.
-- **Phase boundary = a commit** on the milestone branch with the phase's tests green.
-- **Gate = merge and tag.** When the milestone gate passes, merge to `main`, tag `m<n>`, push, update
-  `docs/HANDOFF.md` and the status table below.
+- **Phase boundary = a commit** on the milestone branch with the phase's tests green. The milestone branch has
+  a draft pull request into `main`, so CI runs on every push (ADR-0021).
+- **Gate = merge and release.** When the milestone gate passes and `gh pr checks` is green, merge the pull
+  request, cut the release (`v0.<n>.0`, ADR-0020), update `docs/HANDOFF.md` and the status table below.
 - **Reality over plan.** A task that finds the design wrong stops with `DESIGN_CONFLICT`. Nobody patches around
   it; the owner decides, and `DESIGN.md` plus an ADR change in the same commit.
 
@@ -27,8 +28,8 @@ git switch -c m1-local-core
 
 | Milestone | Delivers | Gate | Test tiers | ADRs it needs | Status |
 | --- | --- | --- | --- | --- | --- |
-| **M0 · Prep** | Repo, ADRs, roadmap, M1 plan, test-environment research, toolchain pins | Docs reviewed; ADR-0018 accepted; M1 plan approved | none | 0001–0019 | In progress |
-| **M1 · Local core** | Core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls` | Crash matrix green; round trips byte-identical on real projects | T0, T1 | 0003–0008, 0010, 0017 | Planned: [plan](plans/M1-local-core.md) |
+| **M0 · Prep** | Repo, ADRs, roadmap, M1 plan, test-environment research, agent permissions, Definition of Done | Docs reviewed; ADR-0018 accepted; M1 plan approved | none | 0001–0021 | In progress |
+| **M1 · Local core** → `v0.1.0` | Factory floor; core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls`; agent eval smoke | Crash matrix green; round trips byte-identical on real projects | T0, T1 | 0003–0008, 0010, 0017, 0020, 0021 | Planned: [plan](plans/M1-local-core.md) |
 | **M2 · Remote stores** | SFTP and S3 stores; catalog events via rclone; Keychain secrets; leases, head check, conflicts, `resolve` | The two-Mac race ends in `conflicted`, never in lost work | T0–T3 | 0006, 0009, 0013 | Outline below |
 | **M3 · Machines** | Devices and pairing; per-device bindings; append-only peer stores; `move`; secrets envelope; warm return; offsite replication | A project moves MacBook → Mac mini → VPS → MacBook with git state intact | T0–T4 | 0010–0013, 0018 | Outline below |
 | **M4 · Agent-ready** | `serve --stdio`; published contract; `attach`; Claude Code and Codex adapters; kit; handoff notes; arrival plans | An agent runs offload and onload unattended from `--json` alone | T0–T3 | 0007, 0014, 0015 | Outline below |
@@ -57,17 +58,20 @@ Tools per tier are proposed in ADR-0018, from the vault research note and live c
 | 0.4 | Research test hosts, sandboxes and stores (Grok lane, X bookmarks plus web) | Vault note `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` | Done; OrbStack claims verified live on the laptop |
 | 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Filled; awaiting owner acceptance |
 | 0.6 | SSH alias `mini` on the laptop | `~/.ssh/config` entry | Done; untested, because the mini was offline in Tailscale on 2026-10-02 |
-| 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | First task of M1 phase 1 | Planned |
+| 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | M1 task 2 | Planned |
+| 0.8 | Versioning, release and install the plainkeep way; factory-floor guardrails | ADR-0020, ADR-0021 | Done |
+| 0.9 | Agent permissions and Definition of Done | `.claude/settings.json`, `CONTRIBUTING.md` | Done |
 
 **Gate:** the owner has reviewed the ADRs and this roadmap, ADR-0018 is accepted, and the M1 plan is approved.
-Tag `m0`.
+M0 is documentation only, so it closes with a commit and no release.
 
 ## M1 · Local core
 
 Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 
-1. **Scaffold and toolchain.** Bun workspace with `core`, `contract`, `cli`, `engine-restic`, `blob-fs`,
-   `eco-node`, `host-macos`; the four scripts; pinned restic; macOS CI.
+1. **Scaffold, factory floor and toolchain.** Bun workspace with `core`, `contract`, `cli`, `engine-restic`,
+   `blob-fs`, `eco-node`, `host-macos`; the four scripts; `VERSION`, `CHANGELOG.md`, `.bun-version`; Biome,
+   gitleaks, the home tripwire; macOS and Linux CI; pinned restic.
 2. **Contract.** Command registry, risk classes, `--json` envelope, exit codes, finding codes, generated
    `plainport.json` and completions, contract tests (ported from plainkeep, ADR-0003).
 3. **Config and roots.** `config.toml` plus `managed.toml` with merge rules and write lock; `init`,
@@ -77,13 +81,17 @@ Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 5. **Offload.** Scan, strip set, plan, the eight-phase saga with journal; external-SSD `blob-fs` store; stub and
    trash release.
 6. **Onload.** Restore to staging, verify, swap, toolchain and hydrate with the Node plugin.
-7. **Status, ls, recover and the gate.** Read commands, `recover`, the crash matrix, byte-identical round trips on
-   the owner's real projects.
+7. **Status, ls, recover and the gate.** Read commands, `recover`, the crash matrix, the agent eval smoke,
+   `scripts/install`, byte-identical round trips on the owner's real projects, a performance baseline, release
+   `v0.1.0`.
 
 ## M2 · Remote stores (outline)
 
+0. **Test environments as code.** `compose.yaml` (MinIO pinned by digest, `atmoz/sftp`, `rest-server
+   --append-only`, Toxiproxy), `scripts/testenv up|down`, R2 and B2 test buckets with scoped keys referenced as
+   `op://`; the Linux CI job starts running the containers; restic version matrix in CI.
 1. **rclone blob store** and store contract suite against `fs`, MinIO and an SFTP container (T2), then B2 and R2
-   (T3). `store add | list | test | remove`.
+   (T3). `store add | list | test | remove`. Retest rclone's `If-None-Match` on the pinned version.
 2. **Remote engine targets.** restic over SFTP and S3; per-store secrets through the Keychain provider.
 3. **Catalog over stores.** Event mirror cache, offline `ls`, sealed events on bucket stores.
 4. **Leases and conflicts.** Head check at commit, lease warnings and `strict`, `conflicted` state,
@@ -92,9 +100,12 @@ Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 
 ## M3 · Machines (outline)
 
+0. **Threat model** (`docs/THREAT-MODEL.md`) before any pairing code. OrbStack `hub` and `vps` machines from
+   cloud-init (`scripts/testenv`); `orb version` on the mini; create the Hetzner CX23.
 1. **SSH transport** (`transport-ssh`) with the SSH policy; peer RPC skeleton.
 2. **Devices and pairing.** `device add | list | role | revoke`; forced-command keys; per-device restic keys;
-   root bindings published as events; Linux lingering.
+   root bindings published as events; Linux lingering; installing the matching plainport build on the device
+   over SSH (ADR-0020), including `darwin-x64` for the mini.
 3. **Peer stores.** `rclone serve restic --stdio --append-only` data plane; append-only suite.
 4. **Move.** Plan both sides, destination-first preflight, parked source, detached remote job,
    `attach`, finish; `move --copy`.
@@ -106,6 +117,7 @@ Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 ## M4 · Agent-ready (outline)
 
 1. **`serve --stdio`** JSON-RPC 2.0 and the published `plainport.json`; MCP tool list generated from it (optional).
+   The agent eval from M1 grows into the gate's scripted suite, with agent CLI versions in the CI matrix.
 2. **Claude Code adapter**, then **Codex adapter**: inventory, capture, place, verify, cleanup; marker-token
    round trips in sandboxed homes with pinned agent versions.
 3. **Handoff notes** and arrival plans.
@@ -116,7 +128,8 @@ Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 
 Grok Build adapter; Python and Rust plugins; `--verify full`; `prune --yes` and the forget delay;
 `doctor --rebuild-catalog`; file-system zoo (symlink loops, sockets, case pairs, NFD names, 4 GB file, 200,000
-files); Toxiproxy network-fault suites. **Gate:** the catalog rebuilds from the repository alone.
+files); Toxiproxy network-fault suites; performance budgets enforced against the M1 baseline;
+`doctor --bundle`. **Gate:** the catalog rebuilds from the repository alone.
 
 ## M6 · Frontends (outline)
 

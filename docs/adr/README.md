@@ -46,4 +46,6 @@ Each record uses plainkeep's shape so the two projects read alike:
 | [0016](0016-frontends-last.md) | Frontends last: TUI, then a SwiftUI app over `serve --stdio` | Accepted |
 | [0017](0017-test-strategy-tdd-and-crash-matrix.md) | Test-first, invariants and the crash matrix | Accepted |
 | [0018](0018-test-environment-ladder.md) | The test environment ladder: OrbStack peers, the mini, R2 and B2, a Hetzner VPS | Proposed (owner to accept) |
-| [0019](0019-delivery-milestones-orchestrate.md) | Delivery: milestone plans run with `/orchestrate`, a commit and tag per gate | Accepted |
+| [0019](0019-delivery-milestones-orchestrate.md) | Delivery: milestone plans run with `/orchestrate`, a release per gate | Accepted |
+| [0020](0020-versioning-release-install.md) | Versioning, release and install, the plainkeep way | Accepted |
+| [0021](0021-factory-floor.md) | The factory floor: guardrails that make agent-built code trustworthy | Accepted |

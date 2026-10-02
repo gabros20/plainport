@@ -21,17 +21,22 @@ paths) on copies of the owner's real projects.
   decisions made, open questions.
 
 **Dependency graph.** 1 → 2 → 3 → 4 → {5, 7} · 5 → 6 · 7 → 8 → 9 → 10 · 3 → 11 · {6, 8, 10, 11} → 12 → 13 → 14 →
-15 → 16. Tasks 5 and 7, and tasks 9 and 11, are `parallel-safe` with each other.
+15 → 16 → 17. Tasks 5 and 7, and tasks 9 and 11, are `parallel-safe` with each other.
+
+**Branch and pull request.** Work on `m1-local-core`. Task 1 opens a draft pull request into `main`; CI runs on
+every push. The gate (Task 17) merges it only when `gh pr checks` is green (ADR-0021).
 
 ---
 
-## Task 1 — Scaffold the Bun workspace
+## Task 1 — Scaffold the Bun workspace and the factory floor
 
 ### Objective
-A Bun workspace that installs, type-checks, tests and compiles an empty `plainport` binary on macOS.
+A Bun workspace that installs, type-checks, lints, tests and compiles an empty `plainport` binary on macOS and
+Linux, with the guardrails ADR-0021 assigns to M1 task 1 already failing loudly.
 
 ### Context
-ADR-0004, ADR-0005, ADR-0019; `docs/DESIGN.md` "Core API → Package layout"; `AGENTS.md` "Commands".
+ADR-0004, ADR-0005, ADR-0019, ADR-0020, ADR-0021; `docs/DESIGN.md` "Core API → Package layout"; `AGENTS.md`
+"Commands"; `CONTRIBUTING.md`; plainkeep's `cli/package.json` and `.github/workflows/ci.yml` for shape.
 
 ### Scope
 Owns: root `package.json`, `bunfig.toml`, `tsconfig.json`, `packages/{core,contract,cli,engine-restic,blob-fs,eco-node,host-macos}/`
@@ -41,17 +46,30 @@ Owns: root `package.json`, `bunfig.toml`, `tsconfig.json`, `packages/{core,contr
   `packages/cli/src/main.ts` to `dist/plainport`), `bun run contract` (a stub until Task 4). Add `typecheck`
   and `check:bun`; `check:bun` refuses Bun older than 1.2.21 with the reason, ported from
   `plainkeep/cli/package.json` (ADR-0003, with a provenance comment).
-- Strict TypeScript, ESM, workspace protocol references between packages. No runtime dependencies yet except
-  `zod`.
-- CI: macOS runner, `bun install --frozen-lockfile`, `typecheck`, `test`, `build`, and `dist/plainport --version`.
+- Strict TypeScript, ESM, workspace protocol references between packages. `typecheck` uses `tsgo --noEmit`
+  (`@typescript/native-preview`), as plainkeep does. No runtime dependencies yet except `zod`.
+- `VERSION` (`0.1.0-dev`), `CHANGELOG.md` (Keep a Changelog, `[Unreleased]`), `.bun-version` (`1.3.14`); the build
+  bakes `VERSION` into the binary (ADR-0020).
+- Biome for format and lint (`bun run lint`), and gitleaks (fixture `.env` files are generated at test time,
+  never committed); both
+  in CI, and both in a `scripts/pre-commit` hook that `bun run hooks` installs (ADR-0021).
+- Home tripwire: a `bunfig.toml` test preload that points `HOME`, `XDG_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+  `GROK_HOME` at a per-run temp directory and fails any test that resolves a path under the real home.
+- Test tier scripts: `bun run test` (T0) and `bun run test:t1` (adds suites tagged as real-binary).
+- CI (`.github/workflows/ci.yml`, on push and pull request to `main`): a macOS job (`bun install
+  --frozen-lockfile`, `typecheck`, `lint`, `test`, `test:t1` once tools exist, `build`, `dist/plainport --version`)
+  and an `ubuntu-24.04` job (`typecheck`, `test`, Linux `build` smoke); plus the version consistency check.
+- Open the draft pull request `m1-local-core` → `main`.
 - Fix `DESIGN.md` "Package layout" from "pnpm workspace" to "Bun workspace" (ADR-0004 records the decision).
 
 ### Tests first
-`packages/cli` test: the compiled binary prints `plainport <version>` and exits 0. One smoke test per package
-importing its index.
+`packages/cli` test: the compiled binary prints `plainport <VERSION>` and exits 0. One smoke test per package
+importing its index. Tripwire test: a test that writes under the real `HOME` fails with a clear message.
 
 ### Verification
-`bun install && bun run typecheck && bun test && bun run build && ./dist/plainport --version`
+`bun install && bun run typecheck && bun run lint && bun test && bun run build && ./dist/plainport --version`
+and `gitleaks detect --no-banner` (if gitleaks isn't installed, say so in the report and install it with
+Homebrew only with the owner's go-ahead).
 
 ### Report
 `.orchestrate/reports/task-1.md`
@@ -491,7 +509,40 @@ Every row green in both variants; the report lists the row count.
 
 ---
 
-## Task 16 — Gate: round trips on real projects
+## Task 16 — Agent eval smoke
+
+### Objective
+Show that a headless coding agent can offload and onload a fixture project using only `plainport help`, the
+generated `plainport.json` and `--json` output, with no other instructions about plainport.
+
+### Context
+ADR-0007, ADR-0021; `docs/ROADMAP.md` M4 gate (this is its early form).
+
+### Scope
+Owns `evals/agent-smoke/`: a prompt, a fixture project, and `evals/agent-smoke/run.ts`, which creates a temp root
+and store, writes a sandboxed plainport config, and runs one headless agent (`claude -p` by default, `codex exec`
+as an option) with its working directory in the temp root. The agent uses its normal login, but must not write
+sessions where its CLI can turn that off; plainport's side is fully sandboxed. Score: did the project reach
+`shelved` and back to `local`? How many calls, how many non-zero exits, did any refusal fail to name its fix?
+Not part of `bun test`; opt-in through `bun run eval:agent`.
+
+### Tests first
+Test the scorer on recorded transcripts: one pass, one fail.
+
+### Verification
+`bun test evals/agent-smoke -t scorer` and one live run, `bun run eval:agent`, with the transcript saved under
+`.orchestrate/raw/`.
+
+### Report
+`.orchestrate/reports/task-16.md`, with every confusing message or missing hint the agent hit, as contract issues
+for the owner.
+
+### Stop condition
+One live run passes, or the run fails and every cause is filed as a contract issue in the report.
+
+---
+
+## Task 17 — Gate: round trips on real projects
 
 ### Objective
 Prove the gate on copies of the owner's real projects without risking the originals.
@@ -500,7 +551,8 @@ Prove the gate on copies of the owner's real projects without risking the origin
 `docs/ROADMAP.md` M1 gate; ADR-0017.
 
 ### Scope
-Owns `scripts/gate-m1.ts` and the gate report. The owner names three to five projects of different shapes.
+Owns `scripts/gate-m1.ts`, `scripts/install` (versioned install with `current` and `--rollback`, ADR-0020) and
+the gate report. The owner names three to five projects of different shapes.
 The script clones each with `cp -c` into a temp root, runs offload then onload against a temp store, and compares
 tree hashes minus stripped paths. It never touches the originals.
 
@@ -511,8 +563,10 @@ Not applicable: this task runs the gate. The script itself is tested on a fixtur
 `bun scripts/gate-m1.ts --projects <owner's list>` and `bun test` (full suite).
 
 ### Report
-`.orchestrate/reports/task-16.md` plus an M1 summary for `docs/HANDOFF.md`.
+`.orchestrate/reports/task-17.md` plus an M1 summary for `docs/HANDOFF.md`.
 
 ### Stop condition
-All named projects round-trip byte-identically and the full suite is green; then merge to `main`, tag `m1`,
+All named projects round-trip byte-identically, the full suite is green, `scripts/install` installs and rolls
+back the build, and a performance baseline (offload and onload time and peak memory per project) is recorded in
+the report; then merge the pull request with CI green, cut release `v0.1.0` (ADR-0020),
 update `docs/HANDOFF.md` and `docs/ROADMAP.md`.
