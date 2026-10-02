@@ -76,8 +76,10 @@ The core emits two more event types, which are not stdout lines: `log` events go
 `result` event becomes the final envelope. Over JSON-RPC (`plainport serve --stdio`) all five arrive as `event`
 notifications.
 
-A reader should rely on two rules: every line but the last is an event line, and the last line is the envelope.
-`parseJsonLines` in `packages/contract` checks exactly that.
+A reader should rely on three rules: every line but the last is an event line, the last line is the envelope,
+and an event line whose `type` it does not know is passed through or skipped, never an error, since a later
+version may add event types (run decision D17). A line of a known type that does not match its shape is an error.
+`parseJsonLines` in `packages/contract` checks exactly that, and returns unknown event lines separately.
 
 ## 3. Exit codes
 
@@ -119,10 +121,11 @@ Every command declares one risk class in the registry, and `plainport.json` publ
   `--json` that line is `error.hint`. The re-run repeats the arguments exactly as given, each quoted for a POSIX
   shell when it needs to be (`'my project'`), with `--yes` placed before any `--`.
 - A command that declares no risk class is treated as `confirm`.
-- `--dry-run` runs as `read` (§6), but only for a command that declares dry-run support; for any other command
-  the flag does not lower the class.
-- The gate is a pure function, `gate()` in `packages/contract` (run decision D15); the CLI parses the flags,
-  prints the refusal and exits.
+- `--dry-run` always runs as `read` (ADR-0007, §6). A command that has no dry run refuses the flag before it
+  runs: exit 2 with the finding `usage.dry-run-unsupported`, whose `fix` is the command without `--dry-run`
+  (run decision D18). It never runs for real as a read.
+- The gate is a pure function, `gate()` in `packages/contract`, with `refuseDryRun()` for the usage refusal
+  (run decision D15); the CLI parses the flags, prints the refusal and exits.
 - An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
   `confirm` and is gated as such.
 
@@ -151,15 +154,17 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | --- | --- | --- | --- | --- |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
+| `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` is the command without it |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
 
 ## 6. The `--dry-run` contract
 
-Every command that changes anything supports `--dry-run` as a true preview: it builds and prints the plan, then
-stops, writing nothing. A `--dry-run` run is a `read`, so it needs no `--yes`: `plainport offload web --dry-run`
-runs freely. Under `--json`, its envelope's `data` is the plan.
+A command that supports `--dry-run` treats it as a true preview: it builds and prints the plan, then stops,
+writing nothing. A `--dry-run` run is always a `read`, so it needs no `--yes`: `plainport offload web --dry-run`
+runs freely. Under `--json`, its envelope's `data` is the plan. A command that has no preview refuses
+`--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy
 
@@ -169,9 +174,12 @@ runs freely. Under `--json`, its envelope's `data` is the plan.
   `plainport_json` bump, and a release with a new major version.
 - Exit codes never change meaning, and a finding code, once released, keeps its meaning. A retired code is never
   reused.
-- Additive changes, such as a new optional field, a new event type, a new finding code or a new command, keep
-  `plainport_json` at its value. Consumers should ignore keys they don't know and skip event lines whose `type`
-  they don't know.
+- **Additive** (keeps `plainport_json`): a new optional key on any printed object, a new event type, a new finding
+  code, a new command. Consumers ignore keys they don't know and pass through or skip event lines whose `type`
+  they don't know (D17); the published `event` and `stream-event` schemas accept an unknown type.
+- **Breaking** (bumps `plainport_json`): removing or renaming a key, making an optional key required, changing a
+  key's type or meaning, and adding a value to a closed set: a new phase, project state, severity, risk class or
+  exit code. Readers may treat those sets as complete (D17).
 - So that a new field is not breaking, the published schemas for everything plainport prints (the envelope, event
   lines, findings, each command's `data`) leave `additionalProperties` open. What plainport reads (arguments,
   config, files it owns) stays strict, so a mistyped key is an error rather than silently ignored (run decision
