@@ -73,6 +73,6 @@ and passed every T2 check above.
   OrbStack's cutoff is Broadwell. Fall back to Lima if it isn't.
 - Retest rclone's `If-None-Match` on the pinned rclone in M2.
 
-**Status.** Proposed. The owner accepts it to close M0; the Hetzner spend is needed only from M3.
+**Status.** Accepted (owner, 2026-10-02). The Hetzner spend starts at M3.
 
 **Design.** Testing and fault injection; Machines; Storage (store kinds).

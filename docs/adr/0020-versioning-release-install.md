@@ -17,7 +17,7 @@ ADR-017 and ADR-021).
   ships `v0.1.0`, M2 `v0.2.0`, and so on to `v1.0.0` at M6. A fix between milestones takes the patch number.
 - **The contract has its own version.** `plainport_json: 1` and `plainport.json`'s schema version change only
   on a breaking contract change (ADR-0007), never with the app version.
-- **CI** runs on push and pull request to `main`: typecheck, tests, compile smoke for every target, and a
+- **CI** runs on every push to `main`: typecheck, tests, compile smoke for every target, and a
   version consistency check (`VERSION` matches the tag on a release commit). This follows plainkeep's
   `.github/workflows/ci.yml`.
 - **Toolchain pin.** `.bun-version` pins Bun, as plainkeep does (1.3.14 at the time of writing).

@@ -8,7 +8,7 @@ nothing consults does nothing.
 
 | Guardrail | What it enforces | When |
 | --- | --- | --- |
-| **Pull requests per milestone** | Work lands on `m<n>-…` branches. A pull request into `main` carries CI and the review trail, and merges only with CI green. GitHub can't enforce branch protection on a private repository on the Free plan, so the orchestrate gate checks `gh pr checks` before merging | M1 |
+| **Local milestone branches** | All development happens locally on `m<n>-…` branches, managed by the orchestrator. No pull requests: the orchestrator merges into `main` at each phase boundary once the phase's tests pass locally, then pushes, and CI runs on `main`. The review trail lives in the orchestrate journal and the commit messages. A red CI on `main` stops the next phase until it's fixed (owner, 2026-10-02) | M1 |
 | **Biome** | Formatting and lint in one fast tool, in CI and before each commit | M1 task 1 |
 | **gitleaks** | No secret reaches git. Fixture `.env` files are generated at test time and never committed, which also keeps them clear of the agents' `.env` read ban | M1 task 1 |
 | **Home tripwire** | A `bun test` preload points `HOME`, `XDG_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GROK_HOME` at a temp directory, and the host port refuses any path under the real home during tests. "Tests never touch the real home" becomes a failing test | M1 task 1 |

@@ -1,6 +1,6 @@
 # plainport roadmap
 
-2 October 2026 · status as of M0
+2 October 2026 · M0 closed, M1 in progress
 
 This is the staged delivery plan for `docs/DESIGN.md`. Each milestone is split into phases, each phase into
 tasks that `/orchestrate` can run one by one. The milestone being built has a full plan file in `docs/plans/`; later
@@ -17,10 +17,10 @@ git switch -c m1-local-core
   then quality review. A task is done when its verification commands pass through `board exec`.
 - **Parallel only where marked.** Tasks tagged `parallel-safe` share no files and may run with
   `strategy=parallel` in worktrees.
-- **Phase boundary = a commit** on the milestone branch with the phase's tests green. The milestone branch has
-  a draft pull request into `main`, so CI runs on every push (ADR-0021).
-- **Gate = merge and release.** When the milestone gate passes and `gh pr checks` is green, merge the pull
-  request, cut the release (`v0.<n>.0`, ADR-0020), update `docs/HANDOFF.md` and the status table below.
+- **Phase boundary = a merge to `main`.** All development happens locally on the milestone branch, managed by
+  the orchestrator. When a phase's tests are green, the orchestrator merges the branch into `main` and pushes,
+  and CI runs on `main` (no pull requests; ADR-0019, ADR-0021).
+- **Gate = release.** When the milestone gate passes and CI on `main` is green, cut the release (`v0.<n>.0`, ADR-0020), update `docs/HANDOFF.md` and the status table below.
 - **Reality over plan.** A task that finds the design wrong stops with `DESIGN_CONFLICT`. Nobody patches around
   it; the owner decides, and `DESIGN.md` plus an ADR change in the same commit.
 
@@ -28,8 +28,8 @@ git switch -c m1-local-core
 
 | Milestone | Delivers | Gate | Test tiers | ADRs it needs | Status |
 | --- | --- | --- | --- | --- | --- |
-| **M0 · Prep** | Repo, ADRs, roadmap, M1 plan, test-environment research, agent permissions, Definition of Done | Docs reviewed; ADR-0018 accepted; M1 plan approved | none | 0001–0021 | In progress |
-| **M1 · Local core** → `v0.1.0` | Factory floor; core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls`; agent eval smoke | Crash matrix green; round trips byte-identical on real projects | T0, T1 | 0003–0008, 0010, 0017, 0020, 0021 | Planned: [plan](plans/M1-local-core.md) |
+| **M0 · Prep** | Repo, ADRs, roadmap, M1 plan, test-environment research, agent permissions, Definition of Done | Docs reviewed; ADR-0018 accepted; M1 plan approved | none | 0001–0021 | Done, 2026-10-02 |
+| **M1 · Local core** → `v0.1.0` | Factory floor; core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls`; agent eval smoke | Crash matrix green; round trips byte-identical on real projects | T0, T1 | 0003–0008, 0010, 0017, 0020, 0021 | In progress: [plan](plans/M1-local-core.md) |
 | **M2 · Remote stores** | SFTP and S3 stores; catalog events via rclone; Keychain secrets; leases, head check, conflicts, `resolve` | The two-Mac race ends in `conflicted`, never in lost work | T0–T3 | 0006, 0009, 0013 | Outline below |
 | **M3 · Machines** | Devices and pairing; per-device bindings; append-only peer stores; `move`; secrets envelope; warm return; offsite replication | A project moves MacBook → Mac mini → VPS → MacBook with git state intact | T0–T4 | 0010–0013, 0018 | Outline below |
 | **M4 · Agent-ready** | `serve --stdio`; published contract; `attach`; Claude Code and Codex adapters; kit; handoff notes; arrival plans | An agent runs offload and onload unattended from `--json` alone | T0–T3 | 0007, 0014, 0015 | Outline below |
@@ -52,11 +52,11 @@ Tools per tier are proposed in ADR-0018, from the vault research note and live c
 
 | # | Task | Output | Status |
 | --- | --- | --- | --- |
-| 0.1 | Initialise git, push to private `gabros20/plainport` | `main` on GitHub | Done |
+| 0.1 | Initialise git, push to `gabros20/plainport` (public, MIT) | `main` on GitHub | Done |
 | 0.2 | ADRs for every design decision plus this session's | `docs/adr/` | Done |
-| 0.3 | This roadmap and the M1 plan file | `docs/ROADMAP.md`, `docs/plans/M1-local-core.md` | Done, awaiting owner review |
+| 0.3 | This roadmap and the M1 plan file | `docs/ROADMAP.md`, `docs/plans/M1-local-core.md` | Done, approved |
 | 0.4 | Research test hosts, sandboxes and stores (Grok lane, X bookmarks plus web) | Vault note `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` | Done; OrbStack claims verified live on the laptop |
-| 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Filled; awaiting owner acceptance |
+| 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Done, accepted |
 | 0.6 | SSH alias `mini` on the laptop | `~/.ssh/config` entry | Done; untested, because the mini was offline in Tailscale on 2026-10-02 |
 | 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | M1 task 2 | Planned |
 | 0.8 | Versioning, release and install the plainkeep way; factory-floor guardrails | ADR-0020, ADR-0021 | Done |
@@ -138,6 +138,6 @@ TUI over the same plans and events (Ink, re-check OpenTUI); SwiftUI desktop app 
 
 ## Open items
 
-- **ADR-0018** is filled and awaits acceptance. Its open checks: `orb version` on the mini, and rclone's `If-None-Match` support on the pinned version (M2).
+- **ADR-0018** open checks: `orb version` on the mini, and rclone's `If-None-Match` support on the pinned version (M2).
 - **The Mac mini** was offline in Tailscale on 2026-10-02, so `ssh mini` is configured but untested.
 - **plainkeep `archive` gap** (from HANDOFF): fix in the plainkeep repository, not here.

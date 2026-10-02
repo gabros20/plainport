@@ -1,6 +1,6 @@
 # M1 · Local core: orchestrate plan
 
-Status: **draft, awaiting owner approval** (M0 gate). Run on branch `m1-local-core`:
+Status: **approved by the owner, 2026-10-02.** Run on branch `m1-local-core`:
 
 ```text
 /orchestrate docs/plans/M1-local-core.md strategy=staged review=dual
@@ -23,8 +23,9 @@ paths) on copies of the owner's real projects.
 **Dependency graph.** 1 → 2 → 3 → 4 → {5, 7} · 5 → 6 · 7 → 8 → 9 → 10 · 3 → 11 · {6, 8, 10, 11} → 12 → 13 → 14 →
 15 → 16 → 17. Tasks 5 and 7, and tasks 9 and 11, are `parallel-safe` with each other.
 
-**Branch and pull request.** Work on `m1-local-core`. Task 1 opens a draft pull request into `main`; CI runs on
-every push. The gate (Task 17) merges it only when `gh pr checks` is green (ADR-0021).
+**Branches.** All work happens locally on `m1-local-core`, managed by the orchestrator; no pull requests. At each
+phase boundary (after tasks 2, 4, 6, 8, 11, 13 and 17) the orchestrator merges into `main`, pushes, and checks CI
+on `main` with `gh run watch`. A red CI stops the next phase until it's fixed (ADR-0021).
 
 ---
 
@@ -56,10 +57,9 @@ Owns: root `package.json`, `bunfig.toml`, `tsconfig.json`, `packages/{core,contr
 - Home tripwire: a `bunfig.toml` test preload that points `HOME`, `XDG_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
   `GROK_HOME` at a per-run temp directory and fails any test that resolves a path under the real home.
 - Test tier scripts: `bun run test` (T0) and `bun run test:t1` (adds suites tagged as real-binary).
-- CI (`.github/workflows/ci.yml`, on push and pull request to `main`): a macOS job (`bun install
+- CI (`.github/workflows/ci.yml`, on push to `main` and manual dispatch): a macOS job (`bun install
   --frozen-lockfile`, `typecheck`, `lint`, `test`, `test:t1` once tools exist, `build`, `dist/plainport --version`)
   and an `ubuntu-24.04` job (`typecheck`, `test`, Linux `build` smoke); plus the version consistency check.
-- Open the draft pull request `m1-local-core` → `main`.
 - Fix `DESIGN.md` "Package layout" from "pnpm workspace" to "Bun workspace" (ADR-0004 records the decision).
 
 ### Tests first
@@ -568,5 +568,5 @@ Not applicable: this task runs the gate. The script itself is tested on a fixtur
 ### Stop condition
 All named projects round-trip byte-identically, the full suite is green, `scripts/install` installs and rolls
 back the build, and a performance baseline (offload and onload time and peak memory per project) is recorded in
-the report; then merge the pull request with CI green, cut release `v0.1.0` (ADR-0020),
+the report; then merge into `main`, confirm CI is green, cut release `v0.1.0` (ADR-0020),
 update `docs/HANDOFF.md` and `docs/ROADMAP.md`.

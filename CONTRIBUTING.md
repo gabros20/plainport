@@ -7,7 +7,8 @@ work gets done and when it counts as done.
 ## The loop
 
 1. Pick up the next task from the current milestone's plan in `docs/plans/` (see `docs/ROADMAP.md`).
-2. Work on the milestone branch (`m1-local-core`, …), never on `main`.
+2. Work on the local milestone branch (`m1-local-core`, …), never on `main`. The orchestrator merges into
+   `main` at each phase boundary.
 3. Write the failing test that states the task's acceptance. Run it and see it fail.
 4. Implement until it passes. Keep commits small and by path (`git add <files>`), message `m<n>(task N): …`.
 5. Run the task's verification commands, then the full T0 suite.
@@ -29,7 +30,7 @@ A task's review checks every line. A "no" sends it back.
 - [ ] Every bug fix has a test that fails without it.
 - [ ] Tests touch only temp directories and the sandboxed home; nothing reaches the real home, real stores or
       agent folders.
-- [ ] `bun run typecheck`, `bun run lint`, `bun test` and gitleaks pass; CI is green on the pull request.
+- [ ] `bun run typecheck`, `bun run lint`, `bun test` and gitleaks pass; CI is green on `main` after the orchestrator's merge.
 - [ ] If a command, output, exit code or finding changed: `bun run contract` was run and the regenerated files
       are committed, and `docs/machine-contract.md` agrees. A breaking contract change bumps the contract version.
 - [ ] If behaviour changed: `docs/DESIGN.md` is updated in the same change, and a changed decision has a new
@@ -45,7 +46,7 @@ A task's review checks every line. A "no" sends it back.
 
 Each milestone gate is a release, and the routine follows plainkeep's (ADR-0020):
 
-1. Merge the milestone pull request with CI green.
+1. Merge the milestone branch into `main` and confirm CI is green on `main`.
 2. Commit `release: X.Y.Z`: drop the `-dev` suffix from `VERSION`, and date the `[Unreleased]` section of
    `CHANGELOG.md` as `[X.Y.Z] — YYYY-MM-DD`.
 3. Tag `vX.Y.Z` and push the commit and the tag.

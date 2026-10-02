@@ -1,7 +1,7 @@
 # ADR-0011 — Mac mini hub, SSH over LAN or Tailscale, no resident daemon (2026-10-01)
 
-**Context.** The owner has a MacBook (Apple M3 Pro), an always-on Mac mini at home (Intel i3-8100B, reached as
-`macminis-mac-mini.tail06e59f.ts.net` on Tailscale, SSH alias `mini`), and may add a VPS worker. The mini must
+**Context.** The owner has a MacBook (Apple M3 Pro), an always-on Mac mini at home (Intel i3-8100B, reached by its Tailscale
+MagicDNS name, SSH alias `mini`), and may add a VPS worker. The mini must
 never open a port to the internet.
 
 **Decision.**

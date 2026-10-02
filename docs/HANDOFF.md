@@ -8,13 +8,13 @@ plainport was designed in a claude.ai conversation between 29 September and 2 Oc
 
 - **Design: complete.** `docs/DESIGN.md` is an export of the living design doc as of 2 October 2026 and is now the source of truth. The claude.ai doc stays as the archive: https://claude.ai/artifact/3qMK5CKtGksjZZwSVnb6iu
 - **Open questions: none.** All 16 were settled; the **Decisions** section of `DESIGN.md` lists the 26 decisions.
-- **Code: none yet.** The next step is milestone M1.
-- **M0 prep (2 October 2026, Claude Code session):** git repository created and pushed to the private
-  `gabros20/plainport`; ADRs in `docs/adr/` record every design decision plus three new ones (copy plainkeep's
+- **Code: none yet.** M0 closed on 2 October 2026; M1 runs through `/orchestrate` on the local branch `m1-local-core`.
+- **M0 prep (2 October 2026, Claude Code session):** git repository created and pushed to
+  `gabros20/plainport` (public, MIT since 2026-10-02); ADRs in `docs/adr/` record every design decision plus three new ones (copy plainkeep's
   contract, test-first with the crash matrix, delivery through `/orchestrate`); `docs/ROADMAP.md` stages
   M0–M6; `docs/plans/M1-local-core.md` is the 16-task M1 plan for `/orchestrate`, awaiting approval.
   ADR-0018 (test environments) is filled from the vault note
-  `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` and live OrbStack checks, and awaits the owner.
+  `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` and live OrbStack checks, and is accepted.
   ADR-0020 (versioning, release and install, copied from plainkeep: no signing, no Homebrew, no Renovate) and
   ADR-0021 (factory-floor guardrails) are accepted. `.claude/settings.json` and `CONTRIBUTING.md` (Definition of
   Done, release routine) are in place. SSH alias `mini` is set up on the laptop but untested, because the mini

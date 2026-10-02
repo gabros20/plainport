@@ -11,7 +11,7 @@
       "Bash(git commit:*)",
       "Bash(git switch:*)",
       "Bash(git worktree:*)",
-      "Bash(gh pr:*)",
+      "Bash(gh run:*)",
       "Bash(board:*)",
       "Bash(orb:*)",
       "Bash(docker:*)",
