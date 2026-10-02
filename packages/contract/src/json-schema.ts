@@ -3,11 +3,11 @@
 import { z } from "zod";
 import { EnvelopeSchema } from "./envelope.ts";
 import {
+  EventLineSchema,
   OperationResultSchema,
   PhaseSchema,
-  PlainportEventSchema,
   ProjectStateSchema,
-  StreamEventSchema,
+  StreamLineSchema,
 } from "./events.ts";
 import { ExitCodeSchema } from "./exit-codes.ts";
 import { FindingSchema } from "./finding.ts";
@@ -15,14 +15,14 @@ import { RiskClassSchema } from "./risk.ts";
 
 const CONTRACT_SCHEMAS = {
   envelope: EnvelopeSchema,
-  event: PlainportEventSchema,
+  event: EventLineSchema,
   "exit-code": ExitCodeSchema,
   finding: FindingSchema,
   "operation-result": OperationResultSchema,
   phase: PhaseSchema,
   "project-state": ProjectStateSchema,
   "risk-class": RiskClassSchema,
-  "stream-event": StreamEventSchema,
+  "stream-event": StreamLineSchema,
 } as const;
 
 export type ContractSchemaName = keyof typeof CONTRACT_SCHEMAS;

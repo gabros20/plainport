@@ -108,3 +108,22 @@ export const StreamEventSchema = z
   .discriminatedUnion("type", [PhaseEventSchema, ProgressEventSchema, FindingEventSchema])
   .meta({ title: "StreamEvent" });
 export type StreamEvent = z.infer<typeof StreamEventSchema>;
+
+const KNOWN_EVENT_TYPES = ["phase", "progress", "finding", "log", "result"] as const;
+
+/** An event line whose type this version does not know (run decision D17): a reader passes it through or skips it.
+ * New event types are additive; new phases or project states are not (machine-contract §7). */
+export const UnknownEventSchema = outputObject({
+  type: z.string().regex(new RegExp(`^(?!(?:${KNOWN_EVENT_TYPES.join("|")})$).+$`)),
+}).meta({ title: "UnknownEvent" });
+export type UnknownEvent = z.infer<typeof UnknownEventSchema>;
+
+/** What a reader accepts as a stdout line before the envelope: a known stream event or an unknown type. */
+export const StreamLineSchema = z
+  .union([StreamEventSchema, UnknownEventSchema])
+  .meta({ title: "StreamLine" });
+
+/** What a reader accepts as an event over JSON-RPC: a known event or an unknown type. */
+export const EventLineSchema = z
+  .union([PlainportEventSchema, UnknownEventSchema])
+  .meta({ title: "EventLine" });

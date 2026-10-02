@@ -5,6 +5,8 @@ import {
   PlainportEventSchema,
   PROJECT_STATES,
   StreamEventSchema,
+  StreamLineSchema,
+  UnknownEventSchema,
 } from "./index.ts";
 
 const f = { code: "git.unpushed", severity: "warn", message: "2 commits", allowable: true };
@@ -101,5 +103,20 @@ describe("events", () => {
         error: { code: "hydrate.failed", message: "pnpm install failed" },
       }).success,
     ).toBe(true);
+  });
+
+  test("D17: readers accept an unknown event type; known types, phases and states stay closed", () => {
+    const future = { type: "future", op: "x", anything: [1] };
+    expect(UnknownEventSchema.safeParse(future).success).toBe(true);
+    expect(StreamLineSchema.safeParse(future).success).toBe(true);
+    for (const type of ["phase", "progress", "finding", "log", "result", ""]) {
+      expect(UnknownEventSchema.safeParse({ type, op: "x" }).success).toBe(false);
+    }
+    expect(
+      StreamLineSchema.safeParse({ type: "phase", op: "x", phase: "upload", status: "start" }).success,
+    ).toBe(false);
+    expect(StreamLineSchema.safeParse({ type: "log", op: "x", level: "info", message: "m" }).success).toBe(
+      false,
+    );
   });
 });

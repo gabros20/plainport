@@ -50,6 +50,11 @@ describe("JSON Schema export", () => {
     expect(inputObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(false);
   });
 
+  test("D17: the published event schemas accept an unknown event type", () => {
+    expect(JSON.stringify(schemas["stream-event"])).toContain('"title":"UnknownEvent"');
+    expect(JSON.stringify(schemas.event)).toContain('"title":"UnknownEvent"');
+  });
+
   test("key facts survive the export", () => {
     const text = JSON.stringify(schemas.envelope);
     expect(text).toContain("plainport_json");

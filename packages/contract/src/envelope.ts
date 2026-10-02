@@ -2,11 +2,11 @@
 // envelope, gabros20/plainkeep@d7eb27e docs/machine-contract.md §1, with plainport_json in place of ops_json.
 
 import { z } from "zod";
-import { type StreamEvent, StreamEventSchema } from "./events.ts";
+import { type StreamEvent, StreamEventSchema, type UnknownEvent, UnknownEventSchema } from "./events.ts";
 import { EXIT, type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
 import { finding } from "./finding.ts";
 import { outputObject } from "./objects.ts";
-import { fail, ok, type Result } from "./result.ts";
+import { decode, fail, ok, type Result } from "./result.ts";
 
 export const PLAINPORT_JSON = 1;
 
@@ -56,7 +56,14 @@ export const envelopeSchema = <D extends z.ZodType>(data: D) =>
 export const EnvelopeSchema = envelopeSchema(z.json()).meta({ title: "Envelope" });
 export type Envelope<D = z.infer<ReturnType<typeof z.json>>> =
   | { plainport_json: 1; ok: true; verb: string; data: D }
-  | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema>; data?: D };
+  | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema>; data?: undefined }
+  | {
+      plainport_json: 1;
+      ok: false;
+      verb: string;
+      error: z.infer<typeof ErrorObjectSchema> & { code: PartialExitCode };
+      data: D;
+    };
 
 export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   plainport_json: PLAINPORT_JSON,
@@ -65,19 +72,30 @@ export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   data,
 });
 
-/** A failure envelope. `data` is accepted only with exit 8 or 10, a partial success (D14). */
+const isPartial = (code: FailureExitCode): code is PartialExitCode =>
+  (PARTIAL_EXIT_CODES as readonly number[]).includes(code);
+
+/**
+ * A failure envelope. `data` is accepted only with exit 8 or 10, a partial success (D14): the types refuse it for
+ * any other code, and a caller that gets past them with a non-literal code is a bug, so it throws.
+ */
 export const errorEnvelope = <C extends FailureExitCode, D = never>(
   verbName: string,
   code: C,
   message: string,
-  extra: { hint?: string; data?: C extends PartialExitCode ? D : never } = {},
-): Envelope<D> => ({
-  plainport_json: PLAINPORT_JSON,
-  ok: false,
-  verb: verbName,
-  error: extra.hint === undefined ? { code, message } : { code, message, hint: extra.hint },
-  ...(extra.data === undefined ? {} : { data: extra.data }),
-});
+  extra: { hint?: string; data?: [C] extends [PartialExitCode] ? D : never } = {},
+): Envelope<D> => {
+  const error = extra.hint === undefined ? { code, message } : { code, message, hint: extra.hint };
+  if (extra.data === undefined) return { plainport_json: PLAINPORT_JSON, ok: false, verb: verbName, error };
+  if (!isPartial(code)) throw new TypeError(`exit ${code} cannot carry data; only 8 and 10 can (D14)`);
+  return {
+    plainport_json: PLAINPORT_JSON,
+    ok: false,
+    verb: verbName,
+    error: { ...error, code },
+    data: extra.data,
+  };
+};
 
 /** The process exit code an envelope stands for: 0 on success, error.code otherwise. */
 export const exitCodeOf = (envelope: Envelope<unknown>): ExitCode => (envelope.ok ? 0 : envelope.error.code);
@@ -86,34 +104,45 @@ const invalid = (message: string) => fail(finding("contract.invalid", { message 
 
 /**
  * Parses a --json stdout stream: zero or more event lines, then exactly one final envelope, each line one JSON
- * object, newline-terminated or not. Never throws; any break of the rule is a contract.invalid failure.
+ * object, newline-terminated or not. An event line of a type this version does not know is collected in
+ * unknownEvents, not a failure (D17). Never throws, even if `data` does; any break of the rule is contract.invalid.
  */
 export const parseJsonLines = <D extends z.ZodType = ReturnType<typeof z.json>>(
   text: string,
   data?: D,
-): Result<{ events: StreamEvent[]; envelope: Envelope<z.output<D>> }> => {
+): Result<{
+  events: StreamEvent[];
+  unknownEvents: { line: number; event: UnknownEvent }[];
+  envelope: Envelope<z.output<D>>;
+}> => {
+  if (text === "" || text === "\n") return invalid("the stream is empty");
   const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
-  const schema = envelopeSchema(data ?? z.json());
-  const events: StreamEvent[] = [];
+  const values: unknown[] = [];
   for (const [index, line] of lines.entries()) {
-    const at = `line ${index + 1}`;
-    let value: unknown;
     try {
-      value = JSON.parse(line);
+      values.push(JSON.parse(line));
     } catch {
-      return invalid(`${at} is not JSON`);
+      return invalid(`line ${index + 1} is not JSON`);
     }
-    const last = index === lines.length - 1;
-    if (!last) {
-      const event = StreamEventSchema.safeParse(value);
-      if (!event.success) return invalid(`${at} is not an event line: ${z.prettifyError(event.error)}`);
-      events.push(event.data);
+  }
+  const last = values.length - 1;
+  const events: StreamEvent[] = [];
+  const unknownEvents: { line: number; event: UnknownEvent }[] = [];
+  for (const [index, value] of values.slice(0, last).entries()) {
+    const unknownEvent = UnknownEventSchema.safeParse(value);
+    if (unknownEvent.success) {
+      unknownEvents.push({ line: index + 1, event: unknownEvent.data });
       continue;
     }
-    const envelope = schema.safeParse(value);
-    if (!envelope.success)
-      return invalid(`${at} is not the final envelope: ${z.prettifyError(envelope.error)}`);
-    return ok({ events, envelope: envelope.data as Envelope<z.output<D>> });
+    const event = decode(StreamEventSchema, value, `line ${index + 1} (an event line)`);
+    if (!event.ok) return event;
+    events.push(event.value);
   }
-  return invalid("the stream is empty");
+  const envelope = decode(
+    envelopeSchema(data ?? z.json()),
+    values[last],
+    `line ${last + 1} (the final envelope)`,
+  );
+  if (!envelope.ok) return envelope;
+  return ok({ events, unknownEvents, envelope: envelope.value as Envelope<z.output<D>> });
 };

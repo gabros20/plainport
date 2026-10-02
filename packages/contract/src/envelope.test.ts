@@ -5,6 +5,8 @@ import {
   envelopeSchema,
   errorEnvelope,
   exitCodeOf,
+  type FailureExitCode,
+  type PartialExitCode,
   PLAINPORT_JSON,
   parseJsonLines,
   successEnvelope,
@@ -72,7 +74,18 @@ describe("envelope", () => {
       expect(EnvelopeSchema.safeParse(env).success).toBe(true);
     }
     // @ts-expect-error data is only for exit 8 and 10
-    errorEnvelope("ls", 4, "no project", { data: { project: "x" } });
+    expect(() => errorEnvelope("ls", 4, "no project", { data: { project: "x" } })).toThrow(TypeError);
+  });
+
+  test("D14 holds at runtime when the code is not a literal", () => {
+    const codeFrom = (n: number): FailureExitCode => n as FailureExitCode;
+    const code = codeFrom(4);
+    // @ts-expect-error a FailureExitCode variable may not carry data
+    expect(() => errorEnvelope("ls", code, "no project", { data: { project: "x" } })).toThrow(TypeError);
+    const partial: PartialExitCode = 10;
+    expect(
+      EnvelopeSchema.parse(errorEnvelope("onload", partial, "not hydrated", { data: { project: "x" } })),
+    ).toBeTruthy();
   });
 
   test("D16: an envelope from a newer plainport, with a field this version does not know, still validates", () => {
@@ -128,7 +141,10 @@ describe("NDJSON stream", () => {
 
   test("event lines then exactly one final envelope parse", () => {
     const parsed = parseJsonLines(text);
-    expect(parsed as unknown).toEqual({ ok: true, value: { events: lines.slice(0, 3), envelope: finalOk } });
+    expect(parsed as unknown).toEqual({
+      ok: true,
+      value: { events: lines.slice(0, 3), unknownEvents: [], envelope: finalOk },
+    });
   });
 
   test("a single envelope line is a whole stream", () => {
@@ -156,6 +172,39 @@ describe("NDJSON stream", () => {
         expect(parsed.exitCode).toBe(1);
       }
     }
+  });
+
+  test("D17: an event line of a type this version does not know is passed through, not a failure", () => {
+    const future = { type: "future", op: "01J9Z6K2", detail: 1 };
+    const parsed = parseJsonLines(
+      [lines[0], future, lines[1], finalOk].map((l) => JSON.stringify(l)).join("\n"),
+    );
+    expect(parsed as unknown).toEqual({
+      ok: true,
+      value: { events: [lines[0], lines[1]], unknownEvents: [{ line: 2, event: future }], envelope: finalOk },
+    });
+    // a known type that is malformed still fails, and so do log and result lines on stdout
+    const badPhase = JSON.stringify({ type: "phase", op: "x", phase: "upload", status: "start" });
+    expect(parseJsonLines(`${badPhase}\n${JSON.stringify(finalOk)}`).ok).toBe(false);
+    const noType = JSON.stringify({ op: "x" });
+    expect(parseJsonLines(`${noType}\n${JSON.stringify(finalOk)}`).ok).toBe(false);
+  });
+
+  test("parseJsonLines never throws, even when the caller's data schema throws", () => {
+    const throwing = z.json().refine(() => {
+      throw new Error("boom");
+    });
+    let parsed: ReturnType<typeof parseJsonLines> | undefined;
+    expect(() => {
+      parsed = parseJsonLines(`${JSON.stringify(finalOk)}\n`, throwing);
+    }).not.toThrow();
+    expect(parsed?.ok).toBe(false);
+  });
+
+  test("an empty stream says so", () => {
+    const parsed = parseJsonLines("");
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.finding.message).toContain("empty");
   });
 
   test("data is checked against the verb's schema when one is given", () => {
