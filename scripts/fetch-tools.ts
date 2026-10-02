@@ -2,12 +2,14 @@
 // .tools/<os>-<arch>/, where packages/core's toolPath finds them for development and tests. Flags: --target
 // <os>-<arch> or --target all (default: this machine), --dest <dir> (default: .tools in the checkout).
 //
-// A run installs every tool for every requested target, or nothing: each archive is hashed in memory and checked
-// against the lock before anything is written, so a mismatch anywhere leaves no file behind. Archives are unpacked
+// Every archive for every requested target is hashed in memory and checked against the lock before anything is
+// written, so a checksum mismatch or failed download anywhere leaves no file behind. Archives are then unpacked
 // with the system's bunzip2 (restic ships .bz2) and unzip (rclone ships .zip) into one temp folder beside the
-// destination, then renamed into place. A `.<name>.pin` file records what was installed, so a second run skips
-// tools that are still intact and executable. Scripts may spawn directly and validate their own dev-only
-// files by hand (run decisions D8 and D10).
+// destination; if any fails to unpack, nothing is installed. Finally the binaries are renamed into place one by
+// one, each followed by its `.<name>.pin` file. That last pass has no rollback: if it fails partway, the binaries
+// already moved stay, and the next run re-fetches any tool whose pin is missing or stale. A second run skips tools
+// that are still intact and executable. Scripts may spawn directly and validate their own dev-only files by hand
+// (run decisions D8 and D10).
 
 import { createHash } from "node:crypto";
 import {
@@ -142,10 +144,10 @@ const unpack = (
 type Pending = FetchedTool & { tool: LockTool; entry: LockTarget; bytes: Uint8Array; pinPath: string };
 
 /**
- * Installs the pinned tools for every target, or none of them. First it downloads every archive that isn't
- * already installed and checks it against the lock in memory, so a mismatch anywhere returns before anything is
- * written. Then it unpacks them all into one temp folder, and only when every one unpacked does it move them
- * into place.
+ * Installs the pinned tools for the given targets in three passes. 1: download every archive that isn't already
+ * installed and check it against the lock in memory; a mismatch or download failure returns before anything is
+ * written. 2: unpack them all into one temp folder; an unpack failure returns with nothing installed. 3: rename
+ * each binary into place and write its pin; this pass is not rolled back if it throws partway.
  */
 export const fetchTools = async (options: {
   lock: Lock;
