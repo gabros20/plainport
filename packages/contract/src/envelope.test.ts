@@ -62,6 +62,33 @@ describe("envelope", () => {
     expect(EnvelopeSchema.safeParse({ ...env, data: undefined }).success).toBe(true);
   });
 
+  test("D14: only exit 8 and exit 10 may carry data", () => {
+    for (const code of [1, 2, 3, 4, 5, 6, 7, 9, 11, 130]) {
+      const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
+      expect(EnvelopeSchema.safeParse(env).success).toBe(false);
+    }
+    for (const code of [8, 10]) {
+      const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
+      expect(EnvelopeSchema.safeParse(env).success).toBe(true);
+    }
+    // @ts-expect-error data is only for exit 8 and 10
+    errorEnvelope("ls", 4, "no project", { data: { project: "x" } });
+  });
+
+  test("D16: an envelope from a newer plainport, with a field this version does not know, still validates", () => {
+    expect(EnvelopeSchema.safeParse({ ...finalOk, warnings: 2 }).success).toBe(true);
+    expect(
+      EnvelopeSchema.safeParse({
+        plainport_json: 1,
+        ok: false,
+        verb: "ls",
+        error: { code: 4, message: "m", docs: "u" },
+      }).success,
+    ).toBe(true);
+    // but the reserved keys still decide the branch: a success never carries error
+    expect(EnvelopeSchema.safeParse({ ...finalOk, error: { code: 1, message: "m" } }).success).toBe(false);
+  });
+
   test("error.code must be a failure exit code from the table", () => {
     const base = { plainport_json: 1, ok: false, verb: "ls", error: { code: 4, message: "m" } };
     expect(EnvelopeSchema.safeParse(base).success).toBe(true);
@@ -79,7 +106,8 @@ describe("envelope", () => {
       { ...finalOk, ok: false },
       { ...finalOk, error: { code: 1, message: "m" } },
       { plainport_json: 1, ok: false, verb: "ls" },
-      { ...finalOk, count: 3 },
+      { plainport_json: 1, ok: false, verb: "ls", error: { code: 1, message: "m" }, data: {} },
+      { plainport_json: 1, ok: false, verb: "ls", error: { code: 4, message: "m" }, data: { project: "x" } },
     ];
     for (const e of bad) expect(EnvelopeSchema.safeParse(e).success).toBe(false);
   });

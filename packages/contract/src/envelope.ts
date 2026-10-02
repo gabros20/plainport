@@ -3,31 +3,53 @@
 
 import { z } from "zod";
 import { type StreamEvent, StreamEventSchema } from "./events.ts";
-import { type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
+import { EXIT, type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
 import { finding } from "./finding.ts";
+import { outputObject } from "./objects.ts";
 import { fail, ok, type Result } from "./result.ts";
 
 export const PLAINPORT_JSON = 1;
 
 const verb = z.string().min(1).meta({ description: "The command as registered, e.g. offload or root add" });
 
-export const ErrorObjectSchema = z.strictObject({
-  code: FailureExitCodeSchema.meta({ description: "Equal to the process exit code" }),
-  message: z.string().min(1),
-  hint: z.string().min(1).optional(),
-});
+/** Failures after which part of the work stands (D14): 8, the kept snapshot of a conflict; 10, a restore not hydrated. */
+export const PARTIAL_EXIT_CODES = [EXIT.conflict, EXIT.unhydrated] as const;
+export type PartialExitCode = (typeof PARTIAL_EXIT_CODES)[number];
 
-/** The final envelope for a command whose data matches `data` (any JSON value by default). A failure may carry
- * data too, only when the operation partly succeeded (run decision D14), e.g. exit 10 with the restored snapshot. */
+const errorObject = <C extends z.ZodType>(code: C) =>
+  outputObject({
+    code: code.meta({ description: "Equal to the process exit code" }),
+    message: z.string().min(1),
+    hint: z.string().min(1).optional(),
+  });
+
+export const ErrorObjectSchema = errorObject(FailureExitCodeSchema);
+const absent = z.never().optional();
+
+/** The final envelope for a command whose data matches `data` (any JSON value by default). A failure carries data
+ * only when part of the work stands (D14): exit 8 or 10. */
 export const envelopeSchema = <D extends z.ZodType>(data: D) =>
   z.union([
-    z.strictObject({ plainport_json: z.literal(PLAINPORT_JSON), ok: z.literal(true), verb, data }),
-    z.strictObject({
+    outputObject({
+      plainport_json: z.literal(PLAINPORT_JSON),
+      ok: z.literal(true),
+      verb,
+      data,
+      error: absent,
+    }),
+    outputObject({
       plainport_json: z.literal(PLAINPORT_JSON),
       ok: z.literal(false),
       verb,
       error: ErrorObjectSchema,
-      data: data.optional(),
+      data: absent,
+    }),
+    outputObject({
+      plainport_json: z.literal(PLAINPORT_JSON),
+      ok: z.literal(false),
+      verb,
+      error: errorObject(z.literal(PARTIAL_EXIT_CODES)),
+      data,
     }),
   ]);
 
@@ -43,12 +65,12 @@ export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   data,
 });
 
-/** A failure envelope. Pass `data` only for a partial success (D14). */
-export const errorEnvelope = <D = never>(
+/** A failure envelope. `data` is accepted only with exit 8 or 10, a partial success (D14). */
+export const errorEnvelope = <C extends FailureExitCode, D = never>(
   verbName: string,
-  code: FailureExitCode,
+  code: C,
   message: string,
-  extra: { hint?: string; data?: D } = {},
+  extra: { hint?: string; data?: C extends PartialExitCode ? D : never } = {},
 ): Envelope<D> => ({
   plainport_json: PLAINPORT_JSON,
   ok: false,

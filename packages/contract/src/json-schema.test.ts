@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { contractJsonSchemas } from "./index.ts";
+import { z } from "zod";
+import { contractJsonSchemas, inputObject, outputObject } from "./index.ts";
 
 describe("JSON Schema export", () => {
   const schemas = contractJsonSchemas();
@@ -28,6 +29,25 @@ describe("JSON Schema export", () => {
 
   test("the export is deterministic and JSON-serialisable", () => {
     expect(JSON.stringify(contractJsonSchemas())).toBe(JSON.stringify(schemas));
+  });
+
+  test("D16: output schemas never close additionalProperties; input objects stay strict", () => {
+    const closed = (node: unknown): boolean => {
+      if (Array.isArray(node)) return node.some(closed);
+      if (node === null || typeof node !== "object") return false;
+      const record = node as Record<string, unknown>;
+      if (record.additionalProperties === false) return true;
+      return Object.values(record).some(closed);
+    };
+    for (const [name, schema] of Object.entries(schemas)) {
+      expect({ name, closed: closed(schema) }).toEqual({ name, closed: false });
+    }
+    const output = z.toJSONSchema(outputObject({ a: z.string() }));
+    const input = z.toJSONSchema(inputObject({ a: z.string() }));
+    expect(closed(output)).toBe(false);
+    expect(input.additionalProperties).toBe(false);
+    expect(outputObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(true);
+    expect(inputObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(false);
   });
 
   test("key facts survive the export", () => {

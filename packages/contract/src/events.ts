@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { FailureExitCodeSchema } from "./exit-codes.ts";
 import { FindingSchema } from "./finding.ts";
+import { outputObject } from "./objects.ts";
 
 export const PHASES = [
   "resolve",
@@ -49,24 +50,24 @@ const resultFields = {
 /** ok is true exactly when exitCode is 0. */
 export const OperationResultSchema = z
   .union([
-    z.strictObject({ ok: z.literal(true), exitCode: z.literal(0), ...resultFields }),
-    z.strictObject({
+    outputObject({ ok: z.literal(true), exitCode: z.literal(0), ...resultFields }),
+    outputObject({
       ok: z.literal(false),
       exitCode: FailureExitCodeSchema,
       ...resultFields,
-      error: z.strictObject({ code: z.string().min(1), message: z.string().min(1) }).optional(),
+      error: outputObject({ code: z.string().min(1), message: z.string().min(1) }).optional(),
     }),
   ])
   .meta({ title: "OperationResult" });
 export type OperationResult = z.infer<typeof OperationResultSchema>;
 
-export const PhaseEventSchema = z.strictObject({
+export const PhaseEventSchema = outputObject({
   type: z.literal("phase"),
   op: opId,
   phase: PhaseSchema,
   status: z.enum(["start", "end", "skip"]),
 });
-export const ProgressEventSchema = z.strictObject({
+export const ProgressEventSchema = outputObject({
   type: z.literal("progress"),
   op: opId,
   phase: PhaseSchema,
@@ -74,18 +75,18 @@ export const ProgressEventSchema = z.strictObject({
   bytesTotal: byteCount,
   etaSeconds: z.number().nonnegative().optional(),
 });
-export const FindingEventSchema = z.strictObject({
+export const FindingEventSchema = outputObject({
   type: z.literal("finding"),
   op: opId,
   finding: FindingSchema,
 });
-export const LogEventSchema = z.strictObject({
+export const LogEventSchema = outputObject({
   type: z.literal("log"),
   op: opId,
   level: z.enum(["debug", "info", "warn"]),
   message: z.string(),
 });
-export const ResultEventSchema = z.strictObject({
+export const ResultEventSchema = outputObject({
   type: z.literal("result"),
   op: opId,
   result: OperationResultSchema,
