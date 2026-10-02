@@ -20,7 +20,7 @@ Under `--json`, the **last line on stdout** is exactly one envelope object.
 **Success:**
 
 ```json
-{"plainport_json": 1, "ok": true, "verb": "offload", "data": {"op": "01J9Z6K2", "freedBytes": 2746000000}}
+{"plainport_json": 1, "ok": true, "verb": "offload", "data": {"op": "01J9Z6K2", "exitCode": 0, "freedBytes": 2746000000}}
 ```
 
 **Failure:**
@@ -38,7 +38,7 @@ Under `--json`, the **last line on stdout** is exactly one envelope object.
 The rules:
 
 - The keys are exactly `plainport_json`, `ok`, `verb`, and `data` (when `ok` is true) or `error` (when `ok` is
-  false). Nothing else appears at the top level.
+  false). This version prints no other top-level key; a later one may add keys (§7).
 - A failure carries `data` next to `error` only when the operation partly succeeded: exit 10 carries the restored
   project and snapshot, exit 8 the kept snapshot. Otherwise a failure has no `data`. When present, `data` has the
   command's declared output shape.
@@ -60,7 +60,7 @@ more event lines, then the envelope. Each line is one JSON object; nothing else 
 {"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
 {"type":"progress","op":"01J9Z6K2","phase":"snapshot","bytesDone":512000000,"bytesTotal":1934000000,"etaSeconds":41}
 {"type":"finding","op":"01J9Z6K2","finding":{"code":"git.unpushed","severity":"warn","message":"2 commits on feature/pricing are not on origin","allowable":true}}
-{"plainport_json":1,"ok":true,"verb":"offload","data":{"op":"01J9Z6K2","project":"work:clients/acme/web","snapshot":"01J9Z6K2","freedBytes":2746000000}}
+{"plainport_json":1,"ok":true,"verb":"offload","data":{"op":"01J9Z6K2","exitCode":0,"project":"work:clients/acme/web","snapshot":"01J9Z6K2","freedBytes":2746000000}}
 ```
 
 | `type` | Fields | Meaning |
@@ -114,10 +114,15 @@ Every command declares one risk class in the registry, and `plainport.json` publ
 | `safe_write` | Changes files only inside your roots, in ways plainport can undo or regenerate | Runs freely |
 | `confirm` | Sends data off the machine or deletes it | Needs `--yes`, or an approved `--plan <id>` |
 
-- A `confirm` command without `--yes` (or `--plan <id>`) does nothing and exits 3. Its message ends with the exact
-  command to re-run, `--yes` added: `re-run: plainport offload web --yes`. Under `--json` that line is
-  `error.hint`.
+- A `confirm` command without `--yes` (or `--plan <id>`) does nothing and exits 3 with the finding `risk.needs-yes`.
+  Its message ends with the exact command to re-run, `--yes` added: `re-run: plainport offload web --yes`. Under
+  `--json` that line is `error.hint`. The re-run repeats the arguments exactly as given, each quoted for a POSIX
+  shell when it needs to be (`'my project'`), with `--yes` placed before any `--`.
 - A command that declares no risk class is treated as `confirm`.
+- `--dry-run` runs as `read` (§6), but only for a command that declares dry-run support; for any other command
+  the flag does not lower the class.
+- The gate is a pure function, `gate()` in `packages/contract` (run decision D15); the CLI parses the flags,
+  prints the refusal and exits.
 - An option can carry a higher class than its command: `onload` is `safe_write`, but `onload --adopt` is
   `confirm` and is gated as such.
 
@@ -145,6 +150,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
+| `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
@@ -164,8 +170,12 @@ runs freely. Under `--json`, its envelope's `data` is the plan.
 - Exit codes never change meaning, and a finding code, once released, keeps its meaning. A retired code is never
   reused.
 - Additive changes, such as a new optional field, a new event type, a new finding code or a new command, keep
-  `plainport_json` at its value. The published JSON Schemas describe the current version exactly, so a strict
-  validator built from an older schema may reject a newer field: consumers should ignore keys they don't know.
+  `plainport_json` at its value. Consumers should ignore keys they don't know and skip event lines whose `type`
+  they don't know.
+- So that a new field is not breaking, the published schemas for everything plainport prints (the envelope, event
+  lines, findings, each command's `data`) leave `additionalProperties` open. What plainport reads (arguments,
+  config, files it owns) stays strict, so a mistyped key is an error rather than silently ignored (run decision
+  D16).
 - Consumers should key on `plainport_json` and the schemas, not on the plainport version string.
 - Tests hold this: the exit-code table and the finding catalogue are frozen literals in
   `packages/contract`, and every command's `--json` output is validated against its declared schema in CI.
