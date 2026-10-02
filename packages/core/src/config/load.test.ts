@@ -238,6 +238,20 @@ describe("config: precedence", () => {
     write(paths.configFile, 'defaultStore = "default-location"\n');
     expect(loaded(new ConfigLoader(pathsFor({}, other))).config.defaultStore).toBe("dotfiles");
   });
+
+  test("with --config, managed.toml is read and written beside that file (D20)", async () => {
+    const other = join(sandbox, "dotfiles", "plainport.toml");
+    write(other, 'defaultStore = "dotfiles"\n');
+    write(paths.managedFile, '[roots.default-location]\nlabel = "not this one"\n');
+    const moved = pathsFor({}, other);
+    const result = await updateManaged(moved, (managed) => ({
+      ...managed,
+      roots: { work: { label: "Work" } },
+    }));
+    if (!result.ok) throw new Error(result.finding.message);
+    expect(readFileSync(join(sandbox, "dotfiles", "managed.toml"), "utf8")).toContain("[roots.work]");
+    expect(loaded(new ConfigLoader(moved)).config.roots).toEqual({ work: { label: "Work" } });
+  });
 });
 
 describe("config: last good configuration", () => {

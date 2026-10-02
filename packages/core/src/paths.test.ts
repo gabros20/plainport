@@ -38,12 +38,14 @@ describe("config: paths", () => {
     expect(result.value.cacheDir).toBe(`${HOME}/.cache/plainport`);
   });
 
-  test("PLAINPORT_CONFIG and --config replace config.toml only; managed.toml stays in the config folder", () => {
+  test("PLAINPORT_CONFIG and --config move config.toml, and managed.toml lives beside it (D20)", () => {
     const env = resolvePaths({ HOME, PLAINPORT_CONFIG: "~/dotfiles/plainport.toml" });
     if (!env.ok) throw new Error(env.finding.message);
     expect(env.value.configFile).toBe(`${HOME}/dotfiles/plainport.toml`);
     expect(env.value.configFileSource).toBe("env");
-    expect(env.value.managedFile).toBe(`${HOME}/.config/plainport/managed.toml`);
+    expect(env.value.managedFile).toBe(`${HOME}/dotfiles/managed.toml`);
+    expect(env.value.managedLock).toBe(`${HOME}/dotfiles/managed.toml.lock`);
+    expect(env.value.deviceFile).toBe(`${HOME}/.local/state/plainport/device.json`);
 
     const flag = resolvePaths(
       { HOME, PLAINPORT_CONFIG: "/ignored.toml" },
@@ -52,6 +54,7 @@ describe("config: paths", () => {
     if (!flag.ok) throw new Error(flag.finding.message);
     expect(flag.value.configFile).toBe("/work/conf/p.toml");
     expect(flag.value.configFileSource).toBe("flag");
+    expect(flag.value.managedFile).toBe("/work/conf/managed.toml");
   });
 
   test("a missing or relative HOME is a finding, never a guess", () => {

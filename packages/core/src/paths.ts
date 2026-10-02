@@ -5,7 +5,7 @@
 // Everything is resolved from the environment passed in, never from os.homedir(): Bun fixes that at start-up,
 // and tests run with a sandboxed HOME.
 
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 
 export type Env = Record<string, string | undefined>;
@@ -17,7 +17,7 @@ export interface PlainportPaths {
   configFile: string;
   /** Where configFile came from: the XDG default, $PLAINPORT_CONFIG or --config. */
   configFileSource: "default" | "env" | "flag";
-  /** Always in configDir, whatever --config says: it is this machine's, written by plainport. */
+  /** Beside configFile, wherever --config or $PLAINPORT_CONFIG puts it (DESIGN.md "Configuration", run decision D20). */
   managedFile: string;
   managedLock: string;
   stateDir: string;
@@ -73,7 +73,7 @@ export const resolvePaths = (env: Env, options: PathOptions = {}): Result<Plainp
     configFileSource = "env";
   }
 
-  const managedFile = join(configDir, "managed.toml");
+  const managedFile = join(dirname(configFile), "managed.toml");
   return ok({
     home,
     configDir,
