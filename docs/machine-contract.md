@@ -169,7 +169,15 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
+| `config.invalid` | block | no | 6 | A config file does not parse or does not match its schema, and there is no last good copy to keep; `paths` names the file and the message the line or key |
+| `config.kept-last-good` | warn | no | 6 | A config file broke since it was last loaded in this process; its last good contents stay in effect |
+| `config.locked` | block | no | 11 | Another process holds `managed.toml.lock`; the message names its PID, host and start time |
+| `config.no-home` | block | no | 6 | `HOME` is unset or not an absolute path |
+| `config.not-found` | block | no | 4 | The file named by `--config` or `PLAINPORT_CONFIG` does not exist |
+| `config.read-only` | block | no | 5 | A write would rewrite `config.toml`, which plainport never does |
+| `config.write-failed` | block | no | 1 | `managed.toml` or `device.json` could not be written; the old file is intact |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
+| `device.invalid` | block | no | 6 | `device.json`, this device's identity, is unreadable; plainport never replaces it |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |

@@ -47,7 +47,25 @@ describe("findings", () => {
   test("the catalogue is frozen", () => {
     expect(FINDINGS as unknown).toEqual({
       "command.unknown": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "config.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "config.kept-last-good": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "config.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "config.no-home": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "config.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "config.read-only": { severity: "block", allowable: false, exitCode: 5, summary: expect.any(String) },
+      "config.write-failed": {
+        severity: "block",
+        allowable: false,
+        exitCode: 1,
+        summary: expect.any(String),
+      },
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "device.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "internal.unexpected": {
         severity: "block",
         allowable: false,
