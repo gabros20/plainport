@@ -978,7 +978,7 @@ export interface OperationResult {
 
 **Remote control.** `plainport serve --stdio` speaks JSON-RPC 2.0 as NDJSON: `projects.list`, `projects.get`, `roots.list`, `roots.bind`, `devices.list`, `plan`, `run`, `attach`, `cancel`, `recover`. Events arrive as `event` notifications. Other devices reach the same server as `ssh <peer> plainport serve --stdio`. Several cores on one machine (CLI plus desktop app) are safe because the per-project lock is the single point of coordination.
 
-**Package layout** (pnpm workspace):
+**Package layout** (Bun workspace):
 
 ```
 packages/

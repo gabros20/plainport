@@ -1,0 +1,29 @@
+{
+  "name": "plainport-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "bun": ">=1.2.21"
+  },
+  "scripts": {
+    "check:bun": "bun scripts/check-bun.ts",
+    "typecheck": "tsgo --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "bun run check:bun && bun test",
+    "test:t1": "bun run check:bun && PLAINPORT_TEST_TIER=1 bun test",
+    "build": "bun run check:bun && bun scripts/build.ts",
+    "contract": "bun scripts/contract.ts",
+    "secrets": "bun scripts/secrets.ts",
+    "hooks": "bun scripts/install-hooks.ts",
+    "check:version": "bun scripts/check-version.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/bun": "1.4.2",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2"
+  }
+}
