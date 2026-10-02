@@ -29,17 +29,22 @@ bun run build && ./dist/plainport --version
 writing anything. `--target all` fetches every target; `--dest <dir>` writes somewhere else. It needs the system
 `bunzip2` and `unzip`.
 
-plainport looks for each tool in this order and takes the first executable it finds:
+How plainport finds each tool:
 
-1. `$PLAINPORT_TOOLS_DIR/restic` and `$PLAINPORT_TOOLS_DIR/rclone`: a flat folder holding the two binaries, no
-   `<os>-<arch>/` level. An empty value is ignored, and a folder without the tool falls through to the next step.
-2. Beside the compiled `plainport` binary, where releases bundle them. Skipped when running from source.
-3. `.tools/<os>-<arch>/` in the checkout: this checkout's when running from source, or, for a compiled build such
-   as `dist/plainport`, the nearest folder above the binary that holds `tools.lock.json`.
+- **`PLAINPORT_TOOLS_DIR` set** (a developer and test override, not user configuration): only
+  `$PLAINPORT_TOOLS_DIR/restic` and `$PLAINPORT_TOOLS_DIR/rclone` are tried. It is a flat folder, with no
+  `<os>-<arch>/` level. If the tool isn't there, plainport stops; it never falls back to other binaries, so tests
+  that point it at fakes stay hermetic. An empty value counts as unset.
+- **Otherwise**, the first executable among:
+  1. the folder of the compiled `plainport` binary, where releases bundle them. Symlinks to the binary are
+     resolved. This is skipped when running from source.
+  2. `.tools/<os>-<arch>/` in a checkout: this checkout's when running from source, or, for a development build
+     (`VERSION` ends in `-dev`) such as `dist/plainport`, the nearest folder above the binary that holds
+     `tools.lock.json`. Release builds never look here.
 
-`PLAINPORT_TOOLS_DIR` is a developer and test override, not user configuration: use it to try other tool
-builds or to point tests at fakes. If nothing is found, plainport stops with finding `tool.missing` and exit
-code 6, naming every path it tried.
+If nothing is found, plainport stops with finding `tool.missing` and exit code 6, naming every path it tried.
+The fix it prints depends on the case: run `bun scripts/fetch-tools.ts` (source and development builds),
+reinstall plainport (release builds), or put the tool in `PLAINPORT_TOOLS_DIR` or unset it.
 
 ## Definition of Done
 
