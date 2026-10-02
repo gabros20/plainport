@@ -22,6 +22,25 @@ bun run contract      # regenerates plainport.json and schemas/; commit the resu
 bun run build && ./dist/plainport --version
 ```
 
+### Pinned restic and rclone
+
+`bun scripts/fetch-tools.ts` downloads the restic and rclone that `tools.lock.json` pins into
+`.tools/<os>-<arch>/` (gitignored), checks each archive's SHA-256 against the lock and refuses a mismatch without
+writing anything. `--target all` fetches every target; `--dest <dir>` writes somewhere else. It needs the system
+`bunzip2` and `unzip`.
+
+plainport looks for each tool in this order and takes the first executable it finds:
+
+1. `$PLAINPORT_TOOLS_DIR/restic` and `$PLAINPORT_TOOLS_DIR/rclone`: a flat folder holding the two binaries, no
+   `<os>-<arch>/` level. An empty value is ignored, and a folder without the tool falls through to the next step.
+2. Beside the compiled `plainport` binary, where releases bundle them. Skipped when running from source.
+3. `.tools/<os>-<arch>/` in the checkout: this checkout's when running from source, or, for a compiled build such
+   as `dist/plainport`, the nearest folder above the binary that holds `tools.lock.json`.
+
+`PLAINPORT_TOOLS_DIR` is a developer and test override, not user configuration: use it to try other tool
+builds or to point tests at fakes. If nothing is found, plainport stops with finding `tool.missing` and exit
+code 6, naming every path it tried.
+
 ## Definition of Done
 
 A task's review checks every line. A "no" sends it back.
