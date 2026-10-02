@@ -1,0 +1,84 @@
+# Shape adapted from plainkeep .github/workflows/ci.yml (gabros20/plainkeep@d7eb27e), ADR-0003.
+# CI for plainport (ADR-0020, ADR-0021): runs on every push to main and by hand. A red run on main stops the next
+# phase until it is fixed.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to .bun-version, never `latest`, so CI tests the toolchain the code was written against.
+          bun-version-file: .bun-version
+      - run: bun run check:bun
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun run test
+      - name: test:t1 (real restic and rclone)
+        # The pinned tools arrive with tools.lock.json (M1 task 2); until then there is nothing to fetch or run.
+        if: hashFiles('tools.lock.json') != ''
+        run: |
+          bun scripts/fetch-tools.ts
+          bun run test:t1
+      - run: bun run build
+      - name: binary prints its version
+        run: |
+          out="$(./dist/plainport --version)"
+          echo "$out"
+          test "$out" = "plainport $(cat VERSION)"
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - name: binary prints its version
+        run: |
+          out="$(./dist/plainport --version)"
+          echo "$out"
+          test "$out" = "plainport $(cat VERSION)"
+
+  version:
+    # VERSION, CHANGELOG.md, a `release: X.Y.Z` commit and any v* tag on it must agree (ADR-0020).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun run check:version
+
+  secrets:
+    # gitleaks over the whole history, from the same pinned Docker image `bun run secrets` uses locally.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun run secrets
