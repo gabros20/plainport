@@ -3,6 +3,10 @@
 export const packageName = "@plainport/core";
 export * from "./config/index.ts";
 export * from "./device.ts";
+export type { LocalFs, LocalIo, ProcessInfo } from "./io.ts";
+export { acquireLock, type HeldLock, type LockHolder, LockHolderSchema, type LockOptions } from "./lock.ts";
+// The real LocalIo, for the composition root (the CLI's main) only (run decision D21).
+export { nodeLocalIo } from "./node-io.ts";
 export * from "./paths.ts";
 export * from "./tools.ts";
 export * from "./ulid.ts";

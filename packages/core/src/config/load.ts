@@ -8,8 +8,8 @@
 
 import { join } from "node:path";
 import { type Finding, fail, finding, ok, type Result } from "@plainport/contract";
+import type { LocalIo } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
-import { type ConfigIo, nodeConfigIo } from "./io.ts";
 import { mergeLayers } from "./merge.ts";
 import {
   type ConfigLayer,
@@ -50,18 +50,18 @@ export class ConfigLoader {
   readonly #lastGood = new Map<string, unknown>();
 
   constructor(
+    readonly io: LocalIo,
     readonly paths: PlainportPaths,
-    readonly io: ConfigIo = nodeConfigIo,
   ) {}
 
   /** One file's layer: its contents, nothing if it is absent, or its last good contents if it broke. */
-  #layer(
+  async #layer(
     path: string,
     schema: typeof ConfigLayerSchema | typeof ProjectConfigSchema,
     required: boolean,
     findings: Finding[],
-  ): Result<unknown> {
-    const read = readTomlFile(this.io, path, schema);
+  ): Promise<Result<unknown>> {
+    const read = await readTomlFile(this.io, path, schema);
     if (read.kind === "ok") {
       this.#lastGood.set(path, read.value);
       return ok(read.value);
@@ -100,7 +100,7 @@ export class ConfigLoader {
     );
   }
 
-  load(options: LoadOptions): Result<LoadedConfig> {
+  async load(options: LoadOptions): Promise<Result<LoadedConfig>> {
     const { paths } = this;
     const findings: Finding[] = [];
     const flags = ConfigLayerSchema.safeParse(options.flags ?? {});
@@ -113,9 +113,9 @@ export class ConfigLoader {
       );
     }
 
-    const managed = this.#layer(paths.managedFile, ConfigLayerSchema, false, findings);
+    const managed = await this.#layer(paths.managedFile, ConfigLayerSchema, false, findings);
     if (!managed.ok) return managed;
-    const user = this.#layer(
+    const user = await this.#layer(
       paths.configFile,
       ConfigLayerSchema,
       paths.configFileSource !== "default",
@@ -124,7 +124,9 @@ export class ConfigLoader {
     if (!user.ok) return user;
     const projectFile = options.projectDir === undefined ? undefined : join(options.projectDir, PROJECT_FILE);
     const project =
-      projectFile === undefined ? ok({}) : this.#layer(projectFile, ProjectConfigSchema, false, findings);
+      projectFile === undefined
+        ? ok({})
+        : await this.#layer(projectFile, ProjectConfigSchema, false, findings);
     if (!project.ok) return project;
 
     const merged = mergeLayers([

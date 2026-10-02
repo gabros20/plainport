@@ -6,10 +6,10 @@
 import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
-import { createExclusive } from "./config/atomic.ts";
-import { type ConfigIo, errorCode, nodeConfigIo } from "./config/io.ts";
+import { createExclusive } from "./atomic.ts";
 import { type Role, RoleSchema } from "./config/schema.ts";
 import { describeIssues } from "./config/toml.ts";
+import { errorCode, type LocalIo } from "./io.ts";
 import type { PlainportPaths } from "./paths.ts";
 import { UlidSchema, ulid } from "./ulid.ts";
 
@@ -33,14 +33,11 @@ const invalid = (path: string, reason: string): Result<never> =>
   );
 
 /** This device's identity, or undefined before `plainport init` has created it. */
-export const readDevice = (
-  paths: PlainportPaths,
-  io: ConfigIo = nodeConfigIo,
-): Result<Device | undefined> => {
+export const readDevice = async (io: LocalIo, paths: PlainportPaths): Promise<Result<Device | undefined>> => {
   const path = paths.deviceFile;
   let text: string;
   try {
-    text = io.readText(path);
+    text = await io.fs.readText(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return ok(undefined);
     return invalid(path, `it could not be read (${error instanceof Error ? error.message : String(error)})`);
@@ -59,16 +56,15 @@ export interface EnsureDeviceOptions {
   /** The role a new identity gets; an existing identity keeps its own (`plainport device role` changes it). */
   role: Role;
   clock?: { now(): Date };
-  io?: ConfigIo;
 }
 
 /** Returns this device's identity, creating device.json first if there is none. */
-export const ensureDevice = (
+export const ensureDevice = async (
+  io: LocalIo,
   paths: PlainportPaths,
   options: EnsureDeviceOptions,
-): Result<{ device: Device; created: boolean }> => {
-  const io = options.io ?? nodeConfigIo;
-  const existing = readDevice(paths, io);
+): Promise<Result<{ device: Device; created: boolean }>> => {
+  const existing = await readDevice(io, paths);
   if (!existing.ok) return existing;
   if (existing.value !== undefined) return ok({ device: existing.value, created: false });
 
@@ -76,8 +72,8 @@ export const ensureDevice = (
   const device: Device = { v: 1, id: ulid(now.getTime()), role: options.role, createdAt: now.toISOString() };
   let created: boolean;
   try {
-    io.mkdirp(dirname(paths.deviceFile));
-    created = createExclusive(io, paths.deviceFile, `${JSON.stringify(device, null, 2)}\n`);
+    await io.fs.mkdirp(dirname(paths.deviceFile));
+    created = await createExclusive(io, paths.deviceFile, `${JSON.stringify(device, null, 2)}\n`);
   } catch (error) {
     return fail(
       finding("config.write-failed", {
@@ -89,7 +85,7 @@ export const ensureDevice = (
   }
   if (created) return ok({ device, created: true });
   // Another process created it first: theirs is the identity.
-  const winner = readDevice(paths, io);
+  const winner = await readDevice(io, paths);
   if (!winner.ok) return winner;
   return winner.value === undefined
     ? invalid(paths.deviceFile, "it vanished right after another process created it")

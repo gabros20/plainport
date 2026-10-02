@@ -1,15 +1,16 @@
 // A child process for the managed.toml tests: `bun managed-writer.ts <name> <count> [crash-before-rename]`.
 // It resolves paths from its own HOME, then adds roots <name>-0 … <name>-<count-1> to managed.toml, one locked
 // update each. With crash-before-rename it SIGKILLs itself after writing the temp file, before the rename.
-// If $MANAGED_WRITER_LOG is set, every update appends "+<name>" on entering and "-<name>" on leaving its critical
-// section, so a test can see whether two writers were ever inside at once, plus "start <name>" and "done <name>"
-// around the whole run. If $MANAGED_WRITER_START is set (epoch ms), the writer waits until then to begin, so two
-// writers start together and really contend for the lock.
+// If $BARRIER_DIR is set, it waits there (barrier.ts) before its first update, so two writers really contend.
+// If $MANAGED_WRITER_LOG is set, every update appends "+<name>" on entering and "-<name>" on leaving the update
+// callback, which runs under the lock, plus "start <name>" and "done <name>" around the whole run.
 
 import { appendFileSync } from "node:fs";
-import { resolvePaths } from "../../paths.ts";
-import { nodeConfigIo } from "../io.ts";
-import { updateManaged } from "../managed.ts";
+import { ok } from "@plainport/contract";
+import { updateManaged } from "../config/managed.ts";
+import { nodeLocalIo } from "../node-io.ts";
+import { resolvePaths } from "../paths.ts";
+import { awaitGo } from "./barrier.ts";
 
 const [name, countText, mode] = Bun.argv.slice(2);
 const paths = resolvePaths(process.env);
@@ -19,31 +20,33 @@ if (!paths.ok || name === undefined) {
 }
 
 const log = process.env.MANAGED_WRITER_LOG;
-
 const io =
   mode === "crash-before-rename"
     ? {
-        ...nodeConfigIo,
-        rename: (): void => {
-          process.kill(process.pid, "SIGKILL");
+        ...nodeLocalIo,
+        fs: {
+          ...nodeLocalIo.fs,
+          rename: async (): Promise<void> => {
+            process.kill(process.pid, "SIGKILL");
+          },
         },
       }
-    : nodeConfigIo;
+    : nodeLocalIo;
 
-const start = Number(process.env.MANAGED_WRITER_START ?? 0);
-if (start > Date.now()) await Bun.sleep(start - Date.now());
+if (process.env.BARRIER_DIR !== undefined) await awaitGo(process.env.BARRIER_DIR, name);
 if (log !== undefined) appendFileSync(log, `start ${name}\n`);
 
 for (let i = 0; i < Number(countText ?? "1"); i++) {
   const result = await updateManaged(
+    io,
     paths.value,
     (managed) => {
       if (log !== undefined) appendFileSync(log, `+${name}\n`);
       Bun.sleepSync(2);
       if (log !== undefined) appendFileSync(log, `-${name}\n`);
-      return { ...managed, roots: { ...managed.roots, [`${name}-${i}`]: { label: `${name} ${i}` } } };
+      return ok({ ...managed, roots: { ...managed.roots, [`${name}-${i}`]: { label: `${name} ${i}` } } });
     },
-    { io, timeoutMs: 30_000 },
+    { timeoutMs: 60_000 },
   );
   if (!result.ok) {
     console.error(`${result.finding.code}: ${result.finding.message}`);

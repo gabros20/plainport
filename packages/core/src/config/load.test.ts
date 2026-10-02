@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { FindingSchema } from "@plainport/contract";
+import { FindingSchema, ok } from "@plainport/contract";
+import { nodeLocalIo } from "../node-io.ts";
 import { type PlainportPaths, resolvePaths } from "../paths.ts";
 import { ConfigLoader, DEFAULTS } from "./index.ts";
 import { updateManaged } from "./managed.ts";
+
+const io = nodeLocalIo;
 
 let sandbox: string;
 let paths: PlainportPaths;
@@ -33,15 +36,15 @@ afterEach(() => {
   rmSync(sandbox, { recursive: true, force: true });
 });
 
-const loaded = (loader: ConfigLoader, options: Parameters<ConfigLoader["load"]>[0] = { env: {} }) => {
-  const result = loader.load(options);
+const loaded = async (loader: ConfigLoader, options: Parameters<ConfigLoader["load"]>[0] = { env: {} }) => {
+  const result = await loader.load(options);
   if (!result.ok) throw new Error(`${result.finding.code}: ${result.finding.message}`);
   return result.value;
 };
 
 describe("config: precedence", () => {
-  test("with no files at all, the built-in defaults apply", () => {
-    const { config, findings } = loaded(new ConfigLoader(paths));
+  test("with no files at all, the built-in defaults apply", async () => {
+    const { config, findings } = await loaded(new ConfigLoader(io, paths));
     expect(config).toEqual(DEFAULTS);
     expect(findings).toEqual([]);
     expect(config.onload).toEqual({ hydrate: true, leases: "warn" });
@@ -49,7 +52,7 @@ describe("config: precedence", () => {
   });
 
   // Each row removes the highest layer of the row above: the value seen is always the highest layer present.
-  test("defaultStore: flags > env > config.toml > managed.toml > defaults", () => {
+  test("defaultStore: flags > env > config.toml > managed.toml > defaults", async () => {
     write(paths.managedFile, 'defaultStore = "from-managed"\n');
     write(paths.configFile, 'defaultStore = "from-config"\n');
     const env = { PLAINPORT_STORE: "from-env" };
@@ -60,36 +63,36 @@ describe("config: precedence", () => {
       [{ env: {}, projectDir: project }, "from-config"],
     ];
     for (const [options, expected] of rows) {
-      expect(loaded(new ConfigLoader(paths), options).config.defaultStore).toBe(expected);
+      expect((await loaded(new ConfigLoader(io, paths), options)).config.defaultStore).toBe(expected);
     }
     rmSync(paths.configFile);
-    expect(loaded(new ConfigLoader(paths)).config.defaultStore).toBe("from-managed");
+    expect((await loaded(new ConfigLoader(io, paths))).config.defaultStore).toBe("from-managed");
     rmSync(paths.managedFile);
-    expect(loaded(new ConfigLoader(paths)).config.defaultStore).toBeUndefined();
+    expect((await loaded(new ConfigLoader(io, paths))).config.defaultStore).toBeUndefined();
   });
 
-  test("deps.mode: flags > project .plainport.toml > config.toml > managed.toml > defaults", () => {
+  test("deps.mode: flags > project .plainport.toml > config.toml > managed.toml > defaults", async () => {
     write(paths.managedFile, '[deps]\nmode = "keep"\n');
     write(paths.configFile, '[deps]\nmode = "strip"\n');
     write(join(project, ".plainport.toml"), '[deps]\nmode = "keep"\n');
-    const load = (options: Parameters<ConfigLoader["load"]>[0]) =>
-      loaded(new ConfigLoader(paths), options).config.deps.mode;
-    expect(load({ env: {}, projectDir: project, flags: { deps: { mode: "strip" } } })).toBe("strip");
-    expect(load({ env: {}, projectDir: project })).toBe("keep");
-    expect(load({ env: {} })).toBe("strip");
+    const load = async (options: Parameters<ConfigLoader["load"]>[0]) =>
+      (await loaded(new ConfigLoader(io, paths), options)).config.deps.mode;
+    expect(await load({ env: {}, projectDir: project, flags: { deps: { mode: "strip" } } })).toBe("strip");
+    expect(await load({ env: {}, projectDir: project })).toBe("keep");
+    expect(await load({ env: {} })).toBe("strip");
     rmSync(paths.configFile);
-    expect(load({ env: {} })).toBe("keep");
+    expect(await load({ env: {} })).toBe("keep");
     rmSync(paths.managedFile);
-    expect(load({ env: {} })).toBe(DEFAULTS.deps.mode);
+    expect(await load({ env: {} })).toBe(DEFAULTS.deps.mode);
   });
 
-  test("a root defined in both files: config.toml wins key by key, managed.toml fills the rest", () => {
+  test("a root defined in both files: config.toml wins key by key, managed.toml fills the rest", async () => {
     write(
       paths.managedFile,
       '[roots.work]\nlabel = "Work (managed)"\nstore = "mini-work"\non = { mbp = "~/work" }\n',
     );
     write(paths.configFile, '[roots.work]\nlabel = "Work"\non = { mini = "~/Developer/Work" }\n');
-    const { config } = loaded(new ConfigLoader(paths));
+    const { config } = await loaded(new ConfigLoader(io, paths));
     expect(config.roots.work).toEqual({
       label: "Work",
       store: "mini-work",
@@ -97,25 +100,25 @@ describe("config: precedence", () => {
     });
   });
 
-  test("arrays replace across layers: the project's strip.extra replaces the global one", () => {
+  test("arrays replace across layers: the project's strip.extra replaces the global one", async () => {
     write(
       paths.configFile,
       '[strip]\nextra = ["**/coverage", "**/.cache"]\nnever = [".vercel/project.json"]\n',
     );
     write(join(project, ".plainport.toml"), '[strip]\nextra = ["public/generated/**"]\n');
-    const { config } = loaded(new ConfigLoader(paths), { env: {}, projectDir: project });
+    const { config } = await loaded(new ConfigLoader(io, paths), { env: {}, projectDir: project });
     expect(config.strip.extra).toEqual(["public/generated/**"]);
     expect(config.strip.never).toEqual([".vercel/project.json"]);
   });
 
-  test("a store split across the two files merges first, then is checked as a whole", () => {
+  test("a store split across the two files merges first, then is checked as a whole", async () => {
     write(paths.managedFile, '[stores.ssd]\nkind = "local"\npath = "/Volumes/A/plainport"\n');
     write(paths.configFile, '[stores.ssd]\npath = "/Volumes/B/plainport"\n');
-    const { config } = loaded(new ConfigLoader(paths));
+    const { config } = await loaded(new ConfigLoader(io, paths));
     expect(config.stores.ssd).toEqual({ kind: "local", path: "/Volumes/B/plainport" });
   });
 
-  test("the DESIGN.md examples load as written", () => {
+  test("the DESIGN.md examples load as written", async () => {
     write(
       paths.configFile,
       [
@@ -195,34 +198,37 @@ describe("config: precedence", () => {
         "",
       ].join("\n"),
     );
-    const { config } = loaded(new ConfigLoader(paths), { env: {}, projectDir: project });
+    const { config } = await loaded(new ConfigLoader(io, paths), { env: {}, projectDir: project });
     expect(config.stores.mini).toMatchObject({ kind: "peer", access: "append-only", replicateTo: ["b2"] });
     expect(config.hooks?.["pre-offload"]).toEqual(["docker compose down"]);
     expect(config.deps.mode).toBe("keep");
     expect(config.strip.keep).toEqual(["dist/"]);
   });
 
-  test("a project file may only hold project settings", () => {
+  test("a project file may only hold project settings", async () => {
     write(join(project, ".plainport.toml"), 'defaultStore = "sneaky"\n');
-    const result = new ConfigLoader(paths).load({ env: {}, projectDir: project });
+    const result = await new ConfigLoader(io, paths).load({ env: {}, projectDir: project });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.finding.code).toBe("config.invalid");
     expect(result.finding.paths).toEqual([join(project, ".plainport.toml")]);
   });
 
-  test("secrets are references: a bare value is refused", () => {
+  test("secrets are references: a bare value is refused", async () => {
     write(
       paths.configFile,
       '[stores.b2]\nkind = "s3"\nendpoint = "https://e"\nbucket = "b"\nsecret = "hunter2"\n',
     );
-    const result = new ConfigLoader(paths).load({ env: {} });
+    const result = await new ConfigLoader(io, paths).load({ env: {} });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.finding.code).toBe("config.invalid");
   });
 
-  test("--config or PLAINPORT_CONFIG naming a missing file is not found (exit 4); a missing default is fine", () => {
-    const result = new ConfigLoader(pathsFor({ PLAINPORT_CONFIG: join(sandbox, "nope.toml") })).load({
+  test("--config or PLAINPORT_CONFIG naming a missing file is not found (exit 4); a missing default is fine", async () => {
+    const result = await new ConfigLoader(
+      io,
+      pathsFor({ PLAINPORT_CONFIG: join(sandbox, "nope.toml") }),
+    ).load({
       env: {},
     });
     expect(result.ok).toBe(false);
@@ -232,11 +238,11 @@ describe("config: precedence", () => {
     expect(result.finding.paths).toEqual([join(sandbox, "nope.toml")]);
   });
 
-  test("--config points the user layer at another file", () => {
+  test("--config points the user layer at another file", async () => {
     const other = join(sandbox, "dotfiles", "plainport.toml");
     write(other, 'defaultStore = "dotfiles"\n');
     write(paths.configFile, 'defaultStore = "default-location"\n');
-    expect(loaded(new ConfigLoader(pathsFor({}, other))).config.defaultStore).toBe("dotfiles");
+    expect((await loaded(new ConfigLoader(io, pathsFor({}, other)))).config.defaultStore).toBe("dotfiles");
   });
 
   test("with --config, managed.toml is read and written beside that file (D20)", async () => {
@@ -244,24 +250,23 @@ describe("config: precedence", () => {
     write(other, 'defaultStore = "dotfiles"\n');
     write(paths.managedFile, '[roots.default-location]\nlabel = "not this one"\n');
     const moved = pathsFor({}, other);
-    const result = await updateManaged(moved, (managed) => ({
-      ...managed,
-      roots: { work: { label: "Work" } },
-    }));
+    const result = await updateManaged(io, moved, (managed) =>
+      ok({ ...managed, roots: { work: { label: "Work" } } }),
+    );
     if (!result.ok) throw new Error(result.finding.message);
     expect(readFileSync(join(sandbox, "dotfiles", "managed.toml"), "utf8")).toContain("[roots.work]");
-    expect(loaded(new ConfigLoader(moved)).config.roots).toEqual({ work: { label: "Work" } });
+    expect((await loaded(new ConfigLoader(io, moved))).config.roots).toEqual({ work: { label: "Work" } });
   });
 });
 
 describe("config: last good configuration", () => {
-  test("a broken config.toml keeps the last good configuration and reports it", () => {
+  test("a broken config.toml keeps the last good configuration and reports it", async () => {
     write(paths.configFile, 'defaultStore = "good"\n');
-    const loader = new ConfigLoader(paths);
-    expect(loaded(loader).config.defaultStore).toBe("good");
+    const loader = new ConfigLoader(io, paths);
+    expect((await loaded(loader)).config.defaultStore).toBe("good");
 
     write(paths.configFile, 'defaultStore = "half\n');
-    const kept = loaded(loader);
+    const kept = await loaded(loader);
     expect(kept.config.defaultStore).toBe("good");
     expect(kept.findings).toHaveLength(1);
     const [finding] = kept.findings;
@@ -273,25 +278,25 @@ describe("config: last good configuration", () => {
     expect(finding?.fix).toContain(paths.configFile);
 
     write(paths.configFile, 'defaultStore = "fixed"\n');
-    const fixed = loaded(loader);
+    const fixed = await loaded(loader);
     expect(fixed.config.defaultStore).toBe("fixed");
     expect(fixed.findings).toEqual([]);
   });
 
-  test("a config.toml that parses but fails the schema also keeps the last good one", () => {
+  test("a config.toml that parses but fails the schema also keeps the last good one", async () => {
     write(paths.configFile, '[onload]\nleases = "strict"\n');
-    const loader = new ConfigLoader(paths);
-    expect(loaded(loader).config.onload.leases).toBe("strict");
+    const loader = new ConfigLoader(io, paths);
+    expect((await loaded(loader)).config.onload.leases).toBe("strict");
     write(paths.configFile, '[onload]\nleases = "sometimes"\n');
-    const kept = loaded(loader);
+    const kept = await loaded(loader);
     expect(kept.config.onload.leases).toBe("strict");
     expect(kept.findings.map((f) => f.code)).toEqual(["config.kept-last-good"]);
     expect(kept.findings[0]?.message).toContain("onload.leases");
   });
 
-  test("with no last good configuration, a broken file is a blocking finding (exit 6)", () => {
+  test("with no last good configuration, a broken file is a blocking finding (exit 6)", async () => {
     write(paths.configFile, "[onload\n");
-    const result = new ConfigLoader(paths).load({ env: {} });
+    const result = await new ConfigLoader(io, paths).load({ env: {} });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.finding.code).toBe("config.invalid");
@@ -300,19 +305,19 @@ describe("config: last good configuration", () => {
     expect(result.finding.message).toContain("line 1");
   });
 
-  test("an unknown key is an error, not ignored", () => {
+  test("an unknown key is an error, not ignored", async () => {
     write(paths.configFile, "[onload]\nhydrat = false\n");
-    const result = new ConfigLoader(paths).load({ env: {} });
+    const result = await new ConfigLoader(io, paths).load({ env: {} });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.finding.message).toContain("hydrat");
   });
 
-  test("a broken managed.toml keeps its last good copy too", () => {
+  test("a broken managed.toml keeps its last good copy too", async () => {
     write(paths.managedFile, 'defaultStore = "managed"\n');
-    const loader = new ConfigLoader(paths);
-    expect(loaded(loader).config.defaultStore).toBe("managed");
+    const loader = new ConfigLoader(io, paths);
+    expect((await loaded(loader)).config.defaultStore).toBe("managed");
     write(paths.managedFile, "defaultStore = \n");
-    const kept = loaded(loader);
+    const kept = await loaded(loader);
     expect(kept.config.defaultStore).toBe("managed");
     expect(kept.findings[0]?.paths).toEqual([paths.managedFile]);
   });
@@ -324,16 +329,15 @@ describe("config: config.toml is never rewritten", () => {
       '# my comments stay\ndefaultStore = "mini"   # aligned\n\n[roots.work]\non = { mbp = "~/work" }\n';
     write(paths.configFile, text);
     const before = statSync(paths.configFile);
-    const loader = new ConfigLoader(paths);
-    loaded(loader);
+    const loader = new ConfigLoader(io, paths);
+    await loaded(loader);
     for (const name of ["a", "b", "c"]) {
-      const result = await updateManaged(paths, (managed) => ({
-        ...managed,
-        roots: { ...managed.roots, [name]: { label: name } },
-      }));
+      const result = await updateManaged(io, paths, (managed) =>
+        ok({ ...managed, roots: { ...managed.roots, [name]: { label: name } } }),
+      );
       if (!result.ok) throw new Error(result.finding.message);
     }
-    expect(loaded(loader).config.roots.work).toEqual({ on: { mbp: "~/work" } });
+    expect((await loaded(loader)).config.roots.work).toEqual({ on: { mbp: "~/work" } });
     const after = statSync(paths.configFile);
     expect(readFileSync(paths.configFile, "utf8")).toBe(text);
     expect(after.ino).toBe(before.ino);
@@ -345,7 +349,7 @@ describe("config: config.toml is never rewritten", () => {
     const aliased = pathsFor({}, paths.managedFile);
     write(aliased.managedFile, 'defaultStore = "mine"\n');
     const before = readFileSync(aliased.managedFile, "utf8");
-    const result = await updateManaged(aliased, (managed) => ({ ...managed, defaultStore: "theirs" }));
+    const result = await updateManaged(io, aliased, (managed) => ok({ ...managed, defaultStore: "theirs" }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.finding.code).toBe("config.read-only");
     expect(readFileSync(aliased.managedFile, "utf8")).toBe(before);

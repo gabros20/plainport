@@ -3,7 +3,7 @@
 
 import { parse, TomlError } from "smol-toml";
 import type { z } from "zod";
-import { type ConfigIo, errorCode } from "./io.ts";
+import { errorCode, type LocalIo } from "../io.ts";
 
 export type FileRead<T> =
   | { kind: "ok"; value: T }
@@ -16,14 +16,14 @@ export const describeIssues = (error: z.ZodError): string =>
     .map((issue) => (issue.path.length === 0 ? issue.message : `${issue.path.join(".")}: ${issue.message}`))
     .join("; ");
 
-export const readTomlFile = <S extends z.ZodType>(
-  io: ConfigIo,
+export const readTomlFile = async <S extends z.ZodType>(
+  io: LocalIo,
   path: string,
   schema: S,
-): FileRead<z.output<S>> => {
+): Promise<FileRead<z.output<S>>> => {
   let text: string;
   try {
-    text = io.readText(path);
+    text = await io.fs.readText(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return { kind: "missing" };
     return {
