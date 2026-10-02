@@ -25,12 +25,9 @@ describe("envelope", () => {
   });
 
   test("an error envelope validates and error.code is the exit code", () => {
-    const env = errorEnvelope(
-      "offload",
-      3,
-      "offload is confirm-class",
-      "re-run: plainport offload web --yes",
-    );
+    const env = errorEnvelope("offload", 3, "offload is confirm-class", {
+      hint: "re-run: plainport offload web --yes",
+    });
     expect(env).toEqual({
       plainport_json: 1,
       ok: false,
@@ -41,6 +38,28 @@ describe("envelope", () => {
     expect(exitCodeOf(env)).toBe(3);
     expect(exitCodeOf(successEnvelope("ls", []))).toBe(0);
     expect(errorEnvelope("ls", 4, "no project 'x'")).not.toHaveProperty("error.hint");
+    expect(errorEnvelope("ls", 4, "no project 'x'")).not.toHaveProperty("data");
+  });
+
+  test("a partial success (D14) carries data next to error, checked against the verb's schema", () => {
+    const data = { project: "work:web", snapshot: "01J9Z6K2" };
+    const env = errorEnvelope("onload", 10, "restored but not hydrated", {
+      hint: "plainport hydrate web",
+      data,
+    });
+    expect(env as unknown).toEqual({
+      plainport_json: 1,
+      ok: false,
+      verb: "onload",
+      error: { code: 10, message: "restored but not hydrated", hint: "plainport hydrate web" },
+      data,
+    });
+    expect(EnvelopeSchema.parse(env) as unknown).toEqual(env);
+    expect(exitCodeOf(env)).toBe(10);
+    const schema = envelopeSchema(z.object({ project: z.string(), snapshot: z.string() }));
+    expect(schema.safeParse(env).success).toBe(true);
+    expect(schema.safeParse({ ...env, data: { project: 1 } }).success).toBe(false);
+    expect(EnvelopeSchema.safeParse({ ...env, data: undefined }).success).toBe(true);
   });
 
   test("error.code must be a failure exit code from the table", () => {
@@ -59,7 +78,6 @@ describe("envelope", () => {
       { ...finalOk, data: undefined },
       { ...finalOk, ok: false },
       { ...finalOk, error: { code: 1, message: "m" } },
-      { plainport_json: 1, ok: false, verb: "ls", error: { code: 1, message: "m" }, data: {} },
       { plainport_json: 1, ok: false, verb: "ls" },
       { ...finalOk, count: 3 },
     ];

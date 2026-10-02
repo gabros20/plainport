@@ -17,7 +17,8 @@ export const ErrorObjectSchema = z.strictObject({
   hint: z.string().min(1).optional(),
 });
 
-/** The final envelope for a command whose data matches `data` (any JSON value by default). */
+/** The final envelope for a command whose data matches `data` (any JSON value by default). A failure may carry
+ * data too, only when the operation partly succeeded (run decision D14), e.g. exit 10 with the restored snapshot. */
 export const envelopeSchema = <D extends z.ZodType>(data: D) =>
   z.union([
     z.strictObject({ plainport_json: z.literal(PLAINPORT_JSON), ok: z.literal(true), verb, data }),
@@ -26,13 +27,14 @@ export const envelopeSchema = <D extends z.ZodType>(data: D) =>
       ok: z.literal(false),
       verb,
       error: ErrorObjectSchema,
+      data: data.optional(),
     }),
   ]);
 
 export const EnvelopeSchema = envelopeSchema(z.json()).meta({ title: "Envelope" });
 export type Envelope<D = z.infer<ReturnType<typeof z.json>>> =
   | { plainport_json: 1; ok: true; verb: string; data: D }
-  | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema> };
+  | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema>; data?: D };
 
 export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   plainport_json: PLAINPORT_JSON,
@@ -41,16 +43,18 @@ export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   data,
 });
 
-export const errorEnvelope = (
+/** A failure envelope. Pass `data` only for a partial success (D14). */
+export const errorEnvelope = <D = never>(
   verbName: string,
   code: FailureExitCode,
   message: string,
-  hint?: string,
-): Envelope<never> => ({
+  extra: { hint?: string; data?: D } = {},
+): Envelope<D> => ({
   plainport_json: PLAINPORT_JSON,
   ok: false,
   verb: verbName,
-  error: hint === undefined ? { code, message } : { code, message, hint },
+  error: extra.hint === undefined ? { code, message } : { code, message, hint: extra.hint },
+  ...(extra.data === undefined ? {} : { data: extra.data }),
 });
 
 /** The process exit code an envelope stands for: 0 on success, error.code otherwise. */
