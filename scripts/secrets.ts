@@ -22,6 +22,33 @@ export const scanCommand = (options: { toplevel: string; commonDir: string; stag
   return ["docker", "run", "--rm", ...mounts, IMAGE, ...scan];
 };
 
+export type ScanVerdict = { ok: true } | { ok: false; exitCode: number; message: string };
+
+/**
+ * gitleaks exits 0 even when its own git call fails: it logs ERR, scans nothing and reports no leaks. So a scan
+ * passes only if gitleaks exited 0, logged no ERR line, and, for a full scan, covered at least one commit.
+ */
+export const scanVerdict = (run: { exitCode: number; output: string; staged: boolean }): ScanVerdict => {
+  if (run.exitCode !== 0)
+    return { ok: false, exitCode: run.exitCode, message: `gitleaks exited ${run.exitCode}` };
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI colour codes
+  const lines = run.output.replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+  const error = lines.find((line) => /\bERR\b/.test(line));
+  if (error !== undefined)
+    return { ok: false, exitCode: 1, message: `gitleaks reported an error: ${error.trim()}` };
+  if (!run.staged) {
+    const scanned = lines.map((line) => /(\d+) commits scanned/.exec(line)?.[1]).find((n) => n !== undefined);
+    if (scanned === undefined || Number(scanned) === 0) {
+      return {
+        ok: false,
+        exitCode: 1,
+        message: `a full scan must cover the history, but gitleaks scanned ${scanned ?? "no"} commits`,
+      };
+    }
+  }
+  return { ok: true };
+};
+
 if (import.meta.main) {
   if (Bun.which("docker") === null) {
     console.error(
@@ -46,6 +73,17 @@ if (import.meta.main) {
     commonDir: git("rev-parse", "--path-format=absolute", "--git-common-dir"),
     staged: Bun.argv.includes("--staged"),
   });
-  const run = Bun.spawnSync(argv, { stdout: "inherit", stderr: "inherit" });
-  process.exit(run.exitCode ?? 1);
+  const staged = Bun.argv.includes("--staged");
+  const run = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
+  process.stdout.write(run.stdout);
+  process.stderr.write(run.stderr);
+  const verdict = scanVerdict({
+    exitCode: run.exitCode ?? 1,
+    output: run.stdout.toString() + run.stderr.toString(),
+    staged,
+  });
+  if (!verdict.ok) {
+    console.error(`bun run secrets: ${verdict.message}`);
+    process.exit(verdict.exitCode);
+  }
 }
