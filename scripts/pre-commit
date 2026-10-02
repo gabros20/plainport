@@ -1,0 +1,6 @@
+#!/bin/sh
+# plainport pre-commit hook (ADR-0021): Biome, then gitleaks on the staged changes. Install: bun run hooks
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+bun run lint
+bun scripts/secrets.ts --staged
