@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { parseJsonLines } from "@plainport/contract";
-import { capture, seen } from "./testing.ts";
+import { approvedPlans, capture, seen } from "./testing.ts";
 
 beforeEach(() => {
   seen.length = 0;
+  approvedPlans.clear();
 });
 
 const envelopeOf = (out: string) => {
@@ -18,13 +19,13 @@ describe("risk gate (ADR-0007, D15)", () => {
     expect(run.code).toBe(3);
     expect(run.out).toBe("");
     expect(run.err).toBe(
-      "plainport: ship is confirm-class: it sends data off this machine or deletes it, so it needs --yes\n" +
+      "plainport: risk.needs-yes: ship is confirm-class: it sends data off this machine or deletes it, so it needs --yes\n" +
         "re-run: plainport ship 'my project' web --yes\n",
     );
     expect(seen).toEqual([]);
   });
 
-  test("under --json the refusal is one envelope whose hint is the re-run line", async () => {
+  test("under --json the refusal is one envelope whose hint is the re-run line and that names its finding", async () => {
     const run = await capture(["ship", "web", "--json"]);
     expect(run.code).toBe(3);
     expect(run.err).toBe("");
@@ -36,6 +37,13 @@ describe("risk gate (ADR-0007, D15)", () => {
         code: 3,
         message: "ship is confirm-class: it sends data off this machine or deletes it, so it needs --yes",
         hint: "re-run: plainport ship web --json --yes",
+        finding: {
+          code: "risk.needs-yes",
+          severity: "block",
+          message: "ship is confirm-class: it sends data off this machine or deletes it, so it needs --yes",
+          fix: "plainport ship web --json --yes",
+          allowable: false,
+        },
       },
     });
   });
@@ -53,15 +61,23 @@ describe("risk gate (ADR-0007, D15)", () => {
     expect(seen[0]?.ctx.risk).toBe("confirm");
   });
 
-  test("confirm with an approved --plan runs without --yes", async () => {
-    const run = await capture(["ship", "web", "--plan", "01J9Z6KB"]);
-    expect(run.code).toBe(0);
+  test("confirm with an approved --plan runs without --yes; an unapproved plan id does not count (I5)", async () => {
+    expect((await capture(["ship", "web", "--plan", "01J9Z6KB"])).code).toBe(3);
+    approvedPlans.add("ship 01J9Z6KB");
+    expect((await capture(["ship", "web", "--plan", "01J9Z6KB"])).code).toBe(0);
+    expect((await capture(["ship", "web", "--plan", "OTHER"])).code).toBe(3);
   });
 
-  test("--dry-run runs as read and needs no --yes", async () => {
+  test("--plan exists only on a command that declares it accepts a plan", async () => {
+    const run = await capture(["write", "web", "--plan", "x"]);
+    expect(run.code).toBe(2);
+    expect(run.err).toStartWith("plainport: usage.invalid: write has no option --plan\n");
+  });
+
+  test("--dry-run runs as read, needs no --yes and renders the plan", async () => {
     const run = await capture(["ship", "web", "--dry-run"]);
     expect(run.code).toBe(0);
-    expect(run.out).toBe("done: ship web (dry run)\n");
+    expect(run.out).toBe("plan: ship web\n");
     expect(seen[0]?.ctx.risk).toBe("read");
     expect(seen[0]?.ctx.dryRun).toBe(true);
   });
@@ -71,7 +87,7 @@ describe("risk gate (ADR-0007, D15)", () => {
     expect(run.code).toBe(2);
     expect(seen).toEqual([]);
     expect(run.err).toBe(
-      "plainport: write has no --dry-run preview\n" +
+      "plainport: usage.dry-run-unsupported: write has no --dry-run preview\n" +
         "fix: without --dry-run it changes files straight away; see what it does first: plainport help write\n",
     );
   });
@@ -104,7 +120,7 @@ describe("unknown commands and usage errors", () => {
     const run = await capture(["shp", "web", "--yes"]);
     expect(run.code).toBe(4);
     expect(run.err).toBe(
-      "plainport: unknown command: shp (did you mean ship?)\nfix: plainport ship web --yes\n",
+      "plainport: command.unknown: unknown command: shp (did you mean ship?)\nfix: plainport ship web --yes\n",
     );
   });
 
@@ -115,14 +131,14 @@ describe("unknown commands and usage errors", () => {
     expect(envelope).toMatchObject({
       ok: false,
       verb: "root ad",
-      error: { code: 4, hint: "plainport root add work --json" },
+      error: { code: 4, hint: "plainport root add work --json", finding: { code: "command.unknown" } },
     });
   });
 
   test("an unregistered command with nothing close points at help", async () => {
     const run = await capture(["zzzzzz"]);
     expect(run.code).toBe(4);
-    expect(run.err).toBe("plainport: unknown command: zzzzzz\nfix: plainport help\n");
+    expect(run.err).toBe("plainport: command.unknown: unknown command: zzzzzz\nfix: plainport help\n");
   });
 
   test("help for an unknown command exits 4 too", async () => {
@@ -134,8 +150,7 @@ describe("unknown commands and usage errors", () => {
   test("an unknown option exits 2 and points at the command's help", async () => {
     const run = await capture(["show", "--frobnicate"]);
     expect(run.code).toBe(2);
-    expect(run.err).toStartWith("plainport: ");
-    expect(run.err).toContain("--frobnicate");
+    expect(run.err).toStartWith("plainport: usage.invalid: show has no option --frobnicate\n");
     expect(run.err).toEndWith("fix: plainport help show\n");
   });
 
@@ -163,7 +178,7 @@ describe("global flags", () => {
     const run = await capture(["--store", "mini", "--config", "/x/c.toml", "show", "web"]);
     expect(run.code).toBe(0);
     expect(seen[0]?.ctx.store).toBe("mini");
-    expect(seen[0]?.ctx.config).toBe("/x/c.toml");
+    expect(seen[0]?.ctx.config).toEqual({ path: "/x/c.toml" });
     expect(seen[0]?.args).toEqual({ project: "web" });
   });
 
@@ -177,5 +192,25 @@ describe("global flags", () => {
   test("a string option keeps its value; boolean options are flags", async () => {
     await capture(["write", "web", "--to", "/tmp/x"]);
     expect(seen[0]?.args).toEqual({ project: "web", to: "/tmp/x" });
+  });
+
+  test("a repeatable option collects every value (the strings kind, e.g. --allow)", async () => {
+    await capture(["ship", "web", "--allow", "git.unpushed", "--allow", "git.stash", "--yes"]);
+    expect(seen[0]?.args).toEqual({ projects: ["web"], allow: ["git.unpushed", "git.stash"] });
+  });
+
+  test("a string option without its value, and a flag given a value, are usage errors", async () => {
+    const missing = await capture(["write", "web", "--to"]);
+    expect(missing.code).toBe(2);
+    expect(missing.err).toStartWith("plainport: usage.invalid: --to needs a value\n");
+    const valued = await capture(["show", "--quiet=yes"]);
+    expect(valued.code).toBe(2);
+    expect(valued.err).toStartWith("plainport: usage.invalid: --quiet takes no value\n");
+  });
+
+  test("handlers get the injected ports, never the real home or clock (I2)", async () => {
+    await capture(["show"]);
+    expect(seen[0]?.ctx.host.home).toContain("plainport-fake-home");
+    expect(seen[0]?.ctx.clock.now().toISOString()).toBe("2026-10-03T12:00:00.000Z");
   });
 });

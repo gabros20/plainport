@@ -16,6 +16,7 @@ import {
   type AnyCommand,
   findCommand,
   optionsOf,
+  type PlanStore,
   positionalsOf,
   type Registry,
   resolveRisk,
@@ -24,22 +25,20 @@ import {
 
 export interface GlobalOption {
   name: string;
-  kind: "boolean" | "string";
+  type: "boolean" | "string";
   summary: string;
-  /** For a string option, how help names its value. */
-  value?: string;
 }
 
 /** DESIGN.md "CLI design" → Global flags, in that order. */
 export const GLOBAL_OPTIONS: readonly GlobalOption[] = [
-  { name: "json", kind: "boolean", summary: "Print NDJSON: event lines, then exactly one final envelope" },
-  { name: "yes", kind: "boolean", summary: "Allow a confirm-class command to run" },
-  { name: "no-input", kind: "boolean", summary: "Never prompt; implied when stdin is not a terminal" },
-  { name: "dry-run", kind: "boolean", summary: "Preview only: build and print the plan, change nothing" },
-  { name: "store", kind: "string", value: "name", summary: "Use this store instead of the default" },
-  { name: "config", kind: "string", value: "path", summary: "Read this config file instead of the default" },
-  { name: "quiet", kind: "boolean", summary: "Print only results, warnings and errors" },
-  { name: "verbose", kind: "boolean", summary: "Print debug logs too" },
+  { name: "json", type: "boolean", summary: "Print NDJSON: event lines, then exactly one final envelope" },
+  { name: "yes", type: "boolean", summary: "Allow a confirm-class command to run" },
+  { name: "no-input", type: "boolean", summary: "Never prompt; implied when stdin is not a terminal" },
+  { name: "dry-run", type: "boolean", summary: "Preview only: build and print the plan, change nothing" },
+  { name: "store", type: "string", summary: "Use this store instead of the default" },
+  { name: "config", type: "string", summary: "Read this config file instead of the default" },
+  { name: "quiet", type: "boolean", summary: "Print only results, warnings and errors" },
+  { name: "verbose", type: "boolean", summary: "Print debug logs too" },
 ];
 
 export interface Globals {
@@ -60,7 +59,7 @@ export type Gated =
 type ParseOptions = Record<string, { type: "boolean" | "string"; multiple?: boolean }>;
 
 const globalParseOptions = (): ParseOptions =>
-  Object.fromEntries(GLOBAL_OPTIONS.map((o) => [o.name, { type: o.kind }]));
+  Object.fromEntries(GLOBAL_OPTIONS.map((o) => [o.name, { type: o.type }]));
 
 const usage = (message: string, fix: string): Failure => fail(finding("usage.invalid", { message, fix }));
 
@@ -79,11 +78,11 @@ const globalsOf = (values: Record<string, unknown>): Globals => ({
 const parseErrorMessage = (verb: string, error: unknown): string => {
   const text = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: string }).code;
-  const option = /'(-[^']*)'/.exec(text)?.[1];
+  const option = /'(-[^' ]*)/.exec(text)?.[1];
   if (code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" && option !== undefined)
     return `${verb} has no option ${option}`;
   if (code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE" && option !== undefined) {
-    return text.includes("argument missing") ? `${option} needs a value` : `${option} takes no value`;
+    return text.includes("does not take") ? `${option} takes no value` : `${option} needs a value`;
   }
   return `${verb}: ${text.split("\n")[0]}`;
 };
@@ -115,7 +114,7 @@ const aliases = (argv: readonly string[], registry: Registry): string[] => {
 };
 
 /** Finds, parses and gates one invocation. `argv` is everything after `plainport`, exactly as given. */
-export const gate = (rawArgv: readonly string[], registry: Registry): Gated => {
+export const gate = (rawArgv: readonly string[], registry: Registry, plans: PlanStore): Gated => {
   const argv = aliases(rawArgv, registry);
   const scan = parseArgs({
     args: argv,
@@ -171,12 +170,7 @@ export const gate = (rawArgv: readonly string[], registry: Registry): Gated => {
       args: rest,
       options: {
         ...globalParseOptions(),
-        ...Object.fromEntries(
-          options.map((o) => [
-            o.name,
-            o.kind === "strings" ? { type: "string" as const, multiple: true } : { type: o.kind },
-          ]),
-        ),
+        ...Object.fromEntries(options.map((o) => [o.name, { type: o.type, multiple: o.multiple }])),
       },
       strict: true,
       allowPositionals: true,
@@ -224,9 +218,10 @@ export const gate = (rawArgv: readonly string[], registry: Registry): Gated => {
     command: verb,
     argv: rawArgv,
     risk: resolveRisk(command, checked.data),
-    supportsDryRun: command.dryRun,
+    supportsDryRun: command.dryRun !== false,
     yes: globals.yes,
-    plan: typeof checked.data.plan === "string",
+    plan:
+      command.acceptsPlan && typeof checked.data.plan === "string" && plans.approved(verb, checked.data.plan),
     dryRun: globals.dryRun,
   });
   if (!verdict.ok) return refuse(verdict);

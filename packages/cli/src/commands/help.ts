@@ -19,14 +19,17 @@ const InfoSchema = z.looseObject({
   options: z.array(
     z.looseObject({
       name: z.string(),
-      kind: z.enum(["boolean", "string", "strings"]),
+      type: z.enum(["boolean", "string"]),
+      multiple: z.boolean(),
       summary: z.string(),
-      required: z.boolean(),
       risk: RiskClassSchema.optional(),
     }),
   ),
   examples: z.array(z.looseObject({ argv: z.array(z.string()), summary: z.string() })),
 });
+
+/** How help names a global option's value. */
+const VALUE_NAMES: Record<string, string> = { store: "name", config: "path" };
 
 const table = (rows: [string, string][]): string[] => {
   const width = Math.max(0, ...rows.map(([left]) => left.length));
@@ -35,7 +38,7 @@ const table = (rows: [string, string][]): string[] => {
 
 const globalRows = (): [string, string][] =>
   GLOBAL_OPTIONS.map((o) => [
-    o.kind === "string" ? `--${o.name} <${o.value ?? "value"}>` : `--${o.name}`,
+    o.type === "string" ? `--${o.name} <${VALUE_NAMES[o.name] ?? "value"}>` : `--${o.name}`,
     o.summary,
   ]);
 
@@ -71,7 +74,7 @@ const detail = (c: CommandInfo): string => {
     lines.push(
       ...table(
         c.options.map((o) => [
-          o.kind === "boolean" ? `--${o.name}` : `--${o.name} <value>`,
+          o.type === "boolean" ? `--${o.name}` : `--${o.name} <value>${o.multiple ? "..." : ""}`,
           o.risk === undefined ? o.summary : `${o.summary} (${o.risk})`,
         ]),
       ),
@@ -90,6 +93,7 @@ export const help = defineCommand({
   summary: "Show every command, or one command's arguments, options and risk class",
   risk: "read",
   dryRun: false,
+  acceptsPlan: false,
   positionals: ["command"],
   args: z.strictObject({
     command: z.array(z.string()).optional().meta({ description: "A command, e.g. version or root add" }),

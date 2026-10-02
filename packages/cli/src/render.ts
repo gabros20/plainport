@@ -35,6 +35,11 @@ const findingLine = (finding: Finding): string => `${finding.severity}  ${findin
 export class Output {
   #finished = false;
 
+  /** Whether the final result has been printed (or printing it was attempted). */
+  get finished(): boolean {
+    return this.#finished;
+  }
+
   constructor(
     private readonly io: IO,
     private readonly mode: RenderMode,
@@ -84,15 +89,13 @@ export class Output {
     this.#finished = true;
     const hint = hintOf(failure.finding);
     if (this.mode.json) {
-      const envelope = errorEnvelope(
-        this.verb,
-        failure.exitCode,
-        failure.finding.message,
-        hint === undefined ? {} : { hint },
-      );
+      const envelope = errorEnvelope(this.verb, failure.exitCode, failure.finding.message, {
+        ...(hint === undefined ? {} : { hint }),
+        finding: failure.finding,
+      });
       this.io.stdout(`${JSON.stringify(envelope)}\n`);
     } else {
-      this.io.stderr(`plainport: ${failure.finding.message}\n`);
+      this.io.stderr(`plainport: ${failure.finding.code}: ${failure.finding.message}\n`);
       if (hint !== undefined) this.io.stderr(hint.startsWith("re-run: ") ? `${hint}\n` : `fix: ${hint}\n`);
     }
     return failure.exitCode;

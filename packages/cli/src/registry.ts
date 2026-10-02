@@ -1,16 +1,58 @@
 // The command registry (ADR-0005, ADR-0007, AGENTS.md rule 4): each command is defined once, with its argument
-// schema, output schema, risk class, dry-run support and handler. Parsing, the risk gate, help, completions and
+// schema, output schema, risk class, dry-run plan schema and handler. Parsing, the risk gate, help, completions and
 // plainport.json all read it; nothing else describes a command.
 //
 // The argument schema is the single description of a command's arguments: its keys are the positional names
 // (listed in order in `positionals`) and the option names, spelled as on the command line (`no-hydrate`). An
-// option's kind comes from its Zod type (boolean is a flag, string takes a value, an array of strings repeats),
+// option's type comes from its Zod type (boolean is a flag, string takes a value, an array of strings repeats),
 // its help text from `.meta({ description })`, and a higher risk class than its command's from
 // `.meta({ risk: "confirm" })` (machine-contract §4: `onload --adopt`).
 
 import type { PlainportEvent, Result, RiskClass, StreamEvent } from "@plainport/contract";
 import { RISK_CLASSES } from "@plainport/contract";
 import { z } from "zod";
+
+declare module "zod" {
+  interface GlobalMeta {
+    /** An option that raises its command's risk class when given (machine-contract §4). */
+    risk?: RiskClass;
+  }
+}
+
+/** The host: file system, processes and the home folder. A placeholder until Task 7 builds the host port. */
+export interface HostPort {
+  /** The user's home folder; tests pass one that is never the real home. */
+  readonly home: string;
+}
+
+export interface Clock {
+  now(): Date;
+}
+
+/** Approved plans (`--plan <id>`). Whether a plan is still fresh is checked when it runs (exit 6). */
+export interface PlanStore {
+  approved(command: string, id: string): boolean;
+}
+
+/** Every side effect a command may have goes through a port (AGENTS.md rule 5); run() takes them, tests pass fakes. */
+export interface Ports {
+  host: HostPort;
+  clock: Clock;
+  plans: PlanStore;
+}
+
+/** The --config path; loading the file arrives with the config task. */
+export interface ConfigRef {
+  readonly path: string | undefined;
+}
+
+/** Where a handler's events and logs go; the renderer decides how they print. */
+export interface OutputPort {
+  /** Streams a phase, progress or finding event (an NDJSON line under --json). */
+  emit(event: StreamEvent): void;
+  /** A log line on stderr; debug only with --verbose, nothing but warnings with --quiet. */
+  log(level: Extract<PlainportEvent, { type: "log" }>["level"], message: string): void;
+}
 
 export interface CommandContext {
   /** --json was given: the renderer prints NDJSON, and a handler must never write to stdout itself. */
@@ -24,12 +66,11 @@ export interface CommandContext {
   /** The risk class the gate let it run as: read under --dry-run, else the command's own or an option's. */
   risk: RiskClass;
   store: string | undefined;
-  config: string | undefined;
   registry: Registry;
-  /** Streams a phase, progress or finding event (an NDJSON line under --json). */
-  emit(event: StreamEvent): void;
-  /** A log line on stderr; debug only with --verbose, nothing but warnings with --quiet. */
-  log(level: Extract<PlainportEvent, { type: "log" }>["level"], message: string): void;
+  host: HostPort;
+  clock: Clock;
+  config: ConfigRef;
+  output: OutputPort;
 }
 
 export type Example = {
@@ -37,41 +78,56 @@ export type Example = {
   summary: string;
 };
 
-export interface CommandDef<A extends z.ZodObject = z.ZodObject, O extends z.ZodType = z.ZodType> {
+/** A command's dry run: the plan it returns as `data` (machine-contract §6), and how a person reads it. */
+export interface DryRun<P extends z.ZodType> {
+  plan: P;
+  human(plan: z.output<P>): string;
+}
+
+export interface CommandDef<
+  A extends z.ZodObject = z.ZodObject,
+  O extends z.ZodType = z.ZodType,
+  P extends z.ZodType = z.ZodNever,
+> {
   /** As typed after `plainport`: one word, or two for a command group (`root add`). */
   name: string;
   summary: string;
   risk: RiskClass;
-  /** Whether --dry-run gives a true preview. Without one, --dry-run is refused with exit 2 (D18). */
-  dryRun: boolean;
+  /** The plan a --dry-run returns, or false: then --dry-run is refused with exit 2 (D18). */
+  dryRun: false | DryRun<P>;
+  /** The command takes `--plan <id>`: an approved plan stands in for --yes. The args need a string `plan` option. */
+  acceptsPlan: boolean;
   /** The argument schema's positional keys, in order; an array-typed one takes the rest and must be last. */
   positionals: readonly (keyof z.output<A> & string)[];
   /** Strict: an unknown key is an error (D16). */
   args: A;
-  /** What `data` holds in the success envelope; open (D16). */
+  /** What `data` holds in the success envelope of a real run; open (D16). */
   output: O;
-  /** Invocations that run in tests without side effects; help prints them and the contract test runs them. */
+  /** Invocations the contract test runs against fake ports; help prints them. */
   examples: readonly Example[];
-  /** The human rendering of the data, printed to stdout. */
+  /** The human rendering of a real run's data, printed to stdout. */
   human(data: z.output<O>): string;
-  handler(args: z.output<A>, ctx: CommandContext): Result<z.output<O>> | Promise<Result<z.output<O>>>;
+  /** Returns the plan under --dry-run (ctx.dryRun), the output otherwise; run() checks each against its schema. */
+  handler(
+    args: z.output<A>,
+    ctx: CommandContext,
+  ): Result<z.output<O> | z.output<P>> | Promise<Result<z.output<O> | z.output<P>>>;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: a registry holds commands of every argument and output type.
-export type AnyCommand = CommandDef<any, any>;
+export type AnyCommand = CommandDef<any, any, any>;
 export type Registry = readonly AnyCommand[];
 
-export const defineCommand = <A extends z.ZodObject, O extends z.ZodType>(
-  def: CommandDef<A, O>,
+export const defineCommand = <A extends z.ZodObject, O extends z.ZodType, P extends z.ZodType = z.ZodNever>(
+  def: CommandDef<A, O, P>,
 ): AnyCommand => def;
 
-export type OptionKind = "boolean" | "string" | "strings";
-
+/** An option as plainport.json and help --json publish it (D19). */
 export type OptionInfo = {
   name: string;
-  kind: OptionKind;
+  type: "boolean" | "string";
+  multiple: boolean;
   summary: string;
-  required: boolean;
   /** Set only when the option raises the command's risk class. */
   risk?: RiskClass;
 };
@@ -110,13 +166,14 @@ const metaOf = (schema: z.ZodType, key: string): unknown => {
   return undefined;
 };
 
-const kindOf = (schema: z.ZodType): OptionKind | undefined => {
+/** How parseArgs reads an option, from its Zod type; undefined for a type it cannot parse. */
+export const parseTypeOf = (schema: z.ZodType): Pick<OptionInfo, "type" | "multiple"> | undefined => {
   const { inner } = unwrap(schema);
-  if (inner instanceof z.ZodBoolean) return "boolean";
-  if (inner instanceof z.ZodString || inner instanceof z.ZodEnum) return "string";
-  if (inner instanceof z.ZodArray && unwrap(inner.def.element as z.ZodType).inner instanceof z.ZodString) {
-    return "strings";
-  }
+  if (inner instanceof z.ZodBoolean) return { type: "boolean", multiple: false };
+  if (inner instanceof z.ZodString || inner instanceof z.ZodEnum) return { type: "string", multiple: false };
+  const element = inner instanceof z.ZodArray ? unwrap(inner.def.element as z.ZodType).inner : undefined;
+  if (element instanceof z.ZodString || element instanceof z.ZodEnum)
+    return { type: "string", multiple: true };
   return undefined;
 };
 
@@ -144,13 +201,17 @@ export const optionsOf = (command: AnyCommand): OptionInfo[] => {
       const risk = metaOf(schema, "risk") as RiskClass | undefined;
       return {
         name,
-        kind: kindOf(schema) ?? "string",
+        ...(parseTypeOf(schema) ?? { type: "string", multiple: false }),
         summary: String(metaOf(schema, "description") ?? ""),
-        required: !unwrap(schema).optional,
         ...(risk === undefined ? {} : { risk }),
       };
     });
 };
+
+const isRequired = (command: AnyCommand, name: string): boolean =>
+  !unwrap((command.args.shape as Record<string, z.ZodType>)[name] as z.ZodType).optional;
+
+const rank = (risk: RiskClass): number => RISK_CLASSES.indexOf(risk);
 
 /** The risk class the arguments call for: the command's own, raised by any option that is set and declares more. */
 export const resolveRisk = (command: AnyCommand, args: Record<string, unknown>): RiskClass => {
@@ -158,7 +219,7 @@ export const resolveRisk = (command: AnyCommand, args: Record<string, unknown>):
   for (const option of optionsOf(command)) {
     const value = args[option.name];
     const set = value !== undefined && value !== false && !(Array.isArray(value) && value.length === 0);
-    if (set && option.risk !== undefined && RISK_CLASSES.indexOf(option.risk) > RISK_CLASSES.indexOf(risk)) {
+    if (set && option.risk !== undefined && rank(option.risk) > rank(risk)) {
       risk = option.risk;
     }
   }
@@ -173,41 +234,73 @@ export const usageOf = (command: AnyCommand): string => {
     parts.push(p.required ? word : `[${word}]`);
   }
   for (const o of optionsOf(command)) {
-    const word = o.kind === "boolean" ? `--${o.name}` : `--${o.name} <value>`;
-    parts.push(o.required ? word : `[${word}]`);
+    const word = o.type === "boolean" ? `--${o.name}` : `--${o.name} <value>${o.multiple ? "..." : ""}`;
+    parts.push(isRequired(command, o.name) ? word : `[${word}]`);
   }
   return parts.join(" ");
 };
 
+/** Whether any object in the JSON Schema is closed (`additionalProperties: false`), which output must never be (D16). */
+const closedSomewhere = (node: unknown): boolean => {
+  if (node === null || typeof node !== "object") return false;
+  if ((node as Record<string, unknown>).additionalProperties === false) return true;
+  return Object.values(node as Record<string, unknown>).some(closedSomewhere);
+};
+
+const isOpen = (schema: z.ZodType): boolean =>
+  !closedSomewhere(z.toJSONSchema(schema, { io: "output", unrepresentable: "any" }));
+
 /**
- * Registry invariants, checked by tests and before generation: unique names, positionals that exist and come
- * before a variadic one only at the end, option kinds parseArgs can parse, and no clash with a global option.
+ * Registry invariants, checked by tests and before generation: unique names; positionals that exist, with a
+ * variadic one only last; option types parseArgs can parse; no clash with a global or reserved option; option risk
+ * classes that are real and raise the command's; strict arguments and open outputs and plans (D16); and --plan
+ * declared exactly when the command accepts a plan.
  */
 export const registryProblems = (registry: Registry, globalNames: readonly string[]): string[] => {
   const problems: string[] = [];
+  const reserved = [...globalNames, "help", "version"];
   const names = new Set<string>();
   for (const command of registry) {
-    if (names.has(command.name)) problems.push(`${command.name}: registered twice`);
+    const say = (problem: string) => problems.push(`${command.name}: ${problem}`);
+    if (names.has(command.name)) say("registered twice");
     names.add(command.name);
-    if (!/^[a-z][a-z-]*( [a-z][a-z-]*)?$/.test(command.name))
-      problems.push(`${command.name}: not a command name`);
+    if (!/^[a-z][a-z-]*( [a-z][a-z-]*)?$/.test(command.name)) say("not a command name");
     const shape = command.args.shape as Record<string, z.ZodType>;
     command.positionals.forEach((name: string, index: number) => {
-      if (!(name in shape))
-        problems.push(`${command.name}: positional ${name} is not in the argument schema`);
+      if (!(name in shape)) say(`positional ${name} is not in the argument schema`);
       else if (
         unwrap(shape[name] as z.ZodType).inner instanceof z.ZodArray &&
         index < command.positionals.length - 1
       )
-        problems.push(`${command.name}: variadic positional ${name} is not last`);
+        say(`variadic positional ${name} is not last`);
     });
     for (const [name, schema] of fields(command)) {
       if ((command.positionals as readonly string[]).includes(name)) continue;
-      if (kindOf(schema) === undefined)
-        problems.push(`${command.name}: option --${name} is not boolean or string`);
-      if (globalNames.includes(name))
-        problems.push(`${command.name}: option --${name} clashes with a global option`);
+      if (parseTypeOf(schema) === undefined)
+        say(`option --${name} is not boolean, string or repeatable string`);
+      if (reserved.includes(name)) say(`option --${name} clashes with a global option`);
+      const risk = metaOf(schema, "risk");
+      if (risk === undefined) continue;
+      if (!(RISK_CLASSES as readonly unknown[]).includes(risk)) {
+        say(
+          `option --${name} declares risk ${String(risk)}, which is not ${RISK_CLASSES.slice(0, -1).join(", ")} or ${RISK_CLASSES.at(-1)}`,
+        );
+      } else if (rank(risk as RiskClass) <= rank(command.risk)) {
+        say(
+          `option --${name} declares risk ${String(risk)}, which does not raise the command's ${command.risk}`,
+        );
+      }
     }
+    if (!(command.args.def.catchall instanceof z.ZodNever))
+      say("argument schema is not strict (use z.strictObject, D16)");
+    if (!isOpen(command.output)) say("output schema is not open (use z.looseObject, D16)");
+    if (command.dryRun !== false && !isOpen(command.dryRun.plan))
+      say("plan schema is not open (use z.looseObject, D16)");
+    const planOption = shape.plan === undefined ? undefined : parseTypeOf(shape.plan);
+    if (command.acceptsPlan && (planOption?.type !== "string" || planOption.multiple))
+      say("accepts --plan but has no string option named plan");
+    if (!command.acceptsPlan && "plan" in shape)
+      say("has an option named plan but does not declare acceptsPlan");
   }
   return problems;
 };
@@ -282,7 +375,7 @@ export const commandInfo = (command: AnyCommand): CommandInfo => ({
   summary: command.summary,
   usage: usageOf(command),
   risk: command.risk,
-  dryRun: command.dryRun,
+  dryRun: command.dryRun !== false,
   positionals: positionalsOf(command),
   options: optionsOf(command),
   examples: command.examples.map((e: Example) => ({ argv: [...e.argv], summary: e.summary })),

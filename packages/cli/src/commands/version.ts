@@ -10,6 +10,7 @@ export const version = defineCommand({
   summary: "Print plainport's version",
   risk: "read",
   dryRun: false,
+  acceptsPlan: false,
   positionals: [],
   args: z.strictObject({}),
   output: z.looseObject({ version: z.string().min(1) }),

@@ -55,6 +55,7 @@ describe("--json: NDJSON event lines, then exactly one final envelope", () => {
       summary: "Returns the wrong shape",
       risk: "read",
       dryRun: false,
+      acceptsPlan: false,
       positionals: [],
       args: z.strictObject({}),
       output: z.looseObject({ n: z.number() }),
@@ -65,6 +66,54 @@ describe("--json: NDJSON event lines, then exactly one final envelope", () => {
     const run = await capture(["liar", "--json"], [...FAKE_REGISTRY, liar]);
     expect(run.code).toBe(1);
     expect(JSON.parse(run.out)).toMatchObject({ ok: false, error: { code: 1 } });
+  });
+});
+
+describe("the plan is the dry run's data (I1)", () => {
+  test("a dry run's data is checked against the plan schema, a real run's against the output schema", async () => {
+    const plan = await capture(["ship", "web", "--dry-run", "--json"]);
+    expect(JSON.parse(plan.out)).toMatchObject({ ok: true, data: { plan: "ship web" } });
+    const wrongPlan = await capture(["ship", "web", "--dry-run", "--lie", "--json"]);
+    expect(wrongPlan.code).toBe(1);
+    expect(JSON.parse(wrongPlan.out)).toMatchObject({
+      ok: false,
+      error: { code: 1, finding: { code: "contract.invalid" } },
+    });
+    const wrongOutput = await capture(["ship", "web", "--yes", "--lie", "--json"]);
+    expect(wrongOutput.code).toBe(1);
+  });
+});
+
+describe("every throw ends in exactly one envelope (I6)", () => {
+  test("a throw while checking the arguments is internal.unexpected, exit 1, one envelope", async () => {
+    const run = await capture(["fragile", "w", "--json"]);
+    expect(run.code).toBe(1);
+    expect(lines(run.out)).toHaveLength(1);
+    expect(JSON.parse(run.out)).toMatchObject({
+      ok: false,
+      verb: "fragile",
+      error: { code: 1, finding: { code: "internal.unexpected" } },
+    });
+    expect(JSON.parse(run.out).error.message).toContain("transform bug");
+  });
+
+  test("a throw while checking the arguments in human mode prints one line and exits 1", async () => {
+    const run = await capture(["fragile", "w"]);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("plainport: internal.unexpected: ");
+  });
+
+  test("a stdout that fails while printing the envelope makes run() return 1, never reject", async () => {
+    let calls = 0;
+    const run = await capture(["show", "--json"], undefined, {
+      stdout: () => {
+        calls += 1;
+        throw new Error("EPIPE");
+      },
+    });
+    expect(run.code).toBe(1);
+    expect(calls).toBe(1);
+    expect(run.err).toContain("EPIPE");
   });
 });
 
@@ -89,6 +138,6 @@ describe("human output", () => {
     const run = await capture(["boom"]);
     expect(run.code).toBe(1);
     expect(run.out).toBe("");
-    expect(run.err).toContain("plainport: unexpected failure in boom: kaboom\n");
+    expect(run.err).toContain("plainport: internal.unexpected: unexpected failure in boom: kaboom\n");
   });
 });
