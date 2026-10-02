@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  constants,
+  copyFileSync,
+  cpSync,
   createReadStream,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   realpath,
@@ -12,7 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { open, writeFile } from "node:fs/promises";
+import { copyFile, open, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import { takeViolations, tripwireInstalled } from "./home-tripwire.ts";
@@ -130,8 +134,6 @@ describe("home tripwire: refusals", () => {
   });
 });
 
-// The checkout normally lives under the real home; these cases only mean something when it does.
-const checkoutUnderHome = realHome !== "" && under(realHome, repoRoot);
 // A path inside the checkout whose parent is a regular file: nothing can ever be created there.
 const checkoutProbe = () => join(repoRoot, "VERSION", `probe-${randomUUID()}`);
 
@@ -171,25 +173,22 @@ describe("home tripwire: write-capable calls count as writes", () => {
     expect(takeViolations()).toHaveLength(2);
   });
 
-  test.skipIf(!checkoutUnderHome)("writes into the checkout are refused", () => {
+  test("writes into the checkout are refused", () => {
     expect(() => writeFileSync(checkoutProbe(), "x")).toThrow(/home tripwire/);
     expect(takeViolations()).toHaveLength(1);
   });
 
-  test.skipIf(!checkoutUnderHome)(
-    "read APIs with write-capable flags inside the checkout are refused",
-    async () => {
-      const version = join(repoRoot, "VERSION");
-      expect(() => readFileSync(version, { flag: "a" })).toThrow(/home tripwire/);
-      expect(() => createReadStream(version, { flags: "a" })).toThrow(/home tripwire/);
-      expect(() => openSync(version, "r+")).toThrow(/home tripwire/);
-      await expect(open(version, "a")).rejects.toThrow(/home tripwire/);
-      expect(takeViolations()).toHaveLength(4);
-      expect(readFileSync(version, { flag: "r" }).length).toBeGreaterThan(0);
-    },
-  );
+  test("read APIs with write-capable flags inside the checkout are refused", async () => {
+    const version = join(repoRoot, "VERSION");
+    expect(() => readFileSync(version, { flag: "a" })).toThrow(/home tripwire/);
+    expect(() => createReadStream(version, { flags: "a" })).toThrow(/home tripwire/);
+    expect(() => openSync(version, "r+")).toThrow(/home tripwire/);
+    await expect(open(version, "a")).rejects.toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(4);
+    expect(readFileSync(version, { flag: "r" }).length).toBeGreaterThan(0);
+  });
 
-  test.skipIf(!checkoutUnderHome)("Bun.file mutators inside the checkout are refused", async () => {
+  test("Bun.file mutators inside the checkout are refused", async () => {
     const file = Bun.file(checkoutProbe());
     expect(() => file.writer()).toThrow(/home tripwire/);
     await expect(file.write("x")).rejects.toThrow(/home tripwire/);
@@ -197,5 +196,53 @@ describe("home tripwire: write-capable calls count as writes", () => {
     await expect(file.unlink()).rejects.toThrow(/home tripwire/);
     expect(() => file.slice(0, 1).writer()).toThrow(/home tripwire/);
     expect(takeViolations()).toHaveLength(5);
+  });
+});
+
+describe("home tripwire: numeric open flags", () => {
+  test("O_CREAT, O_TRUNC and O_APPEND count as writes even with O_RDONLY", () => {
+    const { O_RDONLY, O_CREAT, O_TRUNC, O_APPEND } = constants;
+    for (const flags of [O_RDONLY | O_CREAT, O_RDONLY | O_TRUNC, O_RDONLY | O_APPEND]) {
+      expect(() => openSync(checkoutProbe(), flags)).toThrow(/home tripwire/);
+    }
+    expect(takeViolations()).toHaveLength(3);
+    expect(() => openSync(join(repoRoot, "VERSION"), O_RDONLY)).not.toThrow();
+  });
+});
+
+describe("home tripwire: copies read their source and write their destination", () => {
+  test("copying a checkout file into the sandbox is allowed", async () => {
+    const source = join(repoRoot, "VERSION");
+    const into = mkdtempSync(join(sandbox, "copy-"));
+    copyFileSync(source, join(into, "a"));
+    cpSync(source, join(into, "b"));
+    await copyFile(source, join(into, "c"));
+    expect(readFileSync(join(into, "c"), "utf8")).toBe(readFileSync(source, "utf8"));
+    expect(takeViolations()).toEqual([]);
+  });
+
+  test("copying into the checkout or the real home is refused", () => {
+    const source = join(repoRoot, "VERSION");
+    expect(() => copyFileSync(source, checkoutProbe())).toThrow(/home tripwire/);
+    expect(() => cpSync(source, realHomeProbe())).toThrow(/home tripwire/);
+    expect(takeViolations()).toHaveLength(2);
+  });
+});
+
+describe("home tripwire: a checkout outside the real home", () => {
+  test("writes into the checkout still fail the test", () => {
+    // Pretend the real home is an unrelated temp directory, so the checkout is no longer under it.
+    const fakeHome = mkdtempSync(join(sandbox, "fake-home-"));
+    const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/checkout-write.fixture.ts"], {
+      cwd: repoRoot,
+      env: { ...process.env, PLAINPORT_TRIPWIRE_REAL_HOME: fakeHome },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = run.stdout.toString() + run.stderr.toString();
+    expect(run.exitCode).not.toBe(0);
+    expect(output).toContain("home tripwire: writeFileSync");
+    expect(output).toContain("is in the checkout");
+    expect(output).toMatch(/\b0 pass\b/);
   });
 });

@@ -4,10 +4,16 @@
 // node:fs and Bun's file and spawn APIs so that any test resolving a path under the real home fails: the call
 // throws, and a global afterEach fails the test even if the test swallowed the error. Paths are compared after
 // resolving symlinks, and case-insensitively on macOS. Reads inside this repository are allowed, because the
-// checkout itself usually lives under the real home; writes to it are not (run decision D7).
+// checkout itself usually lives under the real home; writes to it are violations wherever it lives (run
+// decision D7).
 //
-// This is a best-effort net over JS file and spawn calls: a child process handed an absolute real-home path is
-// not caught here; the host port refuses those (Task 7, run decision D6).
+// It catches accidental real-home access by ordinary test code; it is not a security boundary (run decision D6).
+// Known limits, by design; the authoritative refusal of real-home paths is the host port's (Task 7):
+// - `..` after a symlink: paths are normalized before symlinks are resolved, as path.resolve does.
+// - Link versus target: unlink and rename are judged by where a final symlink points, not by the link itself.
+// - Already-open descriptors and FileHandles: fchmod, ftruncate, FileHandle methods and the like are not wrapped.
+// - Native code, and shell paths inside Bun.$.
+// - Child processes handed an absolute real-home path, or an explicit env with the real HOME.
 //
 // Bun quirks this works around (Bun 1.3.14):
 // - os.homedir() and the default environment of Bun.spawn and node:child_process are fixed at process start;
@@ -76,10 +82,15 @@ const realHomeKey = canonical(realHome);
 const repoKey = canonical(repoRoot);
 
 const tmp = resolve(originalTmpdir());
-if (isUnder(realHomeKey, canonical(tmp))) {
-  throw new Error(
-    `home tripwire: the temp directory ${tmp} is under the real home ${realHome}; set TMPDIR outside it and re-run`,
-  );
+for (const [what, root] of [
+  ["the real home", realHomeKey],
+  ["the checkout", repoKey],
+] as const) {
+  if (isUnder(root, canonical(tmp))) {
+    throw new Error(
+      `home tripwire: the temp directory ${tmp} is in ${what}; set TMPDIR outside it and re-run`,
+    );
+  }
 }
 
 const sandbox = mkdtempSync(join(tmp, "plainport-test-home-"));
@@ -139,11 +150,13 @@ const guard = (op: string, value: unknown, write: boolean): void => {
   const path = toPath(value);
   if (path === undefined) return;
   const key = canonical(path);
-  if (!isUnder(realHomeKey, key)) return;
-  if (!write && isUnder(repoKey, key)) return;
+  const inCheckout = isUnder(repoKey, key);
+  // Checkout: reads are fine, writes never are. Elsewhere: anything under the real home is refused.
+  if (inCheckout ? !write : !isUnder(realHomeKey, key)) return;
   const resolved = key === foldCase(path) ? "" : ` (resolves to ${key})`;
+  const where = inCheckout ? `is in the checkout ${repoRoot}` : `is under the real home ${realHome}`;
   const message =
-    `home tripwire: ${op} ${path}${resolved} is under the real home ${realHome}. ` +
+    `home tripwire: ${op} ${path}${resolved} ${where}. ` +
     `Tests must not touch it: use a temp directory or the sandboxed HOME (${sandbox}). See AGENTS.md "Testing".`;
   violations.push(message);
   throw new Error(message);
@@ -168,8 +181,6 @@ const writes: Record<string, number[]> = {
   appendFile: [0],
   chmod: [0],
   chown: [0],
-  copyFile: [0, 1],
-  cp: [0, 1],
   lchmod: [0],
   lchown: [0],
   link: [0, 1],
@@ -187,8 +198,11 @@ const writes: Record<string, number[]> = {
   createWriteStream: [0],
 };
 
+const { O_ACCMODE = 3, O_CREAT, O_TRUNC, O_APPEND } = fs.constants as Record<string, number>;
 const isWriteFlag = (flags: unknown): boolean =>
-  typeof flags === "number" ? (flags & 3) !== 0 : typeof flags === "string" && /[wa+]/.test(flags);
+  typeof flags === "number"
+    ? (flags & O_ACCMODE) !== 0 || (flags & ((O_CREAT ?? 0) | (O_TRUNC ?? 0) | (O_APPEND ?? 0))) !== 0
+    : typeof flags === "string" && /[wa+]/.test(flags);
 // readFile takes { flag }, createReadStream takes { flags }; either may be an encoding string instead.
 const optionFlag = (options: unknown): unknown =>
   typeof options === "object" && options !== null
@@ -233,6 +247,18 @@ for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
   }
   for (const variant of ["open", "openSync"]) {
     wrap(target, variant, (args) => guard(variant, args[0], isWriteFlag(args[1])), async);
+  }
+  // Copies read their source and write their destination.
+  for (const variant of ["copyFile", "copyFileSync", "cp", "cpSync"]) {
+    wrap(
+      target,
+      variant,
+      (args) => {
+        guard(variant, args[0], false);
+        guard(variant, args[1], true);
+      },
+      async,
+    );
   }
   for (const variant of ["readFile", "readFileSync", "createReadStream"]) {
     wrap(target, variant, (args) => guard(variant, args[0], isWriteFlag(optionFlag(args[1]))), async);
