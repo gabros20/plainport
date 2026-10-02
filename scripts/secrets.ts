@@ -16,8 +16,8 @@ if (Bun.which("docker") === null) {
 }
 
 const scan = staged
-  ? ["git", "--staged", "--no-banner", "--redact", "/repo"]
-  : ["detect", "--source", "/repo", "--no-banner", "--redact"];
+  ? ["git", "--staged", "--no-banner", "--redact", "--verbose", "/repo"]
+  : ["detect", "--source", "/repo", "--no-banner", "--redact", "--verbose"];
 const run = Bun.spawnSync(["docker", "run", "--rm", "-v", `${root}:/repo:ro`, IMAGE, ...scan], {
   stdout: "inherit",
   stderr: "inherit",
