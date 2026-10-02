@@ -76,6 +76,15 @@ describe("risk gate (ADR-0007, D15)", () => {
     );
   });
 
+  test("the dry-run refusal's fix, plainport help <command>, runs exactly as printed", async () => {
+    const refusal = await capture(["write", "web", "--dry-run"]);
+    const fix = /plainport (help \S+)\n$/.exec(refusal.err)?.[1];
+    expect(fix).toBe("help write");
+    const help = await capture((fix ?? "").split(" "));
+    expect(help.code).toBe(0);
+    expect(help.out).toContain("Usage: plainport write <project>");
+  });
+
   test("an option can raise the risk class: write --adopt is confirm", async () => {
     expect((await capture(["write", "web"])).code).toBe(0);
     const run = await capture(["write", "web", "--adopt"]);
