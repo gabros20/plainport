@@ -23,6 +23,7 @@
         "@clack/prompts": "1.8.1",
         "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
+        "@plainport/eco-node": "workspace:*",
         "@plainport/host-macos": "workspace:*",
         "zod": "4.6.5",
       },
@@ -44,6 +45,7 @@
     "packages/eco-node": {
       "name": "@plainport/eco-node",
       "dependencies": {
+        "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
       },
     },

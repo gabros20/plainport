@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "fixture-bun",
+      "dependencies": {
+        "left-pad": "1.3.0",
+      },
+    },
+  },
+  "packages": {
+    "left-pad": ["left-pad@1.3.0", "", {}, "sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQEk7Ug+PvvYM5mSAxV7zVfIXGANYXNmXgtgMI6sA8cfIgpw=="],
+  }
+}

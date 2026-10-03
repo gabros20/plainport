@@ -1,0 +1,59 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:npm",
+    "root": "work",
+    "path": "npm"
+  },
+  "include": {
+    "files": 5,
+    "bytes": 40772,
+    "largest": [
+      {
+        "path": "public/hero.mp4",
+        "bytes": 40000
+      },
+      {
+        "path": "package-lock.json",
+        "bytes": 505
+      },
+      {
+        "path": "package.json",
+        "bytes": 198
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": "node_modules",
+      "bytes": 1900,
+      "plugin": "node",
+      "reason": "installed dependencies; npm ci from package-lock.json puts them back"
+    },
+    {
+      "path": "dist",
+      "bytes": 800,
+      "plugin": "node",
+      "reason": "build output; the build script (tsc --outDir dist) makes it again"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "npm ci"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}

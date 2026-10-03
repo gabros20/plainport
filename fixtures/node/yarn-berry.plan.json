@@ -1,0 +1,65 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:yarn-berry",
+    "root": "work",
+    "path": "yarn-berry"
+  },
+  "include": {
+    "files": 8,
+    "bytes": 25718,
+    "largest": [
+      {
+        "path": "assets/video.mp4",
+        "bytes": 25000
+      },
+      {
+        "path": "yarn.lock",
+        "bytes": 283
+      },
+      {
+        "path": "package.json",
+        "bytes": 212
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": ".yarn/unplugged",
+      "bytes": 5000,
+      "plugin": "node",
+      "reason": "installed dependencies; yarn install --immutable from yarn.lock puts them back"
+    },
+    {
+      "path": ".yarn/install-state.gz",
+      "bytes": 700,
+      "plugin": "node",
+      "reason": "installed dependencies; yarn install --immutable from yarn.lock puts them back"
+    },
+    {
+      "path": "dist",
+      "bytes": 600,
+      "plugin": "node",
+      "reason": "build output; the build script (tsup src/index.ts) makes it again"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "yarn install --immutable"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}

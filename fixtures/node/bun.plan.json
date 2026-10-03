@@ -1,0 +1,59 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:bun",
+    "root": "work",
+    "path": "bun"
+  },
+  "include": {
+    "files": 5,
+    "bytes": 20556,
+    "largest": [
+      {
+        "path": "data/sample.db",
+        "bytes": 20000
+      },
+      {
+        "path": "bun.lock",
+        "bytes": 322
+      },
+      {
+        "path": "package.json",
+        "bytes": 192
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": "node_modules",
+      "bytes": 1200,
+      "plugin": "node",
+      "reason": "installed dependencies; bun install --frozen-lockfile from bun.lock puts them back"
+    },
+    {
+      "path": "dist",
+      "bytes": 700,
+      "plugin": "node",
+      "reason": "build output; the build script (bun build ./src/index.ts --outdir dist) makes it again"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "bun install --frozen-lockfile"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}
