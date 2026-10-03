@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { resolvePaths } from "../paths.ts";
-import { memoryBlobStore } from "../testing/memory-blob-store.ts";
+import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
 import {
   appendEvent,
@@ -9,8 +9,10 @@ import {
   CatalogEventSchema,
   encodeEvent,
   eventMirrorDir,
+  FOLD_VERSION,
   foldCatalog,
-  loadCatalogState,
+  loadCatalog,
+  MIRROR_STATE_KEY,
   mirrorEventLog,
   readEvents,
   STATE_KEY,
@@ -85,6 +87,27 @@ describe("catalog: event log on a store", () => {
     expect(decode(store.data.get(key))).toBe('{"v":1,"id":"other');
   });
 
+  test("a new onloaded event must say which head it was written over (D43)", async () => {
+    const store = memoryBlobStore();
+    const onload = {
+      v: 1 as const,
+      id: idAt(2001),
+      type: "onloaded" as const,
+      device: DEVICE,
+      at: "2026-10-03T12:00:00.000Z",
+      op: idAt(2001),
+      project: PROJECT,
+      root: ROOT,
+      path: "web",
+      base: idAt(501),
+    };
+    expect(await appendEvent(storeEventLog(store), onload)).toMatchObject({
+      ok: false,
+      finding: { code: "contract.invalid" },
+    });
+    expect((await appendEvent(storeEventLog(store), { ...onload, over: idAt(502) })).ok).toBe(true);
+  });
+
   test("an event that does not match its schema is a bug: contract.invalid, nothing written", async () => {
     const store = memoryBlobStore();
     const result = await appendEvent(storeEventLog(store), { ...offloaded(1), path: "../escape" });
@@ -149,23 +172,47 @@ describe("catalog: local event mirror", () => {
     expect(eventMirrorDir(paths.value, ".")).toBe(join("/home/u/.cache/plainport", "%2E"));
   });
 
-  test("sync copies the store's new events into the mirror and returns the union", async () => {
+  test("sync fetches only the events the mirror lacks and uploads only what the store lacks, one listing each", async () => {
     const remote = memoryBlobStore();
     const mirror = memoryBlobStore();
     for (const n of [1, 2]) await appendEvent(storeEventLog(remote), offloaded(n));
     const localOnly = offloaded(3);
     await appendEvent(mirrorEventLog(mirror), localOnly);
+    remote.calls.get = 0;
+    remote.calls.list = 0;
+    mirror.calls.list = 0;
 
     const first = await syncMirror(storeEventLog(remote), mirrorEventLog(mirror));
     if (!first.ok) throw new Error(first.finding.message);
-    expect(first.value.copied).toBe(2);
-    expect(first.value.events.map((e) => e.id)).toEqual([offloaded(1).id, offloaded(2).id, localOnly.id]);
-    expect([...mirror.data.keys()].sort()).toEqual(
-      [1, 2, 3].map((n) => `events/${offloaded(n).id}.json`).sort(),
-    );
+    expect(first.value).toMatchObject({ copied: 2, uploaded: 1, findings: [] });
+    expect(remote.calls).toMatchObject({ list: 1, get: 2 });
+    expect(mirror.calls.list).toBe(1);
+    const keys = [1, 2, 3].map((n) => offloaded(n).id);
+    expect([...mirror.data.keys()].sort()).toEqual(keys.map((id) => `events/${id}.json`).sort());
+    expect([...remote.data.keys()].sort()).toEqual(keys.map((id) => `meta/v1/events/${id}.json`).sort());
 
+    remote.calls.get = 0;
     const second = await syncMirror(storeEventLog(remote), mirrorEventLog(mirror));
-    expect(second.ok && second.value.copied).toBe(0);
+    expect(second.ok && second.value).toMatchObject({ copied: 0, uploaded: 0 });
+    expect(remote.calls.get).toBe(0);
+
+    await appendEvent(storeEventLog(remote), offloaded(4));
+    remote.calls.get = 0;
+    const third = await syncMirror(storeEventLog(remote), mirrorEventLog(mirror));
+    expect(third.ok && third.value.copied).toBe(1);
+    expect(remote.calls.get).toBe(1);
+  });
+
+  test("an event the mirror holds torn (different size) is fetched again and completed", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    const event = offloaded(1);
+    await appendEvent(storeEventLog(remote), event);
+    const whole = remote.data.get(`meta/v1/events/${event.id}.json`) as Uint8Array;
+    mirror.data.set(`events/${event.id}.json`, whole.subarray(0, 10));
+    const synced = await syncMirror(storeEventLog(remote), mirrorEventLog(mirror));
+    expect(synced.ok && synced.value.copied).toBe(1);
+    expect(mirror.data.get(`events/${event.id}.json`)).toEqual(whole);
   });
 
   test("an unreachable store fails the sync and leaves the mirror readable offline", async () => {
@@ -183,67 +230,127 @@ describe("catalog: local event mirror", () => {
   });
 });
 
-describe("catalog: state.json cache", () => {
-  test("built from the events, written to meta/v1/state.json, reused while the events are unchanged", async () => {
-    const store = memoryBlobStore();
-    const log = storeEventLog(store);
-    await appendEvent(log, offloaded(1));
-
-    const first = await loadCatalogState(store);
-    if (!first.ok) throw new Error(first.finding.message);
-    expect(first.value.cached).toBe(false);
-    expect(first.value.state).toEqual(foldCatalog([offloaded(1)]));
-    expect(STATE_KEY).toBe("meta/v1/state.json");
-    const cache = JSON.parse(decode(store.data.get(STATE_KEY)) as string);
-    expect(cache).toMatchObject({ v: 1, count: 1 });
-
-    const second = await loadCatalogState(store);
-    expect(second.ok && second.value.cached).toBe(true);
-    expect(second.ok && second.value.state).toEqual(first.value.state);
-  });
-
-  test("a new event makes the cache stale: the state is rebuilt from events and the cache rewritten", async () => {
-    const store = memoryBlobStore();
-    const log = storeEventLog(store);
-    await appendEvent(log, offloaded(1));
-    await loadCatalogState(store);
-    await appendEvent(log, offloaded(2, idAt(777)));
-
-    const result = await loadCatalogState(store);
+describe("catalog: loadCatalog, the one read path (D43)", () => {
+  const load = async (remote: MemoryBlobStore, mirror: MemoryBlobStore) => {
+    const result = await loadCatalog({ store: remote, mirror });
     if (!result.ok) throw new Error(result.finding.message);
-    expect(result.value.cached).toBe(false);
-    expect(result.value.state).toEqual(foldCatalog([offloaded(1), offloaded(2, idAt(777))]));
-    expect(JSON.parse(decode(store.data.get(STATE_KEY)) as string).count).toBe(2);
+    return result.value;
+  };
+
+  test("online: syncs, folds, caches beside the mirror and on the store; reuses the cache while nothing changed", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(remote), offloaded(1));
+
+    const first = await load(remote, mirror);
+    expect(first).toMatchObject({ stale: false, source: "store", cached: false });
+    expect(first.state).toEqual(foldCatalog([offloaded(1)]));
+    expect(STATE_KEY).toBe("meta/v1/state.json");
+    for (const cache of [remote.data.get(STATE_KEY), mirror.data.get(MIRROR_STATE_KEY)]) {
+      expect(JSON.parse(decode(cache) as string)).toMatchObject({ v: 1, fold: FOLD_VERSION, count: 1 });
+    }
+
+    const second = await load(remote, mirror);
+    expect(second).toMatchObject({ stale: false, cached: true, state: first.state });
   });
 
-  test("a damaged or foreign state.json is ignored and rebuilt, never trusted", async () => {
-    const store = memoryBlobStore();
-    await appendEvent(storeEventLog(store), offloaded(1));
+  test("a new event anywhere makes the cache stale: rebuilt from the events and rewritten", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(remote), offloaded(1));
+    await load(remote, mirror);
+    await appendEvent(storeEventLog(remote), offloaded(2, idAt(777)));
+    const result = await load(remote, mirror);
+    expect(result.cached).toBe(false);
+    expect(result.state).toEqual(foldCatalog([offloaded(1), offloaded(2, idAt(777))]));
+  });
+
+  test("I1: an event completed under the same name (a torn write on a store without hard links) refolds", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    const event = offloaded(1);
+    await appendEvent(storeEventLog(remote), offloaded(0));
+    const key = `meta/v1/events/${event.id}.json`;
+    const whole = encodeEvent(CatalogEventSchema.parse(event));
+    remote.data.set(key, whole.subarray(0, 25));
+
+    const torn = await load(remote, mirror);
+    expect(torn.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    expect(torn.state.projects[PROJECT]?.snapshots[event.snapshot]).toBeUndefined();
+
+    remote.data.set(key, whole); // the retry completed it: same name, new size
+    const completed = await load(remote, mirror);
+    expect(completed.cached).toBe(false);
+    expect(completed.findings).toEqual([]);
+    expect(completed.state.projects[PROJECT]?.snapshots[event.snapshot]).toBeDefined();
+  });
+
+  test("I3: a cache built by another fold version is rebuilt, never served", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(remote), offloaded(1));
+    await load(remote, mirror);
+    const cache = JSON.parse(decode(mirror.data.get(MIRROR_STATE_KEY)) as string);
+    const forged = { ...cache, fold: FOLD_VERSION + 1, state: { projects: {}, roots: {} } };
+    mirror.data.set(MIRROR_STATE_KEY, encode(forged));
+    const result = await load(remote, mirror);
+    expect(result).toMatchObject({ cached: false, state: foldCatalog([offloaded(1)]) });
+  });
+
+  test("a damaged or foreign cache is ignored and rebuilt", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(remote), offloaded(1));
     const expected = foldCatalog([offloaded(1)]);
     for (const bad of [
       "{oops",
       JSON.stringify({ v: 9 }),
       JSON.stringify({ v: 1, digest: "x", count: 1, state: {} }),
     ]) {
-      store.data.set(STATE_KEY, encode(bad));
-      const result = await loadCatalogState(store);
-      expect(result.ok && result.value).toMatchObject({ cached: false, state: expected });
+      mirror.data.set(MIRROR_STATE_KEY, encode(bad));
+      expect(await load(remote, mirror)).toMatchObject({ cached: false, state: expected });
     }
   });
 
-  test("the cache is optional: a failed cache write still returns the folded state", async () => {
-    const store = memoryBlobStore();
-    await appendEvent(storeEventLog(store), offloaded(1));
-    store.failNext("put");
-    const result = await loadCatalogState(store);
-    expect(result.ok && result.value.state).toEqual(foldCatalog([offloaded(1)]));
-    expect(store.data.has(STATE_KEY)).toBe(false);
+  test("the caches are optional: failed cache writes still return the folded state", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore({ refusePutsUnder: "state.json" });
+    await appendEvent(storeEventLog(remote), offloaded(1));
+    expect((await load(remote, mirror)).state).toEqual(foldCatalog([offloaded(1)]));
+    expect(mirror.data.has(MIRROR_STATE_KEY)).toBe(false);
   });
 
-  test("skipped events are reported with the state", async () => {
-    const store = memoryBlobStore();
-    store.data.set(`meta/v1/events/${idAt(42)}.json`, encode("{bad"));
-    const result = await loadCatalogState(store);
-    expect(result.ok && result.value.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+  test("I5: when the store is unreachable, the mirror's state comes back marked stale", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(remote), offloaded(1));
+    const online = await load(remote, mirror);
+    remote.failNext("list");
+    const offline = await load(remote, mirror);
+    expect(offline).toMatchObject({ stale: true, source: "mirror", state: online.state });
+    expect(offline.unreachable?.code).toBe("store.unreachable");
+  });
+
+  test("a store that fails otherwise is a failure, and a mirror that cannot be listed is too", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    remote.failNext("list", "store.failed");
+    expect(await loadCatalog({ store: remote, mirror })).toMatchObject({
+      ok: false,
+      finding: { code: "store.failed" },
+    });
+    mirror.failNext("list");
+    expect(await loadCatalog({ store: remote, mirror })).toMatchObject({ ok: false });
+  });
+
+  test("skipped events are reported with the state, from the cache too", async () => {
+    const remote = memoryBlobStore();
+    const mirror = memoryBlobStore();
+    mirror.data.set(`events/${idAt(42)}.json`, encode("{bad"));
+    const first = await load(remote, mirror);
+    expect(first.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    const again = await load(remote, mirror);
+    expect(again).toMatchObject({ cached: true });
+    expect(again.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
   });
 });

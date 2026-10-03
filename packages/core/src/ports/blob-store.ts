@@ -35,7 +35,12 @@ export interface BlobStore {
   capabilities(): BlobCapabilities;
   /** The key's bytes, or null when there is no such key. */
   get(key: string): Promise<Result<Uint8Array | null>>;
-  /** Writes the key whole: a reader sees the old bytes or the new ones, never a part. */
+  /**
+   * Writes the key. A replacing write is whole: a reader sees the old bytes or the new ones, never a part. A
+   * create-only write is whole where the store can link or rename into place; where it cannot (blob-fs on exFAT or
+   * FAT, D41) the key is created in place, so a reader may see a torn prefix, and a crash can leave one that the same
+   * writer's retry completes under the same name (D42).
+   */
   put(key: string, data: Uint8Array, opts?: PutOptions): Promise<Result<{ etag?: string }>>;
   /** Every key starting with `prefix` (which may be ""), sorted by key. */
   list(prefix: string): Promise<Result<BlobEntry[]>>;

@@ -14,21 +14,35 @@ import {
 export interface MemoryBlobStore extends BlobStore {
   /** The stored bytes by key, for assertions. */
   readonly data: Map<string, Uint8Array>;
-  /** The next call of `method` returns store.unreachable instead of running. */
-  failNext(method: "get" | "put" | "list" | "stat" | "delete"): void;
+  /** Calls made so far, by method, to count round trips. */
+  readonly calls: Record<Method, number>;
+  /** The next call of `method` returns `code` (store.unreachable by default) instead of running. */
+  failNext(method: Method, code?: "store.unreachable" | "store.failed"): void;
 }
 
-export const memoryBlobStore = (options: { createIfAbsent?: boolean } = {}): MemoryBlobStore => {
+type Method = "get" | "put" | "list" | "stat" | "delete";
+
+export const memoryBlobStore = (
+  options: {
+    createIfAbsent?: boolean /** Puts of keys ending with this fail with store.failed. */;
+    refusePutsUnder?: string;
+  } = {},
+): MemoryBlobStore => {
   const data = new Map<string, Uint8Array>();
-  const failing = new Set<string>();
-  const unreachable = (method: string): Failure | undefined => {
-    if (!failing.delete(method)) return undefined;
-    return fail(finding("store.unreachable", { message: `the memory store refused ${method} (failNext)` }));
+  const failing = new Map<string, "store.unreachable" | "store.failed">();
+  const calls: Record<Method, number> = { get: 0, put: 0, list: 0, stat: 0, delete: 0 };
+  const unreachable = (method: Method): Failure | undefined => {
+    calls[method]++;
+    const code = failing.get(method);
+    if (code === undefined) return undefined;
+    failing.delete(method);
+    return fail(finding(code, { message: `the memory store refused ${method} (failNext)` }));
   };
   return {
     data,
-    failNext: (method) => {
-      failing.add(method);
+    calls,
+    failNext: (method, code = "store.unreachable") => {
+      failing.set(method, code);
     },
     capabilities: () => ({ createIfAbsent: options.createIfAbsent ?? true, replaceIfMatch: false }),
     get: (key) => {
@@ -42,6 +56,9 @@ export const memoryBlobStore = (options: { createIfAbsent?: boolean } = {}): Mem
       if (opts.ifMatch !== undefined) throw new Error("memoryBlobStore: ifMatch is not supported");
       const refused = unreachable("put");
       if (refused) return Promise.resolve(refused);
+      if (options.refusePutsUnder !== undefined && key.endsWith(options.refusePutsUnder)) {
+        return Promise.resolve(fail(finding("store.failed", { message: `the memory store refuses ${key}` })));
+      }
       if (opts.ifNotExists && data.has(key)) {
         return Promise.resolve(
           fail(finding("store.key-exists", { message: `${key} already exists`, paths: [key] })),
