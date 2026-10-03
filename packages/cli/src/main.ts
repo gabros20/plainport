@@ -75,9 +75,16 @@ export const run = async (
       paths: () => resolvePaths(ports.env, { configFlag: globals.config, cwd: ports.cwd }),
     };
     const result = await command.handler(args, ctx);
-    if (!result.ok) return out.failure(result);
     const plan = globals.dryRun && command.dryRun !== false ? command.dryRun : undefined;
     const what = plan === undefined ? `${command.name}'s output` : `${command.name}'s plan`;
+    if (!result.ok) {
+      if (result.data === undefined) return out.failure(result);
+      // A failure with a result that stands (D14): the result is checked like a success's before it is printed.
+      const partial = decode(plan === undefined ? command.output : plan.plan, result.data, what);
+      if (!partial.ok) return out.failure(partial);
+      const human = plan === undefined ? command.human(partial.value) : plan.human(partial.value);
+      return out.failure({ ...result, data: partial.value }, human);
+    }
     const data = decode(plan === undefined ? command.output : plan.plan, result.value, what);
     if (!data.ok) return out.failure(data);
     return out.success(data.value, plan === undefined ? command.human(data.value) : plan.human(data.value));
@@ -129,7 +136,15 @@ if (import.meta.main) {
   };
   // One host for the whole invocation: SIGINT and SIGTERM stop every child it runs before plainport exits 130.
   const host = createMacosHost({ guard: guardFromEnv(process.env) });
-  const done = realPorts(host).then((ports) => run(process.argv.slice(2), io, ports));
+  const argv = process.argv.slice(2);
+  // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
+  const done = realPorts(host).then(
+    (ports) => run(argv, io, ports),
+    (error: unknown) =>
+      new Output(io, { json: wantsJson(argv), quiet: false, verbose: false }, argv[0] ?? "plainport").failure(
+        unexpected("loading saved plans", error),
+      ),
+  );
   const release = stopOnSignals(host, done, { stderr: (text) => process.stderr.write(text) });
   process.exitCode = await done;
   release();

@@ -5,7 +5,7 @@ import { isUlid, PLAN_TTL_MS, PlanSchema } from "@plainport/core";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import { gate } from "../gate.ts";
 import { preloadPlans } from "../plans.ts";
-import type { Ports } from "../registry.ts";
+import { type Ports, positionalsOf } from "../registry.ts";
 import { capture, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
 
@@ -96,19 +96,53 @@ describe("offload: dry run", () => {
     expect(existsSync(join(box.home, "work/web.plainport"))).toBe(false);
   });
 
-  test("blockers show in the plan with their fix, and the plan line says to fix them first", async () => {
+  const lockedRepo = () => {
     const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
     });
     expect(git.exitCode).toBe(0);
     box.file("work/web/.git/index.lock");
+  };
+
+  test("a plan with blockers exits 6 (D38): the plan on stdout with each fix, the refusal on stderr", async () => {
+    lockedRepo();
     const run = await cli(["offload", "work:web", "--dry-run"]);
-    expect(run.code).toBe(0);
+    expect(run.code).toBe(6);
     expect(run.out).toContain("  block     git.locked  ");
     expect(run.out).toContain("            fix: wait for the git command to finish");
     expect(run.out).toMatch(
       / {2}plan {6}[0-9A-Z]{26} is blocked: fix the findings above, then plan again\n$/,
     );
+    expect(run.err).toStartWith("plainport: git.locked: ");
+  });
+
+  test("under --json a blocked plan is the error envelope's data (D14), valid against the plan schema", async () => {
+    lockedRepo();
+    const run = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(6);
+    const env = envelope(run.out);
+    expect(env).toMatchObject({
+      ok: false,
+      verb: "offload",
+      error: { code: 6, finding: { code: "git.locked" } },
+    });
+    expect(PlanSchema.safeParse(env.data).success).toBe(true);
+    expect(env.data.findings.map((f: { code: string }) => f.code)).toContain("git.locked");
+  });
+
+  test("offload's argument is variadic in the contract, but M1 offloads one project (D38)", async () => {
+    const offload = REGISTRY.find((c) => c.name === "offload");
+    expect(offload === undefined ? undefined : positionalsOf(offload)).toEqual([
+      expect.objectContaining({ name: "project", variadic: true, required: true }),
+    ]);
+    const run = await cli(["offload", "work:web", "work:api", "--dry-run", "--json"]);
+    expect(run.code).toBe(2);
+    expect(envelope(run.out).error).toMatchObject({
+      finding: { code: "usage.invalid" },
+      message: expect.stringContaining("one project per offload until bulk offload lands"),
+    });
+    // Arguments are checked before the risk: no --yes, still a usage error.
+    expect((await cli(["offload", "work:web", "work:api"])).code).toBe(2);
   });
 
   test("an unknown project exits 4 before anything is planned", async () => {

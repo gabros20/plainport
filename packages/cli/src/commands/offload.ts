@@ -2,9 +2,10 @@
 // this machine and deletes the local copy. In this build only its preview runs: --dry-run (always read, D18) plans
 // the offload, prints the plan as DESIGN.md shows it, and saves it under plans/ so `--plan <id>` can approve it
 // (D36). The real run arrives with the offload saga (M1 Task 12); until then it refuses with command.unavailable
-// after the gate, so --yes or an approved plan still leaves everything as it was.
+// after the gate, so --yes or an approved plan still leaves everything as it was. A plan with blockers exits 6 with
+// the plan as the error's data (D14, D38). The argument is variadic in the contract; M1 takes one project (D38).
 
-import { type Finding, fail, finding, ok, shellWord } from "@plainport/contract";
+import { type Finding, fail, failWith, finding, ok, shellWord } from "@plainport/contract";
 import {
   ConfigLoader,
   PLAN_TTL_MS,
@@ -81,7 +82,11 @@ export const offload = defineCommand({
   acceptsPlan: true,
   positionals: ["project"],
   args: z.strictObject({
-    project: z.string().meta({ description: "An address (root:path), a unique name, a path, . or a stub" }),
+    project: z
+      .array(z.string())
+      .min(1)
+      .max(1, "one project per offload until bulk offload lands (D38)")
+      .meta({ description: "An address (root:path), a unique name, a path, . or a stub; one for now" }),
     plan: z.string().optional().meta({ description: "Run a plan a --dry-run saved, instead of --yes" }),
     "keep-deps": z
       .boolean()
@@ -105,14 +110,14 @@ export const offload = defineCommand({
         finding("command.unavailable", {
           message:
             "offload cannot run for real in this build yet (the offload saga arrives in M1 Task 12); nothing was changed",
-          fix: `plainport offload ${shellWord(args.project)} --dry-run`,
+          fix: `plainport offload ${args.project.map(shellWord).join(" ")} --dry-run`,
         }),
       );
     }
     const local = await thisDevice(ctx);
     if (!local.ok) return local;
     const { paths, device } = local.value;
-    const resolved = await resolveProject(ctx.io, paths, args.project, {
+    const resolved = await resolveProject(ctx.io, paths, args.project[0] as string, {
       cwd: ctx.cwd,
       env: ctx.env,
       device: device.name,
@@ -154,6 +159,8 @@ export const offload = defineCommand({
         `the plan could not be saved under ${paths.plansDir} (${systemErrorCode(error)}), so --plan ${planned.value.id} will not find it; use --yes instead`,
       );
     }
-    return ok(planned.value);
+    // A plan with blockers is a refusal that still shows the plan (D38): exit 6, the plan as data (D14).
+    const blocker = planned.value.findings.find((f) => f.severity === "block");
+    return blocker === undefined ? ok(planned.value) : failWith(blocker, planned.value, 6);
   },
 });

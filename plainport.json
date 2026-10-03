@@ -454,15 +454,15 @@
     {
       "name": "offload",
       "summary": "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
-      "usage": "plainport offload <project> [--plan <value>] [--keep-deps]",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps]",
       "risk": "confirm",
       "dryRun": true,
       "positionals": [
         {
           "name": "project",
-          "summary": "An address (root:path), a unique name, a path, . or a stub",
+          "summary": "An address (root:path), a unique name, a path, . or a stub; one for now",
           "required": true,
-          "variadic": false
+          "variadic": true
         }
       ],
       "options": [
@@ -484,8 +484,13 @@
         "type": "object",
         "properties": {
           "project": {
-            "type": "string",
-            "description": "An address (root:path), a unique name, a path, . or a stub"
+            "minItems": 1,
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "An address (root:path), a unique name, a path, . or a stub; one for now"
           },
           "plan": {
             "description": "Run a plan a --dry-run saved, instead of --yes",
@@ -2013,6 +2018,13 @@
       "allowable": false,
       "exitCode": 2,
       "summary": "The arguments or options do not match the command's declared arguments"
+    },
+    {
+      "code": "strip.kept",
+      "severity": "info",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept"
     },
     {
       "code": "tool.missing",
