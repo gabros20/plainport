@@ -267,7 +267,7 @@ describe("completions", () => {
           expect(run.stderr.toString()).toBe("");
           return run.stdout.toString().split("\n").filter(Boolean);
         };
-        expect(complete(REGISTRY, "plainport ")).toEqual(["help", "init", "root", "version"]);
+        expect(complete(REGISTRY, "plainport ")).toEqual(["help", "init", "offload", "root", "version"]);
         expect(complete(REGISTRY, "plainport he")).toEqual(["help"]);
         expect(complete(REGISTRY, "plainport help v")).toEqual(["version"]);
         expect(complete(REGISTRY, "plainport version --j")).toEqual(["--json"]);

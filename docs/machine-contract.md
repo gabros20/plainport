@@ -139,7 +139,7 @@ Every command declares one risk class in the registry, and `plainport.json` publ
   `plainport: <code>: <message>`, then `re-run: …` or `fix: …`.
 - `--plan <id>` exists only on a command whose registry entry declares `acceptsPlan`. It stands in for `--yes` only
   when the plan store holds that id as approved for that command; any other id is refused like a missing `--yes`.
-  Until the plan store arrives (M1 Task 10), no id is approved.
+  A plan is approved for the command that made it while it is fresh: within an hour of its `--dry-run` (D36).
 - A command's dry run declares its own schema: the plan, which is `data` under `--dry-run` (§6). The output schema
   is the `data` of a real run.
 - Arguments are checked before the risk: a usage error exits 2 even on a `confirm` command without `--yes`. An
@@ -212,9 +212,11 @@ Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless
 
 ## 6. The `--dry-run` contract
 
-A command that supports `--dry-run` treats it as a true preview: it builds and prints the plan, then stops,
-writing nothing. A `--dry-run` run is always a `read`, so it needs no `--yes`: `plainport offload web --dry-run`
-runs freely. Under `--json`, its envelope's `data` is the plan. A command that has no preview refuses
+A command that supports `--dry-run` treats it as a true preview: it builds and prints the plan, then stops. It
+writes nothing but its plan file: nothing in the project, its roots or any store changes, and the plan is saved to
+plainport's own state as `plans/<id>.json`, valid for an hour, so `plainport offload web --plan <id>` can run
+exactly that plan (run decision D36). A `--dry-run` run is always a `read`, so it needs no `--yes`:
+`plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy
