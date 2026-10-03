@@ -64,7 +64,14 @@ export const PlanSchema = outputObject({
   id: UlidSchema,
   kind: OperationKindSchema,
   project: ProjectViewSchema.optional(),
-  fingerprint: z.string().min(1).meta({ description: "The scan's tree hash; re-checked when the plan runs" }),
+  fingerprint: z.string().min(1).meta({
+    description:
+      "The scan's tree hash over the included paths (the strip set left out); re-checked when the plan runs",
+  }),
+  fp: z.literal(2).optional().meta({
+    description:
+      "The fingerprint's kind (D53); a plan without it is of an older kind, never compared, so its approval is stale",
+  }),
   include: outputObject({
     files: z.int().nonnegative(),
     bytes,

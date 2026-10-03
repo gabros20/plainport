@@ -29,7 +29,7 @@ import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
-import { scanTree } from "../scan/walk.ts";
+import { includedFingerprint, scanTree } from "../scan/walk.ts";
 import { posixDeleteTrash } from "../spawner.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
@@ -40,8 +40,10 @@ import { captureTree, invariantViolations, type TreeCapture } from "../testing/i
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { isUlid, ulid } from "../ulid.ts";
+import { openSaga } from "./journaled.ts";
 import * as saga from "./offload.ts";
 import { OFFLOAD_STEPS, type OffloadDeps, type OffloadRequest, runOffload } from "./offload.ts";
+import { releaseOffload } from "./release.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
 
@@ -1651,7 +1653,8 @@ describe("offload: fix wave r3 (D50)", () => {
     for (const step of steps)
       expect({ step, fingerprint: seen.get(step)?.plan?.fingerprint }).toEqual({
         step,
-        fingerprint: before.value.fingerprint,
+        // The included fingerprint (D53): the strip set left out.
+        fingerprint: includedFingerprint(before.value, new Set(["node_modules"])),
       });
     await expectInvariants();
   });
@@ -1930,7 +1933,7 @@ describe("offload: fix wave q1 (D52)", () => {
     await expectInvariants();
   });
 
-  test("Ctrl-C during the scan is operation.cancelled: nothing uploaded, the journal closed", async () => {
+  test("Ctrl-C while the scan runs is honoured at the safe point right after it: nothing uploaded, the journal closed", async () => {
     const controller = new AbortController();
     const real = testHost({ faults: { onStep: capture } });
     let scanning = false;
@@ -1989,22 +1992,37 @@ describe("offload: fix wave q1 (D52)", () => {
     await expectInvariants();
   });
 
-  test("the discarded and fork branches have their own after-effect points", async () => {
+  test("OFFLOAD_BRANCHES is a pinned map: every entry is a step or seam, and each branch's run reaches its own", async () => {
     const after = saga.OFFLOAD_AFTER_EFFECT as Record<string, string>;
-    const seen: string[] = [];
-    const host = () =>
-      testHost({
+    const branches = saga.OFFLOAD_BRANCHES as Record<string, { reaches: readonly string[] }>;
+    for (const [name, branch] of Object.entries(branches))
+      for (const point of branch.reaches)
+        expect({ name, point, known: isStep(point) || point in after }).toEqual({ name, point, known: true });
+    const run = async () => {
+      const reached: string[] = [];
+      const host = testHost({
         faults: {
           onStep: (step) => {
             capture(step);
-            if (step in after) seen.push(`${step}@${journalStep()}`);
+            reached.push(step);
           },
         },
       });
+      return { result: await runOffload(deps({}, host), { project: await ref() }), reached };
+    };
+    const has = (reached: string[], branch: string) =>
+      (branches[branch]?.reaches ?? []).every((point) => reached.includes(point));
+    const none = (reached: string[], branch: string) =>
+      (branches[branch]?.reaches ?? []).every((point) => !reached.includes(point));
+
     engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/main.ts"), 0o000);
-    await runOffload(deps({}, host()), { project: await ref() });
+    const discarded = await run();
     chmodSync(join(dir, "src/main.ts"), 0o644);
-    expect(seen).toContain("offload.snapshot.discarded.appended@offload.snapshot.discarded");
+    const d = discarded.result;
+    expect(d.ok ? 0 : [d.exitCode, d.finding.code]).toEqual([6, "restic.unreadable-files"]);
+    expect([has(discarded.reached, "discarded"), none(discarded.reached, "diverged")]).toEqual([true, true]);
+    expect(has(discarded.reached, "firstOffloadOfRoot")).toBe(true);
+
     const id = (await projectId()) as string;
     const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
     engine.hooks.duringSnapshot = async () => {
@@ -2026,9 +2044,11 @@ describe("offload: fix wave q1 (D52)", () => {
         }),
       );
     };
-    await runOffload(deps({}, host()), { project: await ref() });
-    expect(seen).toContain("offload.diverged.appended@offload.diverged");
-    expect(Object.keys(saga.OFFLOAD_BRANCHES as object).length).toBeGreaterThan(0);
+    const forked = await run();
+    const f = forked.result;
+    expect(f.ok ? 0 : [f.exitCode, f.finding.code]).toEqual([8, "catalog.head-moved"]);
+    expect([has(forked.reached, "diverged"), none(forked.reached, "discarded")]).toEqual([true, true]);
+    expect(none(forked.reached, "firstOffloadOfRoot")).toBe(true);
     await expectInvariants();
   });
 
@@ -2050,24 +2070,32 @@ describe("offload: fix wave q1 (D52)", () => {
       box.file("work/web/vendor/lib/README.md", "lib\n");
       gitRepo(nested);
       const gitEnv = { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" };
-      // lsof does not find a socket by its path, so the daemons are the ones that appear while they start.
-      const daemons = () =>
-        new Set(
-          Bun.spawnSync(["/usr/bin/pgrep", "-f", "fsmonitor--daemon run"], { env: gitEnv })
-            .stdout.toString()
-            .split("\n")
-            .filter(Boolean)
-            .map(Number),
-        );
-      const pids: number[] = [];
+      // The daemons are found only through what they hold inside this test's own sandbox (lsof +D on the project
+      // folder), never by a machine-wide process search, so no daemon outside the sandbox is ever signalled.
+      const sandboxDaemons = (): number[] =>
+        Bun.spawnSync(["/usr/sbin/lsof", "-t", "+D", dir], { env: gitEnv })
+          .stdout.toString()
+          .split("\n")
+          .filter(Boolean)
+          .map(Number)
+          .filter(
+            (pid) =>
+              pid > 1 &&
+              Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(pid)], { env: gitEnv })
+                .stdout.toString()
+                .includes("fsmonitor--daemon run"),
+          );
       for (const repo of [dir, nested]) {
-        const known = daemons();
         const started = Bun.spawnSync(["git", "fsmonitor--daemon", "start"], { cwd: repo, env: gitEnv });
         expect(started.exitCode).toBe(0);
-        pids.push(...[...daemons()].filter((pid) => !known.has(pid)));
       }
       const sockets = [dir, nested].map((repo) => join(repo, ".git", "fsmonitor--daemon.ipc"));
       for (let i = 0; i < 200 && !sockets.every(existsSync); i++) await Bun.sleep(25);
+      let pids: number[] = [];
+      for (let i = 0; i < 200 && pids.length < 2; i++) {
+        pids = [...new Set(sandboxDaemons())];
+        if (pids.length < 2) await Bun.sleep(25);
+      }
       expect(pids).toHaveLength(2);
       expect(pids.every((p) => Number.isInteger(p) && p > 1)).toBe(true);
       try {
@@ -2171,6 +2199,163 @@ describe("offload: quality minors (q1)", () => {
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
     expect(result.ok ? "" : result.finding.fix).toContain("plainport offload work:web --yes");
     await expectUntouched();
+    await expectInvariants();
+  });
+});
+
+describe("offload: fix wave q2", () => {
+  const journalNow = (): OffloadJournal => {
+    const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    return OffloadJournalSchema.parse(
+      JSON.parse(readFileSync(join(box.paths.journalDir, names[0] as string), "utf8")),
+    );
+  };
+
+  test("a watcher writing only to a stripped path neither retries nor fails the offload (D53)", async () => {
+    let writes = 0;
+    const touch = () => writeFileSync(join(dir, "node_modules/dep/cache.js"), `${writes++}`.repeat(writes));
+    engine.hooks.duringSnapshot = touch;
+    engine.hooks.duringListing = touch;
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.committed") touch();
+        },
+      },
+    });
+    value(await runOffload(deps({}, host), { project: await ref() }));
+    engine.hooks.duringListing = undefined;
+    expect(engine.calls).toHaveLength(1);
+    expect(existsSync(dir)).toBe(false);
+    await expectInvariants();
+  });
+
+  test("an edit to an included path still retries, with a stripped one alongside (D53)", async () => {
+    engine.hooks.duringSnapshot = (_input, attempt) => {
+      writeFileSync(join(dir, "node_modules/dep/cache.js"), "x");
+      if (attempt === 1) writeFileSync(join(dir, "src/main.ts"), "export const main = 7;\n");
+    };
+    value(await offload());
+    expect(engine.calls).toHaveLength(2);
+    await expectInvariants();
+  });
+
+  test("plans and journals record the fingerprint's kind (fp 2) and the paths it leaves out", async () => {
+    let planned: OffloadJournal | undefined;
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.planned") planned = journalNow();
+        },
+      },
+    });
+    value(await runOffload(deps({}, host), { project: await ref() }));
+    expect(planned?.plan).toMatchObject({ fp: 2, excluded: ["node_modules"] });
+    await expectInvariants();
+  });
+
+  test("an approved plan whose fingerprint is of another kind is stale, never compared", async () => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(),
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
+      }),
+    );
+    expect(prepared.plan.fp).toBe(2);
+    const { fp: _, ...older } = prepared.plan;
+    await savePlan(testHost(), box.paths, older, new Date());
+    const result = await offload({ plan: older.id });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    expect(engine.calls).toHaveLength(0);
+    await expectUntouched();
+    await expectInvariants();
+  });
+
+  /** Crashes the offload at `point`, then resumes its release from the journal alone, as recover will (m1). */
+  const resumeFrom = async (
+    point: string,
+    over: { stillHeld?: () => Promise<boolean>; host?: HostPorts } = {},
+  ) => {
+    const crash = testHost({ faults: { at: point, onStep: capture } });
+    await expect(runOffload(deps({}, crash), { project: await ref() })).rejects.toBeInstanceOf(InjectedFault);
+    const journal = journalNow();
+    const event = (await storeEvents()).find((e) => e.type === "offloaded" && e.op === journal.op);
+    if (event?.type !== "offloaded") throw new Error("no offloaded event");
+    const host = over.host ?? testHost({ faults: { onStep: capture } });
+    const resumed = openSaga(
+      { io: host, paths: box.paths, faultAt: (p) => host.faultAt(p), clock: () => new Date(), log: () => {} },
+      journal,
+    );
+    resumed.commit();
+    return releaseOffload(
+      {
+        host,
+        paths: box.paths,
+        saga: resumed,
+        clock: () => new Date(),
+        log: () => {},
+        ...(over.stillHeld === undefined ? {} : { stillHeld: over.stillHeld }),
+      },
+      { at: event.at, bytes: event.stats.bytes },
+    );
+  };
+
+  for (const point of [
+    "offload.commit.appended",
+    "offload.committed",
+    "offload.release.trash",
+    "offload.release.renamed",
+    "offload.release.moved",
+    "offload.release.stub-placed",
+    "offload.release.registry-updated",
+    "offload.release.stub",
+    "offload.release.delete",
+  ]) {
+    test(`release resumes from ${point}: each stage checks whether it is done (m1)`, async () => {
+      const released = value(await resumeFrom(point));
+      expect(existsSync(dir)).toBe(false);
+      expect(released.stub).toBe(`${dir}.plainport`);
+      expect(StubSchema.parse(JSON.parse(readFileSync(`${dir}.plainport`, "utf8"))).snapshot).toBeDefined();
+      expect(
+        value(await readRegistry(testHost(), box.paths)).projects[(await projectId()) as string]?.base,
+      ).toBe(StubSchema.parse(JSON.parse(readFileSync(`${dir}.plainport`, "utf8"))).snapshot);
+      await expectInvariants();
+    });
+  }
+
+  test("release reads the lock before the fingerprint scan, so the rename follows the scan at once", async () => {
+    const order: string[] = [];
+    const real = testHost({ faults: { onStep: capture } });
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        readdir: async (path) => {
+          if (path.endsWith("/work/web") && !order.includes("scan")) order.push("scan");
+          return real.fs.readdir(path);
+        },
+        rename: async (from, to) => {
+          if (from.endsWith("/work/web")) order.push("rename");
+          return real.fs.rename(from, to);
+        },
+      },
+    };
+    value(
+      await resumeFrom("offload.committed", {
+        host,
+        stillHeld: async () => {
+          order.push("lock");
+          return true;
+        },
+      }),
+    );
+    expect(order).toEqual(["lock", "scan", "rename"]);
     await expectInvariants();
   });
 });

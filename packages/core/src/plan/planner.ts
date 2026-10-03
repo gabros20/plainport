@@ -18,7 +18,7 @@ import { preflight, scanFindings } from "../preflight/index.ts";
 import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
-import type { TreeScan } from "../scan/walk.ts";
+import { FINGERPRINT_VERSION, includedFingerprint, type TreeScan } from "../scan/walk.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { type ArrivalItem, PLAN_TTL_MS, type Plan } from "./schema.ts";
@@ -337,7 +337,9 @@ export const prepareOffload = async (
     id: ulid(req.now.getTime()),
     kind: "offload",
     project: { ...req.project, dir: req.dir, ...(store === undefined ? {} : { store }) },
-    fingerprint: tree.fingerprint,
+    // The included fingerprint (D53): the strip set left out, its kind beside it.
+    fingerprint: includedFingerprint(tree, stripped),
+    fp: FINGERPRINT_VERSION,
     include: { files, bytes, largest },
     strip: strip.value.entries,
     findings,

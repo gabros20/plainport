@@ -35,8 +35,8 @@
 //                                          fingerprint (plan.fingerprint: the plan of the attempt that was verified).
 //                                          The machine may have been used for hours since the crash; if the folder
 //                                          changed, keep it, write no stub, and report
-//                                          offload.diverged-after-commit naming the snapshot (D51): the folder and
-//                                          the committed snapshot are two copies for resolve. The trash is `trash`;
+//                                          offload.diverged-after-commit naming the snapshot, now the head and the
+//                                          device's base (D51, D52). The trash is `trash`;
 //                                          when the release.trash
 //                                          write was lost (the journal says committed and has none), it is
 //                                          offloadTrashOf(journal), and the folder may already be in it: look in
@@ -95,17 +95,17 @@ import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
-import { scanTree } from "../scan/walk.ts";
+import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
 import { withProjectLock } from "./project-gate.ts";
-import { releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
+import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
 
-export { durationMs, offloadTrashOf, TRASH_DIR } from "./release.ts";
+export { durationMs, type OffloadConflict, offloadTrashOf, TRASH_DIR } from "./release.ts";
 
 /**
  * Every journal step, in the order a run reaches them; the crash matrix enumerates its rows from this list.
@@ -205,12 +205,20 @@ export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = 
   "offload.planned": POLICY,
   "offload.snapshot.start": POLICY,
   "offload.snapshot.discarded": [...POLICY, "discarded.snapshot", "discarded.event"],
-  "offload.snapshot.done": [...POLICY, "plan.fingerprint", "attempts.0"],
-  "offload.verified": [...POLICY, "plan.fingerprint", "attempts.0", "verified"],
+  "offload.snapshot.done": [...POLICY, "plan.fingerprint", "plan.fp", "plan.excluded", "attempts.0"],
+  "offload.verified": [...POLICY, "plan.fingerprint", "plan.fp", "plan.excluded", "attempts.0", "verified"],
   "offload.diverged": [...POLICY, "verified", "event", "diverged"],
-  "offload.commit.start": [...POLICY, "plan.fingerprint", "verified", "event"],
-  "offload.committed": [...POLICY, "plan.fingerprint", "verified", "event"],
-  "offload.release.trash": [...POLICY, "plan.fingerprint", "verified", "event", "trash"],
+  "offload.commit.start": [...POLICY, "plan.fingerprint", "plan.fp", "plan.excluded", "verified", "event"],
+  "offload.committed": [...POLICY, "plan.fingerprint", "plan.fp", "plan.excluded", "verified", "event"],
+  "offload.release.trash": [
+    ...POLICY,
+    "plan.fingerprint",
+    "plan.fp",
+    "plan.excluded",
+    "verified",
+    "event",
+    "trash",
+  ],
   "offload.release.moved": [...POLICY, "verified", "event", "trash"],
   "offload.release.stub": [...POLICY, "verified", "event", "trash"],
   "offload.release.delete": [...POLICY, "verified", "event", "trash"],
@@ -271,17 +279,6 @@ export interface OffloadOutcome {
   keepUntil?: string;
 }
 
-/** The error data of exit 8 (D14): the snapshot this offload made, kept as a fork. */
-export interface OffloadConflict {
-  op: string;
-  exitCode: 8;
-  project: string;
-  /** The plainport snapshot id, and this store's restic id for it. */
-  snapshot: string;
-  store: string;
-  stored: string;
-}
-
 /** operation.cancelled once the offload is committed: release did not start, and recover finishes it (D52). */
 const cancelledAfterCommit = (address: string, op: string): Failure =>
   fail(
@@ -306,6 +303,8 @@ const approvalKey = (plan: Plan): string =>
     dir: plan.project?.dir,
     store: plan.project?.store,
     fingerprint: plan.fingerprint,
+    // A fingerprint of another kind (D53) is never equal to one of this kind, whatever its text.
+    fp: plan.fp ?? 1,
     options: plan.options,
     strip: plan.strip.map((s) => [s.path, s.plugin]),
     findings: plan.findings.map((f) => [f.code, f.severity]).sort(),
@@ -642,7 +641,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         const blocker = planBlocker(current);
         if (blocker !== undefined) return fail(blocker);
         const settled = await saga.step("offload.planned", {
-          plan: { id: current.id, fingerprint: current.fingerprint },
+          plan: {
+            id: current.id,
+            fingerprint: current.fingerprint,
+            fp: FINGERPRINT_VERSION,
+            excluded: current.strip.map((s) => s.path),
+          },
           release: {
             keepLocalFor: prepared.config.offload.keepLocalFor,
             stub: prepared.config.offload.stub,
@@ -655,9 +659,10 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         phase("snapshot", "start");
         const right = await scanTree(io.fs, folder);
         if (!right.ok) return right;
-        if (right.value.fingerprint !== current.fingerprint)
+        const stripped = new Set(current.strip.map((s) => s.path));
+        if (includedFingerprint(right.value, stripped) !== current.fingerprint)
           return stale("the folder changed between the plan and the snapshot");
-        const excluded = new Set(current.strip.map((s) => s.path));
+        const excluded = new Set(stripped);
         for (const s of prepared.tree.skipped) if (!isExcluded(excluded, s.path)) excluded.add(s.path);
         const taken = await takeSnapshot({
           saga,
@@ -680,7 +685,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           fs: io.fs,
           dir: folder,
           snapshot: taken.value,
-          tree: prepared.tree,
+          tree: { fingerprint: current.fingerprint, manifest: prepared.tree.manifest },
+          stripped,
           excluded,
           ctx,
         });
@@ -753,6 +759,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         const conflict: OffloadConflict = {
           op,
           exitCode: 8,
+          kind: "fork",
           project: ref.address,
           snapshot: op,
           store: store.name,

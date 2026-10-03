@@ -12,7 +12,7 @@ import { fail, finding, ok, type Result } from "@plainport/contract";
 import { type LocalFs, systemErrorCode } from "../io.ts";
 import type { Engine, EntryMeta, RunContext } from "../ports/engine.ts";
 import type { Manifest, ManifestEntry } from "../scan/manifest.ts";
-import { scanTree } from "../scan/walk.ts";
+import { includedFingerprint, isExcluded, scanTree } from "../scan/walk.ts";
 
 /** At most this many differences are named in the finding. */
 const SHOWN = 10;
@@ -23,14 +23,7 @@ export interface VerifiedTotals {
   bytes: number;
 }
 
-/** Whether `path` is one of `excluded` or lies inside one. */
-export const isExcluded = (excluded: ReadonlySet<string>, path: string): boolean => {
-  if (excluded.has(path)) return true;
-  for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
-    if (excluded.has(path.slice(0, slash))) return true;
-  }
-  return false;
-};
+export { isExcluded };
 
 const differs = (expected: ManifestEntry, listed: EntryMeta): string | undefined => {
   if (listed.type !== expected.type) return `is a ${listed.type} in the snapshot, a ${expected.type} here`;
@@ -113,11 +106,19 @@ export const verifyListing = async (options: {
   );
 };
 
-/** Whether `dir` still has the fingerprint a scan gave it; a walk that fails ends the run. */
-export const unchanged = async (fs: LocalFs, dir: string, fingerprint: string): Promise<Result<boolean>> => {
+/**
+ * Whether `dir` still has the included fingerprint (D53) a plan recorded, `stripped` left out; a walk that fails ends
+ * the run.
+ */
+export const unchanged = async (
+  fs: LocalFs,
+  dir: string,
+  fingerprint: string,
+  stripped: ReadonlySet<string>,
+): Promise<Result<boolean>> => {
   const now = await scanTree(fs, dir);
   if (!now.ok) return now;
-  return ok(now.value.fingerprint === fingerprint);
+  return ok(includedFingerprint(now.value, stripped) === fingerprint);
 };
 
 export type SnapshotCheck = { changed: true } | { changed: false; totals: VerifiedTotals };
@@ -132,13 +133,15 @@ export const verifySnapshot = async (options: {
   fs: LocalFs;
   dir: string;
   snapshot: string;
-  /** The scan the snapshot was made from. */
+  /** The scan the snapshot was made from: its manifest, and the plan's included fingerprint (D53). */
   tree: { fingerprint: string; manifest: Manifest };
+  /** The strip set that fingerprint leaves out. */
+  stripped: ReadonlySet<string>;
   excluded: ReadonlySet<string>;
   ctx: RunContext;
 }): Promise<Result<SnapshotCheck>> => {
   const { fs, dir, tree } = options;
-  const before = await unchanged(fs, dir, tree.fingerprint);
+  const before = await unchanged(fs, dir, tree.fingerprint, options.stripped);
   if (!before.ok) return before;
   if (!before.value) return ok({ changed: true });
   const checked = await verifyListing({
@@ -151,7 +154,7 @@ export const verifySnapshot = async (options: {
     ctx: options.ctx,
   });
   if (!checked.ok) return checked;
-  const after = await unchanged(fs, dir, tree.fingerprint);
+  const after = await unchanged(fs, dir, tree.fingerprint, options.stripped);
   if (!after.ok) return after;
   return ok(after.value ? { changed: false, totals: checked.value } : { changed: true });
 };

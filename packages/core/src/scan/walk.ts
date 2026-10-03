@@ -11,6 +11,12 @@
 // DESIGN says, plus its ctime: an edit that puts the mtime back (touch -r, some sync tools) still moves the ctime,
 // which nothing can set back. It is meant for this device only, to tell whether the folder changed between the
 // plan and the snapshot; it is not a content hash.
+//
+// What plans and journals record is the included fingerprint, version 2 (D53): the same fields, the ctime kept per
+// entry for it, over the entries outside the strip set only, since stripped paths are not in the snapshot and are
+// regenerable; a watcher writing only to a stripped cache changes nothing it covers, and any change to an included
+// path still does. Its version (FINGERPRINT_VERSION) is stored beside it, so a fingerprint of another kind is told
+// apart rather than compared.
 
 import { createHash } from "node:crypto";
 import { isAbsolute, posix, resolve } from "node:path";
@@ -28,9 +34,11 @@ export type SkippedKind = "socket" | "fifo" | "device";
 export interface TreeScan {
   /** The folder scanned, as given. */
   dir: string;
-  /** `sha256:<hex>`, stable while nothing in the folder changes. */
+  /** `sha256:<hex>` over every entry, stable while nothing in the folder changes. */
   fingerprint: string;
   manifest: Manifest;
+  /** Each manifest entry's ctime in nanoseconds, in scan order (the manifest's own), for includedFingerprint. */
+  ctimes: BigInt64Array;
   files: number;
   dirs: number;
   symlinks: number;
@@ -45,6 +53,37 @@ export interface TreeScan {
   /** Symlinks whose target, resolved from where the link is, lies outside the folder. Sorted by path. */
   linksOutside: { path: string; target: string }[];
 }
+
+/** The kind of fingerprint plans and journals record: includedFingerprint's (D53). */
+export const FINGERPRINT_VERSION = 2;
+
+/** Whether `path` is one of `excluded` or lies inside one. */
+export const isExcluded = (excluded: ReadonlySet<string>, path: string): boolean => {
+  if (excluded.has(path)) return true;
+  for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {
+    if (excluded.has(path.slice(0, slash))) return true;
+  }
+  return false;
+};
+
+/**
+ * The included fingerprint (version 2, D53): every entry outside `excluded` (the strip set) with its type, path,
+ * size, mode, mtime, ctime and link target, then every unreadable path outside it.
+ */
+export const includedFingerprint = (tree: TreeScan, excluded: ReadonlySet<string>): string => {
+  const hash = createHash("sha256");
+  hash.update(`v${FINGERPRINT_VERSION}\n`);
+  let i = 0;
+  for (const entry of tree.manifest) {
+    const ctime = tree.ctimes[i++];
+    if (isExcluded(excluded, entry.path)) continue;
+    hash.update(
+      `${entry.type}\0${entry.path}\0${entry.size ?? 0}\0${entry.mode}\0${entry.mtime}\0${ctime}\0${entry.linkTarget ?? ""}\n`,
+    );
+  }
+  for (const path of tree.unreadable) if (!isExcluded(excluded, path)) hash.update(`!${path}\0`);
+  return `sha256:${hash.digest("hex")}`;
+};
 
 const LARGEST = 10;
 /** Entries lstat'ed at once within one folder. */
@@ -105,6 +144,8 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
 
   const hash = createHash("sha256");
   const manifest = new ManifestBuilder();
+  let ctimes = new BigInt64Array(1024);
+  let entries = 0;
   const scan = {
     files: 0,
     dirs: 0,
@@ -167,6 +208,12 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
         hash.update(
           `${stat.kind}\0${path}\0${stat.size}\0${stat.mode}\0${stat.mtimeNs}\0${stat.ctimeNs}\0${target ?? ""}\n`,
         );
+        if (entries === ctimes.length) {
+          const bigger = new BigInt64Array(ctimes.length * 2);
+          bigger.set(ctimes);
+          ctimes = bigger;
+        }
+        ctimes[entries++] = stat.ctimeNs;
         manifest.add({
           path,
           type: stat.kind,
@@ -200,6 +247,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
     dir,
     fingerprint: `sha256:${hash.digest("hex")}`,
     manifest: manifest.finish(),
+    ctimes: ctimes.slice(0, entries),
     files: scan.files,
     dirs: scan.dirs,
     symlinks: scan.symlinks,

@@ -50,7 +50,18 @@ export const OffloadJournalSchema = z
     base: UlidSchema.optional(),
     /** The root-created event this operation wrote, when the root had no ULID yet. */
     rootCreated: UlidSchema.optional(),
-    plan: z.strictObject({ id: UlidSchema, fingerprint: z.string().min(1) }).optional(),
+    /**
+     * The plan of the attempt that was verified: its included fingerprint, that fingerprint's kind (D53; absent, an
+     * older kind recovery never compares) and the strip set it leaves out, so a re-check needs nothing else.
+     */
+    plan: z
+      .strictObject({
+        id: UlidSchema,
+        fingerprint: z.string().min(1),
+        fp: z.literal(2).optional(),
+        excluded: z.array(RelativePathSchema).optional(),
+      })
+      .optional(),
     /** How release goes, decided with the plan, so recovery repeats it whatever the config says by then. */
     release: z.strictObject({ keepLocalFor: z.string(), stub: z.boolean() }).optional(),
     /** The head moved under this copy: the event (`event`) keeps the snapshot as a fork, and nothing is released. */

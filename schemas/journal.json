@@ -127,6 +127,17 @@
             "fingerprint": {
               "type": "string",
               "minLength": 1
+            },
+            "fp": {
+              "type": "number",
+              "const": 2
+            },
+            "excluded": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^(?!\\.\\.?(?:\\/|$))[^/]+(?:\\/(?!\\.\\.?(?:\\/|$))[^/]+)*$"
+              }
             }
           },
           "required": [
