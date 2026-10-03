@@ -184,6 +184,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
+| `process.output-too-large` | block | no | 1 | A child process printed more on stdout than its caller can take whole (a file list, a JSON document); it was stopped, never read in part |
 | `process.spawn-failed` | block | no | 1 | A child process could not be started; `paths` names the program and its working folder |
 | `process.timeout` | block | no | 1 | A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output |
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |

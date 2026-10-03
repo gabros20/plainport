@@ -66,6 +66,12 @@ describe("findings", () => {
         exitCode: 1,
         summary: expect.any(String),
       },
+      "process.output-too-large": {
+        severity: "block",
+        allowable: false,
+        exitCode: 1,
+        summary: expect.any(String),
+      },
       "process.spawn-failed": {
         severity: "block",
         allowable: false,
