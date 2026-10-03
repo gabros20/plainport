@@ -6,10 +6,10 @@
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
-import { writeAtomic } from "./atomic.ts";
 import { describeIssues } from "./config/toml.ts";
 import { errorCode, type LocalIo } from "./io.ts";
-import { acquireLock, type LockHolder } from "./lock.ts";
+import type { LockHolder } from "./lock.ts";
+import { updateLockedFile } from "./locked-file.ts";
 import type { PlainportPaths } from "./paths.ts";
 import { UlidSchema } from "./ulid.ts";
 
@@ -62,7 +62,14 @@ export const readRegistry = async (io: LocalIo, paths: PlainportPaths): Promise<
     text = await io.fs.readText(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return ok({ v: 1, projects: {} });
-    return invalid(path, `it could not be read (${error instanceof Error ? error.message : String(error)})`);
+    // The file may be fine: only reading it failed, so the fix is about access, never about moving it aside.
+    return fail(
+      finding("registry.unreadable", {
+        message: `${path}, this device's project registry, could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        fix: `check that you own ${path} and can read and write it (chmod u+rw ${path}), then re-run`,
+        paths: [path],
+      }),
+    );
   }
   let data: unknown;
   try {
@@ -92,61 +99,48 @@ export type RegistryUpdate = (
   registry: ProjectRegistry,
 ) => Result<ProjectRegistry> | Promise<Result<ProjectRegistry>>;
 
-/** Applies `update` to registry.json under its lock and returns what was written; a refusal writes nothing. */
+/** Applies `update` to registry.json under its lock (updateLockedFile) and returns what was written. */
 export const updateRegistry = async (
   io: LocalIo,
   paths: PlainportPaths,
   update: RegistryUpdate,
   options: { timeoutMs?: number } = {},
 ): Promise<Result<ProjectRegistry>> => {
-  const lockPath = `${paths.registryFile}.lock`;
-  const writeFailed = (error: unknown): Result<never> =>
-    fail(
-      finding("config.write-failed", {
-        message: `${paths.registryFile} could not be written: ${error instanceof Error ? error.message : String(error)}`,
-        fix: `check that ${paths.stateDir} is writable and the disk has space, then re-run`,
-        paths: [paths.registryFile],
+  const lockFile = `${paths.registryFile}.lock`;
+  return updateLockedFile<ProjectRegistry>(
+    io,
+    {
+      file: paths.registryFile,
+      lockFile,
+      read: () => readRegistry(io, paths),
+      check: (value) => {
+        const next = ProjectRegistrySchema.safeParse(value);
+        if (next.success) return ok(next.data);
+        return fail(
+          finding("contract.invalid", {
+            message: `the change would make ${paths.registryFile} invalid: ${describeIssues(next.error)}; nothing was written`,
+            fix: "this is a bug in the command that made the change; report it with the message above",
+            paths: [paths.registryFile],
+          }),
+        );
+      },
+      encode: (value) => `${JSON.stringify(value, null, 2)}\n`,
+      held: lockedFinding,
+      takenOver: finding("registry.locked", {
+        message: `${lockFile} was taken over while this change was being made; nothing was written`,
+        fix: "re-run",
+        paths: [lockFile],
       }),
-    );
-  let lock: Awaited<ReturnType<typeof acquireLock>>;
-  try {
-    lock = await acquireLock(io, lockPath, { timeoutMs: options.timeoutMs ?? 10_000, held: lockedFinding });
-  } catch (error) {
-    return writeFailed(error);
-  }
-  if (!lock.ok) return lock;
-  const held = lock.value;
-  try {
-    const current = await readRegistry(io, paths);
-    if (!current.ok) return current;
-    const updated = await update(structuredClone(current.value));
-    if (!updated.ok) return updated;
-    const next = ProjectRegistrySchema.safeParse(updated.value);
-    if (!next.success) {
-      return fail(
-        finding("contract.invalid", {
-          message: `the change would make ${paths.registryFile} invalid: ${describeIssues(next.error)}; nothing was written`,
-          fix: "this is a bug in the command that made the change; report it with the message above",
-          paths: [paths.registryFile],
-        }),
-      );
-    }
-    if (!(await held.stillHeld())) {
-      return fail(
-        finding("registry.locked", {
-          message: `${lockPath} was taken over while this change was being made; nothing was written`,
-          fix: "re-run",
-          paths: [lockPath],
-        }),
-      );
-    }
-    try {
-      await writeAtomic(io, paths.registryFile, `${JSON.stringify(next.data, null, 2)}\n`);
-    } catch (error) {
-      return writeFailed(error);
-    }
-    return ok(next.data);
-  } finally {
-    await held.release();
-  }
+      writeFailed: (path, error) =>
+        fail(
+          finding("config.write-failed", {
+            message: `${path} could not be written: ${error instanceof Error ? error.message : String(error)}`,
+            fix: `check that ${paths.stateDir} is writable and the disk has space, then re-run`,
+            paths: [path],
+          }),
+        ),
+      ...(options.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
+    },
+    update,
+  );
 };

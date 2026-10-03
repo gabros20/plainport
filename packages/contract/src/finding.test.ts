@@ -58,6 +58,12 @@ describe("findings", () => {
       "project.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "registry.unreadable": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "root.defined-twice": { severity: "warn", allowable: false, exitCode: 6, summary: expect.any(String) },
       "root.exists": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "root.none": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },

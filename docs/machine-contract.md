@@ -186,6 +186,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
 | `registry.locked` | block | no | 11 | Another process holds `registry.json.lock` |
+| `registry.unreadable` | block | no | 6 | `registry.json` exists but plainport may not read it; `fix` is about permissions, and the file is left as it is |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
 | `root.defined-twice` | warn | no | 6 | `config.toml` and `managed.toml` both define a root; `config.toml` wins key by key, and `fix` says where to edit |
 | `root.exists` | block | no | 6 | A root with this key already exists; `fix` is the `root bind` command |

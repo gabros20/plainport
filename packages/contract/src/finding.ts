@@ -143,6 +143,12 @@ export const FINDINGS = Object.freeze({
     exitCode: 11,
     summary: "Another process holds registry.json.lock",
   },
+  "registry.unreadable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "registry.json exists but plainport may not read it; the file is left as it is",
+  },
   "risk.needs-yes": {
     severity: "block",
     allowable: false,
