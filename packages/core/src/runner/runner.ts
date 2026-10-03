@@ -41,7 +41,7 @@ const TAIL_LINES_IN_MESSAGE = 5;
 const TAIL_CHARS_IN_MESSAGE = 600;
 
 type Settings = Record<keyof typeof RUN_DEFAULTS, number>;
-type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "incomplete" | "error";
+type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "line-too-long" | "incomplete" | "error";
 /** Why a capture cannot be shown to be whole; each is process.output-incomplete with its own message. */
 type Incomplete =
   | { why: "held-open" }
@@ -164,12 +164,18 @@ class Collector {
     label: string,
     spec: RunSpec,
     onError: (error: unknown) => void,
+    /** With wholeStdout: an over-long line is not delivered cut but reported here. */
+    onTooLong?: () => void,
   ) {
     this.ring = new RingBuffer(settings.outputLimitBytes);
     const log = spec.log;
     const logged = log !== undefined && (log.streams ?? ["stdout", "stderr"]).includes(stream);
     this.lines = new LineSplitter(settings.maxLineBytes, (bytes, truncated) => {
       if (this.failed) return;
+      if (truncated && onTooLong !== undefined) {
+        onTooLong();
+        return;
+      }
       try {
         const text = this.decoder.decode(bytes);
         spec.onLine?.({ stream, text, truncated });
@@ -383,6 +389,13 @@ const stoppedFailure = (
       );
     case "cancelled":
       return fail(finding("process.cancelled", { message: `${label} was cancelled and stopped${said}` }));
+    case "line-too-long":
+      return fail(
+        finding("process.output-too-large", {
+          message: `${label} printed a stdout line longer than ${settings.maxLineBytes} bytes, which cannot be read as one record, and was stopped`,
+          fix: "raise maxLineBytes for this call, or report the command's output if no record should be that long",
+        }),
+      );
     case "too-large":
       return fail(
         finding("process.output-too-large", {
@@ -397,6 +410,10 @@ const stoppedFailure = (
 export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Result<RunOutcome>> => {
   const settings = { ...settingsOf(spec), captureMaxBytes: spec.capture?.maxBytes };
   if (spec.capture !== undefined) positive("capture.maxBytes", spec.capture.maxBytes);
+  if (spec.wholeStdout && spec.onLine === undefined)
+    throw new RangeError("runProcess: wholeStdout needs onLine");
+  if (spec.wholeStdout && spec.capture !== undefined)
+    throw new RangeError("runProcess: wholeStdout and capture exclude each other");
   const label = basename(spec.command);
   const empty: OutputTail = { text: "", droppedBytes: 0 };
   if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, empty, empty);
@@ -454,7 +471,20 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   spec.signal?.addEventListener("abort", onAbort, { once: true });
 
   const onError = (error: unknown): void => requestStop("error", error);
-  const stdout = new Collector("stdout", settings, label, spec, onError);
+  let lineTooLong = false;
+  const stdout = new Collector(
+    "stdout",
+    settings,
+    label,
+    spec,
+    onError,
+    spec.wholeStdout
+      ? () => {
+          lineTooLong = true;
+          requestStop("line-too-long");
+        }
+      : undefined,
+  );
   const stderr = new Collector("stderr", settings, label, spec, onError);
   const capture =
     spec.capture === undefined
@@ -536,9 +566,10 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     // The leader may be reaped while its last writes are still in the pipe: those can cross the cap during the
     // drain, after the stop reason was read, so the capture decides again here.
     if (reason === undefined && capture?.overflowed) reason = "too-large";
-    // A capture is promised whole. It cannot be shown to be when stdout was still held open as the drain was cut,
+    if (reason === undefined && lineTooLong) reason = "line-too-long";
+    // A capture (or wholeStdout) is promised whole. It cannot be shown to be when stdout was still held open as the drain was cut,
     // when stdout failed to read before its end, or when the leader left writers in its group that were stopped.
-    if (reason === undefined && capture !== undefined) {
+    if (reason === undefined && (capture !== undefined || spec.wholeStdout)) {
       if (!drained) incomplete = { why: "held-open" };
       else if ("stdout" in readErrors)
         incomplete = { why: "read-error", stream: "stdout", error: readErrors.stdout };

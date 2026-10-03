@@ -548,3 +548,106 @@ describe("runner (fake spawner): pipes held by a process outside the group", () 
     });
   });
 });
+
+describe("runner (fake spawner): wholeStdout, stdout read as line records without keeping it", () => {
+  const collect = () => {
+    const lines: string[] = [];
+    return {
+      lines,
+      onLine: (line: { stream: string; text: string; truncated: boolean }) => {
+        if (line.stream === "stdout") lines.push(line.truncated ? `TRUNCATED:${line.text}` : line.text);
+      },
+    };
+  };
+
+  test("every stdout line reaches onLine, past the tail limit, and nothing is captured", async () => {
+    const spawner = new FakeSpawner((child) => {
+      for (let i = 0; i < 500; i++) child.write("stdout", `line ${i}\n`);
+      child.write("stdout", "last without newline");
+      child.exit(0);
+    });
+    const { lines, onLine } = collect();
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine, outputLimitBytes: 64 }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(lines).toHaveLength(501);
+    expect(lines.at(-1)).toBe("last without newline");
+    expect(result.value.captured).toBeUndefined();
+    expect(result.value.stdout.droppedBytes).toBeGreaterThan(0);
+  });
+
+  test("a stdout line longer than maxLineBytes fails as process.output-too-large and never reaches onLine cut", async () => {
+    const spawner = new FakeSpawner(async (child) => {
+      child.write("stdout", `short\n${"x".repeat(100)}\n`);
+      await ms(50);
+      child.exit(0);
+    });
+    const { lines, onLine } = collect();
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine, maxLineBytes: 32 }));
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-too-large" } });
+    if (!result.ok) expect(result.finding.message).toContain("32");
+    expect(lines.some((line) => line.startsWith("TRUNCATED"))).toBe(false);
+    expect(spawner.signals[0]).toBe("SIGTERM");
+  });
+
+  test("an over-long last line read during the drain after the exit still fails the run", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "y".repeat(100));
+      child.exit(0);
+    });
+    const { onLine } = collect();
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine, maxLineBytes: 32 }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
+  });
+
+  test("an over-long stderr line is only cut, as without wholeStdout", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stderr", `${"e".repeat(100)}\n`);
+      child.write("stdout", "fine\n");
+      child.exit(0);
+    });
+    const { lines, onLine } = collect();
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine, maxLineBytes: 32 }));
+    expect(result.ok).toBe(true);
+    expect(lines).toEqual(["fine"]);
+  });
+
+  test("a stdout read error is process.output-incomplete", async () => {
+    const spawner = new FakeSpawner(async (child) => {
+      child.write("stdout", "first\n");
+      await ms(5);
+      child.breakPipe("stdout", Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }));
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine: () => {} }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
+  });
+
+  test("leftovers stopped are process.output-incomplete", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.leftovers = 1;
+      child.write("stdout", "partial\n");
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine: () => {} }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
+  });
+
+  test("stdout held open past the drain is process.output-incomplete", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "partial\n");
+      child.leftovers = 1;
+      child.exit(0);
+      child.leftovers = 0;
+    });
+    const result = await runProcess(spawner, spec({ wholeStdout: true, onLine: () => {} }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
+  });
+
+  test("wholeStdout needs onLine and excludes capture", async () => {
+    await expect(runProcess(new FakeSpawner(), spec({ wholeStdout: true }))).rejects.toThrow(/onLine/);
+    await expect(
+      runProcess(new FakeSpawner(), spec({ wholeStdout: true, onLine: () => {}, capture: { maxBytes: 10 } })),
+    ).rejects.toThrow(/capture/);
+  });
+});
