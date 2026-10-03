@@ -99,7 +99,11 @@ const duration = (ms: number): string => {
   return minutes < 120 ? `${minutes} min` : `${Math.round(minutes / 60)} h`;
 };
 
-/** Splits a byte stream into lines, cutting each at maxLineBytes. */
+/**
+ * Splits a byte stream into lines, cutting each at maxLineBytes. A trailing carriage return is dropped unless
+ * keepCr (wholeStdout: it may be part of a name). onOverflow hears of a cut line the moment it crosses the limit,
+ * not only at its newline.
+ */
 class LineSplitter {
   private parts: Uint8Array[] = [];
   private size = 0;
@@ -108,6 +112,7 @@ class LineSplitter {
   constructor(
     private readonly maxLineBytes: number,
     private readonly emit: (bytes: Uint8Array, truncated: boolean) => void,
+    private readonly options: { keepCr?: boolean; onOverflow?: () => void } = {},
   ) {}
 
   push(chunk: Uint8Array): void {
@@ -128,7 +133,10 @@ class LineSplitter {
 
   private append(bytes: Uint8Array): void {
     const room = this.maxLineBytes - this.size;
-    if (bytes.length > room) this.truncated = true;
+    if (bytes.length > room && !this.truncated) {
+      this.truncated = true;
+      this.options.onOverflow?.();
+    }
     const kept = bytes.length > room ? bytes.subarray(0, room) : bytes;
     if (kept.length === 0) return;
     this.parts.push(kept);
@@ -142,7 +150,7 @@ class LineSplitter {
       line.set(part, at);
       at += part.length;
     }
-    if (!this.truncated && line.at(-1) === 13) line = line.subarray(0, -1);
+    if (!this.truncated && !this.options.keepCr && line.at(-1) === 13) line = line.subarray(0, -1);
     const truncated = this.truncated;
     this.parts = [];
     this.size = 0;
@@ -164,35 +172,39 @@ class Collector {
     label: string,
     spec: RunSpec,
     onError: (error: unknown) => void,
-    /** With wholeStdout: an over-long line is not delivered cut but reported here. */
+    /** With wholeStdout: an over-long line is not delivered cut but reported here as it crosses the limit, and
+     * a trailing carriage return is kept. */
     onTooLong?: () => void,
   ) {
     this.ring = new RingBuffer(settings.outputLimitBytes);
     const log = spec.log;
     const logged = log !== undefined && (log.streams ?? ["stdout", "stderr"]).includes(stream);
-    this.lines = new LineSplitter(settings.maxLineBytes, (bytes, truncated) => {
-      if (this.failed) return;
-      if (truncated && onTooLong !== undefined) {
-        onTooLong();
-        return;
-      }
-      try {
-        const text = this.decoder.decode(bytes);
-        spec.onLine?.({ stream, text, truncated });
-        if (logged && text.length > 0) {
-          const message = `${label}: ${text}`;
-          log.emit({
-            type: "log",
-            op: log.op,
-            level: stream === "stdout" ? "debug" : "info",
-            message: message.length > LOG_MESSAGE_MAX ? `${message.slice(0, LOG_MESSAGE_MAX)}…` : message,
-          });
+    const whole = onTooLong !== undefined;
+    this.lines = new LineSplitter(
+      settings.maxLineBytes,
+      (bytes, truncated) => {
+        if (this.failed) return;
+        // With wholeStdout a cut line is never delivered: onOverflow already failed the run.
+        if (truncated && whole) return;
+        try {
+          const text = this.decoder.decode(bytes);
+          spec.onLine?.({ stream, text, truncated });
+          if (logged && text.length > 0) {
+            const message = `${label}: ${text}`;
+            log.emit({
+              type: "log",
+              op: log.op,
+              level: stream === "stdout" ? "debug" : "info",
+              message: message.length > LOG_MESSAGE_MAX ? `${message.slice(0, LOG_MESSAGE_MAX)}…` : message,
+            });
+          }
+        } catch (error) {
+          this.failed = true;
+          onError(error);
         }
-      } catch (error) {
-        this.failed = true;
-        onError(error);
-      }
-    });
+      },
+      whole ? { keepCr: true, onOverflow: onTooLong } : {},
+    );
   }
 
   push(chunk: Uint8Array): void {

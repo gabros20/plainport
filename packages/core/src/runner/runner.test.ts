@@ -651,3 +651,44 @@ describe("runner (fake spawner): wholeStdout, stdout read as line records withou
     ).rejects.toThrow(/capture/);
   });
 });
+
+describe("runner (fake spawner): wholeStdout lines are the child's lines (fix r2 N2, N3)", () => {
+  test("a carriage return at the end of a stdout line is kept: it may be part of a name", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "tar\r\nplain\n");
+      child.write("stderr", "err\r\n");
+      child.exit(0);
+    });
+    const seen: string[] = [];
+    const result = await runProcess(
+      spawner,
+      spec({ wholeStdout: true, onLine: (line) => seen.push(`${line.stream}:${line.text}`) }),
+    );
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual(["stdout:tar\r", "stdout:plain", "stderr:err"]);
+  });
+
+  test("without wholeStdout a trailing carriage return is still dropped", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "tar\r\n");
+      child.exit(0);
+    });
+    const seen: string[] = [];
+    await runProcess(spawner, spec({ onLine: (line) => seen.push(line.text) }));
+    expect(seen).toEqual(["tar"]);
+  });
+
+  test("an endless stdout line fails as soon as it crosses maxLineBytes, not at its newline or a deadline", async () => {
+    const spawner = new FakeSpawner(async (child) => {
+      child.write("stdout", "z".repeat(100)); // no newline, and the child never exits by itself
+    });
+    const started = performance.now();
+    const result = await runProcess(
+      spawner,
+      spec({ wholeStdout: true, onLine: () => {}, maxLineBytes: 32, idleTimeoutMs: 60_000 }),
+    );
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(spawner.signals[0]).toBe("SIGTERM");
+  });
+});

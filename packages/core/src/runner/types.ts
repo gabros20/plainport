@@ -53,9 +53,11 @@ export interface RunSpec {
    * stdout is data read as line records through onLine, without keeping it: for listings too big to capture
    * (`restic ls --json`). It is held to capture's promise without its memory: every stdout line reaches onLine
    * whole, or the run fails. A stdout line longer than maxLineBytes stops the group and fails as
-   * process.output-too-large (it never reaches onLine cut), and stdout that cannot be shown to have been read to
-   * its end fails as process.output-incomplete, as with capture. Needs onLine; excludes capture. What onLine saw
-   * counts only when the run is ok and the exit code is 0.
+   * process.output-too-large as soon as it crosses the limit (it never reaches onLine cut), and stdout that cannot
+   * be shown to have been read to its end fails as process.output-incomplete, as with capture. Needs onLine;
+   * excludes capture. What onLine saw counts only when the run is ok and the exit code is 0.
+   * A stdout line reaches onLine as text: split at "\n" only, with a trailing "\r" kept (it may be part of a file
+   * name), and decoded as UTF-8 with invalid bytes replaced by U+FFFD. For byte-exact records, use capture.
    */
   wholeStdout?: boolean;
   /** Every complete line as it arrives (parsers, progress). A throw is a bug: the group is stopped, then it
