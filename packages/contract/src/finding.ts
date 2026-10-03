@@ -185,7 +185,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary:
-      "A file or folder an operation writes (its journal, the trash, the stub) could not be written or moved: permissions, a full disk, an I/O error",
+      "A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved: permissions, a full disk, an I/O error",
   },
   "git.failed": {
     severity: "block",
@@ -535,6 +535,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "The store has no identity this device recorded (plainport init sets a store up: its store.json, its restic repository)",
+  },
+  "store.root-mismatch": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store already holds another root's snapshots; one restic repository serves one root (ADR-0010, D48)",
   },
   "store.secret-missing": {
     severity: "block",

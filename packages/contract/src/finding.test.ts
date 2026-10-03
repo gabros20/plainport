@@ -182,6 +182,12 @@ describe("findings", () => {
       "plan.stale": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "project.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "store.not-set-up": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "store.root-mismatch": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.secret-missing": {
         severity: "block",
         allowable: false,

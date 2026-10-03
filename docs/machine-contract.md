@@ -188,7 +188,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; `fix` suggests `--keep-deps` |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
 | `fs.cross-volume` | block | no | 6 | The project folder is on another volume than its root, so release could not move it aside in one rename |
-| `fs.write-failed` | block | no | 1 | A file or folder an operation writes (its journal, the trash, the stub) could not be written or moved; after a commit, `fix` is `plainport recover` |
+| `fs.write-failed` | block | no | 1 | A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved; after a commit, `fix` is `plainport recover` |
 | `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own `.git` included; `paths` lists them |
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
@@ -225,6 +225,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `store.identity-changed` | block | no | 6 | The store at a configured path is not the one this device knows: its `meta/v1/store.json` names another id, or none. Nothing is synced, and nothing is written to either side |
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
 | `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); `fix` is `plainport init` |
+| `store.root-mismatch` | block | no | 6 | The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so `fix` is to give this root its own store |
 | `store.secret-missing` | block | no | 6 | The store's repository password could not be read from its secret reference (`env:` or `file:` in M1) |
 | `store.setup-pending` | warn | no | 6 | `init` recorded the store but could not set it up yet (its disk is not mounted, or this build cannot use its kind) |
 | `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder, such as a disk that is not mounted; nothing is created in its place |
