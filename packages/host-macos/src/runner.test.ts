@@ -3,10 +3,10 @@
 // test, pgrep checks that no process is left in any group the runner started (the task's stop condition).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunSpec, Spawner } from "@plainport/core";
+import { type RunSpec, type Spawner, splitRecords } from "@plainport/core";
 import { createMacosHost, posixSpawner } from "./index.ts";
 
 const groups: number[] = [];
@@ -200,5 +200,93 @@ describe("runner: real process groups (host-macos)", () => {
   test("a program that does not exist is process.spawn-failed", async () => {
     const result = await host.run({ command: join(dir, "nope"), args: [], cwd: dir, env });
     expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.spawn-failed" } });
+  });
+});
+
+describe("runner: nothing outlives a run (host-macos)", () => {
+  test("a process that ran a child exits promptly: no timer of the run keeps it alive", async () => {
+    const script = join(dir, "one-run.ts");
+    writeFileSync(
+      script,
+      `import { createMacosHost } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
+        `const result = await createMacosHost().run({ command: "/bin/echo", args: ["hi"], cwd: ${JSON.stringify(dir)}, env: { PATH: "/usr/bin:/bin" } });\n` +
+        `console.log(result.ok ? "ran" : result.finding.code);\n`,
+    );
+    const started = performance.now();
+    const result = await host.run({
+      command: process.execPath,
+      args: [script],
+      cwd: dir,
+      env: { ...env, HOME: dir },
+      timeoutMs: 20_000,
+    });
+    const elapsed = performance.now() - started;
+    expect(result).toMatchObject({ ok: true, value: { exitCode: 0, stdout: { text: "ran\n" } } });
+    expect(elapsed).toBeLessThan(2500);
+  });
+});
+
+describe("runner: capturing the whole stdout (host-macos)", () => {
+  test("NUL-separated output comes back whole, as git -z prints it", async () => {
+    const result = await host.run(sh("printf 'a b\\0dir/c\\0'", { capture: { maxBytes: 1024 } }));
+    if (!result.ok) throw new Error(result.finding.message);
+    const records = splitRecords(result.value.captured as Uint8Array, 0).map((r) =>
+      new TextDecoder().decode(r),
+    );
+    expect(records).toEqual(["a b", "dir/c"]);
+  });
+
+  test("capture keeps all of a 3 MB stdout while the tail stays bounded", async () => {
+    const result = await host.run(
+      sh("head -c 3000000 /dev/zero | tr '\\0' x", {
+        outputLimitBytes: 64 * 1024,
+        capture: { maxBytes: 4_000_000 },
+      }),
+    );
+    if (!result.ok) throw new Error(result.finding.message);
+    expect(result.value.captured?.length).toBe(3_000_000);
+    expect(result.value.stdout.droppedBytes).toBe(3_000_000 - 64 * 1024);
+  });
+
+  test("stdout past the cap is process.output-too-large, never a shortened ok", async () => {
+    const result = await host.run(
+      sh("yes plainport | head -c 5000000", { capture: { maxBytes: 1_000_000 } }),
+    );
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
+    if (!result.ok) expect(result.finding.message).toContain("1000000");
+  });
+});
+
+describe("runner: stopping every live group (host-macos)", () => {
+  test("stopAll stops every running child, TERM-trapping ones included, and later runs are cancelled", async () => {
+    const own = createMacosHost({ spawner: recording });
+    const ready: string[] = [];
+    let wake!: () => void;
+    const bothReady = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    const onLine = (line: { text: string }): void => {
+      ready.push(line.text);
+      if (ready.length === 2) wake();
+    };
+    const plain = own.run(sh("echo plain; sleep 60", { onLine }));
+    const stubborn = own.run(
+      sh('trap "" TERM; echo stubborn; while :; do sleep 1; done', { onLine, killGraceMs: 300 }),
+    );
+    await bothReady;
+    expect(own.liveGroups()).toHaveLength(2);
+    await own.stopAll();
+    expect(await plain).toMatchObject({ ok: false, exitCode: 130, finding: { code: "process.cancelled" } });
+    expect(await stubborn).toMatchObject({
+      ok: false,
+      exitCode: 130,
+      finding: { code: "process.cancelled" },
+    });
+    expect(own.liveGroups()).toEqual([]);
+    for (const pgid of groups) expect(members(pgid)).toEqual([]);
+    expect(await own.run(sh("echo never"))).toMatchObject({
+      ok: false,
+      finding: { code: "process.cancelled" },
+    });
   });
 });

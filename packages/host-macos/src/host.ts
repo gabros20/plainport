@@ -14,7 +14,17 @@ import {
 import { type GuardPolicy, guardedFs, PathGuard } from "./guard.ts";
 import { posixSpawner } from "./spawner.ts";
 
-export type MacosHost = HostPorts;
+export interface MacosHost extends HostPorts {
+  /**
+   * Stops every child this host is running (TERM, then KILL after each run's grace period, whole groups) and
+   * resolves once all of their runs have settled, each as process.cancelled. Every later run is cancelled before it
+   * starts. The composition root calls it on SIGINT and SIGTERM: children run in their own session, so a terminal's
+   * Ctrl-C never reaches them by itself.
+   */
+  stopAll(): Promise<void>;
+  /** The process groups of the children running now. */
+  liveGroups(): readonly number[];
+}
 
 export interface MacosHostOptions {
   /** Paths to refuse (tests); none by default. See guard.ts for who passes one. */
@@ -29,14 +39,41 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
   const guard = options.guard === undefined ? undefined : new PathGuard(options.guard);
   const spawner = options.spawner ?? posixSpawner;
   const { proc } = nodeLocalIo;
+  const stopping = new AbortController();
+  const runs = new Set<Promise<unknown>>();
+  const groups = new Set<number>();
   return {
     fs: guard === undefined ? nodeLocalIo.fs : guardedFs(nodeLocalIo.fs, guard),
     proc,
     clock: { now: () => new Date(), monotonicMs: () => proc.monotonicMs(), sleep: (ms) => proc.sleep(ms) },
     run: async (spec) => {
       await guard?.checkRun(spec);
-      return runProcess(spawner, spec);
+      let pgid: number | undefined;
+      const tracked: Spawner = {
+        spawn: (request) => {
+          const child = spawner.spawn(request);
+          pgid = child.pid;
+          groups.add(pgid);
+          return child;
+        },
+        signalGroup: (group, signal) => spawner.signalGroup(group, signal),
+      };
+      const signal =
+        spec.signal === undefined ? stopping.signal : AbortSignal.any([spec.signal, stopping.signal]);
+      const running = runProcess(tracked, { ...spec, signal });
+      runs.add(running);
+      try {
+        return await running;
+      } finally {
+        runs.delete(running);
+        if (pgid !== undefined) groups.delete(pgid);
+      }
     },
+    stopAll: async () => {
+      stopping.abort();
+      await Promise.allSettled([...runs]);
+    },
+    liveGroups: () => [...groups],
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
   };
 };
