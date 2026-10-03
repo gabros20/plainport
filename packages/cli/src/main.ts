@@ -4,9 +4,10 @@
 
 import { decode, type Failure, fail, finding } from "@plainport/contract";
 import { resolvePaths } from "@plainport/core";
-import { createMacosHost, guardFromEnv } from "@plainport/host-macos";
+import { createMacosHost, guardFromEnv, type MacosHost } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
 import { gate } from "./gate.ts";
+import { stopOnSignals } from "./interrupt.ts";
 import { clackPrompter } from "./prompt.ts";
 import type { CommandContext, Ports, Registry } from "./registry.ts";
 import { type IO, Output } from "./render.ts";
@@ -99,11 +100,11 @@ export const run = async (
 /** The real ports. core's io is the macOS host port (guarded only when a test run names its real home); no plan
  * store exists until Task 10, so no plan id is approved yet and confirm commands need --yes. Paths come from the
  * environment, never os.homedir(). */
-const realPorts = (): Ports => ({
+const realPorts = (host: MacosHost): Ports => ({
   host: { home: process.env.HOME ?? "" },
   clock: { now: () => new Date() },
   plans: { approved: () => false },
-  io: createMacosHost({ guard: guardFromEnv(process.env) }),
+  io: host,
   env: process.env,
   cwd: process.cwd(),
   prompt: clackPrompter,
@@ -115,5 +116,10 @@ if (import.meta.main) {
     stderr: (text) => process.stderr.write(text),
     isTTY: process.stdin.isTTY === true,
   };
-  process.exitCode = await run(process.argv.slice(2), io, realPorts());
+  // One host for the whole invocation: SIGINT and SIGTERM stop every child it runs before plainport exits 130.
+  const host = createMacosHost({ guard: guardFromEnv(process.env) });
+  const done = run(process.argv.slice(2), io, realPorts(host));
+  const release = stopOnSignals(host, done, { stderr: (text) => process.stderr.write(text) });
+  process.exitCode = await done;
+  release();
 }
