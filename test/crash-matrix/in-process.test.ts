@@ -128,10 +128,12 @@ beforeEach(async () => {
   reference = hashTree(dir);
 });
 
-afterEach(() => {
+afterEach(async () => {
   try {
     chmodSync(join(dir, "src/extra.ts"), 0o644);
   } catch {}
+  // A failed row may leave a detached delete running in the sandbox: let it finish before the sandbox goes.
+  await settleJournals(box.paths).catch(() => {});
   box.cleanup();
 });
 
