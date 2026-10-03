@@ -110,6 +110,24 @@ describe("plan: the strip set", () => {
     expect(stripped(p)).toEqual([".next"]);
   });
 
+  test("a kept candidate shows in the plan with why: strip.kept (info)", async () => {
+    put("node_modules/a/index.js");
+    put("node_modules/a/cert.pem");
+    put("build/app.js");
+    commit("build/app.js");
+    put("dist/index.js");
+    writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["dist/"]\nnever = ["*.pem"]\n');
+    const p = await plan([deps("node_modules"), output("build"), output("dist"), output(".next")]);
+    expect(stripped(p)).toEqual([]);
+    const kept = p.findings.find((f) => f.code === "strip.kept");
+    expect(kept).toMatchObject({ severity: "info", paths: ["build", "dist", "node_modules"] });
+    expect(kept?.message).toContain("build (git tracks it)");
+    expect(kept?.message).toContain("dist (strip.keep matches it)");
+    expect(kept?.message).toContain("node_modules (strip.never matches node_modules/a/cert.pem)");
+    // A candidate that is not on disk is not news.
+    expect(kept?.message).not.toContain(".next");
+  });
+
   test("strip.extra adds untracked paths, never tracked ones", async () => {
     put("coverage/lcov.info", 40);
     put("apps/web/coverage/lcov.info", 40);

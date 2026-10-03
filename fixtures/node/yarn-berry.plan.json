@@ -43,7 +43,18 @@
       "reason": "build output; the build script (tsup src/index.ts) makes it again"
     }
   ],
-  "findings": [],
+  "findings": [
+    {
+      "code": "strip.kept",
+      "severity": "info",
+      "message": "2 proposed paths stay in the snapshot: .yarn/cache (git tracks it), .pnp.cjs (git tracks it)",
+      "paths": [
+        ".pnp.cjs",
+        ".yarn/cache"
+      ],
+      "allowable": false
+    }
+  ],
   "phases": [
     "resolve",
     "preflight",

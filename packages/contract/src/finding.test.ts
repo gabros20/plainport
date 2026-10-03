@@ -158,6 +158,7 @@ describe("findings", () => {
         exitCode: 1,
         summary: expect.any(String),
       },
+      "strip.kept": { severity: "info", allowable: false, exitCode: 6, summary: expect.any(String) },
       "proc.cwd": { severity: "block", allowable: true, exitCode: 6, summary: expect.any(String) },
       "proc.cwd-shell": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
       "proc.open-files": { severity: "block", allowable: true, exitCode: 6, summary: expect.any(String) },

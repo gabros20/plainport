@@ -137,12 +137,29 @@ export const planOffload = async (
     manifest,
     candidates,
     extra: config.strip.extra,
-    protect: [...config.strip.keep, ...config.strip.never],
+    keep: config.strip.keep,
+    never: config.strip.never,
     keepDeps,
     repos,
     tracked: (repo, paths) => gitTracked(host, repo === "" ? req.dir : join(req.dir, repo), ctx, paths),
   });
   if (!strip.ok) return strip;
+  // Candidates kept for a reason a person may want to change: why 612 MB stayed is part of the plan.
+  const shown = strip.value.kept.filter((k) => k.why !== "missing" && k.why !== "inside");
+  if (shown.length > 0) {
+    findings.push(
+      finding("strip.kept", {
+        message: `${plural(shown.length, "proposed path")} ${shown.length === 1 ? "stays" : "stay"} in the snapshot: ${shown
+          .slice(0, 10)
+          .map((k) => `${k.path} (${k.detail})`)
+          .join(", ")}${shown.length > 10 ? ", …" : ""}`,
+        paths: shown
+          .map((k) => k.path)
+          .sort()
+          .slice(0, 100),
+      }),
+    );
+  }
   const nested = repos.filter((r) => r !== "");
   if (nested.length > 0) {
     findings.push(

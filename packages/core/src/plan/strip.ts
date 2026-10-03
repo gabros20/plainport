@@ -29,7 +29,8 @@ export interface StripInput {
   /** strip.extra: more regenerable paths, in gitignore syntax. */
   extra: readonly string[];
   /** strip.keep and strip.never: paths never stripped. */
-  protect: readonly string[];
+  keep: readonly string[];
+  never: readonly string[];
   keepDeps: boolean;
   /** Folders holding a repository (their own .git, a folder or a pointer), relative; "" is the project folder. */
   repos: readonly string[];
@@ -40,8 +41,8 @@ export interface StripInput {
 export interface StripSet {
   /** Largest first, then by path. */
   entries: StripEntry[];
-  /** Candidates the core kept, and why. */
-  kept: { path: string; plugin: string; why: KeptReason }[];
+  /** Candidates the core kept, and why; `detail` says it to people, e.g. "strip.never matches a/cert.pem". */
+  kept: { path: string; plugin: string; why: KeptReason; detail: string }[];
 }
 
 const inside = (path: string, folder: string): boolean => folder === "" || path.startsWith(`${folder}/`);
@@ -71,19 +72,24 @@ const normalized = (path: string): string | undefined => {
 export const resolveStripSet = async (input: StripInput): Promise<Result<StripSet>> => {
   const { manifest } = input;
   const kept: StripSet["kept"] = [];
-  const keep = (c: ProposedStrip, why: KeptReason) => kept.push({ path: c.path, plugin: c.plugin, why });
+  const keep = (c: ProposedStrip, why: KeptReason, detail: string) =>
+    kept.push({ path: c.path, plugin: c.plugin, why, detail });
 
   // strip.extra: the outermost entries a pattern matches, outside any repository's own folder.
   const extraPatterns = input.extra.map((pattern) => ({ pattern, set: compilePatterns([pattern]) }));
   const extras: ProposedStrip[] = [];
-  const protect = compilePatterns(input.protect);
-  /** Paths a protected entry lies at or below. */
-  const touched = new Set<string>();
+  const protect = [
+    { name: "strip.keep", set: compilePatterns(input.keep) },
+    { name: "strip.never", set: compilePatterns(input.never) },
+  ];
+  /** Each path a protected entry lies at or below → the first protected entry and the setting that protects it. */
+  const touched = new Map<string, { entry: string; name: string }>();
   const chosen = new Set<string>();
   for (const entry of manifest) {
-    if (protect.matches(entry.path, entry.type)) {
-      touched.add(entry.path);
-      for (const folder of ancestors(entry.path)) touched.add(folder);
+    const by = protect.find((p) => p.set.matches(entry.path, entry.type));
+    if (by !== undefined) {
+      for (const path of [entry.path, ...ancestors(entry.path)])
+        if (!touched.has(path)) touched.set(path, { entry: entry.path, name: by.name });
     }
     if (extraPatterns.length === 0 || inGitDir(entry.path)) continue;
     if (ancestors(entry.path).some((folder) => chosen.has(folder))) continue;
@@ -105,11 +111,17 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
     if (path === undefined || seen.has(path)) continue;
     seen.add(path);
     const candidate = { ...proposed, path };
-    if (manifest.get(path) === undefined) keep(candidate, "missing");
-    else if (input.keepDeps && candidate.kind === "deps") keep(candidate, "keep-deps");
-    else if (touched.has(path) || protect.covers(path)) keep(candidate, "protected");
-    else if (input.repos.some((repo) => repo !== "" && (repo === path || inside(repo, path))))
-      keep(candidate, "holds-repo");
+    const covering = protect.find((p) => p.set.covers(path));
+    const below = touched.get(path);
+    const repo = input.repos.find((r) => r !== "" && (r === path || inside(r, path)));
+    if (manifest.get(path) === undefined) keep(candidate, "missing", "it is not on disk");
+    else if (input.keepDeps && candidate.kind === "deps")
+      keep(candidate, "keep-deps", "installed dependencies are kept (deps = keep, or --keep-deps)");
+    else if (covering !== undefined) keep(candidate, "protected", `${covering.name} matches it`);
+    else if (below !== undefined)
+      keep(candidate, "protected", `${below.name} matches ${below.entry === path ? "it" : below.entry}`);
+    else if (repo !== undefined)
+      keep(candidate, "holds-repo", `it holds the repository ${repo === path ? "itself" : repo}`);
     else remaining.push(candidate);
   }
 
@@ -136,7 +148,7 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
   }
   remaining = remaining.filter((c) => {
     if (!trackedPaths.has(c.path)) return true;
-    keep(c, "tracked");
+    keep(c, "tracked", "git tracks it");
     return false;
   });
 
@@ -144,7 +156,7 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
   const outer = new Set(remaining.map((c) => c.path));
   remaining = remaining.filter((c) => {
     if (!ancestors(c.path).some((folder) => outer.has(folder))) return true;
-    keep(c, "inside");
+    keep(c, "inside", "it is inside another stripped path");
     return false;
   });
 

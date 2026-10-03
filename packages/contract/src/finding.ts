@@ -464,6 +464,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 2,
     summary: "The arguments or options do not match the command's declared arguments",
   },
+  "strip.kept": {
+    severity: "info",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept",
+  },
   "tool.missing": {
     severity: "block",
     allowable: false,
