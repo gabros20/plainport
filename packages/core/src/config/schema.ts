@@ -62,7 +62,15 @@ const storeShared = {
   access: Access.optional(),
   replicateTo: z.array(Name).optional(),
 };
-const LocalStore = z.strictObject({ kind: z.literal("local"), path: z.string().min(1), ...storeShared });
+/** Where a local store whose config names no secret reads its restic repository password from. */
+export const DEFAULT_LOCAL_SECRET = "env:PLAINPORT_STORE_PASSWORD";
+const LocalStore = z.strictObject({
+  kind: z.literal("local"),
+  path: z.string().min(1),
+  /** The restic repository's password; DEFAULT_LOCAL_SECRET when absent. */
+  secret: SecretRefSchema.optional(),
+  ...storeShared,
+});
 const SftpStore = z.strictObject({
   kind: z.literal("sftp"),
   host: Name,

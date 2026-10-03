@@ -3,7 +3,9 @@
 // only, so it serves Linux as well until host-linux exists.
 
 import { constants } from "node:os";
-import { errorCode } from "./io.ts";
+import { fail, finding, ok, type Result } from "@plainport/contract";
+import { errorCode, systemErrorCode } from "./io.ts";
+import type { DetachSpec } from "./ports/host.ts";
 import type { Spawner } from "./runner/types.ts";
 
 // Bun 1.3.14 names a child's terminating signal from the Linux signal table on every platform, so on macOS a
@@ -84,4 +86,29 @@ export const posixSpawner: Spawner = {
       throw error;
     }
   },
+};
+
+/** HostPorts.detach on POSIX: a new session (setsid), every stream on /dev/null, and nothing keeps this process
+ * waiting for it. */
+export const posixDetach = async (spec: DetachSpec): Promise<Result<{ pid: number }>> => {
+  try {
+    const child = Bun.spawn([spec.command, ...spec.args], {
+      cwd: spec.cwd,
+      env: { ...spec.env },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+    });
+    child.unref();
+    return ok({ pid: child.pid });
+  } catch (error) {
+    const code = systemErrorCode(error);
+    return fail(
+      finding("process.spawn-failed", {
+        message: `${spec.command} could not be started in ${spec.cwd} (${code})`,
+        fix: `check that ${spec.command} exists and ${spec.cwd} is a folder, then re-run`,
+      }),
+    );
+  }
 };

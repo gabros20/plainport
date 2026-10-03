@@ -33,6 +33,13 @@ export interface FindingSpec {
 
 /** Every finding code plainport emits. A code, once listed, keeps its meaning; later tasks add entries. */
 export const FINDINGS = Object.freeze({
+  "catalog.head-moved": {
+    severity: "block",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "The store's latest snapshot of the project is not the one this working copy came from (another copy was offloaded since, or the project is conflicted); nothing local is deleted",
+  },
   "catalog.event-skipped": {
     severity: "warn",
     allowable: false,
@@ -40,17 +47,18 @@ export const FINDINGS = Object.freeze({
     summary:
       "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed",
   },
+  "catalog.incomplete": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; sync the store or run plainport doctor",
+  },
   "command.cancelled": {
     severity: "block",
     allowable: false,
     exitCode: 130,
     summary: "The person answering the prompts cancelled; nothing was written",
-  },
-  "command.unavailable": {
-    severity: "block",
-    allowable: false,
-    exitCode: 1,
-    summary: "This build registers the command but cannot run it for real yet; its --dry-run preview works",
   },
   "command.unknown": {
     severity: "block",
@@ -165,6 +173,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "plainport cannot read some files or folders in the project, so a snapshot would be incomplete",
   },
+  "fs.cross-volume": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The project folder is on another volume than the folder it would be moved aside into, so release could not rename it in one step",
+  },
   "git.failed": {
     severity: "block",
     allowable: false,
@@ -223,17 +238,38 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A bug: an exception escaped a command; the message names it",
   },
+  "journal.pending": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back",
+  },
   "plan.expired": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary: "The approved plan is more than an hour old; plan again with --dry-run",
   },
+  "operation.cancelled": {
+    severity: "block",
+    allowable: false,
+    exitCode: 130,
+    summary:
+      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local",
+  },
   "plan.not-found": {
     severity: "block",
     allowable: false,
     exitCode: 4,
     summary: "No saved plan has this id on this device",
+  },
+  "plan.stale": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The folder changed since the plan was made (its fingerprint differs), or the plan is for another project; a fresh plan is saved",
   },
   "proc.cwd": {
     severity: "block",
@@ -297,6 +333,12 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 2,
     summary: "A project name matches more than one project; the message lists every candidate address",
+  },
+  "project.locked": {
+    severity: "block",
+    allowable: false,
+    exitCode: 11,
+    summary: "Another plainport process holds this project's lock",
   },
   "project.not-found": {
     severity: "block",
@@ -473,12 +515,40 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A create-only write found the key already there; the existing value is left as it was",
   },
+  "store.not-set-up": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store has no identity this device recorded (plainport init sets a store up: its store.json, its restic repository)",
+  },
+  "store.secret-missing": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's repository password could not be read from its secret reference (env: or file: in M1)",
+  },
+  "store.setup-pending": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable",
+  },
   "store.unreachable": {
     severity: "block",
     allowable: false,
     exitCode: 9,
     summary:
       "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved",
+  },
+  "store.unsupported": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder)",
   },
   "stub.invalid": {
     severity: "block",
@@ -504,6 +574,20 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept",
+  },
+  "verify.changed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 7,
+    summary:
+      "Files in the project changed while the snapshot was being made, again after one retry; nothing local was deleted",
+  },
+  "verify.mismatch": {
+    severity: "block",
+    allowable: false,
+    exitCode: 7,
+    summary:
+      "The snapshot's listing does not match the scan of the folder (entries, types, sizes, modes or link targets); nothing local was deleted",
   },
   "tool.missing": {
     severity: "block",

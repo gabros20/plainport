@@ -7,9 +7,9 @@ import { userInfo } from "node:os";
 import { resolve } from "node:path";
 import { type GuardPolicy, guardedFs, PathGuard } from "../guard.ts";
 import { nodeLocalIo } from "../node-io.ts";
-import { faultSeam, type HostPorts } from "../ports/host.ts";
+import { type FaultPlan, faultSeam, type HostPorts } from "../ports/host.ts";
 import { runProcess } from "../runner/runner.ts";
-import { posixSpawner } from "../spawner.ts";
+import { posixDetach, posixSpawner } from "../spawner.ts";
 
 const checkout = resolve(import.meta.dir, "../../../..");
 
@@ -20,7 +20,8 @@ export const testGuard = (): GuardPolicy => {
   return { refuse: [...homes], readOnly: [checkout] };
 };
 
-export const testHost = (): HostPorts => {
+/** `faults` plans a crash at one journal step (ADR-0017), as the crash matrix does. */
+export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
   const guard = new PathGuard(testGuard());
   const { proc } = nodeLocalIo;
   return {
@@ -31,6 +32,10 @@ export const testHost = (): HostPorts => {
       await guard.checkRun(spec);
       return runProcess(posixSpawner, spec);
     },
-    faultAt: faultSeam(undefined, () => process.kill(process.pid, "SIGKILL")),
+    faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
+    detach: async (spec) => {
+      await guard.checkRun(spec);
+      return posixDetach(spec);
+    },
   };
 };

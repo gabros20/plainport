@@ -129,8 +129,9 @@ export interface WriteRootsOptions {
   changes: readonly RootChange[];
   /** Create a binding's folder when it does not exist. */
   create?: boolean;
-  /** A local store to record, make the default, and give to each root added here (`init --store-path`). */
-  store?: { name: string; path: string };
+  /** A local store to record, make the default, and give to each root added here (`init --store-path`), with the
+   * reference to its repository password when one is given (`init --store-secret`). */
+  store?: { name: string; path: string; secret?: string };
   /** Runs under the lock once every check has passed, before anything is created or written; a refusal stops it. */
   beforeWrite?: () => Promise<Result<unknown>>;
   timeoutMs?: number;
@@ -333,7 +334,14 @@ export const writeRoots = async (
             );
           }
         } else {
-          next.stores = { ...next.stores, [name]: { kind: "local", path: displayPath(path, home) } };
+          next.stores = {
+            ...next.stores,
+            [name]: {
+              kind: "local",
+              path: displayPath(path, home),
+              ...(options.store.secret === undefined ? {} : { secret: options.store.secret }),
+            },
+          };
         }
         if (user.defaultStore === undefined) next.defaultStore = name;
         for (const key of added) {

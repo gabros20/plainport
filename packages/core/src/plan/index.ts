@@ -1,7 +1,13 @@
 // The planner (DESIGN.md "Offload process" steps 4–5, "Core API → Plan"): the strip set, the Plan, and saved plans.
 
 export { compilePatterns, type PatternSet } from "./patterns.ts";
-export { OFFLOAD_PHASES, type OffloadPlanRequest, planOffload } from "./planner.ts";
+export {
+  OFFLOAD_PHASES,
+  type OffloadPlanRequest,
+  type PreparedOffload,
+  planOffload,
+  prepareOffload,
+} from "./planner.ts";
 export {
   type ArrivalItem,
   ArrivalItemSchema,

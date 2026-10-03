@@ -17,6 +17,7 @@ export {
   type ProcessInfo,
   systemErrorCode,
 } from "./io.ts";
+export * from "./journal/index.ts";
 export { acquireLock, type HeldLock, type LockHolder, LockHolderSchema, type LockOptions } from "./lock.ts";
 // The real LocalIo, for the composition root (the CLI's main) only (run decision D21).
 export { nodeLocalIo } from "./node-io.ts";
@@ -28,17 +29,21 @@ export type * from "./ports/ecosystem.ts";
 export type * from "./ports/engine.ts";
 export {
   type Clock,
+  type DetachSpec,
   type FaultPlan,
   faultSeam,
   type HostPorts,
   InjectedFault,
 } from "./ports/host.ts";
+export type * from "./ports/store.ts";
 export * from "./preflight/index.ts";
 export * from "./registry.ts";
 export * from "./roots/index.ts";
 export * from "./runner/index.ts";
+export * from "./saga/offload.ts";
 export * from "./scan/index.ts";
-export { posixSpawner } from "./spawner.ts";
+export { posixDetach, posixSpawner } from "./spawner.ts";
+export * from "./store.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";
 export * from "./ulid.ts";

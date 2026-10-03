@@ -8,6 +8,7 @@
 import { join } from "node:path";
 import { type Finding, fail, finding, ok, type Result } from "@plainport/contract";
 import type { ConfigLoader } from "../config/load.ts";
+import type { ResolvedConfig } from "../config/schema.ts";
 import type { Env } from "../paths.ts";
 import type { CheckContext, HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin, HydrateStep } from "../ports/ecosystem.ts";
@@ -16,6 +17,7 @@ import { preflight, scanFindings } from "../preflight/index.ts";
 import { gitTracked } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
+import type { TreeScan } from "../scan/walk.ts";
 import { ulid } from "../ulid.ts";
 import { type ArrivalItem, PLAN_TTL_MS, type Plan } from "./schema.ts";
 import { type ProposedStrip, resolveStripSet } from "./strip.ts";
@@ -84,12 +86,36 @@ const arrivalOf = (step: HydrateStep): ArrivalItem => ({
   detail: step.path === "" ? step.command : `in ${step.path}: ${step.command}`,
 });
 
+/** The plan, and what the offload saga needs beside it to carry the plan out. */
+export interface PreparedOffload {
+  plan: Plan;
+  /** The scan the plan was made from: its manifest is what verification compares the snapshot with. */
+  tree: TreeScan;
+  /** The configuration the plan used (keepLocalFor, stub). */
+  config: ResolvedConfig;
+  /** The plugins that recognised the project. */
+  ecosystems: string[];
+  /** Git fsmonitor daemons watching the folder, stopped before the snapshot. */
+  fsmonitor: number[];
+}
+
 export const planOffload = async (
   host: HostPorts,
   checks: HostChecks,
   plugins: readonly EcosystemPlugin[],
   req: OffloadPlanRequest,
 ): Promise<Result<Plan>> => {
+  const prepared = await prepareOffload(host, checks, plugins, req);
+  return prepared.ok ? ok(prepared.value.plan) : prepared;
+};
+
+/** planOffload, keeping the scan and the configuration the saga goes on with. */
+export const prepareOffload = async (
+  host: HostPorts,
+  checks: HostChecks,
+  plugins: readonly EcosystemPlugin[],
+  req: OffloadPlanRequest,
+): Promise<Result<PreparedOffload>> => {
   const ctx: CheckContext = { env: req.env, ...(req.signal === undefined ? {} : { signal: req.signal }) };
   const checked = await preflight(host, checks, req.dir, ctx);
   if (!checked.ok) return checked;
@@ -123,9 +149,11 @@ export const planOffload = async (
   const keepDeps = req.keepDeps === true || config.deps.mode === "keep";
   const candidates: ProposedStrip[] = [];
   const steps: HydrateStep[] = [];
+  const ecosystems: string[] = [];
   for (const plugin of plugins) {
     const detection = await plugin.detect({ dir: req.dir, manifest, fs: host.fs });
     if (detection === null) continue;
+    ecosystems.push(plugin.id);
     const pluginCtx = { dir: req.dir, manifest, fs: host.fs, detection };
     for (const c of await plugin.strip(pluginCtx)) candidates.push({ ...c, plugin: plugin.id });
     if (plugin.preflight !== undefined) findings.push(...(await plugin.preflight(pluginCtx)));
@@ -217,7 +245,7 @@ export const planOffload = async (
         : steps.map(arrivalOf);
   const store = req.store ?? config.roots[req.project.root]?.store ?? config.defaultStore;
 
-  return ok({
+  const plan: Plan = {
     id: ulid(req.now.getTime()),
     kind: "offload",
     project: { ...req.project, dir: req.dir, ...(store === undefined ? {} : { store }) },
@@ -229,5 +257,6 @@ export const planOffload = async (
     ...(arrival.length === 0 ? {} : { arrival }),
     estimate: { uploadBytes: bytes },
     expiresAt: new Date(req.now.getTime() + PLAN_TTL_MS).toISOString(),
-  });
+  };
+  return ok({ plan, tree, config, ecosystems, fsmonitor: report.fsmonitor });
 };

@@ -170,7 +170,8 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
 | `catalog.event-skipped` | warn | no | 6 | A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed |
-| `command.unavailable` | block | no | 1 | This build registers the command but cannot run it for real yet; its `--dry-run` preview works. Temporary: `offload` until the offload saga lands (D38) |
+| `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork. Nothing local is deleted |
+| `catalog.incomplete` | block | no | 6 | The catalog names a snapshot of the project it does not hold, so its head is unknown; nothing is uploaded or committed |
 | `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
 | `config.invalid` | block | no | 6 | A config file does not parse or does not match its schema, and there is no last good copy to keep; `paths` names the file and the message the line or key |
@@ -186,11 +187,15 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `deps.ambiguous` | warn | yes | 6 | A package folder holds lockfiles of more than one package manager and no `packageManager` field; onload uses the first in DESIGN's table |
 | `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; `fix` suggests `--keep-deps` |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
+| `fs.cross-volume` | block | no | 6 | The project folder is on another volume than its root, so release could not move it aside in one rename |
 | `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own `.git` included; `paths` lists them |
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
+| `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
+| `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
+| `plan.stale` | block | no | 6 | The folder changed since the approved plan was made, or the plan is for another project; a fresh plan is saved and `fix` names its id |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
 | `process.output-incomplete` | block | no | 1 | A child process exited, but output plainport parses as data cannot be taken as whole: something outside its process group kept its stdout open, reading it failed, or processes it left in its group were stopped |
@@ -198,6 +203,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `process.spawn-failed` | block | no | 1 | A child process could not be started; `paths` names the program and its working folder |
 | `process.timeout` | block | no | 1 | A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output |
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
+| `project.locked` | block | no | 11 | Another plainport process holds the project's lock (`locks/<project>.lock`); a lock left by a dead process is broken instead |
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
 | `registry.locked` | block | no | 11 | Another process holds `registry.json.lock` |
@@ -216,13 +222,21 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `store.failed` | block | no | 1 | A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error |
 | `store.identity-changed` | block | no | 6 | The store at a configured path is not the one this device knows: its `meta/v1/store.json` names another id, or none. Nothing is synced, and nothing is written to either side |
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
+| `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); `fix` is `plainport init` |
+| `store.secret-missing` | block | no | 6 | The store's repository password could not be read from its secret reference (`env:` or `file:` in M1) |
+| `store.setup-pending` | warn | no | 6 | `init` recorded the store but could not set it up yet (its disk is not mounted, or this build cannot use its kind) |
 | `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder, such as a disk that is not mounted; nothing is created in its place |
+| `store.unsupported` | block | no | 6 | This build cannot use the store's kind yet; M1 uses local stores |
 | `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
+| `verify.changed` | block | no | 7 | Files changed while the snapshot was made, again after one retry; nothing local was deleted |
+| `verify.mismatch` | block | no | 7 | The snapshot's listing does not match the scan (entries, types, sizes, modes or link targets); nothing local was deleted |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
 | `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>` |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
+
+`command.unavailable` (exit 1), which `offload` returned until its saga landed (D38), is retired and never reused.
 
 ## 6. The `--dry-run` contract
 

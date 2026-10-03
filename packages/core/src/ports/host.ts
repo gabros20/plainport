@@ -13,6 +13,16 @@ export interface Clock {
   sleep(ms: number): Promise<void>;
 }
 
+/** A program started to outlive the command (HostPorts.detach). */
+export interface DetachSpec {
+  /** An absolute path, or a name looked up on the env's PATH. */
+  command: string;
+  args: readonly string[];
+  cwd: string;
+  /** The child's whole environment; nothing is inherited. */
+  env: Readonly<Record<string, string>>;
+}
+
 export interface HostPorts extends LocalIo {
   clock: Clock;
   /** Runs a child process through the one runner (AGENTS.md rule 6). */
@@ -24,6 +34,13 @@ export interface HostPorts extends LocalIo {
    * an await.
    */
   faultAt(step: string): void;
+  /**
+   * Starts a program that outlives this command: a session and process group of its own, stdin, stdout and stderr
+   * on /dev/null, never waited for. Only for work that must finish after the command has returned and that recovery
+   * repeats if it never ran, such as deleting an offload's trash (DESIGN.md "Offload process" step 8). Resolves with
+   * its pid once it has started; one that cannot start is process.spawn-failed.
+   */
+  detach(spec: DetachSpec): Promise<Result<{ pid: number }>>;
 }
 
 /** Dotted lower-case words, at least two: offload.release, onload.swap.rename. */

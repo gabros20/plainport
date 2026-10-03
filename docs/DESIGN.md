@@ -147,6 +147,8 @@ Offload is an eight-phase saga, and the local folder is touched only in the last
 7. **Verify and commit.** Compare `restic ls --json` for the new snapshot with the manifest: same entries, sizes, modes and link targets. Re-stat local files to catch edits made during the upload. Then check the head: the store's latest snapshot of this project must be the one this working copy came from. If so, append an `offloaded` event to the catalog, which also closes the lease.
 8. **Release.** Rename the folder into `<root>/.plainport-trash/` (instant on the same volume), write `myapp.plainport` where it stood, then delete the trash from a detached process, so the command returns at once. Until it is deleted, onloading the same head just renames the folder back. A configurable grace period (`keepLocalFor`, default `0`) can hold the trash for a day before deleting.
 
+**Journal steps.** The journal records `offload.begin`, `planned`, `snapshot.start`, `snapshot.discarded` (restic exit 3 only), `snapshot.done`, `verified`, `commit.start` (the offloaded event's id, before it is appended), `committed`, `release.trash` (the trash path, before the rename), `release.moved`, `release.stub` and `release.delete`; the saga exports this list, and the crash matrix stops at each step. Before `commit.start` recovery rolls back; from it on, recovery looks for the event on the store and finishes release if it is there. A run that fails or is cancelled before the commit has changed nothing local and closes its own journal. Release renames the folder to `<root>/.plainport-trash/<op>/<name>`; the detached process deletes that folder, then the journal. With `keepLocalFor`, the journal stays at `release.delete` until the trash is due, and `gc` or `recover` deletes it then.
+
 **Verification levels.** `manifest` (default) catches missing, unreadable and changed files. `full` also streams the snapshot back as a tar (`restic dump`) and hashes every file against the local copy; it doubles transfer time and suits LAN stores.
 
 **Conflict at step 7.** If another machine offloaded the same project since this copy was onloaded, the new snapshot is kept but tagged divergent. Nothing local is deleted, the exit code is 8, and `plainport resolve myapp` lets you keep either or both. To compare them, it writes the other copy into your repository as a commit on `refs/plainport/theirs/<snapshot>`, built through a temporary index so your own index and branch stay untouched. `git diff HEAD refs/plainport/theirs/…` and `git checkout -p` then work as usual.
@@ -768,7 +770,7 @@ delay = "7d"                    # forget requests wait this long; prune --yes ru
 pruneKey = "op://Private/plainport-prune/b2-key"   # delete-capable; fetched only for prune
 ```
 
-The `secret`, `recovery` and SSH settings are references, never values. Each one resolves through a secret provider: `keychain:`, `se:` (Secure Enclave), `op:` (1Password), `bw:` (Bitwarden), `file:` or `env:`.
+The `secret`, `recovery` and SSH settings are references, never values. In M1 a local store's `secret` is optional: without one, its restic repository password is read from `env:PLAINPORT_STORE_PASSWORD`, and `plainport init --store-secret <ref>` records another reference; only `env:` and `file:` are read until M2. Each one resolves through a secret provider: `keychain:`, `se:` (Secure Enclave), `op:` (1Password), `bw:` (Bitwarden), `file:` or `env:`.
 
 ## CLI design
 
