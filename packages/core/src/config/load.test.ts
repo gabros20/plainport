@@ -205,6 +205,43 @@ describe("config: precedence", () => {
     expect(config.strip.keep).toEqual(["dist/"]);
   });
 
+  test("a root's strip and deps sit between the global settings and the project file (D37)", async () => {
+    write(
+      paths.configFile,
+      [
+        "[strip]",
+        'extra = ["**/coverage"]',
+        'never = [".vercel/project.json"]',
+        "[deps]",
+        'mode = "strip"',
+        "[roots.work]",
+        "[roots.work.strip]",
+        'extra = ["tmp/"]',
+        "[roots.work.deps]",
+        'mode = "keep"',
+        "",
+      ].join("\n"),
+    );
+    const loader = new ConfigLoader(io, paths);
+    // The root's table merges key by key over the global one, and its array replaces the global array.
+    const rootOnly = (await loaded(loader, { env: {}, root: "work" })).config;
+    expect(rootOnly.strip).toEqual({ extra: ["tmp/"], never: [".vercel/project.json"], keep: [] });
+    expect(rootOnly.deps.mode).toBe("keep");
+    // Another root, or no root, keeps the global settings.
+    expect((await loaded(loader, { env: {}, root: "personal" })).config.strip.extra).toEqual(["**/coverage"]);
+    expect((await loaded(loader, { env: {} })).config.deps.mode).toBe("strip");
+    // The project file outranks the root.
+    write(join(project, ".plainport.toml"), '[deps]\nmode = "strip"\n[strip]\nextra = ["out/"]\n');
+    const withProject = (await loaded(loader, { env: {}, root: "work", projectDir: project })).config;
+    expect(withProject.deps.mode).toBe("strip");
+    expect(withProject.strip.extra).toEqual(["out/"]);
+    // Flags outrank everything.
+    const flagged = (
+      await loaded(loader, { env: {}, root: "work", projectDir: project, flags: { deps: { mode: "keep" } } })
+    ).config;
+    expect(flagged.deps.mode).toBe("keep");
+  });
+
   test("a project file may only hold project settings", async () => {
     write(join(project, ".plainport.toml"), 'defaultStore = "sneaky"\n');
     const result = await new ConfigLoader(io, paths).load({ env: {}, projectDir: project });
