@@ -482,20 +482,20 @@ The catalog is an append-only log of small JSON events on the store, and a proje
 }
 ```
 
-Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `renamed`, `resolved`, `lease-broken`, `forget-requested`, `forget-cancelled`, `forgotten`. Root events: `root-created`, `root-updated`, `root-bound`, `root-unbound`, `root-retired`. Device events: `device-paired`, `device-role-changed`, `device-revoked`, `secrets-granted`. A move is an `offloaded` event carrying a `move` field, followed by the target's `onloaded`.
+Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `snapshot-discarded`, `renamed`, `resolved`, `lease-broken`, `forget-requested`, `forget-cancelled`, `forgotten`. `snapshot-discarded` names a snapshot restic wrote although the offload failed (exit 3); it stays in an append-only repository but is never a head. Root events: `root-created`, `root-updated`, `root-bound`, `root-unbound`, `root-retired`. Device events: `device-paired`, `device-role-changed`, `device-revoked`, `secrets-granted`. A move is an `offloaded` event carrying a `move` field, followed by the target's `onloaded`.
 
 **Fold rules** (how state is computed from events):
 
 - **Status** is the latest `offloaded` or `onloaded` along the chain of `base` references. Clocks are for display only, so skew between machines can't reorder history.
-- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event.
+- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event: the deepest along the `base` chain. A discarded snapshot is never a head; two equally deep heads leave no single head.
 - **Snapshot IDs are plainport ULIDs.** For an offload, the snapshot ID is the operation's ULID. `restic copy` gives a snapshot a new restic ID in every repository, so `stored` maps each store to its own restic ID.
 - **Conflict:** two `offloaded` events with the same `base` mean two copies diverged. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
-- **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device.
+- **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device. An onload counts as later than the snapshot it restored and earlier than anything made from it. If several devices have such an event, the one furthest along the chain holds the lease, then the smallest event id, so a project has at most one.
 - **Address** is root plus relative path (`work:clients/acme/web`), unique within its root. The ULID stays fixed across renames, re-filing and moves; a move changes the landing path, never the address.
 - **Bindings** are each device's latest `root-bound` for a root. The device's own config always wins; the event is its published copy for other devices to plan with.
 - **Replication is a union.** Events are immutable files with unique names, so copying them between stores is a set union and never conflicts.
 
-Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time.
+Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time: it records a digest of the event names it was folded from, and is reused only while they match. A root's ULID comes from its first `root-created` event; each device records the ULID it uses for each root key in `registry.json`.
 
 **If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas and trims whitespace from its ends, so the engine percent-encodes (UTF-8 bytes) what restic would change: `,` as `%2C` and `%` as `%25` anywhere, control characters anywhere, and whitespace at the start or end; it decodes those when it reads tags back, so any project path keeps its exact `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
 
@@ -506,7 +506,7 @@ Event files are written create-only where the store can do it (exclusive create 
 | `~/.config/plainport/config.toml` | Your settings: devices, stores, roots, defaults, trusted hooks. plainport never rewrites it |
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
 | `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
-| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it |
+| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |
@@ -1027,12 +1027,14 @@ export interface Engine {
 }
 
 export interface BlobStore {
+  // Every call returns a Result, as the Engine's do: an unmounted disk is store.unreachable, a create-only put on
+  // an existing key is store.key-exists. A catalog is small, so list returns the whole listing, sorted by key.
   capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean };
-  get(key: string): Promise<Uint8Array | null>;
-  put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<{ etag?: string }>;
-  list(prefix: string): AsyncIterable<{ key: string; size: number; etag?: string }>;
-  stat(key: string): Promise<{ size: number; etag?: string } | null>;
-  delete(key: string): Promise<void>;
+  get(key: string): Promise<Result<Uint8Array | null>>;
+  put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<Result<{ etag?: string }>>;
+  list(prefix: string): Promise<Result<{ key: string; size: number; etag?: string }[]>>;
+  stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
+  delete(key: string): Promise<Result<void>>;
 }
 
 export interface EcosystemPlugin {
