@@ -71,6 +71,13 @@ const required = (f: Finding): Finding =>
     ...(f.paths === undefined ? {} : { paths: f.paths }),
   });
 
+/** The repository folder (.git, vendor/lib/.git) a path lies in, if any. */
+const gitFolderOf = (path: string): string | undefined => {
+  if (path.startsWith(".git/")) return ".git";
+  const at = path.indexOf("/.git/");
+  return at === -1 ? undefined : path.slice(0, at + "/.git".length);
+};
+
 const arrivalOf = (step: HydrateStep): ArrivalItem => ({
   part: "deps",
   outcome: "hydrate",
@@ -99,7 +106,7 @@ export const planOffload = async (
     );
   }
 
-  const loaded = await req.loader.load({ env: req.env, projectDir: req.dir });
+  const loaded = await req.loader.load({ env: req.env, projectDir: req.dir, root: req.project.root });
   if (!loaded.ok) return loaded;
   const { config } = loaded.value;
 
@@ -149,7 +156,16 @@ export const planOffload = async (
   const stripped = new Set(strip.value.entries.map((e) => e.path));
   let files = 0;
   let bytes = 0;
+  // A repository's own folder counts as one line in largest (D37): its files mean nothing to strip patterns.
+  const gitFolders = new Map<string, number>();
   const largest: Plan["include"]["largest"] = [];
+  const consider = (candidate: { path: string; bytes: number }) => {
+    if (largest.length === LARGEST && (largest[LARGEST - 1] as { bytes: number }).bytes >= candidate.bytes)
+      return;
+    largest.push(candidate);
+    largest.sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    if (largest.length > LARGEST) largest.pop();
+  };
   for (const entry of manifest) {
     if (entry.type !== "file") continue;
     let left = stripped.has(entry.path);
@@ -163,12 +179,11 @@ export const planOffload = async (
     const size = entry.size ?? 0;
     files++;
     bytes += size;
-    if (largest.length < LARGEST || (largest[LARGEST - 1] as { bytes: number }).bytes < size) {
-      largest.push({ path: entry.path, bytes: size });
-      largest.sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-      if (largest.length > LARGEST) largest.pop();
-    }
+    const folder = gitFolderOf(entry.path);
+    if (folder === undefined) consider({ path: entry.path, bytes: size });
+    else gitFolders.set(folder, (gitFolders.get(folder) ?? 0) + size);
   }
+  for (const [path, size] of gitFolders) consider({ path, bytes: size });
 
   const arrival: ArrivalItem[] =
     steps.length === 0

@@ -152,8 +152,8 @@ const tally = (folder: string): { files: number; bytes: number } => {
 };
 
 /**
- * The plan without what differs from run to run: its id, the fingerprint (mtimes), the temp folder, and .git's
- * own files (object sizes depend on the git version); the include totals count the project's other files only, and
+ * The plan without what differs from run to run: its id, the fingerprint (mtimes), the temp folder, and the
+ * .git line, whose size depends on the git version; the include totals count the project's other files only, and
  * the estimate, which is the include bytes, is checked by the test instead.
  */
 export const normalize = ({ plan, dir }: Pick<GoldenRun, "plan" | "dir">) => {
@@ -166,7 +166,7 @@ export const normalize = ({ plan, dir }: Pick<GoldenRun, "plan" | "dir">) => {
     include: {
       files: plan.include.files - git.files,
       bytes: plan.include.bytes - git.bytes,
-      largest: plan.include.largest.filter((l) => !l.path.startsWith(".git/")).slice(0, 3),
+      largest: plan.include.largest.filter((l) => l.path !== ".git").slice(0, 3),
     },
     strip: plan.strip,
     findings: plan.findings.map((f) => ({ ...f, message: f.message.replaceAll(dir, "<dir>") })),

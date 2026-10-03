@@ -133,6 +133,15 @@ describe("plan: the strip set", () => {
     expect(stripped(await plan([deps("node_modules"), output(".next")]))).toEqual([".next"]);
   });
 
+  test("the root's deps and strip settings apply, and the project file outranks them (D37)", async () => {
+    put("node_modules/a/index.js");
+    put("tmp/x.log");
+    userConfig('[roots.work.deps]\nmode = "keep"\n[roots.work.strip]\nextra = ["tmp/"]\n');
+    expect(stripped(await plan([deps("node_modules")]))).toEqual(["tmp"]);
+    writeFileSync(join(dir, ".plainport.toml"), '[deps]\nmode = "strip"\n');
+    expect(stripped(await plan([deps("node_modules")])).sort()).toEqual(["node_modules", "tmp"]);
+  });
+
   test("a candidate holding a repository is kept, and nested repositories are listed in the plan", async () => {
     put("node_modules/tool/index.js");
     fx.repo(join(dir, "node_modules/tool"));
@@ -186,6 +195,26 @@ describe("plan: totals, findings and the plan's own fields", () => {
       "src/f03.ts",
     ]);
     expect(p.estimate).toEqual({ uploadBytes: 6 + 7800 });
+  });
+
+  test("largest leaves out the files inside .git and shows each repository's .git as one line (D37)", async () => {
+    put("big.bin", 50_000);
+    fx.repo(join(dir, "vendor/lib"));
+    const p = await plan([]);
+    const paths = p.include.largest.map((l) => l.path);
+    expect(paths.filter((path) => path.includes(".git/"))).toEqual([]);
+    const total = (folder: string) =>
+      Bun.spawnSync(["find", folder, "-type", "f", "-exec", "stat", "-f", "%z", "{}", "+"])
+        .stdout.toString()
+        .split("\n")
+        .filter(Boolean)
+        .reduce((sum, n) => sum + Number(n), 0);
+    expect(p.include.largest[0]).toEqual({ path: "big.bin", bytes: 50_000 });
+    expect(p.include.largest).toContainEqual({ path: ".git", bytes: total(join(dir, ".git")) });
+    expect(p.include.largest).toContainEqual({
+      path: "vendor/lib/.git",
+      bytes: total(join(dir, "vendor/lib/.git")),
+    });
   });
 
   test("id, kind, project, phases, expiry and arrival", async () => {
