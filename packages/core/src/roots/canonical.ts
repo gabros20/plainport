@@ -82,9 +82,16 @@ const ignoresCase = async (io: LocalIo, real: string): Promise<boolean> => {
   return false;
 };
 
-/** The path's canonical form; a refusal (unresolvable) when the file system cannot resolve it. */
-export const canonicalPath = async (io: LocalIo, path: string): Promise<Result<CanonicalPath>> => {
-  const absolute = resolve(path);
+/**
+ * The path's canonical form; a refusal (unresolvable) when the file system cannot resolve it. A relative path is
+ * taken relative to `cwd`, the caller's injected working folder, never this process's.
+ */
+export const canonicalPath = async (
+  io: LocalIo,
+  path: string,
+  cwd: string,
+): Promise<Result<CanonicalPath>> => {
+  const absolute = resolve(cwd, path);
   const missing: string[] = [];
   let existing = absolute;
   for (;;) {

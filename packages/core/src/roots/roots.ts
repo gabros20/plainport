@@ -269,7 +269,7 @@ export const writeRoots = async (
           );
         }
 
-        const resolved = await canonicalPath(io, path);
+        const resolved = await canonicalPath(io, path, options.cwd);
         if (!resolved.ok) return resolved;
         const canon = resolved.value;
         const others = new Set([...Object.keys(user.roots ?? {}), ...Object.keys(roots)]);
@@ -278,7 +278,7 @@ export const writeRoots = async (
           const binding = bindingOf(other);
           if (binding === undefined) continue;
           const otherPath = bindingPath(binding, home);
-          const otherResolved = await canonicalPath(io, otherPath);
+          const otherResolved = await canonicalPath(io, otherPath, home);
           if (!otherResolved.ok) {
             return fail({
               ...otherResolved.finding,

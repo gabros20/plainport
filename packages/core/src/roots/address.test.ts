@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { symlinkSync } from "node:fs";
 import { join } from "node:path";
+import { ok } from "@plainport/contract";
 import { nodeLocalIo } from "../node-io.ts";
+import { updateRegistry } from "../registry.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { resolveProject } from "./address.ts";
 import { scanRoot } from "./scan.ts";
@@ -47,6 +49,7 @@ describe("roots: project addresses", () => {
       path: "clients/acme/web",
       id: ids["work:clients/acme/web"] as string,
       dir: join(box.home, "work/clients/acme/web"),
+      match: "registered",
     });
   });
 
@@ -85,8 +88,75 @@ describe("roots: project addresses", () => {
   test("an unregistered project folder inside a root still resolves, by its boundary", async () => {
     box.repo("work/fresh");
     box.dir("work/fresh/src");
-    expect(await address("~/work/fresh/src")).toMatchObject({ address: "work:fresh", root: "work" });
+    expect(await address("~/work/fresh/src")).toMatchObject({
+      address: "work:fresh",
+      root: "work",
+      match: "boundary",
+    });
+    expect(await address("work:fresh/src")).toMatchObject({ address: "work:fresh", match: "boundary" });
     expect((await address("~/work/fresh/src")).id).toBeUndefined();
+  });
+
+  test("a grouping folder is never a project: path and address both list the projects inside", async () => {
+    for (const input of ["~/work/clients", "work:clients", "~/work/clients/acme"]) {
+      const result = await resolve(input);
+      expect(result).toMatchObject({ ok: false, exitCode: 2, finding: { code: "project.ambiguous" } });
+      if (result.ok) continue;
+      expect(result.finding.message).toContain("work:clients/acme/web");
+    }
+    box.repo("work/group/unregistered");
+    const detected = await resolve("work:group");
+    expect(detected).toMatchObject({ ok: false, finding: { code: "project.ambiguous" } });
+    if (!detected.ok) expect(detected.finding.message).toContain("work:group/unregistered");
+  });
+
+  test("a subfolder named by address resolves to the project that holds it, like the path form", async () => {
+    expect(await address("work:api/src/deep")).toMatchObject({
+      address: "work:api",
+      id: ids["work:api"] as string,
+      match: "registered",
+    });
+  });
+
+  test("a plain folder that holds no project is project.not-found, by path or by address", async () => {
+    box.dir("work/empty/inner");
+    expect(await resolve("~/work/empty/inner")).toMatchObject({
+      ok: false,
+      exitCode: 4,
+      finding: { code: "project.not-found" },
+    });
+    expect(await resolve("work:empty")).toMatchObject({ ok: false, finding: { code: "project.not-found" } });
+  });
+
+  test("an address whose folder is not on this device stays an unchecked address", async () => {
+    expect(await address("work:shelved/thing")).toEqual({
+      address: "work:shelved/thing",
+      root: "work",
+      path: "shelved/thing",
+      dir: join(box.home, "work/shelved/thing"),
+      match: "address",
+    });
+  });
+
+  test("a project onloaded to an override folder resolves by that folder", async () => {
+    const elsewhere = box.repo("tmp/x");
+    box.dir("tmp/x/sub");
+    const updated = await updateRegistry(io, box.paths, (registry) => {
+      registry.projects["01J8A2C4E6G8J0K2M4P6R8T0VW"] = {
+        root: "work",
+        path: "moved",
+        override: elsewhere,
+        registeredAt: "2026-10-03T12:00:00.000Z",
+      };
+      return ok(registry);
+    });
+    if (!updated.ok) throw new Error(updated.finding.message);
+    expect(await address("~/tmp/x/sub")).toMatchObject({
+      address: "work:moved",
+      id: "01J8A2C4E6G8J0K2M4P6R8T0VW",
+      dir: elsewhere,
+      match: "registered",
+    });
   });
 
   test("a .plainport stub resolves to the project it stands for", async () => {
@@ -112,6 +182,7 @@ describe("roots: project addresses", () => {
       id: "01J8A2C4E6G8J0K2M4P6R8T0VW",
       dir: join(box.home, "work/clients/old"),
       stub,
+      match: "stub",
     });
     expect((await address("clients/old.plainport", join(box.home, "work"))).address).toBe("work:clients/old");
   });

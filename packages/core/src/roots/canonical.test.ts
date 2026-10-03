@@ -22,21 +22,28 @@ describe("roots: real paths", () => {
   test("a symlinked folder resolves to its target", async () => {
     const target = box.dir("Developer/Work");
     symlinkSync(target, join(box.home, "work"));
-    const canon = unwrap(await canonicalPath(io, join(box.home, "work")));
+    const canon = unwrap(await canonicalPath(io, join(box.home, "work"), box.home));
     expect(canon.real).toBe(realpathSync.native(target));
   });
 
   test("a path that does not exist yet resolves through its nearest existing ancestor", async () => {
     const parent = box.dir("code");
     symlinkSync(parent, join(box.home, "link"));
-    const canon = unwrap(await canonicalPath(io, join(box.home, "link", "new", "deeper")));
+    const canon = unwrap(await canonicalPath(io, join(box.home, "link", "new", "deeper"), box.home));
     expect(canon.real).toBe(join(realpathSync.native(parent), "new", "deeper"));
+  });
+
+  test("a relative path resolves against the cwd it is given, never the process's", async () => {
+    const base = box.dir("base");
+    const canon = unwrap(await canonicalPath(io, "child/x", base));
+    expect(canon.path).toBe(join(base, "child/x"));
+    expect(canon.real).toBe(join(realpathSync.native(base), "child/x"));
   });
 
   test("case sensitivity is probed on the volume itself, writing nothing", async () => {
     box.dir("Probe");
     const insensitive = existsSync(join(box.home, "probe"));
-    const canon = unwrap(await canonicalPath(io, join(box.home, "Probe")));
+    const canon = unwrap(await canonicalPath(io, join(box.home, "Probe"), box.home));
     expect(canon.caseInsensitive).toBe(insensitive);
   });
 

@@ -35,8 +35,8 @@ export const markerOf = async (io: LocalIo, dir: string): Promise<ProjectMarker 
   try {
     entries = await io.fs.entries(dir);
   } catch (error) {
-    const code = errorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES" || code === "EPERM") return undefined;
+    // Missing, not a folder, unreadable or a symlink loop: not a project folder.
+    if (errorCode(error) !== undefined) return undefined;
     throw error;
   }
   if (entries.some((e) => e.name === ".git" && e.kind === "dir")) return ".git";
@@ -46,7 +46,7 @@ export const markerOf = async (io: LocalIo, dir: string): Promise<ProjectMarker 
 const ignored = (globs: readonly Bun.Glob[], path: string): boolean =>
   globs.some((glob) => glob.match(path) || glob.match(`${path}/`) || glob.match(`${path}/-`));
 
-/** Every project under the root folder, in no particular order. Unreadable folders are skipped. */
+/** Every project under the root folder, in no particular order. Folders that cannot be listed are skipped. */
 export const findProjects = async (
   io: LocalIo,
   rootDir: string,
@@ -68,8 +68,8 @@ export const findProjects = async (
     try {
       entries = await io.fs.entries(dir);
     } catch (error) {
-      const code = errorCode(error);
-      if (code === "EACCES" || code === "EPERM" || code === "ENOENT") return;
+      // A folder that cannot be listed (gone, unreadable, a loop, a file) holds no projects the walk can see.
+      if (errorCode(error) !== undefined) return;
       throw error;
     }
     for (const entry of entries) {

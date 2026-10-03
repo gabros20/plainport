@@ -1,6 +1,6 @@
 // Roots, project boundaries and project addresses (DESIGN.md "Roots", ADR-0010).
 
-export { type ProjectRef, type ResolveOptions, resolveProject } from "./address.ts";
+export { type ProjectMatch, type ProjectRef, type ResolveOptions, resolveProject } from "./address.ts";
 export {
   DEFAULT_SCAN_DEPTH,
   type FoundProject,
@@ -9,7 +9,13 @@ export {
   type ProjectMarker,
   projectAt,
 } from "./boundary.ts";
-export { LIKELY_ROOTS, type RootCandidate, rootCandidates, rootKeyFrom } from "./candidates.ts";
+export {
+  LIKELY_ROOTS,
+  type RootCandidate,
+  rootCandidates,
+  rootKeyFrom,
+  type SkippedCandidate,
+} from "./candidates.ts";
 export { type CanonicalPath, canonicalPath, overlapOf } from "./canonical.ts";
 export {
   bindingPath,

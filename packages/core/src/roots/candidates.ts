@@ -4,6 +4,7 @@
 import { join } from "node:path";
 import type { LocalIo } from "../io.ts";
 import { findProjects } from "./boundary.ts";
+import { probeKind } from "./canonical.ts";
 
 /** Where people usually keep code, in the order init offers them. */
 export const LIKELY_ROOTS = ["work", "Developer", "Projects", "code"] as const;
@@ -24,12 +25,33 @@ export const rootKeyFrom = (name: string): string => {
   return key === "" ? "root" : key;
 };
 
-export const rootCandidates = async (io: LocalIo, home: string): Promise<RootCandidate[]> => {
+/** A likely folder that exists but cannot be offered, and why. */
+export interface SkippedCandidate {
+  path: string;
+  reason: string;
+}
+
+/** The likely folders that hold projects; one that is a file, a symlink loop or unreadable is skipped with a note. */
+export const rootCandidates = async (
+  io: LocalIo,
+  home: string,
+): Promise<{ candidates: RootCandidate[]; notes: SkippedCandidate[] }> => {
   const candidates: RootCandidate[] = [];
+  const notes: SkippedCandidate[] = [];
   for (const name of LIKELY_ROOTS) {
     const path = join(home, name);
+    const kind = await probeKind(io, path);
+    if (!kind.ok) {
+      notes.push({ path, reason: kind.finding.message });
+      continue;
+    }
+    if (kind.value === undefined) continue;
+    if (kind.value !== "dir") {
+      notes.push({ path, reason: "it is not a folder" });
+      continue;
+    }
     const projects = (await findProjects(io, path)).length;
     if (projects > 0) candidates.push({ path, key: rootKeyFrom(name), projects });
   }
-  return candidates;
+  return { candidates, notes };
 };
