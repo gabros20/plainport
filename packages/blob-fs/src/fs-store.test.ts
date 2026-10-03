@@ -15,14 +15,13 @@ import {
   type CatalogEvent,
   guardedFs,
   type LocalIo,
-  loadCatalogState,
+  loadCatalog,
   mirrorEventLog,
   PATH_REFUSED,
   PathGuard,
   readEvents,
   resolvePaths,
   storeEventLog,
-  syncMirror,
   ulid,
 } from "@plainport/core";
 import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
@@ -223,21 +222,27 @@ describe("blob-fs carries the catalog", () => {
       `${event(2).id}.json`,
     ]);
 
-    const state = await loadCatalogState(store);
-    if (!state.ok) throw new Error(state.finding.message);
-    expect(state.value.state.projects[idAt(1)]).toMatchObject({ status: "shelved", head: idAt(502) });
-    expect(existsSync(join(storeRoot, "meta/v1/state.json"))).toBe(true);
-
     const paths = resolvePaths({ HOME: dir });
     if (!paths.ok) throw new Error(paths.finding.message);
     const opened = await openEventMirror(io, paths.value, "ssd");
     if (!opened.ok) throw new Error(opened.finding.message);
     const mirror = opened.value;
     const mirrorRoot = join(dir, ".cache", "plainport", "ssd");
-    const synced = await syncMirror(storeEventLog(store), mirrorEventLog(mirror));
-    expect(synced.ok && synced.value.copied).toBe(2);
+
+    const online = await loadCatalog({ store, mirror });
+    if (!online.ok) throw new Error(online.finding.message);
+    expect(online.value).toMatchObject({ stale: false, source: "store" });
+    expect(online.value.state.projects[idAt(1)]).toMatchObject({ status: "shelved", head: idAt(502) });
+    expect(existsSync(join(storeRoot, "meta/v1/state.json"))).toBe(true);
+    expect(existsSync(join(mirrorRoot, "state.json"))).toBe(true);
     expect(readdirSync(join(mirrorRoot, "events")).length).toBe(2);
-    const offline = await readEvents(mirrorEventLog(mirror));
-    expect(offline.ok && offline.value.events).toEqual([event(1), event(2)]);
+    const offlineEvents = await readEvents(mirrorEventLog(mirror));
+    expect(offlineEvents.ok && offlineEvents.value.events).toEqual([event(1), event(2)]);
+
+    // The disk is unplugged: the same state comes from the mirror, marked stale.
+    rmSync(storeRoot, { recursive: true, force: true });
+    const offline = await loadCatalog({ store, mirror });
+    if (!offline.ok) throw new Error(offline.finding.message);
+    expect(offline.value).toMatchObject({ stale: true, source: "mirror", state: online.value.state });
   });
 });
