@@ -41,11 +41,21 @@ export type DockerMounts =
   /** Docker is not installed, or its daemon is not running: nothing can mount the folder, so nothing to check. */
   | { available: false; reason: string };
 
+export interface DatalessReport {
+  /** Placeholder (dataless) files and folders, relative to the folder; their data is not on this disk. */
+  placeholders: string[];
+  /**
+   * Folders the check had no permission to search, relative to the folder. What they hold is unknown, so
+   * preflight blocks on them (fs.unreadable) rather than trusting the scan to find them later.
+   */
+  unsearchable: string[];
+}
+
 export interface HostChecks {
   /** Processes with files open or their working directory inside the folder. */
   processesUsing(dir: string, ctx: CheckContext): Promise<Result<ProcessUse[]>>;
-  /** Placeholder (dataless) files and folders inside the folder, relative to it; their data is not on this disk. */
-  dataless(dir: string, ctx: CheckContext): Promise<Result<string[]>>;
+  /** Placeholder files and folders inside the folder, and the folders that could not be searched for them. */
+  dataless(dir: string, ctx: CheckContext): Promise<Result<DatalessReport>>;
   /** Running containers that bind-mount the folder. */
   dockerMounts(dir: string, ctx: CheckContext): Promise<Result<DockerMounts>>;
 }

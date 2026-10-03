@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok } from "@plainport/contract";
@@ -237,7 +248,7 @@ describe("macOS checks: placeholder (dataless) files", () => {
   test("asks find for the dataless flag, pruned so a placeholder folder is never listed, and gives relative paths", async () => {
     const { host: fake, specs } = scripted(outcome({ out: `${dir}/movie.mov\0${dir}/photos\0` }));
     const result = await createMacosChecks(fake).dataless(dir, { env });
-    expect(result).toEqual({ ok: true, value: ["movie.mov", "photos"] });
+    expect(result).toEqual({ ok: true, value: { placeholders: ["movie.mov", "photos"], unsearchable: [] } });
     expect(specs[0]?.command).toBe("/usr/bin/find");
     expect(specs[0]?.args).toEqual([dir, "-flags", "+dataless", "-print0", "-prune"]);
   });
@@ -249,7 +260,7 @@ describe("macOS checks: placeholder (dataless) files", () => {
     const { host: fake, specs } = scripted(outcome({ out: `${real}/a.mov\0` }));
     const result = await createMacosChecks(fake).dataless(join(dir, "link"), { env });
     expect(specs[0]?.args?.[0]).toBe(real);
-    expect(result).toEqual({ ok: true, value: ["a.mov"] });
+    expect(result).toEqual({ ok: true, value: { placeholders: ["a.mov"], unsearchable: [] } });
   });
 
   test("find not finishing is fs.dataless; a cancellation stays a cancellation", async () => {
@@ -262,7 +273,10 @@ describe("macOS checks: placeholder (dataless) files", () => {
   test("an ordinary folder on APFS has none (find accepts the flag here)", async () => {
     writeFileSync(join(dir, "a.txt"), "a");
     mkdirSync(join(dir, "sub"));
-    expect(await checks.dataless(dir, { env })).toEqual({ ok: true, value: [] });
+    expect(await checks.dataless(dir, { env })).toEqual({
+      ok: true,
+      value: { placeholders: [], unsearchable: [] },
+    });
   });
 
   test("folders find may not enter are the scan's fs.unreadable, not a failure here", async () => {
@@ -273,7 +287,10 @@ describe("macOS checks: placeholder (dataless) files", () => {
         stderr: { text: `find: ${dir}/locked: Permission denied\n`, droppedBytes: 0 },
       }),
     );
-    expect(await createMacosChecks(fake).dataless(dir, { env })).toEqual({ ok: true, value: ["a.mov"] });
+    expect(await createMacosChecks(fake).dataless(dir, { env })).toEqual({
+      ok: true,
+      value: { placeholders: ["a.mov"], unsearchable: ["locked"] },
+    });
   });
 
   test("any other find failure is fs.dataless: the folder was not checked", async () => {
@@ -286,10 +303,11 @@ describe("macOS checks: placeholder (dataless) files", () => {
   });
 });
 
-describe("macOS checks: docker bind mounts", () => {
-  const inspect = (mounts: { Type: string; Source: string }[], name = "/web-db-1", id = "abc123") =>
-    JSON.stringify([{ Id: id, Name: name, Mounts: mounts, State: { Running: true } }]);
+/** A docker inspect listing of one container with these mounts. */
+const inspect = (mounts: { Type: string; Source: string }[], name = "/web-db-1", id = "abc123") =>
+  JSON.stringify([{ Id: id, Name: name, Mounts: mounts, State: { Running: true } }]);
 
+describe("macOS checks: docker bind mounts", () => {
   test("a running container bind-mounting the folder or a folder inside it is found; other mounts are not", async () => {
     const { host: fake, specs } = scripted(
       outcome({ out: "abc123\n" }),
@@ -360,9 +378,21 @@ describe("macOS checks: docker bind mounts", () => {
   });
 
   test("docker not installed is not a finding: it is unavailable", async () => {
-    // The real host, with a PATH that has no docker on it.
-    const result = await checks.dockerMounts(dir, { env: { PATH: dir } });
-    expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
+    // The real host, with a PATH and a HOME that have no docker. The system folders and /var/run are searched
+    // too, so on a machine that has docker there the answer is "not running" (DOCKER_HOST names a missing
+    // socket) or, with a system socket and no CLI, a blocker.
+    const systemCli = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"].some((p) => existsSync(p));
+    const systemSocket = existsSync("/var/run/docker.sock");
+    const result = await checks.dockerMounts(dir, {
+      env: { PATH: dir, HOME: join(dir, "home"), DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
+    });
+    if (systemCli) {
+      expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not running" } });
+    } else if (systemSocket) {
+      expect(!result.ok && result.finding.code).toBe("env.docker-mount");
+    } else {
+      expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
+    }
   });
 
   test("docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)", async () => {
@@ -511,5 +541,140 @@ describe("macOS checks: fail closed", () => {
     expect(!dataless.ok && dataless.finding.code).toBe("fs.dataless");
     const docker = await unchecked.dockerMounts(dir, { env: fakeDocker() });
     expect(!docker.ok && docker.finding.code).toBe("env.docker-mount");
+  });
+});
+
+/**
+ * The real host, with the system folders docker may live in (/usr/local/bin, /opt/homebrew/bin, /var/run) hidden,
+ * so a machine with docker installed answers like one without.
+ */
+const withoutSystemDocker = (base: HostPorts = host): HostPorts => {
+  const hidden = (path: string) => /^\/(usr\/local\/bin|opt\/homebrew\/bin|var\/run)\//.test(path);
+  const enoent = (path: string) => Object.assign(new Error(`ENOENT: hidden, ${path}`), { code: "ENOENT" });
+  return {
+    ...base,
+    fs: {
+      ...base.fs,
+      stat: async (path) => {
+        if (hidden(path)) throw enoent(path);
+        return base.fs.stat(path);
+      },
+      executable: async (path) => (hidden(path) ? false : base.fs.executable(path)),
+    },
+  };
+};
+
+describe("macOS checks: docker as each engine reports it (r4)", () => {
+  /** A recorded-shape inspect listing with __PROJECT__ replaced by the folder's spelling the engine uses. */
+  const fixture = (name: string, project: string): string =>
+    readFileSync(join(import.meta.dir, "fixtures", `docker-inspect-${name}.json`), "utf8").replaceAll(
+      "__PROJECT__",
+      project,
+    );
+
+  test("Docker Desktop names bind sources inside its VM (/host_mnt/...): they are mapped back to host paths", async () => {
+    const { host: fake } = scripted(
+      outcome({ out: "9f1c2e4a7b3d\n" }),
+      outcome({ out: fixture("docker-desktop", dir) }),
+    );
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(result.ok && result.value.available && result.value.mounts.map((m) => m.source)).toEqual([
+      `/host_mnt${dir}`,
+      `/host_mnt${join(dir, "data")}`,
+    ]);
+  });
+
+  test("OrbStack and colima name bind sources by their host path", async () => {
+    const { host: fake } = scripted(
+      outcome({ out: "c7d8e9f0a1b2\n" }),
+      outcome({ out: fixture("orbstack", dir) }),
+    );
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(result.ok && result.value.available && result.value.mounts.length).toBe(2);
+  });
+
+  test("a /host_mnt source for another folder is still not a mount of this one", async () => {
+    const { host: fake } = scripted(
+      outcome({ out: "9f1c2e4a7b3d\n" }),
+      outcome({ out: fixture("docker-desktop", `${dir}-other`) }),
+    );
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(result).toEqual({ ok: true, value: { available: true, mounts: [] } });
+  });
+
+  test("a daemon socket with no docker command anywhere known blocks: containers may be running", async () => {
+    const home = join(dir, "home");
+    mkdirSync(join(home, ".docker", "run"), { recursive: true });
+    const server = createServer();
+    try {
+      await new Promise<void>((done) => server.listen(join(home, ".docker", "run", "docker.sock"), done));
+      const result = await createMacosChecks(withoutSystemDocker()).dockerMounts(dir, {
+        env: { PATH: dir, HOME: home },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.finding.code).toBe("env.docker-mount");
+        expect(result.finding.message).toContain(join(home, ".docker", "run", "docker.sock"));
+        expect(result.finding.fix).toContain(".docker/bin");
+      }
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
+  });
+
+  test("DOCKER_HOST naming a unix socket that exists counts as a daemon too", async () => {
+    const server = createServer();
+    try {
+      await new Promise<void>((done) => server.listen(join(dir, "engine.sock"), done));
+      const result = await createMacosChecks(withoutSystemDocker()).dockerMounts(dir, {
+        env: { PATH: dir, HOME: join(dir, "home"), DOCKER_HOST: `unix://${join(dir, "engine.sock")}` },
+      });
+      expect(!result.ok && result.finding.code).toBe("env.docker-mount");
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
+  });
+
+  test("a docker CLI in a known install folder is found when PATH lacks it", async () => {
+    const home = join(dir, "home");
+    mkdirSync(join(home, ".orbstack", "bin"), { recursive: true });
+    writeFileSync(join(home, ".orbstack", "bin", "docker"), "#!/bin/sh\nexit 99\n");
+    chmodSync(join(home, ".orbstack", "bin", "docker"), 0o755);
+    const { host: fake, specs } = scripted(outcome({ out: "" }));
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: { PATH: dir, HOME: home } });
+    expect(result).toEqual({ ok: true, value: { available: true, mounts: [] } });
+    expect(specs[0]?.command).toBe(join(home, ".orbstack", "bin", "docker"));
+  });
+
+  test("docker inspect's 'No such object' is accepted only when stderr was read whole", async () => {
+    const { host: fake } = scripted(
+      outcome({ out: "abc123\ngone456\n" }),
+      outcome({
+        exitCode: 1,
+        out: inspect([{ Type: "bind", Source: dir }]),
+        stderr: { text: "Error: No such object: gone456\n", droppedBytes: 512 },
+      }),
+    );
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(!result.ok && result.finding.code).toBe("env.docker-mount");
+  });
+});
+
+describe("macOS checks: folders find could not search (r4)", () => {
+  test("are returned by name, so preflight can block on them itself", async () => {
+    const { host: fake } = scripted(
+      outcome({
+        exitCode: 1,
+        out: `${dir}/a.mov\0`,
+        stderr: {
+          text: `find: ${dir}/locked: Permission denied\nfind: ${dir}/deep/er: Permission denied\n`,
+          droppedBytes: 0,
+        },
+      }),
+    );
+    expect(await createMacosChecks(fake).dataless(dir, { env })).toEqual({
+      ok: true,
+      value: { placeholders: ["a.mov"], unsearchable: ["locked", "deep/er"] },
+    });
   });
 });

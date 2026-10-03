@@ -26,7 +26,7 @@ afterEach(async () => {
 
 const quiet: HostChecks = {
   processesUsing: async () => ok([]),
-  dataless: async () => ok([]),
+  dataless: async () => found(),
   dockerMounts: async () => ok({ available: true, mounts: [] }),
 };
 
@@ -37,6 +37,8 @@ const run = async (dir: string, checks: Partial<HostChecks> = {}): Promise<Prefl
 };
 
 const codes = (findings: Finding[]) => findings.map((f) => `${f.severity} ${f.code}`);
+const found = (...placeholders: string[]) => ok({ placeholders, unsearchable: [] });
+const DAEMON = "git fsmonitor--daemon run --detach --ipc-threads=8";
 
 const use = (over: Partial<ProcessUse>): ProcessUse => ({
   pid: 4242,
@@ -53,7 +55,7 @@ describe("preflight: a clean folder", () => {
   test("a pushed repository nobody is using has no findings", async () => {
     const dir = fx.repo("web");
     fx.origin(dir);
-    expect(await run(dir)).toEqual({ findings: [], notes: [], fsmonitor: [] });
+    expect(await run(dir)).toEqual({ findings: [], notes: [], fsmonitor: [], safeToRead: true });
   });
 
   test("a folder without git is checked for processes, containers and placeholders only", async () => {
@@ -132,7 +134,6 @@ describe("preflight: processes", () => {
     servers.push(server);
     await new Promise<void>((done) => server.listen(path, done));
   };
-  const DAEMON = "git fsmonitor--daemon run --detach --ipc-threads=8";
 
   test("git's fsmonitor daemon is not a blocker: it is listed to be stopped", async () => {
     const dir = fx.repo("web");
@@ -140,7 +141,7 @@ describe("preflight: processes", () => {
     await listen(socket);
     const report = await run(dir, {
       processesUsing: async () =>
-        ok([use({ pid: 321, command: "git", args: DAEMON, cwd: true, files: [socket], fileCount: 1 })]),
+        ok([use({ pid: 321, command: "git", args: DAEMON, files: [socket], fileCount: 1 })]),
     });
     expect(report.findings).toEqual([]);
     expect(report.fsmonitor).toEqual([321]);
@@ -197,7 +198,7 @@ describe("preflight: what plainport cannot read", () => {
     const report = await run(dir, {
       dataless: async () => {
         asked = true;
-        return ok([]);
+        return found();
       },
     });
     chmodSync(dir, 0o755);
@@ -263,7 +264,7 @@ describe("preflight: containers and placeholders", () => {
 
   test("fs.dataless: placeholder files block, named relative to the folder", async () => {
     const dir = fx.repo("web");
-    const report = await run(dir, { dataless: async () => ok(["assets/video.mov"]) });
+    const report = await run(dir, { dataless: async () => found("assets/video.mov") });
     expect(codes(report.findings)).toEqual(["block fs.dataless"]);
     expect(report.findings[0]?.paths).toEqual(["assets/video.mov"]);
   });
@@ -300,7 +301,7 @@ describe("preflight: a check that cannot answer", () => {
 
 describe("preflight: findings from the scan", () => {
   const scanned = async (dir: string) => {
-    const result = await scanProject(host, dir, { env: fx.env });
+    const result = await scanProject(host, dir, { env: fx.env }, { safeToRead: true });
     if (!result.ok) throw new Error(result.finding.message);
     return scanFindings(result.value);
   };
@@ -450,7 +451,7 @@ describe("preflight: fails closed", () => {
     const dir = fx.repo("web");
     fx.write(join(dir, ".git", "index.lock"));
     const { spy, runs, reads } = watched();
-    const report = await runWith(spy, dir, { dataless: async () => ok(["assets/a.mov"]) });
+    const report = await runWith(spy, dir, { dataless: async () => found("assets/a.mov") });
     expect(codes(report.findings)).toEqual(["block fs.dataless"]);
     expect(runs).toEqual([]);
     expect(reads).toEqual([]);
@@ -472,7 +473,7 @@ describe("preflight: fails closed", () => {
     const linked = join(fx.root, "web-feature");
     fx.git(dir, "worktree", "add", "-q", "-b", "feature", linked);
     const { spy, reads } = watched();
-    const report = await runWith(spy, linked, { dataless: async () => ok([".git"]) });
+    const report = await runWith(spy, linked, { dataless: async () => found(".git") });
     expect(codes(report.findings)).toEqual(["block fs.dataless"]);
     expect(reads).toEqual([]);
   });
@@ -554,7 +555,7 @@ describe("preflight: fails closed", () => {
 
 describe("preflight: git.unpushed fixes cover everything reported", () => {
   const scanned = async (dir: string) => {
-    const result = await scanProject(host, dir, { env: fx.env });
+    const result = await scanProject(host, dir, { env: fx.env }, { safeToRead: true });
     if (!result.ok) throw new Error(result.finding.message);
     return scanFindings(result.value);
   };
@@ -602,5 +603,95 @@ describe("preflight: git.unpushed fixes cover everything reported", () => {
     expect(found?.message).toContain("1 stash");
     expect(found?.fix).toContain("git push origin main");
     expect(found?.fix).toContain("git stash list");
+  });
+});
+
+describe("preflight: fails closed (r4)", () => {
+  test("with placeholders present, nothing inside the folder is looked up, not even the daemon's socket", async () => {
+    const dir = fx.repo("web");
+    const looked: string[] = [];
+    const spy: HostPorts = {
+      ...host,
+      fs: {
+        ...host.fs,
+        lstat: async (path) => {
+          looked.push(path);
+          return host.fs.lstat(path);
+        },
+        realpath: async (path) => {
+          looked.push(path);
+          return host.fs.realpath(path);
+        },
+      },
+    };
+    const result = await preflight(
+      spy,
+      {
+        ...quiet,
+        dataless: async () => found("assets/a.mov"),
+        processesUsing: async () =>
+          ok([use({ pid: 9, command: "git", args: DAEMON, files: [dir], fileCount: 1 })]),
+      },
+      dir,
+      { env: fx.env },
+    );
+    expect(result.ok && codes(result.value.findings)).toEqual(["block fs.dataless", "block proc.open-files"]);
+    expect(looked).toEqual([]);
+  });
+
+  test("folders the placeholder check could not search block as fs.unreadable here, with a fix", async () => {
+    const dir = fx.repo("web");
+    const report = await run(dir, {
+      dataless: async () => ok({ placeholders: [], unsearchable: ["vendor/locked"] }),
+    });
+    expect(codes(report.findings)).toEqual(["block fs.unreadable"]);
+    expect(report.findings[0]?.paths).toEqual([join(dir, "vendor/locked")]);
+    expect(report.findings[0]?.fix).toBe(`chmod u+rx ${join(dir, "vendor/locked")}`);
+    expect(report.safeToRead).toBe(false);
+  });
+
+  test("the scan refuses to run without a preflight that cleared the folder for reading", async () => {
+    const dir = fx.repo("web");
+    const result = await scanProject(host, dir, { env: fx.env }, { safeToRead: false });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.finding.code).toBe("fs.dataless");
+  });
+
+  test("only the daemon itself (fsmonitor--daemon run) is exempt; a git client naming it is not", async () => {
+    const dir = fx.repo("web");
+    const server = createServer();
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(join(dir, ".git", "fsmonitor--daemon.ipc"), done));
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([
+          use({ pid: 11, command: "git", args: "git fsmonitor--daemon status", cwd: true }),
+          use({ pid: 12, command: "git", args: "git log --grep fsmonitor--daemon", cwd: true }),
+          use({
+            pid: 13,
+            command: "git",
+            args: "/usr/bin/git fsmonitor--daemon run --detach",
+            files: [dir],
+            fileCount: 1,
+          }),
+        ]),
+    });
+    expect(codes(report.findings)).toEqual(["block proc.cwd"]);
+    expect(report.findings[0]?.message).toContain("git (11)");
+    expect(report.findings[0]?.message).toContain("git (12)");
+    expect(report.fsmonitor).toEqual([13]);
+  });
+
+  test("a daemon working inside the folder is still proc.cwd, exempt only for what it holds", async () => {
+    const dir = fx.repo("web");
+    const server = createServer();
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(join(dir, ".git", "fsmonitor--daemon.ipc"), done));
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([use({ pid: 14, command: "git", args: DAEMON, cwd: true, files: [dir], fileCount: 1 })]),
+    });
+    expect(codes(report.findings)).toEqual(["block proc.cwd"]);
+    expect(report.fsmonitor).toEqual([14]);
   });
 });

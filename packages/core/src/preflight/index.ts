@@ -24,6 +24,11 @@ export interface PreflightReport {
   notes: string[];
   /** Pids of git fsmonitor daemons watching the folder: stopped before the snapshot, never a blocker. */
   fsmonitor: number[];
+  /**
+   * The placeholder check answered, found none, and could search every folder, so reading the folder downloads
+   * nothing. The git checks ran only if this holds, and scanProject() refuses to run without it.
+   */
+  safeToRead: boolean;
 }
 
 /** At most this many paths go into a finding; its message gives the full count. */
@@ -105,11 +110,15 @@ const processFindings = (
     // real socket, and the daemon holds nothing inside the folder but the folder itself (it watches it) and that
     // socket. A daemon for a repository nested inside also holds the nested folder, so it is not exempt; anything
     // else, git included, is an ordinary process with files open. `files` is a sample: a process holding more than
-    // it lists is not known to hold only the daemon's paths, so it is not exempt either.
-    const daemon = use.command === "git" && /(^|\s)fsmonitor--daemon(\s|$)/.test(use.args ?? "");
+    // it lists is not known to hold only the daemon's paths, so it is not exempt either. Only the daemon's own
+    // subcommand (`git fsmonitor--daemon run`) counts, not a client (`… status`) or a git given the word as an
+    // argument; and the exemption covers what the daemon holds, never its working directory.
+    const daemon = use.command === "git" && /^\S*git\s+fsmonitor--daemon\s+run(\s|$)/.test(use.args ?? "");
     const known = use.fileCount === use.files.length && use.files.every((path) => daemonPaths.has(path));
-    if (daemon && daemonPaths.size > 0 && known) report.fsmonitor.push(use.pid);
-    else others.push(use);
+    if (daemon && daemonPaths.size > 0 && known) {
+      report.fsmonitor.push(use.pid);
+      if (use.cwd) others.push({ ...use, files: [], fileCount: 0 });
+    } else others.push(use);
   }
   const holding = others.filter((p) => p.fileCount > 0);
   if (holding.length > 0) {
@@ -153,7 +162,7 @@ export const preflight = async (
   dir: string,
   ctx: CheckContext,
 ): Promise<Result<PreflightReport>> => {
-  const report: PreflightReport = { findings: [], notes: [], fsmonitor: [] };
+  const report: PreflightReport = { findings: [], notes: [], fsmonitor: [], safeToRead: false };
   const failed = (failure: Failure): Failure | undefined => {
     if (failure.exitCode === 130) return failure;
     report.findings.push(failure.finding);
@@ -163,35 +172,51 @@ export const preflight = async (
   const dataless = await checks.dataless(dir, ctx);
   if (!dataless.ok) {
     if (failed(dataless)) return dataless;
-  } else if (dataless.value.length > 0) {
-    const paths = dataless.value;
-    report.findings.push(
-      finding("fs.dataless", {
-        message: `${plural(paths.length, "file")} in ${dir} ${paths.length === 1 ? "is a placeholder" : "are placeholders"} (iCloud Drive or Dropbox): ${paths.length === 1 ? "its" : "their"} data is not on this disk, and reading ${paths.length === 1 ? "it" : "them"} would download or fail`,
-        paths: capped(paths),
-        fix: "download them first (in Finder: Download Now, or open each one), then re-run",
-      }),
-    );
+  } else {
+    const { placeholders, unsearchable } = dataless.value;
+    if (placeholders.length > 0) {
+      report.findings.push(
+        finding("fs.dataless", {
+          message: `${plural(placeholders.length, "file")} in ${dir} ${placeholders.length === 1 ? "is a placeholder" : "are placeholders"} (iCloud Drive or Dropbox): ${placeholders.length === 1 ? "its" : "their"} data is not on this disk, and reading ${placeholders.length === 1 ? "it" : "them"} would download or fail`,
+          paths: capped(placeholders),
+          fix: "download them first (in Finder: Download Now, or open each one), then re-run",
+        }),
+      );
+    }
+    if (unsearchable.length > 0) {
+      const paths = unsearchable.map((p) => join(dir, p));
+      report.findings.push(
+        finding("fs.unreadable", {
+          message: `plainport cannot search ${plural(paths.length, "folder")} in ${dir}, so what ${paths.length === 1 ? "it holds" : "they hold"} is unknown: ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", …" : ""}`,
+          paths: capped(paths),
+          fix: `chmod u+rx ${words(paths)}`,
+        }),
+      );
+    }
+    report.safeToRead = placeholders.length === 0 && unsearchable.length === 0;
   }
-  const safeToRead = dataless.ok && dataless.value.length === 0;
 
   const processes = await checks.processesUsing(dir, ctx);
   if (!processes.ok) {
     if (failed(processes)) return processes;
   } else {
-    const spellings = [resolve(dir)];
-    try {
-      spellings.push(await host.fs.realpath(dir));
-    } catch {
-      // The spelling given is all there is.
-    }
+    // The daemon's socket is looked up inside .git only once the folder is known safe to read; otherwise nothing is
+    // exempt, which can only add blockers.
     const daemonPaths = new Set<string>();
-    for (const spelling of spellings) {
-      const socket = join(spelling, ".git", "fsmonitor--daemon.ipc");
+    if (report.safeToRead) {
+      const spellings = [resolve(dir)];
       try {
-        if ((await host.fs.lstat(socket)).kind === "socket") daemonPaths.add(socket).add(spelling);
+        spellings.push(await host.fs.realpath(dir));
       } catch {
-        // No socket there: nothing is exempt.
+        // The spelling given is all there is.
+      }
+      for (const spelling of spellings) {
+        const socket = join(spelling, ".git", "fsmonitor--daemon.ipc");
+        try {
+          if ((await host.fs.lstat(socket)).kind === "socket") daemonPaths.add(socket).add(spelling);
+        } catch {
+          // No socket there: nothing is exempt.
+        }
       }
     }
     processFindings(processes.value, dir, daemonPaths, report);
@@ -214,7 +239,7 @@ export const preflight = async (
     );
   }
 
-  if (safeToRead) {
+  if (report.safeToRead) {
     const git = await gitChecks(host, dir, ctx, report);
     if (git !== undefined && failed(git)) return git;
   } else {

@@ -1,0 +1,63 @@
+[
+  {
+    "Id": "9f1c2e4a7b3d5c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60",
+    "Created": "2026-10-03T06:10:11.123456789Z",
+    "Path": "redis-server",
+    "Args": [],
+    "State": {
+      "Status": "running",
+      "Running": true,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 4321,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-10-03T06:10:11.456789012Z",
+      "FinishedAt": "0001-01-01T00:00:00Z"
+    },
+    "Image": "sha256:3a0f1b2c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+    "Name": "/web-db-1",
+    "RestartCount": 0,
+    "Driver": "overlayfs",
+    "Platform": "linux",
+    "HostConfig": {
+      "Binds": ["/Users/me/code/web:/project", "/Users/me/code/web/data:/data"],
+      "NetworkMode": "bridge"
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/host_mnt__PROJECT__",
+        "Destination": "/project",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "bind",
+        "Source": "/host_mnt__PROJECT__/data",
+        "Destination": "/data",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "web_cache",
+        "Source": "/var/lib/docker/volumes/web_cache/_data",
+        "Destination": "/cache",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": true,
+        "Propagation": ""
+      }
+    ],
+    "Config": {
+      "Hostname": "9f1c2e4a7b3d",
+      "Image": "redis:7-alpine",
+      "Cmd": ["redis-server"]
+    }
+  }
+]
