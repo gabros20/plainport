@@ -115,22 +115,40 @@ const skipped = (key: string, reason: string): Finding =>
     paths: [key],
   });
 
-const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | Finding => {
+/**
+ * A file left out of the fold. `bytes` says whether the bytes themselves are no event (torn, not JSON): only such a
+ * file is remembered as skipped by the mirror (I7). JSON that this version cannot use (a type or a schema it does not
+ * know, a name that disagrees with the id) is read again on every sync, since a newer plainport may accept it.
+ */
+interface Skipped {
+  finding: Finding;
+  bytes: boolean;
+}
+
+const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | Skipped => {
   let data: unknown;
   try {
     data = JSON.parse(decoder.decode(bytes));
   } catch (error) {
-    return skipped(key, `it is not JSON (${(error as Error).message})`);
+    return { finding: skipped(key, `it is not JSON (${(error as Error).message})`), bytes: true };
   }
   const type = typeof data === "object" && data !== null && "type" in data ? data.type : undefined;
   if (typeof type === "string" && !(CATALOG_EVENT_TYPES as readonly string[]).includes(type)) {
-    return skipped(key, `this version of plainport does not know the event type ${JSON.stringify(type)}`);
+    return {
+      finding: skipped(key, `this version of plainport does not know the event type ${JSON.stringify(type)}`),
+      bytes: false,
+    };
   }
   const checked = CatalogEventSchema.safeParse(data);
-  if (!checked.success)
-    return skipped(key, `it does not match the event schema: ${describeIssues(checked.error)}`);
-  if (checked.data.id !== id)
-    return skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`);
+  if (!checked.success) {
+    return {
+      finding: skipped(key, `it does not match the event schema: ${describeIssues(checked.error)}`),
+      bytes: false,
+    };
+  }
+  if (checked.data.id !== id) {
+    return { finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`), bytes: false };
+  }
   return checked.data;
 };
 
@@ -173,7 +191,7 @@ const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsR
     if (!bytes.ok) return bytes;
     if (bytes.value === null) continue; // removed since the listing (a store's own cleanup); nothing to fold
     const parsed = parseEvent(key, id, bytes.value);
-    if ("code" in parsed) findings.push(parsed);
+    if ("finding" in parsed) findings.push(parsed.finding);
     else events.push(parsed);
   }
   events.sort((a, b) => compare(a.id, b.id));
@@ -202,9 +220,12 @@ export const MirrorFileSchema = z
     v: z.literal(1),
     /** The id of the store mirrored (its meta/v1/store.json). */
     store: UlidSchema,
+    /** The FOLD_VERSION of the reader that wrote `skipped`: another reader starts the list afresh (I7). */
+    fold: z.int().positive(),
     lastSyncedAt: z.iso.datetime(),
-    /** Store files that could not be copied (torn, a newer type, other bytes than the mirror's), by event id: not
-     * fetched again while their size is the same, and reported each time. */
+    /** Store files whose bytes are no event (torn, not JSON), by event id: not fetched again while their size is the
+     * same and the reader is the same version, and reported each time. A file this version cannot use although it is
+     * JSON (a type or schema it does not know) is never listed here: it is read again on every sync. */
     skipped: z.record(z.string(), z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema })),
   })
   .meta({ title: "EventMirror", description: "mirror.json beside a store's local event mirror" });
@@ -305,13 +326,13 @@ const download = async (
   remote: EventLog,
   mirror: EventLog,
   id: string,
-): Promise<{ ok: true; value: number | Finding | undefined } | Fault> => {
+): Promise<{ ok: true; value: number | Skipped | undefined } | Fault> => {
   const key = keyOf(remote, id);
   const bytes = await remote.store.get(key);
   if (!bytes.ok) return storeFault(bytes);
   if (bytes.value === null) return ok(undefined);
   const parsed = parseEvent(key, id, bytes.value);
-  if ("code" in parsed) return ok(parsed);
+  if ("finding" in parsed) return ok(parsed);
   const target = keyOf(mirror, id);
   const createOnly = mirror.store.capabilities().createIfAbsent;
   const put = await mirror.store.put(target, bytes.value, createOnly ? { ifNotExists: true } : {});
@@ -329,15 +350,17 @@ const download = async (
     return completed.ok ? ok(bytes.value.length) : mirrorFault(completed);
   }
   if (mine !== null && sameBytes(mine, bytes.value)) return ok(bytes.value.length);
-  return ok(
-    skipped(key, `the mirror holds other bytes under its name (${target}); both are kept as they are`),
-  );
+  return ok({
+    finding: skipped(key, `the mirror holds other bytes under its name (${target}); both are kept as they are`),
+    bytes: false,
+  });
 };
 
 /**
  * Brings the mirror up to the store: one listing of each, fetching only files the mirror does not hold under the same
- * name and size and has not already found unreadable at that size. It only downloads: a read never writes to a store
- * (D45). Returns the mirror's listing as it stands afterwards.
+ * name and size and that this version of the reader has not already found to be no event at that size (I7: a list an
+ * older or newer reader made is started afresh, and JSON this version cannot use is never on it). It only downloads:
+ * a read never writes to a store (D45). Returns the mirror's listing as it stands afterwards.
  */
 const syncDown = async (
   remote: EventLog,
@@ -354,7 +377,7 @@ const syncDown = async (
   }
   const mine = await listEvents(mirror);
   if (!mine.ok) return mirrorFault(mine);
-  const known = recorded.value?.skipped ?? {};
+  const known = recorded.value?.fold === FOLD_VERSION ? recorded.value.skipped : {};
   const mirrorSizes = sizesById(mine.value);
   const skippedNow: MirrorFile["skipped"] = {};
   const findings: Finding[] = [];
@@ -374,11 +397,17 @@ const syncDown = async (
       mirrorSizes.set(id, result.value);
       copied++;
     } else {
-      skippedNow[id] = { size, finding: result.value };
-      findings.push(result.value);
+      if (result.value.bytes) skippedNow[id] = { size, finding: result.value.finding };
+      findings.push(result.value.finding);
     }
   }
-  const file: MirrorFile = { v: 1, store: storeId, lastSyncedAt: now.toISOString(), skipped: skippedNow };
+  const file: MirrorFile = {
+    v: 1,
+    store: storeId,
+    fold: FOLD_VERSION,
+    lastSyncedAt: now.toISOString(),
+    skipped: skippedNow,
+  };
   const written = await mirror.store.put(MIRROR_FILE_KEY, encoder.encode(`${JSON.stringify(file)}\n`));
   if (!written.ok) return mirrorFault(written);
   const entries = new Map(mine.value.entries.map((entry) => [entry.key, entry]));

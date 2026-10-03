@@ -12,6 +12,11 @@
       "title": "Ulid",
       "description": "A ULID: 26 upper-case Crockford base32 characters"
     },
+    "fold": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
     "lastSyncedAt": {
       "type": "string",
       "format": "date-time",
@@ -88,6 +93,7 @@
   "required": [
     "v",
     "store",
+    "fold",
     "lastSyncedAt",
     "skipped"
   ],

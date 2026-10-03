@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { finding } from "@plainport/contract";
 import { resolvePaths } from "../paths.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
@@ -279,7 +280,7 @@ describe("catalog: loadCatalog, the one read path (D43, D45)", () => {
     expect(first.findings.map((f) => f.code)).toEqual(["catalog.event-skipped", "catalog.event-skipped"]);
     store.calls.get = 0;
     const second = await load(store, mirror);
-    expect(store.calls.get).toBe(1); // the identity file only
+    expect(store.calls.get).toBe(2); // the identity file, and the newer event again (I7); the torn one is remembered
     expect(second.findings.map((f) => f.code)).toEqual(["catalog.event-skipped", "catalog.event-skipped"]);
 
     store.data.set(`meta/v1/events/${torn.id}.json`, whole); // completed: new size, fetched again
@@ -287,6 +288,69 @@ describe("catalog: loadCatalog, the one read path (D43, D45)", () => {
     expect(third.copied).toBe(1);
     expect(third.findings).toHaveLength(1);
     expect(third.state.projects[PROJECT]?.snapshots[torn.snapshot]).toBeDefined();
+  });
+
+  test("I7: a valid event of a type this version does not know is read again on every sync, never remembered as skipped", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    const newer = { ...offloaded(2), type: "resolved" };
+    store.data.set(`meta/v1/events/${newer.id}.json`, encode(newer));
+    const first = await load(store, mirror);
+    expect(first.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    const recorded = JSON.parse(decode(mirror.data.get(MIRROR_FILE_KEY)) as string);
+    expect(recorded.fold).toBe(FOLD_VERSION); // the reader that wrote the skip list
+    expect(recorded.skipped).toEqual({}); // a newer reader may accept the event: nothing to remember
+    store.calls.get = 0;
+    const second = await load(store, mirror);
+    expect(store.calls.get).toBe(2); // the identity file and the event, again
+    expect(second.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+  });
+
+  test("I7: after an upgrade, what the older reader skipped is read again: the skip list dies with its reader's version", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    // M1 on this device skipped the event (to it, an unknown type) and remembered it at this size. Then plainport was
+    // upgraded to a reader that knows the type: here, the event is one this fold knows.
+    const event = offloaded(1);
+    await appendEvent(storeEventLog(store), event);
+    const size = (store.data.get(`meta/v1/events/${event.id}.json`) as Uint8Array).length;
+    mirror.data.set(
+      MIRROR_FILE_KEY,
+      encode({
+        v: 1,
+        store: STORE_ID,
+        fold: FOLD_VERSION - 1,
+        lastSyncedAt: NOW.toISOString(),
+        skipped: {
+          [event.id]: {
+            size,
+            finding: finding("catalog.event-skipped", { message: "an older plainport did not know it" }),
+          },
+        },
+      }),
+    );
+    const result = await load(store, mirror);
+    expect(result.copied).toBe(1);
+    expect(result.findings).toEqual([]);
+    expect(result.state.projects[PROJECT]?.snapshots[event.snapshot]).toBeDefined();
+    expect(JSON.parse(decode(mirror.data.get(MIRROR_FILE_KEY)) as string)).toMatchObject({
+      fold: FOLD_VERSION,
+      skipped: {},
+    });
+  });
+
+  test("I7: a file that is not JSON is remembered by size, with the version that found it so", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    store.data.set(`meta/v1/events/${idAt(42)}.json`, encode("{torn"));
+    await load(store, mirror);
+    expect(JSON.parse(decode(mirror.data.get(MIRROR_FILE_KEY)) as string)).toMatchObject({
+      fold: FOLD_VERSION,
+      skipped: { [idAt(42)]: { size: 5 } },
+    });
+    store.calls.get = 0;
+    expect((await load(store, mirror)).findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    expect(store.calls.get).toBe(1); // the identity file only
   });
 
   test("an event the store encodes differently is copied byte for byte, so it is not fetched again", async () => {
@@ -419,7 +483,7 @@ describe("catalog: loadCatalog, the one read path (D43, D45)", () => {
     const foreign = memoryBlobStore();
     foreign.data.set(
       MIRROR_FILE_KEY,
-      encode({ v: 1, store: idAt(901), lastSyncedAt: NOW.toISOString(), skipped: {} }),
+      encode({ v: 1, store: idAt(901), fold: FOLD_VERSION, lastSyncedAt: NOW.toISOString(), skipped: {} }),
     );
     await appendEvent(mirrorEventLog(foreign), offloaded(5));
     const result = await load(store, foreign);
