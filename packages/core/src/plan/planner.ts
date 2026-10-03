@@ -18,7 +18,7 @@ import { preflight, scanFindings } from "../preflight/index.ts";
 import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
-import { FINGERPRINT_VERSION, includedFingerprint, type TreeScan } from "../scan/walk.ts";
+import { FINGERPRINT_VERSION, includedFingerprint, scanTree, type TreeScan } from "../scan/walk.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { type ArrivalItem, PLAN_TTL_MS, type Plan } from "./schema.ts";
@@ -358,4 +358,56 @@ export const prepareOffload = async (
   };
   await req.boundary?.("plan.end");
   return ok({ plan, tree, config, ecosystems });
+};
+
+export interface DehydrateRequest {
+  dir: string;
+  /** strip.keep and strip.never from config and the project file apply; none without it. */
+  loader: ConfigLoader | undefined;
+  env: Env;
+  root: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * What `plainport dehydrate` may remove: the installed dependencies plugins claim (kind deps, not declined), less
+ * anything git tracks or strip.keep and strip.never protect, as the strip set decides them (AGENTS.md rule 2).
+ */
+export const dehydrateSet = async (
+  host: HostPorts,
+  plugins: readonly EcosystemPlugin[],
+  req: DehydrateRequest,
+): Promise<Result<{ path: string; bytes: number }[]>> => {
+  const scanned = await scanTree(host.fs, req.dir);
+  if (!scanned.ok) return scanned;
+  const { manifest } = scanned.value;
+  let keep: readonly string[] = [];
+  let never: readonly string[] = [];
+  if (req.loader !== undefined) {
+    const loaded = await req.loader.load({ env: req.env, projectDir: req.dir, root: req.root });
+    if (!loaded.ok) return loaded;
+    keep = loaded.value.config.strip.keep;
+    never = loaded.value.config.strip.never;
+  }
+  const candidates: ProposedStrip[] = [];
+  for (const plugin of plugins) {
+    const detection = await plugin.detect({ dir: req.dir, manifest, fs: host.fs });
+    if (detection === null) continue;
+    const ctx = { dir: req.dir, manifest, fs: host.fs, detection };
+    for (const c of await plugin.strip(ctx))
+      if (c.kind === "deps") candidates.push({ ...c, plugin: plugin.id });
+  }
+  const ctx: CheckContext = { env: req.env, ...(req.signal === undefined ? {} : { signal: req.signal }) };
+  const strip = await resolveStripSet({
+    manifest,
+    candidates,
+    extra: [],
+    keep,
+    never,
+    keepDeps: false,
+    repos: repositories(manifest),
+    tracked: (repo, paths) => gitTracked(host, repo === "" ? req.dir : join(req.dir, repo), ctx, paths),
+  });
+  if (!strip.ok) return strip;
+  return ok(strip.value.entries.map((e) => ({ path: e.path, bytes: e.bytes })));
 };

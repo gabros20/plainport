@@ -193,6 +193,14 @@ export const stopFsmonitor = async (host: HostPorts, repo: string, ctx: GitConte
   (await git(host, repo, ctx, ["fsmonitor--daemon", "stop"])).ok;
 
 /**
+ * Refreshes the index's stat data after a restore (DESIGN.md "Edge cases": git's index cache is invalid after a
+ * restore), so the first `git status` is not slow. The one git call that writes, and only the index: through the
+ * same path as every other (real path, ceiling, gitEnv). Whether git finished.
+ */
+export const refreshIndex = async (host: HostPorts, repo: string, ctx: GitContext): Promise<boolean> =>
+  (await git(host, repo, ctx, ["update-index", "-q", "--refresh"])).ok;
+
+/**
  * fs.unreadable for a path plainport needed to look at and could not. `blocked` is what to fix: a file that cannot
  * be read (u+r), or, by default, the folder holding the path, which cannot be searched when lstat itself fails
  * (u+rx).

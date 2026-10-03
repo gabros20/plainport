@@ -8,6 +8,10 @@
 // Python backend). A workspace member (package.json `workspaces`, pnpm-workspace.yaml `packages`) is never one, stray
 // lockfile or not: one install at the workspace root covers it.
 //
+// Toolchain: the node version a version file pins (.nvmrc, .node-version, .tool-versions, mise.toml), which a version
+// manager can activate, and what package.json's engines and packageManager ask for, which the core compares with
+// the active versions; only the project folder's own files count.
+//
 // Proposals: every outermost node_modules; the framework caches .next, .nuxt, .svelte-kit, .turbo, .parcel-cache and
 // .vercel/output; Yarn Berry's install state and cache (.yarn/cache, .yarn/unplugged, .yarn/install-state.gz,
 // .pnp.cjs, .pnp.loader.mjs), kept by the core when committed for zero-installs; and dist/ or build/ beside a
@@ -25,6 +29,7 @@ import {
   type ProjectDir,
   type StripCandidate,
   systemErrorCode,
+  type ToolRequirement,
 } from "@plainport/core";
 import { choosePackageManager, LOCKFILES, MANAGER_NAMES, type PackageManagerChoice } from "./detect.ts";
 import { type OutputFolder, scriptWriting } from "./scripts.ts";
@@ -39,6 +44,9 @@ const CACHES: ReadonlyMap<string, string> = new Map([
   [".parcel-cache", "Parcel's cache; parcel fills it again"],
   [".vercel/output", "Vercel's build output; vercel build makes it again"],
 ]);
+
+/** The tools a project can ask a version of: node and its package managers. */
+const TOOLS: ReadonlySet<string> = new Set(["node", "npm", "pnpm", "yarn", "bun"]);
 
 /** Yarn Berry's install artefacts, inside a Yarn Berry install root. */
 const BERRY = [".yarn/cache", ".yarn/unplugged", ".yarn/install-state.gz", ".pnp.cjs", ".pnp.loader.mjs"];
@@ -309,6 +317,75 @@ export const nodePlugin: EcosystemPlugin = {
       }
     }
     return findings;
+  },
+
+  toolchain: async (ctx): Promise<ToolRequirement[]> => {
+    const found: ToolRequirement[] = [];
+    const read = async (name: string): Promise<string | undefined> => {
+      if (ctx.manifest.get(name)?.type !== "file") return undefined;
+      try {
+        return await ctx.fs.readText(join(ctx.dir, name));
+      } catch (error) {
+        systemErrorCode(error); // unreadable: it asks for nothing
+        return undefined;
+      }
+    };
+    const firstLine = (text: string | undefined): string | undefined =>
+      text
+        ?.split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l !== "" && !l.startsWith("#"));
+    for (const name of [".nvmrc", ".node-version"]) {
+      const version = firstLine(await read(name));
+      if (version !== undefined) found.push({ tool: "node", version, source: name, pinned: true });
+    }
+    for (const line of (await read(".tool-versions"))?.split(/\r?\n/) ?? []) {
+      const [tool, version] = line.replace(/#.*/, "").trim().split(/\s+/);
+      const named = tool === "nodejs" ? "node" : tool;
+      if (named !== undefined && version !== undefined && TOOLS.has(named))
+        found.push({ tool: named, version, source: ".tool-versions", pinned: true });
+    }
+    for (const name of ["mise.toml", ".mise.toml"]) {
+      const text = await read(name);
+      if (text === undefined) continue;
+      let tools: unknown;
+      try {
+        tools = (Bun.TOML.parse(text) as { tools?: unknown }).tools;
+      } catch {
+        continue; // not TOML mise can read either: it asks for nothing
+      }
+      if (typeof tools !== "object" || tools === null) continue;
+      for (const [tool, value] of Object.entries(tools)) {
+        const version = Array.isArray(value) ? value[0] : value;
+        if (TOOLS.has(tool) && typeof version === "string")
+          found.push({ tool, version, source: name, pinned: true });
+      }
+    }
+    const pkg = await read("package.json");
+    let json: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = pkg === undefined ? undefined : JSON.parse(pkg);
+      if (typeof parsed === "object" && parsed !== null) json = parsed as Record<string, unknown>;
+    } catch {
+      // Not JSON: the package asks for nothing.
+    }
+    if (typeof json.engines === "object" && json.engines !== null) {
+      for (const [tool, version] of Object.entries(json.engines)) {
+        if (TOOLS.has(tool) && typeof version === "string")
+          found.push({ tool, version, source: `package.json engines.${tool}`, pinned: false });
+      }
+    }
+    const manager = /^(npm|pnpm|yarn|bun)@([^+\s]+)/.exec(
+      typeof json.packageManager === "string" ? json.packageManager.trim() : "",
+    );
+    if (manager !== null)
+      found.push({
+        tool: manager[1] as string,
+        version: manager[2] as string,
+        source: "package.json packageManager",
+        pinned: false,
+      });
+    return found;
   },
 
   hydrate: async (ctx) => {

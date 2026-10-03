@@ -1,0 +1,8 @@
+{
+  "name": "hydrate-bun",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "plainport-tiny": "file:vendor/plainport-tiny-1.0.0.tgz"
+  }
+}

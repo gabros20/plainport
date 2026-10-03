@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      plainport-tiny:
+        specifier: file:vendor/plainport-tiny-1.0.0.tgz
+        version: file:vendor/plainport-tiny-1.0.0.tgz
+
+packages:
+
+  plainport-tiny@file:vendor/plainport-tiny-1.0.0.tgz:
+    resolution: {integrity: sha512-niqHixEH+4v7RIaN5pvbg6EtG2D1kAcEQ7MfcjkEq2phhUO3CmT2IevHSLibYVBR2E6VZZteMjfdJDapslOfAQ==, tarball: file:vendor/plainport-tiny-1.0.0.tgz}
+    version: 1.0.0
+
+snapshots:
+
+  plainport-tiny@file:vendor/plainport-tiny-1.0.0.tgz: {}
