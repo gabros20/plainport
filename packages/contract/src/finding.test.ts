@@ -46,6 +46,28 @@ describe("findings", () => {
 
   test("the catalogue is frozen", () => {
     expect(FINDINGS as unknown).toEqual({
+      "command.cancelled": {
+        severity: "block",
+        allowable: false,
+        exitCode: 130,
+        summary: expect.any(String),
+      },
+      "config.owned": { severity: "block", allowable: false, exitCode: 5, summary: expect.any(String) },
+      "device.none": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "project.ambiguous": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },
+      "project.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "root.defined-twice": { severity: "warn", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "root.exists": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "root.none": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },
+      "root.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "root.not-writable": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "root.overlap": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "root.path-missing": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "root.synced-folder": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
+      "root.unbound": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "stub.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "command.unknown": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "config.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "config.kept-last-good": {

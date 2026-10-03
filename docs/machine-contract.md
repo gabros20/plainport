@@ -168,20 +168,37 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
+| `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
 | `config.invalid` | block | no | 6 | A config file does not parse or does not match its schema, and there is no last good copy to keep; `paths` names the file and the message the line or key |
 | `config.kept-last-good` | warn | no | 6 | A config file broke since it was last loaded in this process; its last good contents stay in effect |
 | `config.locked` | block | no | 11 | Another process holds `managed.toml.lock`; the message names its PID, host and start time |
 | `config.no-home` | block | no | 6 | `HOME` is unset or not an absolute path |
 | `config.not-found` | block | no | 4 | The file named by `--config` or `PLAINPORT_CONFIG` does not exist |
+| `config.owned` | block | no | 5 | `config.toml` already sets this root binding or store and wins over `managed.toml`; `fix` names the key and file to edit |
 | `config.read-only` | block | no | 5 | A write would rewrite `config.toml`, which plainport never does |
 | `config.write-failed` | block | no | 1 | `managed.toml` or `device.json` could not be written; the old file is intact |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
 | `device.invalid` | block | no | 6 | `device.json`, this device's identity, is unreadable; plainport never replaces it |
+| `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
+| `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
+| `project.not-found` | block | no | 4 | No project matches the name, address or path |
+| `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
+| `registry.locked` | block | no | 11 | Another process holds `registry.json.lock` |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
-| `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
+| `root.defined-twice` | warn | no | 6 | `config.toml` and `managed.toml` both define a root; `config.toml` wins key by key, and `fix` says where to edit |
+| `root.exists` | block | no | 6 | A root with this key already exists; `fix` is the `root bind` command |
+| `root.none` | block | no | 2 | The folder is outside every root; file it with `--root` and `--as`, or add a root that holds it |
+| `root.not-found` | block | no | 4 | No root has this key |
+| `root.not-writable` | block | no | 6 | plainport cannot write to the root's folder |
+| `root.overlap` | block | no | 6 | Two roots on this device overlap or resolve to the same real path (symlinks resolved, case folded on case-insensitive volumes); `paths` names both folders |
+| `root.path-missing` | block | no | 6 | The root's folder on this device does not exist or is not a folder; `--create` makes it |
+| `root.synced-folder` | warn | yes | 6 | The root is inside an iCloud Drive or Dropbox folder |
+| `root.unbound` | block | no | 6 | The root has no folder on this device; `fix` is `plainport root bind <root> <path>` |
+| `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
+| `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
 | `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>` |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
