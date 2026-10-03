@@ -46,6 +46,12 @@ describe("findings", () => {
 
   test("the catalogue is frozen", () => {
     expect(FINDINGS as unknown).toEqual({
+      "catalog.event-skipped": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "command.cancelled": {
         severity: "block",
         allowable: false,
@@ -104,6 +110,9 @@ describe("findings", () => {
       "root.path-missing": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "root.synced-folder": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
       "root.unbound": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "store.failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.unreachable": { severity: "block", allowable: false, exitCode: 9, summary: expect.any(String) },
       "stub.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "command.unknown": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "config.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },

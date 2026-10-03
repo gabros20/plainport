@@ -33,6 +33,13 @@ export interface FindingSpec {
 
 /** Every finding code plainport emits. A code, once listed, keeps its meaning; later tasks add entries. */
 export const FINDINGS = Object.freeze({
+  "catalog.event-skipped": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed",
+  },
   "command.cancelled": {
     severity: "block",
     allowable: false,
@@ -445,6 +452,26 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary: "The root has no folder on this device; plainport root bind gives it one",
+  },
+  "store.failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary:
+      "A read or write in the store failed (permissions, a full disk, an I/O error); the message names the key and the error",
+  },
+  "store.key-exists": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A create-only write found the key already there; the existing value is left as it was",
+  },
+  "store.unreachable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 9,
+    summary:
+      "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved",
   },
   "stub.invalid": {
     severity: "block",

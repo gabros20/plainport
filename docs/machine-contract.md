@@ -169,6 +169,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
+| `catalog.event-skipped` | warn | no | 6 | A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed |
 | `command.unavailable` | block | no | 1 | This build registers the command but cannot run it for real yet; its `--dry-run` preview works. Temporary: `offload` until the offload saga lands (D38) |
 | `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
@@ -212,6 +213,9 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `root.synced-folder` | warn | yes | 6 | The root is inside an iCloud Drive or Dropbox folder |
 | `root.unbound` | block | no | 6 | The root has no folder on this device; `fix` is `plainport root bind <root> <path>` |
 | `strip.kept` | info | no | 6 | Paths a plugin or `strip.extra` proposed stay in the snapshot; the message says why for each (git tracks it, `strip.keep` or `strip.never` matches, it holds a repository, dependencies are kept) |
+| `store.failed` | block | no | 1 | A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error |
+| `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
+| `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder, such as a disk that is not mounted; nothing is created in its place |
 | `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
