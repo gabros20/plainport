@@ -34,13 +34,17 @@ const project = {
 
 /** Each store's own restic id for the snapshot (`restic copy` gives it a new one in every repository). */
 const stored = z.record(z.string().min(1), ResticIdSchema);
+/** A snapshot an event says was made is stored somewhere: at least one entry (D41). */
+const storedSomewhere = stored
+  .refine((map) => Object.keys(map).length > 0, "names at least one store")
+  .meta({ minProperties: 1 });
 
 const snapshotFields = {
   /** The snapshot this one was made from: the working copy's onloaded or checkpointed snapshot. None on a first offload. */
   base: UlidSchema.optional(),
   /** The plainport snapshot id: the ULID of the operation that made it. */
   snapshot: UlidSchema,
-  stored,
+  stored: storedSomewhere,
   stats: z.strictObject({
     files: z.int().nonnegative(),
     bytes: z.int().nonnegative(),

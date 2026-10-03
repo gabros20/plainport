@@ -6,6 +6,8 @@ import { ulid } from "../ulid.ts";
 import {
   appendEvent,
   type CatalogEvent,
+  CatalogEventSchema,
+  encodeEvent,
   eventMirrorDir,
   foldCatalog,
   loadCatalogState,
@@ -59,6 +61,28 @@ describe("catalog: event log on a store", () => {
     const clash = await appendEvent(log, { ...event, path: "other" });
     expect(clash).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
     expect(JSON.parse(decode(store.data.get(`meta/v1/events/${event.id}.json`)) as string).path).toBe("web");
+  });
+
+  test("a retry completes its own torn write (a file without hard links died mid-write); other bytes are refused", async () => {
+    const store = memoryBlobStore();
+    const log = storeEventLog(store);
+    const event = offloaded(1);
+    const key = `meta/v1/events/${event.id}.json`;
+    // The bytes appendEvent writes: the event as its schema parses it, in the schema's key order.
+    const whole = decode(encodeEvent(CatalogEventSchema.parse(event))) as string;
+    store.data.set(key, encode(whole.slice(0, 20)));
+    const torn = await readEvents(log);
+    expect(torn.ok && torn.value.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    expect(await appendEvent(log, event)).toEqual({ ok: true, value: undefined });
+    expect(decode(store.data.get(key))).toBe(whole);
+    // An empty file (the crash came before any byte) is completed too.
+    store.data.set(key, encode(""));
+    expect((await appendEvent(log, event)).ok).toBe(true);
+    expect(decode(store.data.get(key))).toBe(whole);
+    // A torn file that is not a prefix of this event is someone else's: never overwritten.
+    store.data.set(key, encode('{"v":1,"id":"other'));
+    expect(await appendEvent(log, event)).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
+    expect(decode(store.data.get(key))).toBe('{"v":1,"id":"other');
   });
 
   test("an event that does not match its schema is a bug: contract.invalid, nothing written", async () => {

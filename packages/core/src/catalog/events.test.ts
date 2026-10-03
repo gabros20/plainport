@@ -81,6 +81,8 @@ describe("catalog: event schemas", () => {
       { ...designExample, stored: { ssd: "abc" } },
       { ...designExample, at: "yesterday" },
       { ...designExample, type: "teleported" },
+      { ...designExample, stored: {} },
+      { ...valid.checkpointed, stored: {} },
       { ...valid["root-created"], key: "Work Stuff" },
       { ...valid["root-bound"], path: "" },
     ];
@@ -92,6 +94,8 @@ describe("catalog: event schemas", () => {
     expect(Object.keys(schemas).sort()).toEqual(["catalog-event", "catalog-state"]);
     const text = JSON.stringify(schemas["catalog-event"]);
     for (const type of CATALOG_EVENT_TYPES) expect(text).toContain(`"${type}"`);
+    // D41: a non-empty stored map is published too, not only checked in TypeScript.
+    expect(text).toContain('"minProperties":1');
     // Round trip: the JSON Schema is the zod schema's own export.
     expect(schemas["catalog-event"]).toEqual(
       z.toJSONSchema(CatalogEventSchema, { target: "draft-2020-12", io: "input" }) as Record<string, unknown>,

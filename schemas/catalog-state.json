@@ -123,6 +123,15 @@
                   }
                 }
               },
+              "missing": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
               "discarded": {
                 "type": "array",
                 "items": {
@@ -202,6 +211,7 @@
               "heads",
               "lease",
               "conflicts",
+              "missing",
               "discarded",
               "snapshots"
             ],

@@ -70,7 +70,18 @@ export const appendEvent = async (log: EventLog, event: CatalogEvent): Promise<R
   if (put.finding.code !== "store.key-exists") return put;
   const existing = await log.store.get(key);
   if (!existing.ok) return existing;
-  return existing.value !== null && sameBytes(existing.value, data) ? ok(undefined) : put;
+  if (existing.value === null || sameBytes(existing.value, data))
+    return existing.value === null ? put : ok(undefined);
+  // A store without hard links creates the key in place (D41), so a crash mid-write can leave a strict prefix of
+  // these very bytes. Only this event's own writer makes that prefix; completing it overwrites nothing of anyone's.
+  if (
+    existing.value.length < data.length &&
+    sameBytes(existing.value, data.subarray(0, existing.value.length))
+  ) {
+    const completed = await log.store.put(key, data);
+    return completed.ok ? ok(undefined) : completed;
+  }
+  return put;
 };
 
 const skipped = (key: string, reason: string): Finding =>
