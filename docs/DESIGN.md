@@ -497,7 +497,7 @@ Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `renamed`
 
 Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time.
 
-**If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Root keys and device bindings come back as each device re-publishes its config.
+**If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas, so the engine writes `,` in a tag value as `%2C` and `%` as `%25`, and decodes both when it reads tags back; a project path with a comma still gets its `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
 
 **Local state per machine** uses XDG paths, so config can live in a dotfiles repo:
 
@@ -1007,18 +1007,18 @@ Six small interfaces make plainport modular: `Engine` moves project data, `BlobS
 ```ts
 export interface Engine {
   id: string;                                            // "restic"
-  init(store: StoreConfig, secret: Secret): Promise<void>;
+  // Bound to one store's repository and its secret when it is made. Every call returns a Result (expected
+  // failures are findings, never exceptions); ctx is optional where DESIGN had none.
+  init(ctx?: RunContext): Promise<Result<{ id: string }>>;
   snapshot(
     input: { dir: string; excludes: string[]; parent?: string; tags: string[] },
     ctx: RunContext,
-  ): Promise<{ id: string; stats: SnapshotStats }>;
-  list(filter: { tags?: string[] }): Promise<SnapshotInfo[]>;
-  entries(snapshot: string): AsyncIterable<EntryMeta>;     // restic ls --json
-  stream(snapshot: string): AsyncIterable<TarEntry>;       // restic dump, for full verify
-  restore(snapshot: string, target: string, ctx: RunContext): Promise<RestoreStats>;
-  forget(snapshots: string[]): Promise<void>;
-  prune(ctx: RunContext): Promise<void>;
-  check(opts?: { readDataSubset?: string }): Promise<CheckReport>;
+  ): Promise<Result<{ id: string; stats: SnapshotStats }>>;
+  list(filter: { tags?: string[] }, ctx?: RunContext): Promise<Result<SnapshotInfo[]>>;
+  entries(snapshot: string, ctx?: RunContext): Promise<Result<EntryMeta[]>>; // restic ls --json, whole or not at all
+  restore(snapshot: string, target: string, ctx: RunContext, opts?: RestoreOptions): Promise<Result<RestoreStats>>;
+  check(opts?: { readDataSubset?: string }, ctx?: RunContext): Promise<Result<CheckReport>>;
+  // M5: stream (restic dump, for full verify), forget and prune.
 }
 
 export interface BlobStore {
@@ -1053,9 +1053,9 @@ export interface Transport {
 // for data, "plainport serve --stdio" for control.
 
 export interface RunContext {
-  signal: AbortSignal;
-  progress(p: Progress): void;
-  log(line: LogLine): void;
+  op: string;                                            // carried by every event
+  signal?: AbortSignal;
+  emit?(event: ProgressEvent | LogEvent): void;          // secrets already removed
 }
 ```
 
