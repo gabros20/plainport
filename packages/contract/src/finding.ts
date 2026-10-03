@@ -39,6 +39,12 @@ export const FINDINGS = Object.freeze({
     exitCode: 130,
     summary: "The person answering the prompts cancelled; nothing was written",
   },
+  "command.unavailable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "This build registers the command but cannot run it for real yet; its --dry-run preview works",
+  },
   "command.unknown": {
     severity: "block",
     allowable: false,
@@ -100,6 +106,20 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary: "A value crossing an edge did not match its schema",
+  },
+  "deps.ambiguous": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A package folder holds lockfiles of more than one package manager and no packageManager field says which to use",
+  },
+  "deps.no-lockfile": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A package folder has no lockfile for its package manager, so onload would resolve fresh dependency versions",
   },
   "device.invalid": {
     severity: "block",
@@ -163,12 +183,26 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "The repository's index.lock exists: a git process is running or crashed",
   },
+  "git.nested-repos": {
+    severity: "info",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Repositories inside the project (nested clones and submodules) travel as plain files, their own .git included",
+  },
   "git.unpushed": {
     severity: "warn",
     allowable: true,
     exitCode: 6,
     summary:
       "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy",
+  },
+  "git.unpushed-required": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "requirePushed is set, and commits, branches or stashes exist only in this copy of the repository; push them first",
   },
   "git.worktrees": {
     severity: "block",
@@ -181,6 +215,18 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary: "A bug: an exception escaped a command; the message names it",
+  },
+  "plan.expired": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "The approved plan is more than an hour old; plan again with --dry-run",
+  },
+  "plan.not-found": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary: "No saved plan has this id on this device",
   },
   "proc.cwd": {
     severity: "block",
