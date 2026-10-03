@@ -48,7 +48,6 @@ import {
   type StreamEvent,
   shellWord,
 } from "@plainport/contract";
-import { CatalogEventSchema } from "../catalog/events.ts";
 import type { CatalogProject } from "../catalog/fold.ts";
 import { catalogReader } from "../catalog/head.ts";
 import { appendEvent, STORE_EVENTS_PREFIX, storeEventLog } from "../catalog/log.ts";
@@ -80,7 +79,7 @@ import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
 import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
 import { offloadTrashOf, rootFolderOf } from "./release.ts";
-import { verifyListing } from "./verify.ts";
+import { checkSnapshot, kindAt, producedBy, restoreVerified, unreadable } from "./restore-tree.ts";
 
 /** Every journal step, in the order a run reaches them; the crash matrix enumerates its rows from this list. */
 export const ONLOAD_STEPS = [
@@ -212,63 +211,12 @@ export type OnloadOutcome = {
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
-/** What is at the path itself: its kind, or undefined when nothing is. */
-const kindAt = async (io: LocalIo, path: string): Promise<string | undefined> => {
-  try {
-    return (await io.fs.lstat(path)).kind;
-  } catch (error) {
-    const code = systemErrorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
-};
-
 /** The nearest folder at or above `path` that exists. */
 const nearestExisting = async (io: LocalIo, path: string): Promise<string> => {
   let at = path;
   while ((await kindAt(io, at)) === undefined && dirname(at) !== at) at = dirname(at);
   return at;
 };
-
-const unreadable = (path: string, error: unknown, what: string): Failure =>
-  fail(
-    finding("fs.unreadable", {
-      message: `${path} cannot be inspected (${systemErrorCode(error)}), so ${what}`,
-      fix: `check that you can read ${shellWord(path)} and the folder that holds it, then re-run`,
-      paths: [path],
-    }),
-  );
-
-/**
- * Whether the volume holding `folder` ignores case: a probe file made there is looked up with its name upper-cased.
- * The folder is plainport's own staging holder, so a probe a crash leaves behind is in a folder recover owns.
- * (roots/canonical.ts probes a path's own name in its parent, which at a mount point is the volume around it.)
- */
-const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Result<boolean>> => {
-  const probe = join(folder, `.plainport-case-${op.toLowerCase()}`);
-  try {
-    await io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true });
-  } catch (error) {
-    return unreadable(folder, error, "whether its volume ignores case is unknown; nothing was restored");
-  }
-  try {
-    return ok((await kindAt(io, join(folder, `.PLAINPORT-CASE-${op.toUpperCase()}`))) !== undefined);
-  } catch (error) {
-    return unreadable(folder, error, "whether its volume ignores case is unknown; nothing was restored");
-  } finally {
-    try {
-      await io.fs.unlink(probe);
-    } catch (error) {
-      assertSystemError(error);
-    }
-  }
-};
-
-/**
- * Folds a name as a case-insensitive volume compares it (APFS, HFS+): letter case and Unicode normalization (NFC/NFD)
- * both, so two names that differ in either one would land on one file there.
- */
-const foldCaseAndForm = (path: string): string => path.normalize("NFC").toLowerCase();
 
 /** Runs the onload; see the file comment. A failure before the swap changed nothing outside its staging folder. */
 export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<Result<OnloadOutcome>> => {
@@ -477,14 +425,27 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       } catch (error) {
         return writeFailed(error, `making ${holder}`, false, holder);
       }
-      const listed = await listSnapshot(stored, ctx, made.event, placed.value, holder, resumed !== undefined);
+      const listed = await checkSnapshot({
+        io,
+        engine: store.engine,
+        store: store.blob,
+        stored,
+        event: made.event,
+        ctx,
+        op,
+        nearest: placed.value,
+        holder,
+        resuming: resumed !== undefined,
+        address: ref.address,
+        elsewhere: `plainport onload ${shellWord(ref.address)} --to <path>`,
+      });
       if (!listed.ok) return signal?.aborted ? cancelled() : listed;
       files = listed.value.files;
       bytes = listed.value.bytes;
       rootMode = listed.value.rootMode;
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
-      const produced = await producedBy(made.event);
+      const produced = await producedBy(store.blob, made.event);
       files = produced?.stats.files ?? 0;
       bytes = produced?.stats.bytes ?? 0;
     }
@@ -540,21 +501,6 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     });
     if (!result.ok) return result;
     return hydrate(result.value);
-  }
-
-  /** The event that made a snapshot (offloaded or checkpointed), read from the store; undefined when unreadable. */
-  async function producedBy(event: string) {
-    const got = await store.blob.get(`${STORE_EVENTS_PREFIX}${event}.json`);
-    if (!got.ok || got.value === null) return undefined;
-    try {
-      const parsed = CatalogEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
-      // Unreadable here, as the fold would skip it: nothing is counted.
-      return parsed.success && (parsed.data.type === "offloaded" || parsed.data.type === "checkpointed")
-        ? parsed.data
-        : undefined;
-    } catch {
-      return undefined;
-    }
   }
 
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
@@ -742,131 +688,25 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     return { op: offload.op, folder };
   }
 
-  /**
-   * Reads the snapshot's listing once before anything is written: its totals, names that differ only by case
-   * (fs.case-collision on a case-insensitive volume) and the space the restore needs (fs.no-space).
-   */
-  async function listSnapshot(
-    stored: string,
-    ctx: RunContext,
-    event: string,
-    nearest: string,
-    holder: string,
-    resuming: boolean,
-  ): Promise<Result<{ files: number; bytes: number; rootMode?: number }>> {
-    let files = 0;
-    let bytes = 0;
-    // The first name of each folded key, and every group that has more than one.
-    const firstOf = new Map<string, string>();
-    const groups = new Map<string, string[]>();
-    const listed = await store.engine.entries(
-      stored,
-      (entry) => {
-        if (entry.type === "file") {
-          files++;
-          bytes += entry.size ?? 0;
-        }
-        const key = foldCaseAndForm(entry.path);
-        const first = firstOf.get(key);
-        if (first === undefined) firstOf.set(key, entry.path);
-        else groups.set(key, [...(groups.get(key) ?? [first]), entry.path]);
-      },
-      ctx,
-    );
-    if (!listed.ok) return listed;
-    const collisions = [...groups.values()];
-    if (collisions.length > 0) {
-      const insensitive = await ignoresCase(io, holder, op);
-      if (!insensitive.ok) return insensitive;
-      if (insensitive.value) {
-        const names = collisions.flat().sort();
-        return fail(
-          finding("fs.case-collision", {
-            message: `the snapshot holds names that differ only by case or Unicode form (${collisions
-              .slice(0, 5)
-              .map((c) => c.sort().join(" and "))
-              .join(
-                "; ",
-              )}${collisions.length > 5 ? "; …" : ""}), and ${nearest} is on a case-insensitive volume, where one would overwrite the other; nothing was restored`,
-            fix: `onload to a case-sensitive volume: plainport onload ${shellWord(ref.address)} --to <path>`,
-            paths: names.slice(0, 100),
-          }),
-        );
-      }
-    }
-    // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
-    const made = await producedBy(event);
-    const stripped = made?.stats.strippedBytes ?? 0;
-    const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
-    // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore
-    // already holds part of it in staging, and verification still catches a short one, so it is not counted again.
-    const needed = Math.ceil((bytes + stripped + files * 2048) * 1.1);
-    let free: number;
-    try {
-      free = await io.fs.freeBytes(nearest);
-    } catch (error) {
-      return unreadable(nearest, error, "its free space is unknown; nothing was restored");
-    }
-    if (!resuming && free < needed) {
-      return fail(
-        finding("fs.no-space", {
-          message: `${ref.address} needs about ${needed} bytes on the volume of ${nearest} (the snapshot's ${bytes}, ${stripped} of dependencies and a 10% margin), and ${free} are free; nothing was restored`,
-          fix: "free some space (plainport offload another project, or empty the trash), or onload to another volume with --to <path>",
-          paths: [nearest],
-        }),
-      );
-    }
-    return ok({ files, bytes, ...(rootMode === undefined ? {} : { rootMode }) });
-  }
-
   /** Restore into staging (taking over one left by a stopped onload), then compare it with the listing. */
   async function restoreAndVerify(
     saga: Saga<OnloadJournal, OnloadStep>,
     ctx: RunContext,
     resuming: boolean,
   ): Promise<Result<void>> {
-    const staging = saga.journal.staging as string;
-    phase("restore", "start");
-    // Made here, not by restic: a snapshot holds the folder's contents, not the folder's own mode, and restic makes a
-    // target it creates private (0700). This one gets a new folder's mode, as the project folder had.
-    try {
-      await io.fs.mkdirp(staging);
-    } catch (error) {
-      return writeFailed(error, `making ${staging}`, false, staging);
-    }
-    const starting = await saga.step("onload.restore.start");
-    if (!starting.ok) return starting;
-    const restored = await store.engine.restore(
-      saga.journal.stored,
-      staging,
-      ctx,
-      resuming ? { overwrite: "if-changed" } : {},
-    );
-    if (!restored.ok) return signal?.aborted ? cancelled() : restored;
-    const done = await saga.step("onload.restored");
-    if (!done.ok) return done;
-    phase("restore", "end");
-    if (signal?.aborted) return cancelled();
-
-    phase("verify", "start");
-    const scanned = await scanTree(io.fs, staging);
-    if (!scanned.ok) return scanned;
-    const checked = await verifyListing({
+    return restoreVerified({
+      io,
       engine: store.engine,
-      fs: io.fs,
-      snapshot: saga.journal.stored,
-      dir: staging,
-      manifest: scanned.value.manifest,
-      excluded: new Set(),
+      stored: saga.journal.stored,
+      staging: saga.journal.staging as string,
       ctx,
-      subject: "the restored folder",
+      ...(resuming ? { overwrite: "if-changed" as const } : {}),
+      phase,
+      step: (name) => saga.step(`onload.${name}`),
+      stopped: () => signal?.aborted === true,
+      cancelled,
       fix: `the restored copy was removed and the stub stays; re-run plainport onload ${shellWord(ref.address)}, and if it fails again run restic check on the store`,
     });
-    if (!checked.ok) return signal?.aborted ? cancelled() : checked;
-    const verified = await saga.step("onload.verified");
-    if (!verified.ok) return verified;
-    phase("verify", "end");
-    return ok(undefined);
   }
 
   /** A failure before the swap: the staging folder goes (the journal with it, by runSaga), the stub stays. */
