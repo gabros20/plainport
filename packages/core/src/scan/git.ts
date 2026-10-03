@@ -466,3 +466,34 @@ export const gitWorktrees = async (
   }
   return ok(worktrees.slice(1));
 };
+
+/**
+ * Which of the given paths (relative to the repository's top folder, "/"-separated) git tracks: a path is tracked
+ * when it is a tracked file or a folder holding one. Asks the index (`git ls-files`), literally, so a path holding
+ * glob characters is never read as a pattern.
+ */
+export const gitTracked = async (
+  host: HostPorts,
+  repo: string,
+  ctx: GitContext,
+  paths: readonly string[],
+): Promise<Result<Set<string>>> => {
+  const tracked = new Set<string>();
+  if (paths.length === 0) return ok(tracked);
+  const out = await git(host, repo, ctx, [
+    "ls-files",
+    "-z",
+    "--cached",
+    "--",
+    ...paths.map((p) => `:(literal)${p}`),
+  ]);
+  if (!out.ok) return out;
+  const wanted = new Set(paths);
+  for (const file of records(out.value, NUL)) {
+    // The file itself and every folder above it that was asked about.
+    for (let at = file; at !== ""; at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "") {
+      if (wanted.has(at)) tracked.add(at);
+    }
+  }
+  return ok(tracked);
+};
