@@ -4,17 +4,21 @@
 //
 // - Processes: one `lsof -F` listing of every process this user may see (a few MB, under a second), filtered to
 //   paths under the folder's real path, since lsof names files by their real path (/private/var, not /var).
+//   lsof escapes bytes in names (\xNN, \t, ^A, \\), so the folder is escaped the same way and matched as lsof
+//   prints it. Only exit 0 counts as a whole listing: lsof exits 1 for any error, also one -w keeps quiet.
 //   plainport itself and its own lsof are left out; its ancestors (the shell or agent that started it) are marked.
 // - Placeholders: `find -flags +dataless`. The flag is SF_DATALESS (0x40000000 in st_flags), which iCloud Drive and
 //   other File Provider clients set on files and folders whose data is not on this disk; find reads it with
 //   lstat, which does not download anything. Checked on real APFS against evicted iCloud Drive files (they list,
 //   and `ls -lO` shows "dataless"); a test cannot make one, since chflags will not set the flag, so the tests run
 //   find on an ordinary folder and feed it recorded output. -prune keeps find out of a dataless folder: listing one
-//   would download it.
-// - Docker: `docker ps` then `docker inspect` for bind mounts. Docker missing or its daemon not running is not a
-//   finding (nothing can mount the folder then); it is reported as unavailable.
+//   would download it. find is given the folder's real path, so a symlinked folder is searched where the walk goes.
+// - Docker: `docker ps` then `docker inspect` for bind mounts of the folder, of something inside it, or of a folder
+//   holding it. Only two answers are not findings, since nothing can mount the folder then: no docker executable
+//   on PATH, and a daemon that is clearly not there (its socket missing or refusing connections). Any other failure
+//   blocks under env.docker-mount, as lsof's and find's do under their own codes: an unchecked folder is not safe.
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { decode, type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import {
   type CheckContext,
@@ -61,6 +65,41 @@ const spellings = async (host: HostPorts, dir: string): Promise<string[]> => {
   }
 };
 
+const LSOF_NAMED: Readonly<Record<number, string>> = { 8: "\\b", 9: "\\t", 10: "\\n", 12: "\\f", 13: "\\r" };
+
+/** A path as lsof prints it in the C locale: printable ASCII as is, a backslash doubled, \b \t \n \f \r, other
+ * control bytes as ^X, and DEL and every byte above it as \xNN. */
+export const lsofName = (path: string): string => {
+  let out = "";
+  for (const byte of new TextEncoder().encode(path)) {
+    if (byte === 0x5c) out += "\\\\";
+    else if (LSOF_NAMED[byte] !== undefined) out += LSOF_NAMED[byte];
+    else if (byte < 0x20) out += `^${String.fromCharCode(byte + 0x40)}`;
+    else if (byte >= 0x7f) out += `\\x${byte.toString(16).padStart(2, "0")}`;
+    else out += String.fromCharCode(byte);
+  }
+  return out;
+};
+
+/** Undoes lsofName for the part of a name below a known folder. ^X is kept as written: it is also how a name with
+ * a caret prints, and a caret is likelier than a control character. */
+const fromLsofName = (name: string): string => {
+  const bytes: number[] = [];
+  const named: Readonly<Record<string, number>> = { b: 8, t: 9, n: 10, f: 12, r: 13, "\\": 0x5c };
+  for (let i = 0; i < name.length; i++) {
+    const char = name[i] as string;
+    const next = name[i + 1];
+    if (char === "\\" && next === "x" && /^[0-9a-f]{2}$/.test(name.slice(i + 2, i + 4))) {
+      bytes.push(Number.parseInt(name.slice(i + 2, i + 4), 16));
+      i += 3;
+    } else if (char === "\\" && next !== undefined && named[next] !== undefined) {
+      bytes.push(named[next] as number);
+      i += 1;
+    } else bytes.push(...new TextEncoder().encode(char));
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+};
+
 /**
  * Reads `lsof -F pcRfn` output: the processes with their working directory or an open file under one of the roots,
  * except `self` and the lsof it started. A process is an ancestor when it is on self's parent chain.
@@ -74,6 +113,16 @@ export const parseLsof = (text: string, roots: readonly string[], self: number):
     files: string[];
     fileCount: number;
   }
+  // Each root as lsof prints it, with the root itself to rebuild a file's real path.
+  const printed = roots.map((root) => ({ root, name: lsofName(root) }));
+  const placed = (name: string): string | undefined => {
+    for (const { root, name: prefix } of printed) {
+      if (name === prefix) return root;
+      if (name.startsWith(prefix === "/" ? prefix : `${prefix}/`))
+        return root + fromLsofName(name.slice(prefix.length));
+    }
+    return undefined;
+  };
   const all: Seen[] = [];
   let current: Seen | undefined;
   let fd = "";
@@ -87,11 +136,13 @@ export const parseLsof = (text: string, roots: readonly string[], self: number):
     else if (field === "R") current.ppid = Number(value);
     else if (field === "c") current.command = value;
     else if (field === "f") fd = value;
-    else if (field === "n" && under(roots, value)) {
+    else if (field === "n") {
+      const path = placed(value);
+      if (path === undefined) continue;
       if (fd === "cwd") current.cwd = true;
       else {
         current.fileCount++;
-        if (current.files.length < MAX_FILES) current.files.push(value);
+        if (current.files.length < MAX_FILES) current.files.push(path);
       }
     }
   }
@@ -121,8 +172,11 @@ const InspectSchema = z.array(
   }),
 );
 
-const DAEMON_DOWN =
-  /cannot connect to the docker daemon|is the docker daemon running|failed to connect to the docker api|error during connect/i;
+/** Docker's CLI could not reach a daemon because none is there: the socket is missing or refuses connections. */
+export const daemonDown = (stderr: string): boolean =>
+  /cannot connect to the docker daemon|failed to connect to the docker api/i.test(stderr) &&
+  !/permission denied/i.test(stderr) &&
+  /is the docker daemon running\?|no such file or directory|connection refused/i.test(stderr);
 
 export const createMacosChecks = (host: HostPorts): HostChecks => {
   const capture = (command: string, args: string[], env: Record<string, string>, ctx: CheckContext) =>
@@ -137,6 +191,19 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
     });
   const decoder = new TextDecoder();
+  /** A runner failure (timeout, spawn, unreadable output) as the check's own blocker; a cancellation stays one. */
+  const asCheck =
+    (code: "proc.open-files" | "fs.dataless" | "env.docker-mount", what: string, dir: string) =>
+    (failure: Failure): Failure =>
+      failure.exitCode === 130
+        ? failure
+        : fail(
+            finding(code, {
+              message: `could not ${what}: ${failure.finding.message}`,
+              paths: [dir],
+              fix: failure.finding.fix ?? "re-run; if it keeps failing, fix the cause the message names",
+            }),
+          );
 
   return {
     processesUsing: async (dir, ctx) => {
@@ -147,36 +214,29 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         { PATH: SYSTEM_PATH, LC_ALL: "C" },
         ctx,
       );
-      if (!ran.ok) return ran;
-      // lsof exits 1 when it found nothing to list or met an error it was told to keep quiet about (-w); only
-      // stderr tells them apart.
-      const quietOne =
-        ran.value.exitCode === 1 && ran.value.stderr.text.trim() === "" && ran.value.signal === null;
-      const bytes = quietOne
-        ? ok(ran.value.captured ?? new Uint8Array())
-        : capturedOutput(ran.value, (outcome) =>
-            fail(
-              finding("proc.open-files", {
-                message: `could not list the processes using ${dir}: lsof failed with exit code ${outcome.exitCode}: ${lastLines(outcome)}`,
-                paths: [dir],
-                fix: "re-run; if lsof keeps failing, check that /usr/sbin/lsof runs",
-              }),
-            ),
-          );
+      if (!ran.ok) return asCheck("proc.open-files", `list the processes using ${dir}`, dir)(ran);
+      const bytes = capturedOutput(ran.value, (outcome) =>
+        fail(
+          finding("proc.open-files", {
+            message: `could not list the processes using ${dir}: lsof failed with exit code ${outcome.exitCode}: ${lastLines(outcome)}`,
+            paths: [dir],
+            fix: "re-run; if lsof keeps failing, check that /usr/sbin/lsof runs",
+          }),
+        ),
+      );
       if (!bytes.ok) return bytes;
       return ok(parseLsof(decoder.decode(bytes.value), roots, host.proc.pid));
     },
 
     dataless: async (dir, ctx) => {
-      const [given] = await spellings(host, dir);
-      const top = given as string;
+      const top = (await spellings(host, dir)).at(-1) as string;
       const ran = await capture(
         FIND,
         [top, "-flags", "+dataless", "-print0", "-prune"],
         { PATH: SYSTEM_PATH, LC_ALL: "C" },
         ctx,
       );
-      if (!ran.ok) return ran;
+      if (!ran.ok) return asCheck("fs.dataless", `check ${dir} for placeholder files`, dir)(ran);
       const outcome = ran.value;
       // Folders find may not enter are reported by the scan as fs.unreadable; anything else means not checked.
       const deniedOnly =
@@ -226,13 +286,20 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
           }),
         );
 
-      const listed = await capture("docker", ["ps", "--quiet", "--no-trunc"], env, ctx);
-      if (!listed.ok) {
-        return listed.finding.code === "process.spawn-failed"
-          ? unavailable("docker is not installed")
-          : listed;
+      let docker: string | undefined;
+      for (const folder of (env.PATH ?? "").split(":")) {
+        if (folder === "" || !isAbsolute(folder)) continue;
+        if (await host.fs.executable(join(folder, "docker"))) {
+          docker = join(folder, "docker");
+          break;
+        }
       }
-      if (listed.value.exitCode !== 0 && DAEMON_DOWN.test(listed.value.stderr.text))
+      if (docker === undefined) return unavailable("docker is not installed");
+      const checkFailed = asCheck("env.docker-mount", `check which containers mount ${dir}`, dir);
+
+      const listed = await capture(docker, ["ps", "--quiet", "--no-trunc"], env, ctx);
+      if (!listed.ok) return checkFailed(listed);
+      if (listed.value.exitCode !== 0 && daemonDown(listed.value.stderr.text))
         return unavailable("docker is not running");
       const ids = capturedOutput(listed.value, (outcome) => notChecked("docker ps", outcome));
       if (!ids.ok) return ids;
@@ -243,8 +310,8 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         .filter((id) => id !== "");
       if (containers.length === 0) return ok({ available: true, mounts: [] });
 
-      const inspected = await capture("docker", ["inspect", ...containers], env, ctx);
-      if (!inspected.ok) return inspected;
+      const inspected = await capture(docker, ["inspect", ...containers], env, ctx);
+      if (!inspected.ok) return checkFailed(inspected);
       const outcome = inspected.value;
       // A container that stopped since `docker ps` is "No such object"; the rest are still described.
       const vanishedOnly =
@@ -283,7 +350,15 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
           } catch {
             // Gone, or not on this disk: its spelling is all there is.
           }
-          if (sources.some((source) => under(roots, source))) {
+          // The folder itself, something inside it, or a folder that holds it: each reaches the project's files.
+          if (
+            sources.some(
+              (source) =>
+                under(roots, source) ||
+                under([source], roots[0] as string) ||
+                under([source], roots.at(-1) as string),
+            )
+          ) {
             mounts.push({
               container: container.Id,
               name: container.Name.replace(/^\//, ""),

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ok } from "@plainport/contract";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, join } from "node:path";
+import { type Failure, fail, finding, ok } from "@plainport/contract";
 import { type HostPorts, preflight, type RunOutcome, type RunSpec } from "@plainport/core";
 import { createMacosChecks, parseLsof } from "./checks.ts";
 import { testHost } from "./testing.ts";
@@ -40,7 +40,7 @@ const outcome = (over: Partial<RunOutcome> & { out?: string }): RunOutcome => {
 };
 
 /** The real host, with run() answered by the script: one reply per call, recording each spec. */
-const scripted = (...replies: RunOutcome[]): { host: HostPorts; specs: RunSpec[] } => {
+const scripted = (...replies: (RunOutcome | Failure)[]): { host: HostPorts; specs: RunSpec[] } => {
   const specs: RunSpec[] = [];
   return {
     specs,
@@ -50,11 +50,23 @@ const scripted = (...replies: RunOutcome[]): { host: HostPorts; specs: RunSpec[]
         specs.push(spec);
         const reply = replies.shift();
         if (reply === undefined) throw new Error(`unexpected run of ${spec.command}`);
-        return ok(reply);
+        return "ok" in reply ? reply : ok(reply);
       },
     },
   };
 };
+
+/** A PATH holding a docker that is never run (scripted hosts answer instead), so docker counts as installed. */
+const fakeDocker = (): Record<string, string> => {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "docker"), "#!/bin/sh\nexit 99\n");
+  chmodSync(join(bin, "docker"), 0o755);
+  return { PATH: bin };
+};
+
+const timedOut = fail(finding("process.timeout", { message: "ran past its deadline" }));
+const cancelled = fail(finding("process.cancelled", { message: "stopped" }));
 
 /** Waits until lsof sees the child, so the check is not racing its start. */
 const settle = () => Bun.sleep(150);
@@ -126,6 +138,40 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     }
   });
 
+  test("a folder whose name lsof escapes (non-ASCII, tab, control, backslash, caret) is still matched", async () => {
+    const odd = join(dir, "p \u00e1\tt\u0001x\\y^z");
+    mkdirSync(odd);
+    writeFileSync(join(odd, "f.txt"), "f");
+    children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: odd }));
+    children.push(
+      Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(odd, "f.txt")], { cwd: "/" }),
+    );
+    await settle();
+    const result = await checks.processesUsing(odd, { env });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.find((p) => p.pid === children[0]?.pid)).toMatchObject({ cwd: true });
+      expect(result.value.find((p) => p.pid === children[1]?.pid)).toMatchObject({
+        files: [join(odd, "f.txt")],
+      });
+    }
+  });
+
+  test("lsof exiting 1 is not a whole listing, even with nothing on stderr", async () => {
+    const { host: fake } = scripted(outcome({ exitCode: 1, out: "p1\nR0\nclaunchd\n" }));
+    const result = await createMacosChecks(fake).processesUsing(dir, { env });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.finding.code).toBe("proc.open-files");
+  });
+
+  test("lsof not finishing is proc.open-files; a cancellation stays a cancellation", async () => {
+    const late = await createMacosChecks(scripted(timedOut).host).processesUsing(dir, { env });
+    expect(!late.ok && late.finding.code).toBe("proc.open-files");
+    expect(!late.ok && late.finding.message).toContain("ran past its deadline");
+    const stopped = await createMacosChecks(scripted(cancelled).host).processesUsing(dir, { env });
+    expect(!stopped.ok && stopped.exitCode).toBe(130);
+  });
+
   test("an idle folder has no processes", async () => {
     const result = await checks.processesUsing(dir, { env });
     expect(result).toEqual({ ok: true, value: [] });
@@ -151,6 +197,23 @@ describe("macOS checks: placeholder (dataless) files", () => {
     expect(result).toEqual({ ok: true, value: ["movie.mov", "photos"] });
     expect(specs[0]?.command).toBe("/usr/bin/find");
     expect(specs[0]?.args).toEqual([dir, "-flags", "+dataless", "-print0", "-prune"]);
+  });
+
+  test("a folder given through a symlink is searched at its real path", async () => {
+    const real = join(dir, "real");
+    mkdirSync(real);
+    symlinkSync(real, join(dir, "link"));
+    const { host: fake, specs } = scripted(outcome({ out: `${real}/a.mov\0` }));
+    const result = await createMacosChecks(fake).dataless(join(dir, "link"), { env });
+    expect(specs[0]?.args?.[0]).toBe(real);
+    expect(result).toEqual({ ok: true, value: ["a.mov"] });
+  });
+
+  test("find not finishing is fs.dataless; a cancellation stays a cancellation", async () => {
+    const late = await createMacosChecks(scripted(timedOut).host).dataless(dir, { env });
+    expect(!late.ok && late.finding.code).toBe("fs.dataless");
+    const stopped = await createMacosChecks(scripted(cancelled).host).dataless(dir, { env });
+    expect(!stopped.ok && stopped.exitCode).toBe(130);
   });
 
   test("an ordinary folder on APFS has none (find accepts the flag here)", async () => {
@@ -196,7 +259,7 @@ describe("macOS checks: docker bind mounts", () => {
         ]),
       }),
     );
-    const result = await createMacosChecks(fake).dockerMounts(dir, { env });
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
     expect(result).toEqual({
       ok: true,
       value: {
@@ -208,14 +271,45 @@ describe("macOS checks: docker bind mounts", () => {
       },
     });
     expect(specs.map((s) => [s.command, ...(s.args ?? [])])).toEqual([
-      ["docker", "ps", "--quiet", "--no-trunc"],
-      ["docker", "inspect", "abc123"],
+      [join(dir, "bin", "docker"), "ps", "--quiet", "--no-trunc"],
+      [join(dir, "bin", "docker"), "inspect", "abc123"],
     ]);
+  });
+
+  test("a container mounting a folder that holds the project blocks too", async () => {
+    const { host: fake } = scripted(
+      outcome({ out: "abc123\n" }),
+      outcome({ out: inspect([{ Type: "bind", Source: dirname(dir) }]) }),
+    );
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(result).toEqual({
+      ok: true,
+      value: { available: true, mounts: [{ container: "abc123", name: "web-db-1", source: dirname(dir) }] },
+    });
+  });
+
+  test("docker that is installed but cannot be started, or refuses us, blocks: containers may be running", async () => {
+    const spawn = fail(finding("process.spawn-failed", { message: "could not start docker: EACCES" }));
+    const failed = await createMacosChecks(scripted(spawn).host).dockerMounts(dir, { env: fakeDocker() });
+    expect(!failed.ok && failed.finding.code).toBe("env.docker-mount");
+    const denied = scripted(
+      outcome({
+        exitCode: 1,
+        stderr: {
+          text: "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock\n",
+          droppedBytes: 0,
+        },
+      }),
+    );
+    const refused = await createMacosChecks(denied.host).dockerMounts(dir, { env: fakeDocker() });
+    expect(!refused.ok && refused.finding.code).toBe("env.docker-mount");
+    const late = await createMacosChecks(scripted(timedOut).host).dockerMounts(dir, { env: fakeDocker() });
+    expect(!late.ok && late.finding.code).toBe("env.docker-mount");
   });
 
   test("no running containers: nothing to inspect", async () => {
     const { host: fake, specs } = scripted(outcome({ out: "" }));
-    expect(await createMacosChecks(fake).dockerMounts(dir, { env })).toEqual({
+    expect(await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() })).toEqual({
       ok: true,
       value: { available: true, mounts: [] },
     });
@@ -229,9 +323,14 @@ describe("macOS checks: docker bind mounts", () => {
   });
 
   test("docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)", async () => {
-    const hasDocker = Bun.which("docker", { PATH: process.env.PATH ?? "" }) !== null;
+    // This PATH without folders under the real home, which the guarded host refuses to look in.
+    const PATH = (process.env.PATH ?? "")
+      .split(":")
+      .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
+      .join(":");
+    const hasDocker = Bun.which("docker", { PATH }) !== null;
     const result = await checks.dockerMounts(dir, {
-      env: { PATH: process.env.PATH ?? "", HOME: dir, DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
+      env: { PATH, HOME: dir, DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
     });
     expect(result).toEqual({
       ok: true,
@@ -245,7 +344,7 @@ describe("macOS checks: docker bind mounts", () => {
       "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
     ]) {
       const { host: fake } = scripted(outcome({ exitCode: 1, stderr: { text, droppedBytes: 0 } }));
-      expect(await createMacosChecks(fake).dockerMounts(dir, { env })).toEqual({
+      expect(await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() })).toEqual({
         ok: true,
         value: { available: false, reason: "docker is not running" },
       });
@@ -262,7 +361,7 @@ describe("macOS checks: docker bind mounts", () => {
         },
       }),
     );
-    expect(await createMacosChecks(fake).dockerMounts(dir, { env })).toEqual({
+    expect(await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() })).toEqual({
       ok: true,
       value: { available: false, reason: "docker is not running" },
     });
@@ -277,7 +376,7 @@ describe("macOS checks: docker bind mounts", () => {
         stderr: { text: "Error: No such object: gone456\n", droppedBytes: 0 },
       }),
     );
-    const result = await createMacosChecks(fake).dockerMounts(dir, { env });
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
     expect(result.ok && result.value.available && result.value.mounts.length).toBe(1);
   });
 
@@ -286,7 +385,7 @@ describe("macOS checks: docker bind mounts", () => {
       outcome({ out: "abc123\n" }),
       outcome({ exitCode: 1, stderr: { text: "permission denied\n", droppedBytes: 0 } }),
     );
-    const result = await createMacosChecks(fake).dockerMounts(dir, { env });
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.finding.code).toBe("env.docker-mount");
   });
