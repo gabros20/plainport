@@ -57,9 +57,16 @@ disk image it makes with `hdiutil` and deletes afterwards.
 The subprocess variant drives the compiled binary through a test hook, not configuration: `PLAINPORT_TEST_FAULT_AT`
 (with `PLAINPORT_TEST_FAULT_OCCURRENCE`) makes it SIGKILL itself at a step, and `PLAINPORT_TEST_PAUSE_AT` with
 `PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed. Only a binary compiled with
-`--define PLAINPORT_TEST_HOOKS=true` reads them (the matrix builds its own; `bun run build` and releases never do),
-and only when `PLAINPORT_TRIPWIRE_REAL_HOME` names the real home and `HOME` lies outside it
+`--define globalThis.PLAINPORT_TEST_HOOKS=true` reads them; the matrix builds its own. `scripts/build.ts` (so
+`bun run build` and every release) defines it false, the hook is compiled out, and `scripts/build.test.ts` checks the
+release binary holds none of these names (D67). In a matrix build, `PLAINPORT_TRIPWIRE_REAL_HOME` must name the real
+home and `HOME` lie outside it, and the pause file must lie under `HOME` and pass the home guard
 (`packages/cli/src/test-hooks.ts`).
+
+Two more knobs for the matrix itself: `PLAINPORT_CRASH_PARALLEL` sets how many subprocess rows run at once (default 6,
+3 under CI, never more than the cores), and `PLAINPORT_CRASH_MATRIX_DAMAGE=1` runs every row of both variants with
+harm done after recover (a deleted `.env` or stub) and passes only if each row reports it, which proves the checks
+still bite.
 
 ## Definition of Done
 

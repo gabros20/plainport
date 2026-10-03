@@ -35,11 +35,11 @@ export interface HostPorts extends LocalIo {
   deleteTrashDetached(trash: string, journal: string, device: string): Promise<Result<{ pid: number }>>;
 }
 
-/** Dotted lower-case words, at least two: offload.release, onload.swap.rename. */
-const STEP = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$/;
+/** Dotted lower-case words, at least two: offload.release, onload.swap.rename. The name every fault step has. */
+export const FAULT_STEP = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$/;
 
 const checkStep = (step: string): void => {
-  if (!STEP.test(step))
+  if (!FAULT_STEP.test(step))
     throw new Error(`faultAt: step ${JSON.stringify(step)} is not dotted lower-case words`);
 };
 
