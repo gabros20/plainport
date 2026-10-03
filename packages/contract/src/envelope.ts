@@ -12,8 +12,11 @@ export const PLAINPORT_JSON = 1;
 
 const verb = z.string().min(1).meta({ description: "The command as registered, e.g. offload or root add" });
 
-/** Failures after which part of the work stands (D14): 8, the kept snapshot of a conflict; 10, a restore not hydrated. */
-export const PARTIAL_EXIT_CODES = [EXIT.conflict, EXIT.unhydrated] as const;
+/**
+ * Failures that still carry a useful result (D14): 6, the plan of a --dry-run its blockers stopped (D38); 8, the
+ * kept snapshot of a conflict; 10, a restore not hydrated.
+ */
+export const PARTIAL_EXIT_CODES = [EXIT.blocked, EXIT.conflict, EXIT.unhydrated] as const;
 export type PartialExitCode = (typeof PARTIAL_EXIT_CODES)[number];
 
 const errorObject = <C extends z.ZodType>(code: C) =>
@@ -30,7 +33,7 @@ export const ErrorObjectSchema = errorObject(FailureExitCodeSchema);
 const absent = z.never().optional();
 
 /** The final envelope for a command whose data matches `data` (any JSON value by default). A failure carries data
- * only when part of the work stands (D14): exit 8 or 10. */
+ * only when it still has a useful result (D14): exit 6, 8 or 10. */
 export const envelopeSchema = <D extends z.ZodType>(data: D) =>
   z.union([
     outputObject({
@@ -79,7 +82,7 @@ const isPartial = (code: FailureExitCode): code is PartialExitCode =>
   (PARTIAL_EXIT_CODES as readonly number[]).includes(code);
 
 /**
- * A failure envelope. `data` is accepted only with exit 8 or 10, a partial success (D14): the types refuse it for
+ * A failure envelope. `data` is accepted only with exit 6, 8 or 10, a useful partial result (D14): the types refuse it for
  * any other code, and a caller that gets past them with a non-literal code is a bug, so it throws.
  */
 export const errorEnvelope = <C extends FailureExitCode, D = never>(
@@ -95,7 +98,7 @@ export const errorEnvelope = <C extends FailureExitCode, D = never>(
     ...(extra.finding === undefined ? {} : { finding: extra.finding }),
   };
   if (extra.data === undefined) return { plainport_json: PLAINPORT_JSON, ok: false, verb: verbName, error };
-  if (!isPartial(code)) throw new TypeError(`exit ${code} cannot carry data; only 8 and 10 can (D14)`);
+  if (!isPartial(code)) throw new TypeError(`exit ${code} cannot carry data; only 6, 8 and 10 can (D14)`);
   return {
     plainport_json: PLAINPORT_JSON,
     ok: false,
