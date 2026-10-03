@@ -17,6 +17,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type { StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
@@ -279,6 +280,15 @@ const treeOf = (
   return out;
 };
 
+/** Writes a lock for the project as a live plainport elsewhere would hold it. */
+const holdLock = (id: string) => {
+  mkdirSync(box.paths.locksDir, { recursive: true });
+  writeFileSync(
+    join(box.paths.locksDir, `${id}.lock`),
+    `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date().toISOString(), token: "held" })}\n`,
+  );
+};
+
 const pmCalls = (): string[] =>
   existsSync(pmLog)
     ? readFileSync(pmLog, "utf8")
@@ -457,6 +467,7 @@ describe("onload: the round trip", () => {
     const fresh = join(box.home, "fresh");
     mkdirSync(fresh);
     expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe((lstatSync(fresh).mode & 0o7777).toString(8));
+    await expectInvariants();
   });
 
   test("onload --snapshot restores an older snapshot and still opens the lease over the head (D43)", async () => {
@@ -505,6 +516,12 @@ describe("onload: the same head's folder still in the trash", () => {
     const result = value(await onload());
     expect(result).toMatchObject({ restored: "reuse", snapshot: off.op, hydrate: { status: "reused" } });
     expect(steps).toContain("onload.reuse.cleared");
+    // The totals are the snapshot's, as its offloaded event recorded them.
+    const stats = (await storeEvents()).find((e) => e.type === "offloaded");
+    expect(stats?.type === "offloaded" && [result.files, result.bytes]).toEqual(
+      stats?.type === "offloaded" ? [stats.stats.files, stats.stats.bytes] : [],
+    );
+    expect(result.files).toBeGreaterThan(0);
     expect(steps).not.toContain("onload.restore.start");
     expect(engine.restores).toEqual([]);
     expect(pmCalls()).toEqual([]);
@@ -531,6 +548,7 @@ describe("onload: the same head's folder still in the trash", () => {
     expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
     // The trash stays for its own deadline; it is not this onload's.
     expect(existsSync(trash)).toBe(true);
+    await expectInvariants();
   });
 });
 
@@ -560,6 +578,21 @@ describe("onload: preflight refusals change nothing", () => {
     // The staging holder stays beside the landing place, empty: another onload there may be using it.
     expect(readdirSync(join(box.home, "elsewhere")).sort()).toEqual([".plainport-staging", "web"]);
     expect(readdirSync(join(box.home, "elsewhere/.plainport-staging"))).toEqual([]);
+    await expectInvariants("web", elsewhere);
+  });
+
+  test("the fix path.occupied prints works: --to lands beside an unrelated folder at the project's place (D56)", async () => {
+    await offload();
+    box.file("work/web/other.txt", "someone else's folder\n");
+    const refused = await onload();
+    expect(!refused.ok && refused.finding.fix).toContain("--to <path>");
+    mkdirSync(join(box.home, "elsewhere"));
+    const elsewhere = join(box.home, "elsewhere/web");
+    const result = value(await onload({ to: elsewhere }));
+    expect(result.dir).toBe(elsewhere);
+    expect(existsSync(join(elsewhere, "src/main.ts"))).toBe(true);
+    expect(readdirSync(dir)).toEqual(["other.txt"]);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
     await expectInvariants("web", elsewhere);
   });
 
@@ -895,6 +928,47 @@ describe("onload: hydration", () => {
     expect(pmCalls()).toHaveLength(2);
   });
 
+  test("Ctrl-C during the install after a good restore exits 130; the project is restored-unhydrated (D56)", async () => {
+    const off = await offload();
+    writeFileSync(join(bin, "npm"), '#!/bin/sh\necho "$PWD|npm $*" >> "$FAKE_PM_LOG"\nexec sleep 30\n');
+    chmodSync(join(bin, "npm"), 0o755);
+    const stop = new AbortController();
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "onload.committed") setTimeout(() => stop.abort(), 300);
+        },
+      },
+    });
+    const result = await runOnload(deps({ signal: stop.signal }, host), { project: await ref() });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([130, "operation.cancelled"]);
+    expect(!result.ok && result.finding.fix).toBe("plainport hydrate work:web");
+    expect(!result.ok && result.finding.message).toContain(off.op);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    const id = await projectId();
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.unhydrated).toBe(true);
+    expect(foldCatalog(await storeEvents()).projects[id]?.status).toBe("local");
+    await expectInvariants();
+
+    // plainport hydrate, stopped the same way, also exits 130 and leaves the project restored-unhydrated.
+    const again = new AbortController();
+    setTimeout(() => again.abort(), 300);
+    const hydrated = await runHydrate(
+      {
+        host: testHost(),
+        plugins: [nodePlugin],
+        env: env(),
+        paths: box.paths,
+        emit: () => {},
+        log: () => {},
+        signal: again.signal,
+      },
+      { project: await ref() },
+    );
+    expect(!hydrated.ok && [hydrated.exitCode, hydrated.finding.code]).toEqual([130, "operation.cancelled"]);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.unhydrated).toBe(true);
+  }, 30_000);
+
   test("--no-hydrate restores without installing: restored-unhydrated, exit 0", async () => {
     await offload();
     const result = value(await onload({ hydrate: false }));
@@ -917,6 +991,7 @@ describe("onload: hydration", () => {
     expect(existsSync(join(dir, "pwned"))).toBe(false);
     expect(existsSync(join(dir, "pwned-too"))).toBe(false);
     expect(pmCalls()).toHaveLength(1);
+    await expectInvariants();
   });
 
   test("dehydrate removes only the dependencies a plugin claims and git does not track", async () => {
@@ -944,6 +1019,47 @@ describe("onload: hydration", () => {
     expect(value(await readRegistry(testHost(), box.paths)).projects[await projectId()]?.unhydrated).toBe(
       true,
     );
+    await expectInvariants();
+  });
+
+  test("dehydrate never strips a registered inner project's dependencies, and takes its lock (D53, D56)", async () => {
+    box.file("work/web/packages/inner/package.json", `${JSON.stringify({ name: "inner" })}\n`);
+    box.file("work/web/packages/inner/package-lock.json", `${JSON.stringify({ lockfileVersion: 3 })}\n`);
+    box.file("work/web/packages/inner/node_modules/x/index.js", "inner\n");
+    const inner = ulid();
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          projects: {
+            ...r.projects,
+            [inner]: { root: "work", path: "web/packages/inner", registeredAt: new Date().toISOString() },
+          },
+        },
+      })),
+    );
+    const commandDeps = {
+      host: testHost(),
+      checks: quietChecks,
+      plugins: [nodePlugin],
+      env: env(),
+      paths: box.paths,
+      loader: new ConfigLoader(testHost(), box.paths),
+      emit: () => {},
+      log: () => {},
+    };
+    // Its lock held: dehydrate and hydrate of the outer project both refuse with exit 11.
+    holdLock(inner);
+    for (const run of [runDehydrate, runHydrate]) {
+      const held = await run(commandDeps, { project: await ref() });
+      expect(!held.ok && [held.exitCode, held.finding.code]).toEqual([11, "project.locked"]);
+    }
+    expect(existsSync(join(dir, "node_modules"))).toBe(true);
+    rmSync(join(box.paths.locksDir, `${inner}.lock`));
+    const result = value(await runDehydrate(commandDeps, { project: await ref() }));
+    expect(result.removed.map((r) => r.path)).toEqual(["node_modules"]);
+    expect(existsSync(join(dir, "packages/inner/node_modules/x/index.js"))).toBe(true);
   });
 });
 

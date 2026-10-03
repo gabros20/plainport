@@ -43,7 +43,7 @@ import type { ProjectRef } from "../roots/address.ts";
 import { refreshIndex } from "../scan/git.ts";
 import { scanTree } from "../scan/walk.ts";
 import { ulid } from "../ulid.ts";
-import { withProjectLock } from "./project-gate.ts";
+import { nestedProjects, withProjectLock } from "./project-gate.ts";
 
 export type HydrateStepReport = {
   /** The install root, relative to the project; "" is the project folder. */
@@ -248,6 +248,18 @@ export const hydrateProject = async (
     ),
   });
 
+  /** Ctrl-C (D56): the restore stands, the dependencies are not installed, and plainport hydrate retries. */
+  const stopped = (steps: HydrateStepReport[]) => ({
+    report: { status: "failed" as const, steps, untrusted },
+    failure: fail(
+      finding("operation.cancelled", {
+        message: `${address} is restored, but its install was stopped; its dependencies are not installed (restored-unhydrated)`,
+        fix: `plainport hydrate ${shellWord(address)}`,
+        paths: [dir],
+      }),
+    ),
+  });
+
   phase("toolchain", "start");
   const scanned = await scanTree(host.fs, dir);
   if (!scanned.ok)
@@ -274,6 +286,7 @@ export const hydrateProject = async (
   phase("hydrate", "start");
   const steps: HydrateStepReport[] = [];
   for (const step of installs) {
+    if (deps.signal?.aborted) return stopped(steps);
     const argv = toolchain.wrap(step.argv);
     const cwd = step.path === "" ? dir : join(dir, ...step.path.split("/"));
     const where = step.path === "" ? address : `${address} (${step.path})`;
@@ -289,6 +302,7 @@ export const hydrateProject = async (
     });
     if (!ran.ok) {
       steps.push({ path: step.path, command: step.command, ok: false });
+      if (ran.finding.code === "process.cancelled" || deps.signal?.aborted) return stopped(steps);
       return failed(
         `${where} is restored, but ${step.command} could not run: ${ran.finding.message}`,
         steps,
@@ -405,21 +419,29 @@ export const runHydrate = async (
   );
   if (!registered.ok) return registered;
   const id = registered.value.id;
+  // The registered projects nested with this one are locked too (D53, D56).
+  const nested = nestedProjects(registered.value.registry, { id, root: ref.root, path: ref.path });
   const gate = { io: host, paths, clock, log: deps.log };
-  return withProjectLock(gate, { id: id, address: ref.address }, async () => {
-    const done = await hydrateProject({ ...deps, op }, dir, ref.address);
-    const marked = await markHydrated(host, paths, id, done.failure === undefined);
-    if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
-    const outcome: HydrateOutcome = {
-      op,
-      exitCode: done.failure === undefined ? 0 : 10,
-      project: ref.address,
-      dir,
-      hydrate: done.report,
-    };
-    if (done.failure !== undefined) return failWith(done.failure.finding, outcome, 10);
-    return ok(outcome);
-  });
+  return withProjectLock(
+    gate,
+    { id, address: ref.address },
+    async () => {
+      const done = await hydrateProject({ ...deps, op }, dir, ref.address);
+      const marked = await markHydrated(host, paths, id, done.failure === undefined);
+      if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
+      const outcome: HydrateOutcome = {
+        op,
+        exitCode: done.failure === undefined ? 0 : 10,
+        project: ref.address,
+        dir,
+        hydrate: done.report,
+      };
+      if (done.failure?.exitCode === 130) return done.failure;
+      if (done.failure !== undefined) return failWith(done.failure.finding, outcome, 10);
+      return ok(outcome);
+    },
+    { related: nested },
+  );
 };
 
 export interface DehydrateDeps extends HydrateCommandDeps {
@@ -458,53 +480,65 @@ export const runDehydrate = async (
   );
   if (!registered.ok) return registered;
   const id = registered.value.id;
+  // The registered projects nested with this one are locked too (D53, D56).
+  const nested = nestedProjects(registered.value.registry, { id, root: ref.root, path: ref.path });
   const gate = { io: host, paths, clock, log: deps.log };
-  return withProjectLock(gate, { id: id, address: ref.address }, async () => {
-    // A dev server or an editor in the folder would see its dependencies vanish: the same process checks offload has.
-    const checked = await preflight(host, deps.checks, dir, {
-      env: deps.env,
-      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-    });
-    if (!checked.ok) return checked;
-    const busy = checked.value.findings.find(
-      (f) => f.severity === "block" && (f.code.startsWith("proc.") || f.code === "env.docker-mount"),
-    );
-    if (busy !== undefined) return fail(busy);
-    const set = await dehydrateSet(host, deps.plugins, {
-      dir,
-      loader: deps.loader,
-      env: deps.env,
-      root: ref.root,
-      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-    });
-    if (!set.ok) return set;
-    const removed: DehydrateOutcome["removed"] = [];
-    for (const entry of set.value) {
-      const path = join(dir, ...entry.path.split("/"));
-      try {
-        await host.fs.removeTree(path);
-      } catch (error) {
-        const code = systemErrorCode(error);
-        return fail(
-          finding("fs.write-failed", {
-            message: `${path} could not be removed (${code}); what was removed before it is regenerable, and plainport hydrate puts it back`,
-            fix: `check the permissions of ${shellWord(path)}, then re-run`,
-            paths: [path],
-          }),
-        );
+  return withProjectLock(
+    gate,
+    { id, address: ref.address },
+    async () => {
+      // A dev server or an editor in the folder would see its dependencies vanish: the same process checks offload has.
+      const checked = await preflight(host, deps.checks, dir, {
+        env: deps.env,
+        ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+      });
+      if (!checked.ok) return checked;
+      const busy = checked.value.findings.find(
+        (f) => f.severity === "block" && (f.code.startsWith("proc.") || f.code === "env.docker-mount"),
+      );
+      if (busy !== undefined) return fail(busy);
+      const set = await dehydrateSet(host, deps.plugins, {
+        dir,
+        loader: deps.loader,
+        env: deps.env,
+        root: ref.root,
+        ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+      });
+      if (!set.ok) return set;
+      const removed: DehydrateOutcome["removed"] = [];
+      // A registered inner project's dependencies are its own to remove (D56): its subtree is left alone.
+      const inner = nested
+        .filter((n) => n.inside && n.override === undefined)
+        .map((n) => n.path.slice(ref.path.length + 1));
+      const within = (path: string) => inner.some((p) => path === p || path.startsWith(`${p}/`));
+      for (const entry of set.value.filter((e) => !within(e.path))) {
+        const path = join(dir, ...entry.path.split("/"));
+        try {
+          await host.fs.removeTree(path);
+        } catch (error) {
+          const code = systemErrorCode(error);
+          return fail(
+            finding("fs.write-failed", {
+              message: `${path} could not be removed (${code}); what was removed before it is regenerable, and plainport hydrate puts it back`,
+              fix: `check the permissions of ${shellWord(path)}, then re-run`,
+              paths: [path],
+            }),
+          );
+        }
+        removed.push({ path: entry.path, bytes: entry.bytes });
       }
-      removed.push({ path: entry.path, bytes: entry.bytes });
-    }
-    if (removed.length > 0) {
-      const marked = await markHydrated(host, paths, id, false);
-      if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
-    }
-    return ok({
-      op,
-      project: ref.address,
-      dir,
-      removed,
-      freedBytes: removed.reduce((sum, r) => sum + r.bytes, 0),
-    });
-  });
+      if (removed.length > 0) {
+        const marked = await markHydrated(host, paths, id, false);
+        if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
+      }
+      return ok({
+        op,
+        project: ref.address,
+        dir,
+        removed,
+        freedBytes: removed.reduce((sum, r) => sum + r.bytes, 0),
+      });
+    },
+    { related: nested },
+  );
 };

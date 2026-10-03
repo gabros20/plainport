@@ -262,8 +262,11 @@ const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Res
   }
 };
 
-/** Folds a name the way a case-insensitive volume compares it: Unicode composition and case. */
-const fold = (path: string): string => path.normalize("NFC").toLowerCase();
+/**
+ * Folds a name as a case-insensitive volume compares it (APFS, HFS+): letter case and Unicode normalization (NFC/NFD)
+ * both, so two names that differ in either one would land on one file there.
+ */
+const foldCaseAndForm = (path: string): string => path.normalize("NFC").toLowerCase();
 
 /** Runs the onload; see the file comment. A failure before the swap changed nothing outside its staging folder. */
 export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<Result<OnloadOutcome>> => {
@@ -445,6 +448,11 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       files = listed.value.files;
       bytes = listed.value.bytes;
       rootMode = listed.value.rootMode;
+    } else {
+      // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
+      const produced = await producedBy(made.event);
+      files = produced?.stats.files ?? 0;
+      bytes = produced?.stats.bytes ?? 0;
     }
     phase("preflight", "end");
     if (signal?.aborted) return cancelled();
@@ -497,6 +505,21 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     });
     if (!result.ok) return result;
     return hydrate(result.value);
+  }
+
+  /** The event that made a snapshot (offloaded or checkpointed), read from the store; undefined when unreadable. */
+  async function producedBy(event: string) {
+    const got = await store.blob.get(`${STORE_EVENTS_PREFIX}${event}.json`);
+    if (!got.ok || got.value === null) return undefined;
+    try {
+      const parsed = CatalogEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
+      // Unreadable here, as the fold would skip it: nothing is counted.
+      return parsed.success && (parsed.data.type === "offloaded" || parsed.data.type === "checkpointed")
+        ? parsed.data
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
@@ -565,26 +588,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         }),
       );
     }
-    // --to while the project's folder stands at its place: one working copy per device.
-    if (req.to !== undefined && ref.dir !== undefined && ref.dir !== target) {
-      try {
-        if ((await kindAt(io, ref.dir)) === "dir") {
-          return fail(
-            finding("path.occupied", {
-              message: `${ref.address} is already here at ${ref.dir}, so it was not onloaded a second time at ${target}`,
-              fix: `work in ${shellWord(ref.dir)}, or offload it first (plainport offload ${shellWord(ref.address)} --yes)`,
-              paths: [ref.dir],
-            }),
-          );
-        }
-      } catch (error) {
-        return unreadable(
-          ref.dir,
-          error,
-          "whether the project is already here is unknown; nothing was restored",
-        );
-      }
-    }
+    // --to lands wherever its path is free, whatever stands at the project's own place (D56).
     return undefined;
   }
 
@@ -697,7 +701,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           files++;
           bytes += entry.size ?? 0;
         }
-        const key = fold(entry.path);
+        const key = foldCaseAndForm(entry.path);
         const same = byFold.get(key);
         if (same === undefined) byFold.set(key, [entry.path]);
         else same.push(entry.path);
@@ -713,7 +717,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         const names = collisions.flat().sort();
         return fail(
           finding("fs.case-collision", {
-            message: `the snapshot holds names that differ only by case (${collisions
+            message: `the snapshot holds names that differ only by case or Unicode form (${collisions
               .slice(0, 5)
               .map((c) => c.sort().join(" and "))
               .join(
@@ -725,21 +729,10 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         );
       }
     }
-    // The dependencies the install puts back, as the offload recorded them (DESIGN step 2).
-    let stripped = 0;
-    let rootMode: number | undefined;
-    const got = await store.blob.get(`${STORE_EVENTS_PREFIX}${event}.json`);
-    if (got.ok && got.value !== null) {
-      try {
-        const parsed = CatalogEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
-        if (parsed.success && parsed.data.type === "offloaded") {
-          stripped = parsed.data.stats.strippedBytes;
-          rootMode = parsed.data.rootMode;
-        } else if (parsed.success && "stats" in parsed.data) stripped = parsed.data.stats.strippedBytes;
-      } catch {
-        // Unreadable here, as the fold would skip it: the dependencies are not counted.
-      }
-    }
+    // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
+    const made = await producedBy(event);
+    const stripped = made?.stats.strippedBytes ?? 0;
+    const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
     const needed = Math.ceil((bytes + stripped) * 1.1);
     let free: number;
     try {
@@ -1058,6 +1051,18 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     );
     phase("hooks", "skip");
     const result = { ...outcome, hydrate: done.report };
+    // Ctrl-C during the install (D56): the restore stands, restored-unhydrated, exit 130.
+    if (done.failure?.exitCode === 130)
+      return withFix(
+        {
+          ...done.failure,
+          finding: {
+            ...done.failure.finding,
+            message: `${ref.address} was restored from snapshot ${outcome.snapshot} into ${outcome.dir}, then its install was stopped; its dependencies are not installed (restored-unhydrated)`,
+          },
+        },
+        `plainport hydrate ${shellWord(ref.address)}`,
+      );
     if (done.failure !== undefined) return failWith(done.failure.finding, { ...result, exitCode: 10 }, 10);
     const marked = await markHydrated(host, paths, id, true);
     if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
