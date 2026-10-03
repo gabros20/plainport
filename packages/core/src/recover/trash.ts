@@ -112,6 +112,30 @@ const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
   return total;
 };
 
+/**
+ * Removes a released trash folder, which its own detached delete may be removing at the same moment: a tree that
+ * changes under the walk (ENOENT, ENOTEMPTY) is walked again, and a folder that is gone is done.
+ */
+export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await io.fs.removeTree(trash);
+      return;
+    } catch (error) {
+      const code = systemErrorCode(error);
+      if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
+      try {
+        await io.fs.lstat(trash);
+      } catch (gone) {
+        if (systemErrorCode(gone) === "ENOENT") return;
+        throw gone;
+      }
+      if (attempt >= 5) throw error;
+      await io.proc.sleep(20 * attempt);
+    }
+  }
+};
+
 /** The onload journals renaming a released offload's trash back, by that offload's op. */
 const renamedBack = (journals: readonly Journal[]): Map<string, string> => {
   const out = new Map<string, string>();
@@ -167,7 +191,7 @@ export const collectTrash = async (
         const trash = itemOf(now).trash;
         const bytes = await treeBytes(io, trash);
         try {
-          await io.fs.removeTree(trash);
+          await removeTrash(io, trash);
           await removeJournal(io, paths, now.op);
         } catch (error) {
           return writeFailed(error, `deleting the trash ${trash}`, true, trash);

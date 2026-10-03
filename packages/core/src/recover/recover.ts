@@ -70,6 +70,7 @@ import { type OffloadConflict, offloadTrashOf, releaseOffload } from "../saga/re
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
+import { removeTrash } from "./trash.ts";
 
 /**
  * What recover did with one operation. rolled-back: it had not committed, and nothing local changed. finished: the
@@ -551,7 +552,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       return { op: { ...entry(journal, "trash-kept", state), trash, keepUntil: journal.keepUntil } };
     }
     try {
-      await io.fs.removeTree(trash);
+      await removeTrash(io, trash);
       await removeJournal(io, paths, journal.op);
     } catch (error) {
       return pending(journal, writeFailed(error, `deleting the trash ${trash}`, true, trash));

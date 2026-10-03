@@ -1138,3 +1138,44 @@ describe("status and ls views: every end state the sagas leave", () => {
     expect([view.id, view.state]).toEqual([id, "shelved"]);
   });
 });
+
+describe("trash deleted twice at once (a detached delete still running)", () => {
+  /** A host whose first removeTree finds the tree pulled from under it, as a concurrent rm leaves it. */
+  const racing = (): HostPorts => {
+    const real = testHost();
+    let first = true;
+    return {
+      ...real,
+      fs: {
+        ...real.fs,
+        removeTree: async (path) => {
+          if (!first) return real.fs.removeTree(path);
+          first = false;
+          await real.fs.removeTree(path);
+          throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}/x'`), {
+            code: "ENOENT",
+          });
+        },
+      },
+    };
+  };
+
+  test("gc takes a trash that vanished under it as deleted", async () => {
+    await crashOffloadAt("offload.release.delete");
+    const gc = await collectTrash(
+      { host: racing(), paths: box.paths, env: env(), log: () => {} },
+      { early: false },
+    );
+    expect(gc.ok ? gc.value.deleted.length : gc.finding.code).toBe(1);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("recover takes a trash that vanished under it as deleted", async () => {
+    await crashOffloadAt("offload.release.delete");
+    const host = racing();
+    const report = reportOf(await recover(recoverDeps({ host, loader: new ConfigLoader(host, box.paths) })));
+    expect(report.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+    await expectInvariants();
+  });
+});
