@@ -509,7 +509,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       return fail(
         finding("catalog.incomplete", {
           message: `the catalog names ${plural(project.missing.length, "snapshot")} of ${ref.address} it does not hold (${project.missing.join(", ")}), so its head is unknown; nothing was restored`,
-          fix: "connect the store that holds them (plainport store replicate syncs them), or run plainport doctor",
+          fix: `connect the store that holds them (plainport store replicate syncs them), or run plainport doctor; plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads a snapshot side by side meanwhile`,
         }),
       );
     }

@@ -311,3 +311,48 @@ describe("restore: a snapshot side by side (D58)", () => {
     expect(existsSync(join(box.home, "old/.plainport-staging"))).toBe(false);
   });
 });
+
+describe("restore: where onload's refusals point (D44, D56)", () => {
+  test("onload's catalog.incomplete and catalog.head-moved fixes name plainport restore", async () => {
+    await offload();
+    const id = Object.keys(value(await readRegistry(testHost(), box.paths)).projects)[0] as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    const s = ulid();
+    value(
+      await appendEvent(storeEventLog(store), {
+        v: 1,
+        id: s,
+        op: s,
+        type: "offloaded",
+        device: ulid(),
+        at: "2026-10-02T00:00:00.000Z",
+        project: id,
+        root: rootId,
+        path: "web",
+        base: ulid(),
+        snapshot: s,
+        stored: { ssd: "c".repeat(64) },
+        stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+      }),
+    );
+    const refused = await runOnload(
+      {
+        host: testHost(),
+        plugins: [nodePlugin],
+        paths: box.paths,
+        device,
+        env: env(),
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+        emit: () => {},
+        log: () => {},
+      },
+      { project: await ref(), hydrate: false },
+    );
+    expect(refused.ok ? 0 : refused.finding.code).toBe("catalog.incomplete");
+    expect(refused.ok ? "" : refused.finding.fix).toContain(
+      "plainport restore work:web --snapshot <id> --to <path>",
+    );
+  });
+});
