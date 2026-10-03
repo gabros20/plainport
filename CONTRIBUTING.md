@@ -46,6 +46,21 @@ If nothing is found, plainport stops with finding `tool.missing` and exit code 6
 The fix it prints depends on the case: run `bun scripts/fetch-tools.ts` (source and development builds),
 reinstall plainport (release builds), or put the tool in `PLAINPORT_TOOLS_DIR` or unset it.
 
+### The crash matrix
+
+`test/crash-matrix/` kills both sagas at every journal step and after every side effect, runs `recover` and checks
+the six invariants (ADR-0017). Its rows come from the sagas' exported steps, seams and branches, so a new step adds
+rows by itself; a new branch must say how each variant reaches it. The in-process variant runs in `bun test` (T0);
+the SIGKILL subprocess variant runs in `bun run test:t1` and, on macOS, puts the project on a case-sensitive APFS
+disk image it makes with `hdiutil` and deletes afterwards.
+
+The subprocess variant drives the compiled binary through a test hook, not configuration: `PLAINPORT_TEST_FAULT_AT`
+(with `PLAINPORT_TEST_FAULT_OCCURRENCE`) makes it SIGKILL itself at a step, and `PLAINPORT_TEST_PAUSE_AT` with
+`PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed. Only a binary compiled with
+`--define PLAINPORT_TEST_HOOKS=true` reads them (the matrix builds its own; `bun run build` and releases never do),
+and only when `PLAINPORT_TRIPWIRE_REAL_HOME` names the real home and `HOME` lies outside it
+(`packages/cli/src/test-hooks.ts`).
+
 ## Definition of Done
 
 A task's review checks every line. A "no" sends it back.
