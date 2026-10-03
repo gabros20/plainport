@@ -213,7 +213,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
 | `project.locked` | block | no | 11 | Another plainport process holds the project's lock (`locks/<project>.lock`), or the lock of a registered project nested with it (D53); a lock left by a dead process is broken instead |
 | `project.already-local` | block | no | 6 | `onload --to` while the project's own onloaded copy is on this device: a device holds one working copy; `fix` names `plainport restore <project> --snapshot <id> --to <path>` for a side-by-side copy (D56) |
-| `project.nested` | block | no | 6 | The folder holds another registered project that is on this device; `fix` offloads the inner project first (D53) |
+| `project.nested` | block | no | 6 | The folder holds another registered project's effective folder (its `--to` override, else its root's place) on this device, so `offload` refuses and `fix` offloads the inner project first; `onload --to` refuses a landing folder inside another registered project's folder (D53) |
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
 | `registry.locked` | block | no | 11 | Another process holds `registry.json.lock` |
