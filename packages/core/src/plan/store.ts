@@ -14,6 +14,9 @@ import { type OperationKind, PLAN_TTL_MS, type Plan, PlanFileSchema } from "./sc
 const SUFFIX = ".json";
 const fileOf = (paths: PlainportPaths, id: string): string => join(paths.plansDir, `${id}${SUFFIX}`);
 const expired = (plan: Plan, now: Date): boolean => Date.parse(plan.expiresAt) <= now.getTime();
+/** Fresh and free of blockers: a plan its own dry run refused is never approved (D38). */
+const approvable = (plan: Plan, now: Date): boolean =>
+  !expired(plan, now) && !plan.findings.some((f) => f.severity === "block");
 
 const notFound = (id: string) =>
   fail(
@@ -107,7 +110,7 @@ export const readPlan = async (
   return ok(plan);
 };
 
-/** The fresh plans on this device: their ids and kinds. Files that are not plans are passed over. */
+/** The plans `--plan <id>` may approve: fresh, with no block finding (D38). Files that are not plans are passed over. */
 export const listPlans = async (
   io: LocalIo,
   paths: PlainportPaths,
@@ -126,7 +129,7 @@ export const listPlans = async (
     const id = name.slice(0, -SUFFIX.length);
     if (!name.endsWith(SUFFIX) || !isUlid(id)) continue;
     const read = await readFile(io, join(paths.plansDir, name));
-    if (read.ok && read.value !== undefined && read.value.id === id && !expired(read.value, now))
+    if (read.ok && read.value !== undefined && read.value.id === id && approvable(read.value, now))
       plans.push({ id, kind: read.value.kind });
   }
   return plans;

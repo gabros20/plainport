@@ -87,4 +87,16 @@ describe("plan store: approved plans live under plans/ and expire after one hour
   test("listPlans on a device with no plans folder is empty", async () => {
     expect(await listPlans(nodeLocalIo, sb.paths, NOW)).toEqual([]);
   });
+
+  test("a plan with a block finding is never approvable (D38)", async () => {
+    const blocked = aPlan(NOW, {
+      findings: [{ code: "git.locked", severity: "block", message: "locked", allowable: true }],
+    });
+    const warned = aPlan(new Date(NOW.getTime() + 1), {
+      findings: [{ code: "git.unpushed", severity: "warn", message: "unpushed", allowable: true }],
+    });
+    await savePlan(nodeLocalIo, sb.paths, blocked, NOW);
+    await savePlan(nodeLocalIo, sb.paths, warned, NOW);
+    expect(await listPlans(nodeLocalIo, sb.paths, NOW)).toEqual([{ id: warned.id, kind: "offload" }]);
+  });
 });

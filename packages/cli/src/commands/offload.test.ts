@@ -130,6 +130,16 @@ describe("offload: dry run", () => {
     expect(env.data.findings.map((f: { code: string }) => f.code)).toContain("git.locked");
   });
 
+  test("a blocked plan's id never stands in for --yes (D38)", async () => {
+    lockedRepo();
+    const planned = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    const { id } = envelope(planned.out).data;
+    const store = await preloadPlans(ports().io, ports().env, NOW);
+    const run = await cli(["offload", "work:web", "--plan", id, "--json"], { plans: store });
+    expect(run.code).toBe(3);
+    expect(envelope(run.out).error.finding.code).toBe("risk.needs-yes");
+  });
+
   test("offload's argument is variadic in the contract, but M1 offloads one project (D38)", async () => {
     const offload = REGISTRY.find((c) => c.name === "offload");
     expect(offload === undefined ? undefined : positionalsOf(offload)).toEqual([
