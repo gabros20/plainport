@@ -238,6 +238,8 @@ describe("offload: the happy path", () => {
     expect(existsSync(dir)).toBe(false);
     await waitGone(join(box.home, "work/.plainport-trash", result.op));
     expect(existsSync(join(box.home, "work/.plainport-trash", result.op))).toBe(false);
+    // The detached delete then removes its claim (D64), then the journal.
+    await waitGone(join(box.paths.journalDir, `${result.op}.json`));
 
     // One snapshot, tagged, with the strip set left out.
     expect(engine.calls).toHaveLength(1);
@@ -1291,16 +1293,16 @@ describe("invariants helper", () => {
 describe("the detached trash delete (D47)", () => {
   test("starts only for an offload's own trash and journal; anything else is a bug and refused", async () => {
     const op = ulid();
-    await expect(posixDeleteTrash("/tmp/somewhere", `/x/journal/${op}.json`)).rejects.toThrow(
-      "not an offload's",
-    );
     await expect(
-      posixDeleteTrash(`/r/.plainport-trash/${op}`, `/x/journal/${ulid()}.json`),
+      posixDeleteTrash(testHost(), "/tmp/somewhere", `/x/journal/${op}.json`, ulid()),
+    ).rejects.toThrow("not an offload's");
+    await expect(
+      posixDeleteTrash(testHost(), `/r/.plainport-trash/${op}`, `/x/journal/${ulid()}.json`, ulid()),
     ).rejects.toThrow();
     const trash = box.dir(`work/.plainport-trash/${op}`);
     box.file(`work/.plainport-trash/${op}/web/a.txt`, "a");
     const journal = box.file(`.local/state/plainport/journal/${op}.json`, "{}");
-    value(await posixDeleteTrash(trash, journal));
+    value(await posixDeleteTrash(testHost(), trash, journal, ulid()));
     await waitGone(journal);
     expect([existsSync(trash), existsSync(journal)]).toEqual([false, false]);
   });

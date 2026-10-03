@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "holder": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "v",
+    "holder"
+  ],
+  "additionalProperties": false,
+  "title": "StagingHolder",
+  "description": "staging/holders/<sha256>.json in plainport's state: an onload --to's staging holder, for gc"
+}

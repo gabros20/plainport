@@ -122,6 +122,18 @@ const isStale = async (io: LocalIo, owner: LockHolder | undefined): Promise<bool
   return !(await io.proc.isAlive(owner.pid));
 };
 
+/**
+ * The holder of the lock at `path` while it is live: on this host, not stale (above), and taken since this host last
+ * booted, since a pid recorded before the boot may now be any other process's. Undefined when nothing holds it, it
+ * cannot be read, or its holder is gone. Only reads.
+ */
+export const liveHolder = async (io: LocalIo, path: string): Promise<LockHolder | undefined> => {
+  const holder = (await readLock(io, path))?.holder;
+  if (holder === undefined || holder.host !== io.proc.hostname()) return undefined;
+  if (!(Date.parse(holder.startedAt) >= io.proc.bootedAtMs())) return undefined;
+  return (await isStale(io, holder)) ? undefined : holder;
+};
+
 /** Waits for `turn` until the deadline; false if the deadline passed first. */
 const waitTurn = async (
   io: LocalIo,

@@ -28,10 +28,11 @@ export interface HostPorts extends LocalIo {
    * Deletes an offload's trash folder, then its journal, from a detached process that outlives this command (DESIGN.md
    * "Offload process" step 8). The one sanctioned exception to the one process runner (D47): the command is fixed
    * and internal, it has no output to bound, and only a journaled trash path is accepted (`.../.plainport-trash/<op>`,
-   * with its `journal/<op>.json`). If it dies or never starts, recover and gc finish the trash. Resolves once it has
-   * started; one that cannot start is process.spawn-failed.
+   * with its `journal/<op>.json`). If it dies or never starts, recover and gc finish the trash. It claims the trash
+   * for this device (`device`, D64) before deleting; it resolves ok once that claim is there. One that cannot start is
+   * process.spawn-failed; one that cannot claim is stopped, and fs.write-failed.
    */
-  deleteTrashDetached(trash: string, journal: string): Promise<Result<{ pid: number }>>;
+  deleteTrashDetached(trash: string, journal: string, device: string): Promise<Result<{ pid: number }>>;
 }
 
 /** Dotted lower-case words, at least two: offload.release, onload.swap.rename. */

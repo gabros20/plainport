@@ -8,6 +8,7 @@ import { nodePlugin } from "@plainport/eco-node";
 import { createMacosChecks, createMacosHost, guardFromEnv, type MacosHost } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
 import { gate } from "./gate.ts";
+import { housekeep } from "./housekeeping.ts";
 import { Cancellation, stopOnSignals } from "./interrupt.ts";
 import { preloadPlans } from "./plans.ts";
 import { clackPrompter } from "./prompt.ts";
@@ -78,6 +79,8 @@ export const run = async (
       holdSignal: () => ports.cancellation?.hold() ?? (() => {}),
       paths: () => resolvePaths(ports.env, { configFlag: globals.config, cwd: ports.cwd }),
     };
+    // Due trash and the interrupted operations' notices, before the command itself (D59).
+    await housekeep(command.name, ctx);
     const result = await command.handler(args, ctx);
     const plan = globals.dryRun && command.dryRun !== false ? command.dryRun : undefined;
     const what = plan === undefined ? `${command.name}'s output` : `${command.name}'s plan`;

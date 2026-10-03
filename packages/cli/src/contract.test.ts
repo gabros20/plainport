@@ -270,13 +270,19 @@ describe("completions", () => {
         expect(complete(REGISTRY, "plainport ")).toEqual([
           "help",
           "init",
+          "ls",
+          "status",
           "offload",
           "onload",
           "hydrate",
           "dehydrate",
+          "restore",
+          "recover",
+          "gc",
           "root",
           "version",
         ]);
+        expect(complete(REGISTRY, "plainport gc --no")).toEqual(["--now", "--no-input"]);
         expect(complete(REGISTRY, "plainport he")).toEqual(["help"]);
         expect(complete(REGISTRY, "plainport help v")).toEqual(["version"]);
         expect(complete(REGISTRY, "plainport version --j")).toEqual(["--json"]);

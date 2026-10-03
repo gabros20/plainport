@@ -16,11 +16,12 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   stat,
   statfs,
   unlink,
 } from "node:fs/promises";
-import { hostname } from "node:os";
+import { hostname, uptime } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { type DirEntry, errorCode, type FileKind, type LinkStat, type LocalIo } from "./io.ts";
 
@@ -201,6 +202,10 @@ export const nodeLocalIo: LocalIo = {
       await openUp(path);
       await rm(path, { recursive: true, force: true });
     },
+    rmdir: (path) => rmdir(path),
+    mkdir: async (path) => {
+      await mkdir(path);
+    },
   },
   proc: {
     pid: process.pid,
@@ -214,6 +219,7 @@ export const nodeLocalIo: LocalIo = {
         return errorCode(error) === "EPERM";
       }
     },
+    bootedAtMs: () => Date.now() - uptime() * 1000,
     sleep: (ms) => Bun.sleep(ms),
     monotonicMs: () => performance.now(),
   },

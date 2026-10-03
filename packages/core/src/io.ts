@@ -52,6 +52,16 @@ export interface LocalFs {
    * followed. Nothing there is fine. Only for plainport's own folders (staging) and what a plugin proves regenerable.
    */
   removeTree(path: string): Promise<void>;
+  /**
+   * Removes an empty folder, and nothing else: rejects with ENOTEMPTY when it holds anything (a folder another
+   * operation shares, which then stays), ENOENT when nothing is there.
+   */
+  rmdir(path: string): Promise<void>;
+  /**
+   * Makes one folder, exclusively: rejects with EEXIST when anything is there already (so a landing path is never
+   * shared), ENOENT when its parent is missing.
+   */
+  mkdir(path: string): Promise<void>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";
@@ -87,6 +97,8 @@ export interface ProcessInfo {
   hostname(): string;
   /** Whether a process with this pid exists on this host. */
   isAlive(pid: number): Promise<boolean>;
+  /** When this host last booted, in epoch milliseconds: a process recorded as started before it is gone. */
+  bootedAtMs(): number;
   sleep(ms: number): Promise<void>;
   /** Milliseconds on a clock that never goes backwards, for deadlines. */
   monotonicMs(): number;

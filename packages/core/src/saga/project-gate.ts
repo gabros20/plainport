@@ -1,8 +1,9 @@
 // The gate every project operation passes (ADR-0008, DESIGN.md "Offload process" step 1): the project's lock
 // (locks/<project>.lock; a lock held by a dead process is broken, a live one is project.locked, exit 11), then the
 // journals: an operation of this project that was interrupted must be finished or rolled back by `plainport recover`
-// before a new one starts (journal.pending). A journal this build cannot read fails closed: it could be this
-// project's. The lock is released on every way out but a crash. A simulated crash (InjectedFault) unwinds through
+// before a new one starts (journal.pending). A journal this build cannot read fails closed: when its `project.id`
+// still reads it holds that project (and the projects nested with it) back, and when not it could be any project's,
+// so it holds every one. The lock is released on every way out but a crash. A simulated crash (InjectedFault) unwinds through
 // here and releases it, which a killed process never does; the crash matrix uses the seam's `kill` action wherever
 // what it checks is recover breaking a dead holder's lock. The body gets stillHeld(), to re-check the lock before an
 // irreversible step (lock.ts's known limit). Offload uses it now; onload and recover take the same lock.
@@ -11,8 +12,8 @@ import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
 import { assertSystemError, type LocalIo } from "../io.ts";
-import { type Journal, journalFile, readJournals } from "../journal/index.ts";
-import { acquireLock, type LockHolder } from "../lock.ts";
+import { type Journal, type JournalsRead, journalFile, readJournals } from "../journal/index.ts";
+import { acquireLock, type LockHolder, liveHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { readRegistry } from "../registry.ts";
 import { type CanonicalPath, canonicalPath, overlapOf } from "../roots/canonical.ts";
@@ -25,6 +26,39 @@ const RELEASED: ReadonlySet<string> = new Set(["offload.release.delete"]);
 
 /** Whether an interrupted operation still holds its project back from a new one. */
 export const holdsProjectBack = (journal: Journal): boolean => !RELEASED.has(journal.step);
+
+/** The unreadable journals that may be an operation of one of these projects: theirs, and those naming no project. */
+export const unreadableOf = (read: JournalsRead, ids: ReadonlySet<string>): string[] =>
+  read.unreadable.filter((path) => {
+    const owner = read.owners[path];
+    return owner === undefined || ids.has(owner.id);
+  });
+
+/**
+ * Whether the plainport that wrote the journal is still running it: it holds the project's lock, live (lock.ts's
+ * liveHolder: taken since this host booted, its process alive), under the journal's host and pid, and took it no later
+ * than the journal's last write. A pid reused by another process after a crash or a reboot holds no such lock (a
+ * crashed holder's lock is broken by the next acquirer, a pre-boot one is not live), so it never looks running.
+ */
+export const operationRunning = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  journal: Journal,
+): Promise<boolean> => {
+  if (journal.host !== io.proc.hostname()) return false;
+  let holder: LockHolder | undefined;
+  try {
+    holder = await liveHolder(io, join(paths.locksDir, `${journal.project.id}.lock`));
+  } catch (error) {
+    assertSystemError(error);
+    return false;
+  }
+  return (
+    holder !== undefined &&
+    holder.pid === journal.pid &&
+    Date.parse(holder.startedAt) <= Date.parse(journal.updatedAt)
+  );
+};
 
 const lockHeld = (address: string) => (holder: LockHolder | undefined, path: string, ours: boolean) =>
   finding("project.locked", {
@@ -177,11 +211,14 @@ export const withProjectLock = async <T>(
     } catch (error) {
       return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
     }
-    const [unreadable] = journals.unreadable;
+    const [unreadable] = unreadableOf(
+      journals,
+      new Set([project.id, ...(options.related ?? []).map((r) => r.id)]),
+    );
     if (unreadable !== undefined) {
       return fail(
         finding("journal.pending", {
-          message: `${unreadable} is a journal this version of plainport cannot read, so it may be an interrupted operation of ${project.address}; nothing new was started`,
+          message: `${unreadable} is a journal this version of plainport cannot read, so it may be an interrupted operation of ${journals.owners[unreadable]?.address ?? project.address}; nothing new was started`,
           fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run",
           paths: [unreadable],
         }),

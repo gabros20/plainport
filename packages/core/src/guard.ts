@@ -164,7 +164,16 @@ const READS = [
   "readable",
   "freeBytes",
 ] as const;
-const WRITES = ["writeTextDurable", "writeBytesDurable", "unlink", "mkdirp", "removeTree", "chmod"] as const;
+const WRITES = [
+  "writeTextDurable",
+  "writeBytesDurable",
+  "unlink",
+  "mkdirp",
+  "removeTree",
+  "rmdir",
+  "mkdir",
+  "chmod",
+] as const;
 
 /** The file system, with every path checked by the guard first. */
 export const guardedFs = (fs: LocalFs, guard: PathGuard): LocalFs => {

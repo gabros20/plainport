@@ -2,11 +2,12 @@
 // session and process group (setsid, Bun's `detached`), and signals go to the whole group, kill(-pgid). POSIX
 // only, so it serves Linux as well until host-linux exists.
 
-import { constants } from "node:os";
+import { constants, uptime } from "node:os";
 import { isAbsolute } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import { errorCode, systemErrorCode } from "./io.ts";
+import { errorCode, type LocalIo, systemErrorCode } from "./io.ts";
 import type { Spawner } from "./runner/types.ts";
+import { trashClaimFile } from "./trash-claim.ts";
 
 // Bun 1.3.14 names a child's terminating signal from the Linux signal table on every platform, so on macOS a
 // SIGUSR1 (30) comes back as "SIGPWR" and a SIGBUS (10) as "SIGUSR1". Map the name back to its Linux number, then to
@@ -92,11 +93,45 @@ export const posixSpawner: Spawner = {
 const TRASH = /\/\.plainport-trash\/([0-9A-HJKMNP-TV-Z]{26})$/;
 const JOURNAL = /\/journal\/([0-9A-HJKMNP-TV-Z]{26})\.json$/;
 
+/** How long the detached delete has to write its claim before it is stopped. */
+const CLAIM_WAIT_MS = 10_000;
+
+/** Waits for the child's claim: written, the child already done (exit 0), failed (exited without one), or timeout. */
+const awaitClaim = async (
+  io: LocalIo,
+  claim: string,
+  exitCode: () => number | null,
+): Promise<"claimed" | "finished" | "failed" | "timeout"> => {
+  const deadline = io.proc.monotonicMs() + CLAIM_WAIT_MS;
+  for (;;) {
+    try {
+      await io.fs.lstat(claim);
+      return "claimed";
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    const code = exitCode();
+    if (code !== null) return code === 0 ? "finished" : "failed";
+    if (io.proc.monotonicMs() > deadline) return "timeout";
+    await io.proc.sleep(5);
+  }
+};
+
 /**
  * HostPorts.deleteTrashDetached on POSIX (D47): /bin/sh in a new session (setsid), every stream on /dev/null, never
- * waited for. It makes the trash writable (a read-only folder cannot be emptied), deletes it, then the journal.
+ * waited for. It first claims the trash as its own (trash-claim.ts, D64: its pid, written by itself), makes the trash
+ * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal. This resolves ok only
+ * once the claim is there (or the child already finished), polled through `io`, so a caller holding the project's
+ * lock releases it only after any other deleter can see the claim. A child that exits without its claim is
+ * fs.write-failed; one that has not claimed within CLAIM_WAIT_MS (a disk that hangs) is killed first, so no deleter
+ * runs unclaimed, and is fs.write-failed too; gc and recover delete that trash later.
  */
-export const posixDeleteTrash = async (trash: string, journal: string): Promise<Result<{ pid: number }>> => {
+export const posixDeleteTrash = async (
+  io: LocalIo,
+  trash: string,
+  journal: string,
+  device: string,
+): Promise<Result<{ pid: number }>> => {
   const op = TRASH.exec(trash)?.[1];
   if (op === undefined || JOURNAL.exec(journal)?.[1] !== op || !isAbsolute(trash) || !isAbsolute(journal))
     throw new Error(`deleteTrashDetached: ${trash} and ${journal} are not an offload's trash and journal`);
@@ -105,10 +140,17 @@ export const posixDeleteTrash = async (trash: string, journal: string): Promise<
       [
         "/bin/sh",
         "-c",
-        'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$2"',
+        [
+          'c="$1.claim"',
+          `printf '{"v":1,"device":"%s","pid":%s,"bootedAt":%s,"startedAt":"%s"}\\n' "$3" "$$" "$4" "$5" > "$c.tmp" && mv -f -- "$c.tmp" "$c" || exit 1`,
+          'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$c" && rm -f -- "$2"',
+        ].join("\n"),
         "plainport-trash",
         trash,
         journal,
+        device,
+        String(Date.now() - uptime() * 1000),
+        new Date().toISOString(),
       ],
       {
         cwd: "/",
@@ -120,7 +162,23 @@ export const posixDeleteTrash = async (trash: string, journal: string): Promise<
       },
     );
     child.unref();
-    return ok({ pid: child.pid });
+    // Until the claim is there, nothing tells another deleter that this one runs (D64).
+    const claimed = await awaitClaim(io, trashClaimFile(trash), () => child.exitCode);
+    if (claimed === "claimed" || claimed === "finished") return ok({ pid: child.pid });
+    if (claimed === "timeout") {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        systemErrorCode(error);
+      }
+    }
+    return fail(
+      finding("fs.write-failed", {
+        message: `the detached delete of ${trash} could not claim it (${claimed === "timeout" ? `no claim within ${CLAIM_WAIT_MS / 1000} s` : "its claim could not be written"}), so it was stopped before deleting anything`,
+        fix: "check that the volume is writable, then run plainport gc",
+        paths: [trashClaimFile(trash)],
+      }),
+    );
   } catch (error) {
     const code = systemErrorCode(error);
     return fail(

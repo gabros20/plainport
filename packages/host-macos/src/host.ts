@@ -76,9 +76,14 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
     },
     liveGroups: () => [...groups],
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
-    deleteTrashDetached: async (trash, journal) => {
+    deleteTrashDetached: async (trash, journal, device) => {
       await guard?.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
-      return posixDeleteTrash(trash, journal);
+      return posixDeleteTrash(
+        { fs: guard === undefined ? nodeLocalIo.fs : guardedFs(nodeLocalIo.fs, guard), proc },
+        trash,
+        journal,
+        device,
+      );
     },
   };
 };

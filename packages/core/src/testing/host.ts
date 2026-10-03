@@ -33,9 +33,9 @@ export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
       return runProcess(posixSpawner, spec);
     },
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
-    deleteTrashDetached: async (trash, journal) => {
+    deleteTrashDetached: async (trash, journal, device) => {
       await guard.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
-      return posixDeleteTrash(trash, journal);
+      return posixDeleteTrash({ fs: guardedFs(nodeLocalIo.fs, guard), proc }, trash, journal, device);
     },
   };
 };

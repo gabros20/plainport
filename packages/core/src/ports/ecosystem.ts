@@ -74,6 +74,11 @@ export interface ToolRequirement {
 
 export interface EcosystemPlugin {
   id: string;
+  /**
+   * Folder names that only ever hold this ecosystem's regenerable dependencies (node_modules): a view sizing a folder
+   * never walks them. Strip decisions never use this; they come from strip().
+   */
+  dependencyFolders?: readonly string[];
   detect(dir: ProjectDir): Promise<Detection | null>;
   /** Proposals only: the path and why it is regenerable. */
   strip(ctx: PluginContext): Promise<StripCandidate[]>;
