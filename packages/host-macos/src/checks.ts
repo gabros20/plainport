@@ -14,16 +14,22 @@
 //   find on an ordinary folder and feed it recorded output. -prune keeps find out of a dataless folder: listing one
 //   would download it. find is given the folder's real path, so a symlinked folder is searched where the walk goes.
 // - Docker: `docker ps` then `docker inspect` for bind mounts of the folder, of something inside it, or of a folder
-//   holding it. Only two answers are not findings, since nothing can mount the folder then: no docker executable
-//   on PATH, and a daemon that is clearly not there (its socket missing or refusing connections). Any other failure
-//   blocks under env.docker-mount, as lsof's and find's do under their own codes: an unchecked folder is not safe.
+//   holding it. Only two answers are not findings, since nothing can mount the folder then: no docker on PATH
+//   (every entry looked in, and none holds one), and a daemon that is clearly not there (its socket missing or
+//   refusing connections). Any other failure blocks under env.docker-mount, as lsof's and find's do under their own
+//   codes: an unchecked folder is not safe. That includes a PATH entry that cannot be searched and a docker that is
+//   there but not executable, since a daemon may be running with mounts either way.
+//
+// Each check first resolves the folder's real path, since lsof, find and docker name files by it; a folder whose
+// real path cannot be found is not checked, and blocks under the check's own code.
 
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { decode, type Failure, fail, finding, ok, type Result } from "@plainport/contract";
+import { decode, type Failure, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import {
   type CheckContext,
   capturedOutput,
   type DockerMounts,
+  errorCode,
   type HostChecks,
   type HostPorts,
   type ProcessUse,
@@ -31,6 +37,7 @@ import {
   splitRecords,
 } from "@plainport/core";
 import { z } from "zod";
+import { PATH_REFUSED } from "./guard.ts";
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const LSOF = "/usr/sbin/lsof";
@@ -54,14 +61,26 @@ const lastLines = (outcome: RunOutcome): string =>
 const under = (roots: readonly string[], path: string): boolean =>
   roots.some((root) => path === root || path.startsWith(root === "/" ? root : `${root}/`));
 
-/** The folder as given and with symlinks resolved: tools report one spelling or the other. */
-const spellings = async (host: HostPorts, dir: string): Promise<string[]> => {
+type CheckCode = "proc.open-files" | "fs.dataless" | "env.docker-mount";
+
+/**
+ * The folder as given and with symlinks resolved, the real one last: tools report one spelling or the other. A
+ * folder whose real path cannot be found cannot be matched against what they report, so the check fails.
+ */
+const spellings = async (host: HostPorts, dir: string, code: CheckCode): Promise<Result<string[]>> => {
   const given = resolve(dir);
   try {
     const real = await host.fs.realpath(given);
-    return real === given ? [given] : [given, real];
-  } catch {
-    return [given];
+    return ok(real === given ? [given] : [given, real]);
+  } catch (error) {
+    if (errorCode(error) === PATH_REFUSED) throw error;
+    return fail(
+      finding(code, {
+        message: `could not find the real path of ${dir}, so it was not checked: ${error instanceof Error ? error.message : String(error)}`,
+        paths: [dir],
+        fix: `make every folder on the way to it searchable (chmod u+x), or give the path as the file system spells it; then re-run`,
+      }),
+    );
   }
 };
 
@@ -197,7 +216,7 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
   const decoder = new TextDecoder();
   /** A runner failure (timeout, spawn, unreadable output) as the check's own blocker; a cancellation stays one. */
   const asCheck =
-    (code: "proc.open-files" | "fs.dataless" | "env.docker-mount", what: string, dir: string) =>
+    (code: CheckCode, what: string, dir: string) =>
     (failure: Failure): Failure =>
       failure.exitCode === 130
         ? failure
@@ -211,7 +230,9 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
 
   return {
     processesUsing: async (dir, ctx) => {
-      const roots = await spellings(host, dir);
+      const spelled = await spellings(host, dir, "proc.open-files");
+      if (!spelled.ok) return spelled;
+      const roots = spelled.value;
       const ran = await capture(
         LSOF,
         ["-n", "-P", "-w", "-F", "pcRfn"],
@@ -256,7 +277,9 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
     },
 
     dataless: async (dir, ctx) => {
-      const top = (await spellings(host, dir)).at(-1) as string;
+      const spelled = await spellings(host, dir, "fs.dataless");
+      if (!spelled.ok) return spelled;
+      const top = spelled.value.at(-1) as string;
       const ran = await capture(
         FIND,
         [top, "-flags", "+dataless", "-print0", "-prune"],
@@ -313,13 +336,41 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
           }),
         );
 
+      const spelled = await spellings(host, dir, "env.docker-mount");
+      if (!spelled.ok) return spelled;
+      const roots = spelled.value;
+      const notKnown = (message: string, fix: string): Failure =>
+        fail(finding("env.docker-mount", { message, paths: [dir], fix }));
+
+      // Docker is "not installed" only when every PATH entry was looked in and none holds a docker. An entry that
+      // cannot be searched, or a docker that cannot be run, leaves the question open, and a daemon may be running.
+      // An empty or relative entry means the working directory, which is / for every child here.
       let docker: string | undefined;
-      for (const folder of (env.PATH ?? "").split(":")) {
-        if (folder === "" || !isAbsolute(folder)) continue;
-        if (await host.fs.executable(join(folder, "docker"))) {
-          docker = join(folder, "docker");
-          break;
+      for (const entry of (env.PATH ?? "").split(":")) {
+        const folder = resolve("/", entry);
+        const candidate = join(folder, "docker");
+        let kind: string;
+        try {
+          kind = (await host.fs.stat(candidate)).kind;
+        } catch (error) {
+          const code = errorCode(error);
+          if (code === "ENOENT" || code === "ENOTDIR") continue;
+          if (code === PATH_REFUSED) throw error;
+          return notKnown(
+            `could not tell whether docker is installed: ${candidate}: ${error instanceof Error ? error.message : String(error)}`,
+            `make ${shellWord(folder)} searchable (chmod u+x ${shellWord(folder)}) or take it off PATH, then re-run`,
+          );
         }
+        // A folder or a special file named docker is not the CLI; a shell would skip it too.
+        if (kind !== "file") continue;
+        if (!(await host.fs.executable(candidate))) {
+          return notKnown(
+            `docker is installed at ${candidate} but cannot be run by this user, so its containers were not checked`,
+            `chmod u+x ${shellWord(candidate)}, or take ${shellWord(folder)} off PATH; then re-run`,
+          );
+        }
+        docker = candidate;
+        break;
       }
       if (docker === undefined) return unavailable("docker is not installed");
       const checkFailed = asCheck("env.docker-mount", `check which containers mount ${dir}`, dir);
@@ -374,7 +425,6 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         );
       }
 
-      const roots = await spellings(host, dir);
       const mounts: { container: string; name: string; source: string }[] = [];
       for (const container of described.value) {
         for (const mount of container.Mounts ?? []) {

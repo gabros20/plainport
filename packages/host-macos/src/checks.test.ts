@@ -463,3 +463,53 @@ describe("macOS checks: preflight with the real checks", () => {
     }
   });
 });
+
+describe("macOS checks: fail closed", () => {
+  test("a PATH folder that cannot be searched for docker blocks: docker may be installed there", async () => {
+    const locked = join(dir, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      const result = await checks.dockerMounts(dir, { env: { PATH: `${locked}:${dir}` } });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.finding.code).toBe("env.docker-mount");
+        expect(result.finding.fix).toContain(locked);
+      }
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+
+  test("a docker that is there but not executable blocks, with a fix", async () => {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, "docker"), 0o644);
+    const result = await checks.dockerMounts(dir, { env: { PATH: bin } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.finding.code).toBe("env.docker-mount");
+      expect(result.finding.fix).toContain(`chmod u+x ${join(bin, "docker")}`);
+    }
+  });
+
+  test("a folder whose real path cannot be found is not checked: each check blocks under its own code", async () => {
+    const broken: HostPorts = {
+      ...scripted().host,
+      fs: {
+        ...host.fs,
+        realpath: async () => {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        },
+      },
+    };
+    const unchecked = createMacosChecks(broken);
+    const processes = await unchecked.processesUsing(dir, { env });
+    expect(!processes.ok && processes.finding.code).toBe("proc.open-files");
+    const dataless = await unchecked.dataless(dir, { env });
+    expect(!dataless.ok && dataless.finding.code).toBe("fs.dataless");
+    const docker = await unchecked.dockerMounts(dir, { env: fakeDocker() });
+    expect(!docker.ok && docker.finding.code).toBe("env.docker-mount");
+  });
+});
