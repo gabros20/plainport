@@ -231,6 +231,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 4,
     summary: "The store's repository has no snapshot with this id",
   },
+  "restic.symlinks-unclear": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Too many symlinks in a snapshot have names or targets that restic's listing cannot place in one pass (line breaks, ' -> '); the message lists them",
+  },
   "restic.unreadable-files": {
     severity: "block",
     allowable: false,

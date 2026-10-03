@@ -158,6 +158,12 @@ describe("findings", () => {
         exitCode: 4,
         summary: expect.any(String),
       },
+      "restic.symlinks-unclear": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "restic.unreadable-files": {
         severity: "block",
         allowable: false,
