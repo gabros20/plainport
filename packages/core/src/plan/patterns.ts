@@ -2,18 +2,28 @@
 // relative to the project root. The subset here: a pattern with no slash but a trailing one matches a name at any
 // depth; any other slash anchors it to the project folder; a trailing slash matches folders only; `**` spans
 // folders, `*` and `?` stay inside one name, `[...]` is a character class. Blank lines and `#` comments match
-// nothing, and so does a negation (`!`), which strip lists have no use for.
+// nothing. A negation (`!`) counts only in decide(), where the last matching pattern wins as in gitignore: strip.extra
+// uses it to re-include a path (D39). matches() and covers() pass over negations, which for strip.keep and
+// strip.never can only protect more.
+
+type Kind = "file" | "dir" | "symlink";
 
 export interface PatternSet {
-  /** Whether a pattern matches this entry itself. */
-  matches(path: string, kind: "file" | "dir" | "symlink"): boolean;
-  /** Whether a pattern matches the path (as a file or a folder) or any folder above it. */
+  /** Whether a positive pattern matches this entry itself. */
+  matches(path: string, kind: Kind): boolean;
+  /** Whether a positive pattern matches the path (as a file or a folder) or any folder above it. */
   covers(path: string): boolean;
+  /** The last pattern matching this entry decides: true when it is positive, false when it is a negation, undefined
+   * when none matches. */
+  decide(path: string, kind: Kind): boolean | undefined;
+  /** Whether any pattern is a negation. */
+  hasNegation: boolean;
 }
 
 interface Compiled {
   regex: RegExp;
   dirOnly: boolean;
+  negated: boolean;
 }
 
 const globToRegex = (glob: string): string => {
@@ -51,22 +61,33 @@ const globToRegex = (glob: string): string => {
 
 const compile = (pattern: string): Compiled | undefined => {
   let text = pattern.trim();
-  if (text === "" || text.startsWith("#") || text.startsWith("!")) return undefined;
+  if (text === "" || text.startsWith("#")) return undefined;
+  const negated = text.startsWith("!");
+  if (negated) text = text.slice(1);
   const dirOnly = text.endsWith("/");
   if (dirOnly) text = text.replace(/\/+$/, "");
   const anchored = text.includes("/");
   text = text.replace(/^\/+/, "");
   if (text === "") return undefined;
   const body = globToRegex(text);
-  return { regex: new RegExp(anchored ? `^${body}$` : `^(?:.*/)?${body}$`), dirOnly };
+  return { regex: new RegExp(anchored ? `^${body}$` : `^(?:.*/)?${body}$`), dirOnly, negated };
 };
 
 export const compilePatterns = (patterns: readonly string[]): PatternSet => {
   const compiled = patterns.map(compile).filter((c): c is Compiled => c !== undefined);
-  const matches = (path: string, kind: "file" | "dir" | "symlink"): boolean =>
-    compiled.some((c) => (!c.dirOnly || kind === "dir") && c.regex.test(path));
+  const hit = (c: Compiled, path: string, kind: Kind) => (!c.dirOnly || kind === "dir") && c.regex.test(path);
+  const matches = (path: string, kind: Kind): boolean =>
+    compiled.some((c) => !c.negated && hit(c, path, kind));
   return {
     matches,
+    hasNegation: compiled.some((c) => c.negated),
+    decide: (path, kind) => {
+      for (let i = compiled.length - 1; i >= 0; i--) {
+        const c = compiled[i] as Compiled;
+        if (hit(c, path, kind)) return !c.negated;
+      }
+      return undefined;
+    },
     covers: (path) => {
       if (matches(path, "file") || matches(path, "dir")) return true;
       for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) {

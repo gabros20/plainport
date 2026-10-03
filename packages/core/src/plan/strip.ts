@@ -3,8 +3,9 @@
 // anything that
 //
 // - is not on disk (nothing to leave out),
+// - the plugin itself declines, saying why (a node_modules no install puts back),
 // - is installed dependencies while deps.mode is keep (or --keep-deps),
-// - strip.keep or strip.never match, on the path, a folder above it, or anything inside it,
+// - strip.keep or strip.never match: the candidate itself or a folder above it, never something inside it (D39),
 // - holds a repository of its own, whose unpushed work could live nowhere else,
 // - git tracks, in whole or in part (a tracked build/, a committed .yarn/cache),
 //
@@ -21,7 +22,14 @@ export interface ProposedStrip extends StripCandidate {
   plugin: string;
 }
 
-export type KeptReason = "missing" | "keep-deps" | "protected" | "holds-repo" | "tracked" | "inside";
+export type KeptReason =
+  | "missing"
+  | "declined"
+  | "keep-deps"
+  | "protected"
+  | "holds-repo"
+  | "tracked"
+  | "inside";
 
 export interface StripInput {
   manifest: Manifest;
@@ -69,40 +77,59 @@ const normalized = (path: string): string | undefined => {
   return trimmed;
 };
 
+/**
+ * strip.extra's matches: the outermost entries the patterns strip, outside any repository's own folder. The last
+ * matching pattern decides and a folder's state passes to what it holds, as in gitignore; a negation re-includes
+ * (D39). A folder holding anything re-included is not stripped whole: what it holds is looked at one by one.
+ */
+const extraMatches = (manifest: Manifest, patterns: readonly string[]): ProposedStrip[] => {
+  if (patterns.length === 0) return [];
+  const all = compilePatterns(patterns);
+  const each = patterns.map((pattern) => ({ pattern, set: compilePatterns([pattern]) }));
+  /** Folders whose state is "strip". */
+  const stripped = new Set<string>();
+  /** Folders holding something re-included. */
+  const mixed = new Set<string>();
+  const hits: string[] = [];
+  for (const entry of manifest) {
+    if (inGitDir(entry.path)) continue;
+    const parent = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : "";
+    const inherited = stripped.has(parent);
+    const state = all.decide(entry.path, entry.type) ?? inherited;
+    if (state) {
+      hits.push(entry.path);
+      if (entry.type === "dir") stripped.add(entry.path);
+    } else if (inherited || ancestors(entry.path).some((folder) => stripped.has(folder))) {
+      for (const folder of ancestors(entry.path)) mixed.add(folder);
+    }
+  }
+  const chosen = new Set<string>();
+  const out: ProposedStrip[] = [];
+  for (const path of hits) {
+    if (mixed.has(path) || ancestors(path).some((folder) => chosen.has(folder))) continue;
+    chosen.add(path);
+    const by = [...each].reverse().find((p) => p.set.covers(path));
+    out.push({
+      path,
+      plugin: "config",
+      kind: "output",
+      reason: `matches strip.extra ${by?.pattern ?? ""}`.trim(),
+    });
+  }
+  return out;
+};
+
 export const resolveStripSet = async (input: StripInput): Promise<Result<StripSet>> => {
   const { manifest } = input;
   const kept: StripSet["kept"] = [];
   const keep = (c: ProposedStrip, why: KeptReason, detail: string) =>
     kept.push({ path: c.path, plugin: c.plugin, why, detail });
 
-  // strip.extra: the outermost entries a pattern matches, outside any repository's own folder.
-  const extraPatterns = input.extra.map((pattern) => ({ pattern, set: compilePatterns([pattern]) }));
-  const extras: ProposedStrip[] = [];
+  const extras = extraMatches(manifest, input.extra);
   const protect = [
     { name: "strip.keep", set: compilePatterns(input.keep) },
     { name: "strip.never", set: compilePatterns(input.never) },
   ];
-  /** Each path a protected entry lies at or below → the first protected entry and the setting that protects it. */
-  const touched = new Map<string, { entry: string; name: string }>();
-  const chosen = new Set<string>();
-  for (const entry of manifest) {
-    const by = protect.find((p) => p.set.matches(entry.path, entry.type));
-    if (by !== undefined) {
-      for (const path of [entry.path, ...ancestors(entry.path)])
-        if (!touched.has(path)) touched.set(path, { entry: entry.path, name: by.name });
-    }
-    if (extraPatterns.length === 0 || inGitDir(entry.path)) continue;
-    if (ancestors(entry.path).some((folder) => chosen.has(folder))) continue;
-    const hit = extraPatterns.find((p) => p.set.matches(entry.path, entry.type));
-    if (hit === undefined) continue;
-    chosen.add(entry.path);
-    extras.push({
-      path: entry.path,
-      plugin: "config",
-      kind: "output",
-      reason: `matches strip.extra ${hit.pattern}`,
-    });
-  }
 
   const seen = new Set<string>();
   let remaining: ProposedStrip[] = [];
@@ -111,15 +138,14 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
     if (path === undefined || seen.has(path)) continue;
     seen.add(path);
     const candidate = { ...proposed, path };
+    // keep and never look at the candidate (or a folder above it), never inside it (D39).
     const covering = protect.find((p) => p.set.covers(path));
-    const below = touched.get(path);
     const repo = input.repos.find((r) => r !== "" && (r === path || inside(r, path)));
     if (manifest.get(path) === undefined) keep(candidate, "missing", "it is not on disk");
+    else if (candidate.declined !== undefined) keep(candidate, "declined", candidate.declined);
     else if (input.keepDeps && candidate.kind === "deps")
       keep(candidate, "keep-deps", "installed dependencies are kept (deps = keep, or --keep-deps)");
     else if (covering !== undefined) keep(candidate, "protected", `${covering.name} matches it`);
-    else if (below !== undefined)
-      keep(candidate, "protected", `${below.name} matches ${below.entry === path ? "it" : below.entry}`);
     else if (repo !== undefined)
       keep(candidate, "holds-repo", `it holds the repository ${repo === path ? "itself" : repo}`);
     else remaining.push(candidate);
@@ -135,7 +161,9 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
         undefined,
       );
     if (repo === undefined) continue;
-    byRepo.set(repo, [...(byRepo.get(repo) ?? []), candidate]);
+    const list = byRepo.get(repo);
+    if (list === undefined) byRepo.set(repo, [candidate]);
+    else list.push(candidate);
   }
   const trackedPaths = new Set<string>();
   for (const [repo, candidates] of byRepo) {

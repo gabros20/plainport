@@ -37,6 +37,11 @@ export interface StripCandidate {
   reason: string;
   /** deps: installed dependencies, kept when deps.mode is keep; output: build output and caches. */
   kind: "deps" | "output";
+  /**
+   * Set when the plugin saw the path but cannot claim it, with why (a node_modules no install puts back). The core
+   * keeps it and says why in the plan (strip.kept).
+   */
+  declined?: string;
 }
 
 export interface HydrateStep {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ok } from "@plainport/contract";
 import { ConfigLoader } from "../config/load.ts";
@@ -105,28 +105,113 @@ describe("plan: the strip set", () => {
     put(".vercel/output/config.json");
     put(".next/cache/x");
     writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["dist/"]\n');
-    userConfig('[strip]\nnever = [".vercel/output/config.json"]\n');
+    userConfig('[strip]\nnever = [".vercel/output"]\n');
     const p = await plan([output("dist"), output(".vercel/output"), output(".next")]);
     expect(stripped(p)).toEqual([".next"]);
   });
 
+  test("D39: keep and never match the candidates themselves, never something inside one", async () => {
+    put("node_modules/react/dist/index.js");
+    put("node_modules/a/test/cert.pem");
+    put("dist/index.js");
+    put("apps/web/.next/x");
+    // DESIGN's own example: keep = ["dist/"] keeps the project's dist, not node_modules.
+    writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["dist/", "apps/"]\nnever = ["*.pem"]\n');
+    const p = await plan([deps("node_modules"), output("dist"), output("apps/web/.next")]);
+    expect(stripped(p)).toEqual(["node_modules"]);
+    const kept = p.findings.find((f) => f.code === "strip.kept");
+    // A pattern matching a folder above the candidate keeps it too.
+    expect(kept?.paths).toEqual(["apps/web/.next", "dist"]);
+  });
+
+  test("a kept candidate inside a stripped one leaves with it, so the plan does not say it stays", async () => {
+    put("out/keep/a.js");
+    put("out/b.js");
+    writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["out/keep"]\n');
+    const p = await plan([output("out"), output("out/keep")]);
+    expect(stripped(p)).toEqual(["out"]);
+    expect(p.findings.find((f) => f.code === "strip.kept")).toBeUndefined();
+  });
+
   test("a kept candidate shows in the plan with why: strip.kept (info)", async () => {
     put("node_modules/a/index.js");
-    put("node_modules/a/cert.pem");
     put("build/app.js");
     commit("build/app.js");
     put("dist/index.js");
-    writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["dist/"]\nnever = ["*.pem"]\n');
-    const p = await plan([deps("node_modules"), output("build"), output("dist"), output(".next")]);
+    put("certs/dev.pem");
+    writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["dist/"]\nnever = ["certs"]\n');
+    const p = await plan([output("build"), output("dist"), output("certs"), output(".next")], {
+      keepDeps: true,
+    });
     expect(stripped(p)).toEqual([]);
     const kept = p.findings.find((f) => f.code === "strip.kept");
-    expect(kept).toMatchObject({ severity: "info", paths: ["build", "dist", "node_modules"] });
+    expect(kept).toMatchObject({ severity: "info", paths: ["build", "certs", "dist"] });
     expect(kept?.message).toContain("build (git tracks it)");
     expect(kept?.message).toContain("dist (strip.keep matches it)");
-    expect(kept?.message).toContain("node_modules (strip.never matches node_modules/a/cert.pem)");
+    expect(kept?.message).toContain("certs (strip.never matches it)");
     // A candidate that is not on disk is not news.
     expect(kept?.message).not.toContain(".next");
   });
+
+  test("a path a plugin declines stays, with the plugin's reason in strip.kept", async () => {
+    put("tools/node_modules/a.js");
+    const declined: StripCandidate = {
+      path: "tools/node_modules",
+      reason: "installed dependencies",
+      kind: "deps",
+      declined: "no install puts it back: tools has no lockfile",
+    };
+    const p = await plan([declined]);
+    expect(stripped(p)).toEqual([]);
+    expect(p.findings.find((f) => f.code === "strip.kept")?.message).toContain(
+      "tools/node_modules (no install puts it back: tools has no lockfile)",
+    );
+  });
+
+  test("D39: strip.extra supports negation; a folder holding a re-included file is not stripped whole", async () => {
+    put("a.log");
+    put("audit.log");
+    put("logs/x.log");
+    put("logs/keep.txt");
+    put("cache/one");
+    put("cache/two");
+    userConfig('[strip]\nextra = ["*.log", "!audit.log", "logs/", "cache/", "!cache/two"]\n');
+    const p = await plan([]);
+    expect(stripped(p).sort()).toEqual(["a.log", "cache/one", "logs"]);
+  });
+
+  test("D39: a tracked folder spelled in NFD on disk is still tracked (core.precomposeunicode)", async () => {
+    const nfd = "cafe\u0301";
+    put(`${nfd}/dist/a.js`);
+    commit(`${nfd}/dist/a.js`);
+    // The index holds the name precomposed (NFC), as git does on macOS.
+    expect(fx.git(dir, "-c", "core.quotePath=false", "ls-files")).toContain("caf\u00e9/dist/a.js");
+    expect(stripped(await plan([output(`${nfd}/dist`)]))).toEqual([]);
+  });
+
+  test("D39: on a case-insensitive volume, a tracked folder renamed only in case stays tracked", async () => {
+    put("Build/a.js");
+    commit("Build/a.js");
+    renameSync(join(dir, "Build"), join(dir, "tmp-build"));
+    renameSync(join(dir, "tmp-build"), join(dir, "build"));
+    if (!existsSync(join(dir, "BUILD"))) return; // a case-sensitive volume: nothing to show
+    expect(fx.git(dir, "config", "core.ignorecase").trim()).toBe("true");
+    expect(stripped(await plan([output("build")]))).toEqual([]);
+  });
+
+  test("the tracked check scales: 20,000 candidates in one plan, a tracked one among them kept", async () => {
+    // Long names: one pathspec per candidate on git's command line would pass macOS's 1 MiB argument limit.
+    const folder = (d: number) => `generated/a-folder-with-a-rather-long-name-${d}`;
+    const file = (d: number, f: number) => `${folder(d)}/a-file-with-a-long-name-${f}.tmp`;
+    for (let d = 0; d < 200; d++) {
+      for (let f = 0; f < 100; f++) put(file(d, f), 1);
+    }
+    commit(file(7, 7));
+    userConfig('[strip]\nextra = ["*.tmp"]\n');
+    const p = await plan([]);
+    expect(p.strip.length).toBe(19_999);
+    expect(stripped(p)).not.toContain(file(7, 7));
+  }, 60_000);
 
   test("strip.extra adds untracked paths, never tracked ones", async () => {
     put("coverage/lcov.info", 40);

@@ -469,8 +469,12 @@ export const gitWorktrees = async (
 
 /**
  * Which of the given paths (relative to the repository's top folder, "/"-separated) git tracks: a path is tracked
- * when it is a tracked file or a folder holding one. Asks the index (`git ls-files`), literally, so a path holding
- * glob characters is never read as a pattern.
+ * when it is a tracked file or a folder holding one (run decision D39). The whole index is read once
+ * (`git ls-files -z`), so any number of paths fits, with no argument list to outgrow; each index path and each asked
+ * path are compared as git itself compares them in this repository: precomposed to NFC (core.precomposeunicode,
+ * applied always, since folding more only keeps more) and case-folded when core.ignorecase is set. A path git
+ * printed in bytes that are not UTF-8 cannot be compared, so every asked path that is not UTF-8 either counts as
+ * tracked: when unsure, keep.
  */
 export const gitTracked = async (
   host: HostPorts,
@@ -480,20 +484,35 @@ export const gitTracked = async (
 ): Promise<Result<Set<string>>> => {
   const tracked = new Set<string>();
   if (paths.length === 0) return ok(tracked);
-  const out = await git(host, repo, ctx, [
-    "ls-files",
-    "-z",
-    "--cached",
-    "--",
-    ...paths.map((p) => `:(literal)${p}`),
+  const ignorecase = await git(host, repo, ctx, [
+    "config",
+    "--bool",
+    "--default",
+    "false",
+    "core.ignorecase",
   ]);
+  if (!ignorecase.ok) return ignorecase;
+  const icase = text(ignorecase.value).trim() === "true";
+  const fold = (path: string): string =>
+    icase ? path.normalize("NFC").toLowerCase() : path.normalize("NFC");
+  const out = await git(host, repo, ctx, ["ls-files", "-z", "--cached"]);
   if (!out.ok) return out;
-  const wanted = new Set(paths);
+  const wanted = new Map<string, string[]>();
+  for (const path of paths) {
+    const key = fold(path);
+    const same = wanted.get(key);
+    if (same === undefined) wanted.set(key, [path]);
+    else same.push(path);
+  }
+  let undecodable = false;
   for (const file of records(out.value, NUL)) {
+    if (file.includes("\uFFFD")) undecodable = true;
     // The file itself and every folder above it that was asked about.
-    for (let at = file; at !== ""; at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "") {
-      if (wanted.has(at)) tracked.add(at);
+    const key = fold(file);
+    for (let at = key; at !== ""; at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "") {
+      for (const path of wanted.get(at) ?? []) tracked.add(path);
     }
   }
+  if (undecodable) for (const path of paths) if (path.includes("\uFFFD")) tracked.add(path);
   return ok(tracked);
 };

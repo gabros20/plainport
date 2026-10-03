@@ -47,4 +47,14 @@ describe("plan: strip patterns use gitignore syntax, relative to the project", (
     expect(set.covers("dist/a/b.js")).toBe(true);
     expect(set.covers("src/dist.js")).toBe(false);
   });
+
+  test("decide(): the last pattern that matches wins, and a negation re-includes (D39)", () => {
+    const set = compilePatterns(["*.log", "!audit.log", "logs/"]);
+    expect(set.decide("a.log", "file")).toBe(true);
+    expect(set.decide("audit.log", "file")).toBe(false);
+    expect(set.decide("logs", "dir")).toBe(true);
+    expect(set.decide("src/x.ts", "file")).toBeUndefined();
+    expect(set.hasNegation).toBe(true);
+    expect(compilePatterns(["dist/"]).hasNegation).toBe(false);
+  });
 });

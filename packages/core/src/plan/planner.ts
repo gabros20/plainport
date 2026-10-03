@@ -145,7 +145,14 @@ export const planOffload = async (
   });
   if (!strip.ok) return strip;
   // Candidates kept for a reason a person may want to change: why 612 MB stayed is part of the plan.
-  const shown = strip.value.kept.filter((k) => k.why !== "missing" && k.why !== "inside");
+  // A kept candidate inside a stripped path leaves with it, so it is not reported as staying.
+  const gone = new Set(strip.value.entries.map((e) => e.path));
+  const shown = strip.value.kept.filter(
+    (k) =>
+      k.why !== "missing" &&
+      k.why !== "inside" &&
+      !k.path.split("/").some((_, i, parts) => i > 0 && gone.has(parts.slice(0, i).join("/"))),
+  );
   if (shown.length > 0) {
     findings.push(
       finding("strip.kept", {
