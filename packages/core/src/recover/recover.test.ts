@@ -1739,7 +1739,7 @@ describe("fix wave r2: sizes and the staging record's schema", () => {
   });
 
   test("the staging record is published as a JSON Schema", () => {
-    expect(Object.keys(stagingJsonSchemas())).toEqual(["staging-record"]);
+    expect(Object.keys(stagingJsonSchemas())).toEqual(["staging-record", "staging-holder"]);
     expect(stagingJsonSchemas()["staging-record"]).toMatchObject({ title: "StagingRecord" });
   });
 });
@@ -1876,5 +1876,66 @@ describe("fix wave r3: unreadable journals and a reused pid", () => {
     }
     expect(reportOf(await recover(recoverDeps())).operations.map((o) => o.outcome)).toEqual(["finished"]);
     await expectInvariants();
+  });
+});
+
+describe("fix wave r3: staging gc finds and staging it cannot reach", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const restoreDeps = () => ({
+    host: testHost(),
+    paths: box.paths,
+    device,
+    env: env(),
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: async () => ({ ok: true as const, value: mirror }),
+    emit: () => {},
+    log: () => {},
+  });
+
+  test("an onload --to whose journal was lost before any registry override leaves staging gc removes", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    mkdirSync(join(box.home, "elsewhere"));
+    const host = testHost({ faults: { at: "onload.restored" } });
+    await expect(
+      runOnload(onloadDeps(host), {
+        project: await ref(),
+        to: join(box.home, "elsewhere/web"),
+        hydrate: false,
+      }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const holder = join(box.home, "elsewhere/.plainport-staging");
+    expect(readdirSync(holder).filter((n) => !n.startsWith("."))).toHaveLength(1);
+    // The onload's every write lost (D24): no journal, and the registry has no override for its landing.
+    rmSync(box.paths.journalDir, { recursive: true });
+    const id = (await projectId()) as string;
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBeUndefined();
+    const report = value(await collectTrash(trashDeps(), { early: false }));
+    expect(report.staging).toHaveLength(1);
+    expect(existsSync(holder) ? readdirSync(holder).filter((n) => !n.startsWith(".")) : []).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("a crashed restore's staging whose volume is away is reported (root.path-missing), and removed once it is back", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    engine.hooks.duringRestore = () => {
+      throw new InjectedFault("restore");
+    };
+    await expect(
+      runRestore(restoreDeps(), { project: await ref(), to: join(box.home, "old/web") }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    engine.hooks.duringRestore = undefined;
+    renameSync(join(box.home, "old"), join(box.home, "old.away"));
+    const away = await collectTrash(trashDeps(), { early: false });
+    expect(away.ok ? 0 : [away.exitCode, away.finding.code]).toEqual([6, "root.path-missing"]);
+    const kept = (away.ok ? away.value : (away.data as { stagingKept: { staging: string }[] })).stagingKept;
+    expect(kept.map((k) => k.staging)).toEqual([
+      expect.stringContaining(join(box.home, "old/.plainport-staging")),
+    ]);
+    renameSync(join(box.home, "old.away"), join(box.home, "old"));
+    const back = value(await collectTrash(trashDeps(), { early: false }));
+    expect([back.staging.length, back.stagingKept]).toEqual([1, []]);
   });
 });

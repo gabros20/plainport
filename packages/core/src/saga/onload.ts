@@ -69,6 +69,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { noteStagingHolder } from "../recover/staging.ts";
 import { type ProjectRegistry, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
@@ -421,6 +422,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     let rootMode: number | undefined;
     if (reuse === undefined) {
       try {
+        // A --to landing's holder is noted first, so gc finds a staging folder whose journal a lost write dropped.
+        if (req.to !== undefined) await noteStagingHolder(io, paths, holder);
         await io.fs.mkdirp(holder);
       } catch (error) {
         return writeFailed(error, `making ${holder}`, false, holder);

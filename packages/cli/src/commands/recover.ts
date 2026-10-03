@@ -146,6 +146,10 @@ export const gc = defineCommand({
         description:
           "Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed (D60)",
       }),
+      stagingKept: z.array(z.looseObject({ staging: z.string(), finding: FindingDataSchema })).meta({
+        description:
+          "A crashed restore's staging folder gc could not reach (its volume away), kept with its record",
+      }),
     })
     .meta({ description: "The trash deleted and kept, and the abandoned staging removed" }),
   examples: [
@@ -163,6 +167,7 @@ export const gc = defineCommand({
         `kept ${k.trash} (${k.project})${k.reason === undefined ? ` until ${k.keepUntil}` : `: ${k.reason}`}`,
       );
     for (const st of data.staging) lines.push(`removed ${st}, an abandoned staging folder`);
+    for (const st of data.stagingKept) lines.push(`kept ${st.staging}: ${st.finding.message}`);
     return lines.length === 0 ? "no trash to delete" : lines.join("\n");
   },
   handler: async (args, ctx) => {

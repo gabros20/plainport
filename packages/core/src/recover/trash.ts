@@ -37,7 +37,12 @@ import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf } from "../saga/release.ts";
 import { isUlid } from "../ulid.ts";
-import { readStagingRecords, removeHolderIfEmpty, removeStagingRecord } from "./staging.ts";
+import {
+  notedStagingHolders,
+  readStagingRecords,
+  removeHolderIfEmpty,
+  removeStagingRecord,
+} from "./staging.ts";
 
 export interface TrashDeps {
   host: HostPorts;
@@ -70,6 +75,8 @@ export type GcReport = {
   freedBytes: number;
   /** Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed. */
   staging: string[];
+  /** A crashed restore's staging folder that could not be reached (its volume away): kept, with its record. */
+  stagingKept: { staging: string; finding: Finding }[];
 };
 
 const released = (journal: Journal): journal is OffloadJournal =>
@@ -186,7 +193,14 @@ export const collectTrash = async (
   } catch (error) {
     return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
   }
-  const report: GcReport = { deleted: [], kept: [], skipped: [], freedBytes: 0, staging: [] };
+  const report: GcReport = {
+    deleted: [],
+    kept: [],
+    skipped: [],
+    freedBytes: 0,
+    staging: [],
+    stagingKept: [],
+  };
   let problem: Failure | undefined;
   for (const journal of read.journals.filter(released)) {
     const item = itemOf(journal);
@@ -246,6 +260,7 @@ export const collectTrash = async (
   }
   const swept = await sweepStaging(deps, clock);
   report.staging.push(...swept.removed);
+  report.stagingKept.push(...swept.kept);
   problem ??= swept.problems[0];
   if (problem !== undefined) return failWith(problem.finding, report, problem.exitCode);
   return ok(report);
@@ -253,21 +268,23 @@ export const collectTrash = async (
 
 /**
  * Abandoned staging (D60): a restore's that its record names, once nobody holds its project's lock (a running
- * restore holds it); and, in the staging holders of this device's roots and onload landing folders, an onload's whose
- * journal is gone (a lost write, D24). The holders are listed before the journals and records are read: an operation
+ * restore holds it), or kept and reported while its volume is away; and, in the staging holders of this device's
+ * roots, its registry's landing folders and every noted `onload --to` holder, an onload's whose journal is gone (a lost
+ * write, D24). The holders are listed before the journals and records are read: an operation
  * writes its journal or record before it makes its staging folder, so a folder listed is owned by something read.
  */
 const sweepStaging = async (
   deps: TrashDeps,
   clock: () => Date,
-): Promise<{ removed: string[]; problems: Failure[] }> => {
+): Promise<{ removed: string[]; kept: GcReport["stagingKept"]; problems: Failure[] }> => {
   const { host, paths } = deps;
   const io: LocalIo = host;
   const removed: string[] = [];
+  const kept: GcReport["stagingKept"] = [];
   const problems: Failure[] = [];
   const holders = new Set<string>();
   const device = await readDevice(io, paths);
-  if (!device.ok) return { removed, problems: [device] };
+  if (!device.ok) return { removed, kept, problems: [device] };
   const roots = await listRoots(io, paths, {
     env: deps.env,
     ...(device.value === undefined ? {} : { device: device.value.name }),
@@ -278,6 +295,11 @@ const sweepStaging = async (
   if (registry.ok)
     for (const e of Object.values(registry.value.projects))
       if (e.override !== undefined) holders.add(join(dirname(e.override), STAGING_DIR));
+  try {
+    for (const noted of await notedStagingHolders(io, paths)) holders.add(noted);
+  } catch (error) {
+    problems.push(writeFailed(error, "reading the noted staging holders", false, paths.stateDir));
+  }
   const listed: [string, string][] = [];
   for (const holder of holders) {
     let names: string[];
@@ -306,7 +328,7 @@ const sweepStaging = async (
     records = await readStagingRecords(io, paths);
   } catch (error) {
     problems.push(writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir));
-    return { removed, problems };
+    return { removed, kept, problems };
   }
   const owners = new Set(read.journals.map((j) => j.op));
   const recorded = new Set(records.map((r) => r.staging));
@@ -337,12 +359,24 @@ const sweepStaging = async (
     }
   }
   for (const record of records) {
-    // Its folder's volume away: the record stays for when it is back.
+    // Its folder's volume away: the record stays for when it is back, and the report says so.
     const parent = dirname(dirname(record.staging));
+    let there = false;
     try {
-      if ((await io.fs.lstat(parent)).kind !== "dir") continue;
+      there = (await io.fs.lstat(parent)).kind === "dir";
     } catch (error) {
       systemErrorCode(error);
+    }
+    if (!there) {
+      const away = fail(
+        finding("root.path-missing", {
+          message: `${parent}, which holds the staging folder ${record.staging} of a restore of ${record.project.address} that stopped, is not there (a volume that is not mounted?); it was left as it is`,
+          fix: "mount the volume, then run plainport gc",
+          paths: [parent],
+        }),
+      );
+      kept.push({ staging: record.staging, finding: away.finding });
+      problems.push(away);
       continue;
     }
     const gate = { io, paths, clock, log: deps.log };
@@ -368,7 +402,7 @@ const sweepStaging = async (
       deps.log("info", `${record.staging} is left: ${done.finding.message}`);
     else problems.push(done);
   }
-  return { removed, problems };
+  return { removed, kept, problems };
 };
 
 export type Housekept = {
