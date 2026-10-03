@@ -1,12 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
-import { isUlid, nodeLocalIo, PLAN_TTL_MS, PlanSchema, StubSchema } from "@plainport/core";
+import { isUlid, nodeLocalIo, PLAN_TTL_MS, PlanSchema, StubSchema, ulid } from "@plainport/core";
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
 import { describeT1 } from "../../../../test/tiers.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
-import { type InvariantSubject, invariantViolations } from "../../../core/src/testing/invariants.ts";
+import { testHost } from "../../../core/src/testing/host.ts";
+import {
+  captureTree,
+  type InvariantSubject,
+  invariantViolations,
+  type TreeCapture,
+} from "../../../core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import { gate } from "../gate.ts";
 import { Cancellation } from "../interrupt.ts";
@@ -20,6 +26,7 @@ let box: Sandbox;
 const NOW = new Date("2026-10-03T12:00:00Z");
 
 beforeEach(async () => {
+  released = undefined;
   box = makeSandbox("plainport-offload-");
   box.dir("work");
   const run = await cli([
@@ -42,8 +49,20 @@ beforeEach(async () => {
 });
 afterEach(() => box.cleanup());
 
+/** The project folder as it stood when release began: invariant 1 checks the committed snapshot against it. */
+let released: TreeCapture | undefined;
 const ports = (over: Partial<Ports> = {}): Ports =>
-  sandboxPorts(box.home, { clock: { now: () => NOW }, ...over });
+  sandboxPorts(box.home, {
+    clock: { now: () => NOW },
+    system: testHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "offload.release.trash") released = captureTree(join(box.home, "work/web"));
+        },
+      },
+    }),
+    ...over,
+  });
 async function cli(argv: string[], over: Partial<Ports> = {}) {
   return capture(argv, REGISTRY, { ports: ports(over) });
 }
@@ -188,6 +207,8 @@ describe("offload: a real run", () => {
         blob: fsBlobStore(nodeLocalIo, ssd()),
         engine: fakeEngine(fakeRepositoryAt(ssd())),
       },
+      ...(released === undefined ? {} : { released }),
+      stripped: ["node_modules", "dist"],
     };
   };
   const expectInvariants = async () => expect(await invariantViolations(await subject())).toEqual([]);
@@ -274,6 +295,10 @@ describe("offload: a real run", () => {
     expect(run.code).toBe(6);
     expect(envelope(run.out).error).toMatchObject({ finding: { code: "plan.stale" } });
     expect(envelope(run.out).error.hint).toMatch(/--plan [0-9A-Z]{26}$/);
+    // The fresh plan is the error's data (D14, D38), valid against the plan schema.
+    const fresh2 = envelope(run.out).data;
+    expect(PlanSchema.safeParse(fresh2).success).toBe(true);
+    expect(envelope(run.out).error.hint).toContain(fresh2.id);
     expect(existsSync(join(dir(), "src/main.ts"))).toBe(true);
     expect(fakeRepositoryAt(ssd()).snapshots).toEqual([]);
     await expectInvariants();
@@ -306,6 +331,52 @@ describe("offload: a real run", () => {
     await expectInvariants();
   });
 
+  test("a head that moves during the upload exits 8 with the kept snapshot as data (D14)", async () => {
+    const first = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(first.code).toBe(0);
+    const { op } = envelope(first.out).data;
+    // The project back at its place (as an onload would leave it), and another device's offload since.
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    const id = Object.entries(registry.projects as Record<string, { path: string }>).find(
+      ([, e]) => e.path === "web",
+    )?.[0] as string;
+    box.file("work/web/package.json", "{}\n");
+    rmSync(`${dir()}.plainport`);
+    const other = ulid();
+    const event = {
+      v: 1,
+      id: other,
+      op: other,
+      type: "offloaded",
+      device: ulid(),
+      at: "2026-10-03T12:30:00.000Z",
+      project: id,
+      root: registry.roots.work,
+      path: "web",
+      base: op,
+      snapshot: other,
+      stored: { local: "d".repeat(64) },
+      stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+    };
+    fakeEngineHooks.set(ssd(), {
+      duringSnapshot: () =>
+        writeFileSync(join(ssd(), "meta/v1/events", `${other}.json`), `${JSON.stringify(event)}\n`),
+    });
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(run.code).toBe(8);
+    expect(envelope(run.out)).toMatchObject({
+      ok: false,
+      error: { code: 8, finding: { code: "catalog.head-moved" } },
+      data: {
+        exitCode: 8,
+        project: "work:web",
+        store: "local",
+        stored: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+    expect(existsSync(join(dir(), "package.json"))).toBe(true);
+  });
+
   test("a store init never set up refuses with store.not-set-up", async () => {
     const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
     delete registry.stores;
@@ -321,7 +392,13 @@ describe("offload: a real run", () => {
 
 describeT1("offload with the real restic on a temp external-disk store", () => {
   test("init creates the repository; offload snapshots, verifies and releases; restic lists what the catalog names", async () => {
-    const host = macosTestHost();
+    const host = macosTestHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "offload.release.trash") released = captureTree(join(box.home, "work/web"));
+        },
+      },
+    });
     const env = {
       HOME: box.home,
       PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -354,6 +431,8 @@ describeT1("offload with the real restic on a temp external-disk store", () => {
       project: { id, dir: join(box.home, "work/web") },
       roots: [join(box.home, "work")],
       store: { name: "t1", blob: store, engine: opened.value.engine },
+      ...(released === undefined ? {} : { released }),
+      stripped: ["node_modules", "dist"],
     });
     expect(violations).toEqual([]);
   }, 120_000);

@@ -77,6 +77,40 @@ export const renderPlan = (plan: Plan): string => {
   return lines.join("\n");
 };
 
+/** A real run's data: the offload done; or, with exit 8, the snapshot kept as a fork; or, with exit 6 for a plan
+ * that no longer holds, the fresh plan (D14, D38). */
+const OffloadOutputSchema = z.union([
+  z.looseObject({
+    op: z.string(),
+    exitCode: z.literal(0),
+    project: z.string(),
+    snapshot: z.string(),
+    freedBytes: z.int().nonnegative().meta({
+      description: "Bytes freed now: 0 while the trash is kept (keepLocalFor) or waits for recover",
+    }),
+    store: z.string(),
+    stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
+    trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
+    keepUntil: z.iso
+      .datetime()
+      .optional()
+      .meta({ description: "keepLocalFor: the trash is kept until then" }),
+  }),
+  z
+    .looseObject({
+      op: z.string(),
+      exitCode: z.literal(8),
+      project: z.string(),
+      snapshot: z.string(),
+      store: z.string(),
+      stored: z.string().meta({ description: "The store's restic id for the snapshot kept as a fork" }),
+    })
+    .meta({
+      description: "Exit 8: the head moved, the snapshot is kept as a fork and the folder stays (D14)",
+    }),
+  PlanSchema.meta({ description: "Exit 6 (plan.stale): the fresh plan to review and approve (D14, D38)" }),
+]);
+
 export const offload = defineCommand({
   name: "offload",
   summary: "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
@@ -99,30 +133,25 @@ export const offload = defineCommand({
       description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
     }),
   }),
-  output: z.looseObject({
-    op: z.string(),
-    exitCode: z.literal(0),
-    project: z.string(),
-    snapshot: z.string(),
-    freedBytes: z.int().nonnegative(),
-    store: z.string(),
-    stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
-    trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
-    keepUntil: z.iso
-      .datetime()
-      .optional()
-      .meta({ description: "keepLocalFor: the trash is kept until then" }),
-  }),
+  output: OffloadOutputSchema,
   examples: [
     { argv: ["offload", "work:clients/acme/web", "--dry-run"], summary: "Plan offloading a project" },
     { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
   ],
-  human: (data) =>
-    [
+  human: (data) => {
+    if ("fingerprint" in data) return renderPlan(data as Plan);
+    if (data.exitCode === 8)
+      return `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
+    return [
       `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; freed ${formatBytes(data.freedBytes)}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
-      ...(data.keepUntil === undefined ? [] : [`kept      ${data.trash} until ${data.keepUntil}`]),
-    ].join("\n"),
+      ...(data.keepUntil !== undefined
+        ? [`kept      ${data.trash} until ${data.keepUntil}`]
+        : data.freedBytes === 0
+          ? [`trash     ${data.trash} waits for plainport recover to delete it`]
+          : []),
+    ].join("\n");
+  },
   handler: async (args, ctx) => {
     const local = await thisDevice(ctx);
     if (!local.ok) return local;
@@ -159,6 +188,7 @@ export const offload = defineCommand({
             emit: (event) => ctx.output.emit(event),
             log: (level, message) => ctx.output.log(level, message),
             signal: ctx.signal,
+            now: () => ctx.clock.now(),
           },
           {
             project: ref,

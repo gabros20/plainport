@@ -135,6 +135,26 @@
           ],
           "additionalProperties": false
         },
+        "release": {
+          "type": "object",
+          "properties": {
+            "keepLocalFor": {
+              "type": "string"
+            },
+            "stub": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "keepLocalFor",
+            "stub"
+          ],
+          "additionalProperties": false
+        },
+        "diverged": {
+          "type": "boolean",
+          "const": true
+        },
         "attempts": {
           "type": "array",
           "items": {
