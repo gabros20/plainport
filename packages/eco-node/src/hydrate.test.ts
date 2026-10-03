@@ -212,7 +212,11 @@ describe("hydrate: the core meets the toolchain", () => {
   test("the toolchain step's warning reaches the event stream, and the install runs through the manager", async () => {
     const dir = project("npm");
     writeFileSync(join(dir, ".nvmrc"), "20.11.0\n");
-    fake("fnm", 'echo "$*" > "$FAKE_LOG"; shift 2; exec "$@"');
+    // POSIX sh (dash on Linux has no `exec --`): drop everything up to and including fnm's "--", then run the rest.
+    fake(
+      "fnm",
+      'echo "$*" > "$FAKE_LOG"; while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; exec "$@"',
+    );
     fake("npm", "mkdir -p node_modules; echo ok > node_modules/.marker");
     const done = await hydrate(dir, {
       ...offlineEnv(`${bin}:/usr/bin:/bin`),
