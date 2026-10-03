@@ -133,11 +133,23 @@ const git = async (
   } catch (error) {
     return unreadable(dir, error);
   }
+  // The ceiling is a colon-separated list, so a parent path holding ':' cannot be one; without it git could walk
+  // up into a repository that holds the project, so git is not run at all (D33).
+  const ceiling = dirname(real);
+  if (ceiling.includes(":")) {
+    return fail(
+      finding("git.failed", {
+        message: `git was not run in ${dir}: its parent path ${ceiling} contains ':', so git could not be kept from looking above the folder for a repository`,
+        paths: [dir],
+        fix: "move the project to a path whose folder names have no ':', then re-run",
+      }),
+    );
+  }
   const ran = await host.run({
     command: "git",
     args: [...FLAGS, ...args],
     cwd: dir,
-    env: { ...gitEnv(ctx.env), GIT_CEILING_DIRECTORIES: dirname(real) },
+    env: { ...gitEnv(ctx.env), GIT_CEILING_DIRECTORIES: ceiling },
     capture: { maxBytes: CAPTURE_BYTES },
     idleTimeoutMs: 120_000,
     timeoutMs: 600_000,

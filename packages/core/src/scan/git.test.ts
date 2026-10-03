@@ -238,3 +238,17 @@ describe("scan: git facts fail closed", () => {
     if (!result.ok) expect(result.finding.code).toBe("git.failed");
   });
 });
+
+describe("scan: git facts fail closed (r4)", () => {
+  test("a parent path holding ':' cannot be a git ceiling, so git is not run: git.failed with a fix", async () => {
+    const parent = fx.repo("parent");
+    const dir = join(parent, "a:b", "sub");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    const result = await gitFacts(host, dir, { env: fx.env });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.finding.code).toBe("git.failed");
+      expect(result.finding.fix).toBeDefined();
+    }
+  });
+});
