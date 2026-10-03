@@ -552,7 +552,7 @@ Every edge case resolves to one of three outcomes: handled silently, a warning i
 
 | Case | What plainport does |
 | --- | --- |
-| Symlinks | Stored as links. Warning `fs.link-outside` for absolute links pointing outside the project, whose targets are not captured. |
+| Symlinks | Stored as links. Warning `fs.link-outside` for links, absolute or relative, whose target resolves outside the project; the targets are not captured. |
 | Sockets, FIFOs, device files | Skipped and listed; dev servers leave `.sock` files behind. |
 | Unreadable files | Blocker `fs.unreadable` in preflight. Restic exit code 3 fails the snapshot, never a partial success. |
 | Files changing during upload | Fingerprint check before, re-stat after. A mismatch retries once, then fails with nothing deleted. |
