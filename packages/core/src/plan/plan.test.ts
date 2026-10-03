@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ok } from "@plainport/contract";
 import { ConfigLoader } from "../config/load.ts";
@@ -200,22 +200,40 @@ describe("plan: the strip set", () => {
     expect(stripped(p).sort()).toEqual(["a.log", "cache/one", "logs"]);
   });
 
-  test("D39: a tracked folder spelled in NFD on disk is still tracked (core.precomposeunicode)", async () => {
+  test("D39: a tracked folder is tracked whichever Unicode form the index and the disk spell it in", async () => {
+    const nfc = "caf\u00e9";
     const nfd = "cafe\u0301";
+    // Committed under its NFD name: git on macOS precomposes it to NFC in the index (core.precomposeunicode);
+    // git on Linux stores the bytes as given.
     put(`${nfd}/dist/a.js`);
     commit(`${nfd}/dist/a.js`);
-    // The index holds the name precomposed (NFC), as git does on macOS.
-    expect(fx.git(dir, "-c", "core.quotePath=false", "ls-files")).toContain("caf\u00e9/dist/a.js");
-    expect(stripped(await plan([output(`${nfd}/dist`)]))).toEqual([]);
+    const listed = fx.git(dir, "-c", "core.quotePath=false", "ls-files");
+    expect(listed).toContain(`${process.platform === "darwin" ? nfc : nfd}/dist/a.js`);
+    const onDisk = (prefix: string) => readdirSync(dir).find((name) => name.normalize("NFC") === prefix);
+    expect(stripped(await plan([output(`${onDisk(nfc)}/dist`)]))).toEqual([]);
+
+    // Committed as NFC, then renamed on disk to NFD: on Linux a different name to git, on macOS the same one. The
+    // fold counts it as tracked on both, so it stays: when unsure, keep.
+    put("ma\u00f1ana/build/b.js");
+    commit("ma\u00f1ana/build/b.js");
+    renameSync(join(dir, "ma\u00f1ana"), join(dir, "tmp-name"));
+    renameSync(join(dir, "tmp-name"), join(dir, "man\u0303ana"));
+    const renamed = readdirSync(dir).find((name) => name.normalize("NFC") === "ma\u00f1ana");
+    expect(renamed).toBeDefined();
+    expect(stripped(await plan([output(`${renamed}/build`)]))).toEqual([]);
   });
 
-  test("D39: on a case-insensitive volume, a tracked folder renamed only in case stays tracked", async () => {
+  test("D39: a tracked folder renamed only in case stays tracked, on a case-insensitive volume or not", async () => {
     put("Build/a.js");
     commit("Build/a.js");
     renameSync(join(dir, "Build"), join(dir, "tmp-build"));
     renameSync(join(dir, "tmp-build"), join(dir, "build"));
-    if (!existsSync(join(dir, "BUILD"))) return; // a case-sensitive volume: nothing to show
-    expect(fx.git(dir, "config", "core.ignorecase").trim()).toBe("true");
+    // git sets core.ignorecase from the volume; on a case-sensitive one (Linux) build/ is another name to git,
+    // and the fold still counts it as tracked: when unsure, keep.
+    const insensitive = existsSync(join(dir, "BUILD"));
+    expect(fx.git(dir, "config", "--bool", "--default", "false", "core.ignorecase").trim()).toBe(
+      String(insensitive),
+    );
     expect(stripped(await plan([output("build")]))).toEqual([]);
   });
 
@@ -225,7 +243,7 @@ describe("plan: the strip set", () => {
     commit("Build/a.js");
     renameSync(join(dir, "Build"), join(dir, "tmp-build"));
     renameSync(join(dir, "tmp-build"), join(dir, "build"));
-    if (!existsSync(join(dir, "BUILD"))) return; // a case-sensitive volume: nothing to show
+    // Kept on a case-insensitive volume (git finds Build/ as build/) and on a case-sensitive one alike.
     expect(stripped(await plan([output("build")]))).toEqual([]);
   });
 
@@ -336,12 +354,12 @@ describe("plan: totals, findings and the plan's own fields", () => {
     const p = await plan([]);
     const paths = p.include.largest.map((l) => l.path);
     expect(paths.filter((path) => path.includes(".git/"))).toEqual([]);
-    const total = (folder: string) =>
-      Bun.spawnSync(["find", folder, "-type", "f", "-exec", "stat", "-f", "%z", "{}", "+"])
-        .stdout.toString()
-        .split("\n")
-        .filter(Boolean)
-        .reduce((sum, n) => sum + Number(n), 0);
+    // Every file's size under a folder, through node:fs (BSD and GNU stat disagree on their flags).
+    const total = (folder: string): number =>
+      readdirSync(folder, { recursive: true, encoding: "utf8" })
+        .map((name) => lstatSync(join(folder, name)))
+        .filter((stat) => stat.isFile())
+        .reduce((sum, stat) => sum + stat.size, 0);
     expect(p.include.largest[0]).toEqual({ path: "big.bin", bytes: 50_000 });
     expect(p.include.largest).toContainEqual({ path: ".git", bytes: total(join(dir, ".git")) });
     expect(p.include.largest).toContainEqual({
