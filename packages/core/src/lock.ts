@@ -51,17 +51,21 @@ export interface LockOptions {
   now?: () => Date;
 }
 
-/** Per process (per ProcessInfo): the in-memory queue tail for each lock path, and the tokens of live locks. */
+/**
+ * Per process: the in-memory queue tail for each lock path, and the tokens of live locks. Keyed by pid, not by the
+ * ProcessInfo object, so two ProcessInfo objects for one process (a host port and nodeLocalIo, or a test's copy)
+ * share one queue and one token set and can never take each other's live lock for a stale one.
+ */
 interface ProcessLocks {
   tails: Map<string, Promise<void>>;
   tokens: Set<string>;
 }
-const processLocks = new WeakMap<object, ProcessLocks>();
+const processLocks = new Map<number, ProcessLocks>();
 const locksOf = (io: LocalIo): ProcessLocks => {
-  let state = processLocks.get(io.proc);
+  let state = processLocks.get(io.proc.pid);
   if (state === undefined) {
     state = { tails: new Map(), tokens: new Set() };
-    processLocks.set(io.proc, state);
+    processLocks.set(io.proc.pid, state);
   }
   return state;
 };

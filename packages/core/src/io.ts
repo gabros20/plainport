@@ -1,7 +1,7 @@
 // The file system and process calls core makes on this machine (run decision D21). Core never imports node:fs for
 // them: every entry point takes a LocalIo, and only the composition root (the CLI's main, and tests) passes the real
-// one, nodeLocalIo from node-io.ts. The host port (Task 7) implements this same shape, so it can take over by being
-// passed in. Calls are async, like the rest of the core API. Fs methods reject with Node errors (with `code`:
+// one, nodeLocalIo from node-io.ts. The host port (ports/host.ts, built on it by @plainport/host-macos) extends this
+// shape, so it can take over by being passed in. Calls are async, like the rest of the core API. Fs methods reject with Node errors (with `code`:
 // ENOENT, EEXIST, …) like node:fs; callers turn the expected ones into findings.
 
 export interface LocalFs {
@@ -26,6 +26,8 @@ export interface LocalFs {
   entries(path: string): Promise<DirEntry[]>;
   /** Whether this process may create files in the folder. */
   writable(path: string): Promise<boolean>;
+  /** Whether the path is a regular file (symlinks followed) this process may execute; false when missing. */
+  executable(path: string): Promise<boolean>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";

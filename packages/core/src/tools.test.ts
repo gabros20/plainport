@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { FindingSchema } from "@plainport/contract";
 import { describeT1 } from "../../../test/tiers.ts";
+import type { LocalIo } from "./io.ts";
+import { nodeLocalIo } from "./node-io.ts";
 import { checkoutToolsDir, hostTarget, type ToolPathContext, toolPath } from "./tools.ts";
 
 const repo = resolve(import.meta.dir, "../../..");
@@ -49,14 +51,20 @@ describe("tools: toolPath resolver order", () => {
     target: "darwin-arm64",
     ...overrides,
   });
-  // Records the paths toolPath asks about without touching the file system.
-  const spy = (): { seen: string[]; isExecutable: (path: string) => boolean } => {
+  // An io that records the paths toolPath asks about without touching the file system.
+  const spy = (): { seen: string[]; io: LocalIo } => {
     const seen: string[] = [];
     return {
       seen,
-      isExecutable: (path) => {
-        seen.push(path);
-        return false;
+      io: {
+        ...nodeLocalIo,
+        fs: {
+          ...nodeLocalIo.fs,
+          executable: async (path) => {
+            seen.push(path);
+            return false;
+          },
+        },
       },
     };
   };
@@ -69,21 +77,21 @@ describe("tools: toolPath resolver order", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("$PLAINPORT_TOOLS_DIR wins over the binary's folder and .tools/", () => {
+  test("$PLAINPORT_TOOLS_DIR wins over the binary's folder and .tools/", async () => {
     const expected = place(envDir, "restic");
     place(binDir, "restic");
     place(join(devDir, "darwin-arm64"), "restic");
-    expect(toolPath("restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }))).toEqual({
+    expect(await toolPath(nodeLocalIo, "restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }))).toEqual({
       ok: true,
       value: { path: expected, source: "env" },
     });
   });
 
-  test("a set $PLAINPORT_TOOLS_DIR without the tool is tool.missing, never a fall-through", () => {
+  test("a set $PLAINPORT_TOOLS_DIR without the tool is tool.missing, never a fall-through", async () => {
     place(envDir, "rclone");
     place(binDir, "restic");
     place(join(devDir, "darwin-arm64"), "restic");
-    const result = toolPath("restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }));
+    const result = await toolPath(nodeLocalIo, "restic", context({ env: { PLAINPORT_TOOLS_DIR: envDir } }));
     expect(result).toMatchObject({
       ok: false,
       exitCode: 6,
@@ -94,35 +102,35 @@ describe("tools: toolPath resolver order", () => {
     expect(result.finding.fix).toContain("unset PLAINPORT_TOOLS_DIR");
   });
 
-  test("the binary's own folder comes next", () => {
+  test("the binary's own folder comes next", async () => {
     const expected = place(binDir, "rclone");
     place(join(devDir, "darwin-arm64"), "rclone");
-    expect(toolPath("rclone", context())).toEqual({
+    expect(await toolPath(nodeLocalIo, "rclone", context())).toEqual({
       ok: true,
       value: { path: expected, source: "beside-binary" },
     });
   });
 
-  test(".tools/<os>-<arch>/ comes last", () => {
+  test(".tools/<os>-<arch>/ comes last", async () => {
     const expected = place(join(devDir, "darwin-arm64"), "restic");
     place(join(devDir, "linux-x64"), "restic");
-    expect(toolPath("restic", context())).toEqual({
+    expect(await toolPath(nodeLocalIo, "restic", context())).toEqual({
       ok: true,
       value: { path: expected, source: "dev-tools" },
     });
   });
 
-  test("a file that is not executable doesn't count", () => {
+  test("a file that is not executable doesn't count", async () => {
     place(binDir, "restic", 0o644);
     const expected = place(join(devDir, "darwin-arm64"), "restic");
-    expect(toolPath("restic", context())).toEqual({
+    expect(await toolPath(nodeLocalIo, "restic", context())).toEqual({
       ok: true,
       value: { path: expected, source: "dev-tools" },
     });
   });
 
-  test("nothing found is a tool.missing value that lists every folder searched, in order", () => {
-    const result = toolPath("restic", context());
+  test("nothing found is a tool.missing value that lists every folder searched, in order", async () => {
+    const result = await toolPath(nodeLocalIo, "restic", context());
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.finding.code).toBe("tool.missing");
@@ -135,59 +143,58 @@ describe("tools: toolPath resolver order", () => {
     expect(result.finding.fix).not.toContain("PLAINPORT_TOOLS_DIR");
   });
 
-  test("null means none: an empty $PLAINPORT_TOOLS_DIR, a null binary, .tools/ and target are skipped", () => {
+  test("null means none: an empty $PLAINPORT_TOOLS_DIR, a null binary, .tools/ and target are skipped", async () => {
     const probe = spy();
     const none = { env: { PLAINPORT_TOOLS_DIR: "" }, execPath: null, devToolsDir: null, target: null };
-    expect(toolPath("rclone", { ...none, isExecutable: probe.isExecutable })).toMatchObject({
+    expect(await toolPath(probe.io, "rclone", none)).toMatchObject({
       ok: false,
       finding: { code: "tool.missing", paths: [] },
     });
-    expect(toolPath("rclone", { ...none, devToolsDir: devDir })).toMatchObject({
+    expect(await toolPath(probe.io, "rclone", { ...none, devToolsDir: devDir })).toMatchObject({
       ok: false,
       finding: { paths: [] },
     });
     expect(probe.seen).toEqual([]);
   });
 
-  test("undefined means the default, exactly like leaving the key out", () => {
+  test("undefined means the default, exactly like leaving the key out", async () => {
     const omitted = spy();
-    toolPath("restic", { env: {}, isExecutable: omitted.isExecutable });
+    await toolPath(omitted.io, "restic", { env: {} });
     const explicit = spy();
-    toolPath("restic", {
+    await toolPath(explicit.io, "restic", {
       env: {},
       execPath: undefined,
       devToolsDir: undefined,
       target: undefined,
-      isExecutable: explicit.isExecutable,
     });
     expect(explicit.seen).toEqual(omitted.seen);
   });
 
-  test("running from source, the defaults look only in the checkout's .tools/ for the host", () => {
+  test("running from source, the defaults look only in the checkout's .tools/ for the host", async () => {
     const probe = spy();
-    expect(toolPath("restic", { env: {}, isExecutable: probe.isExecutable }).ok).toBe(false);
+    expect((await toolPath(probe.io, "restic", { env: {} })).ok).toBe(false);
     expect(probe.seen).toEqual([join(repo, ".tools", `${hostTarget()}`, "restic")]);
   });
 
-  test("a release build with execPath undefined still looks beside the running binary", () => {
+  test("a release build with execPath undefined still looks beside the running binary", async () => {
     const probe = spy();
-    toolPath("restic", { env: {}, build: "release", execPath: undefined, isExecutable: probe.isExecutable });
+    await toolPath(probe.io, "restic", { env: {}, build: "release", execPath: undefined });
     expect(probe.seen).toEqual([join(dirname(process.execPath), "restic")]);
   });
 
-  test("a dev build walks up to the checkout's .tools/; a release build never does", () => {
+  test("a dev build walks up to the checkout's .tools/; a release build never does", async () => {
     const checkout = join(dir, "repo");
     place(checkout, "tools.lock.json", 0o644);
     const devTool = place(join(checkout, ".tools", "darwin-arm64"), "restic");
     const execPath = join(checkout, "dist", "plainport");
     const base = { env: {}, execPath, target: "darwin-arm64" } as const;
 
-    expect(toolPath("restic", { ...base, build: "dev" })).toEqual({
+    expect(await toolPath(nodeLocalIo, "restic", { ...base, build: "dev" })).toEqual({
       ok: true,
       value: { path: devTool, source: "dev-tools" },
     });
 
-    const release = toolPath("restic", { ...base, build: "release" });
+    const release = await toolPath(nodeLocalIo, "restic", { ...base, build: "release" });
     expect(release).toMatchObject({
       ok: false,
       finding: { code: "tool.missing", paths: [join(checkout, "dist", "restic")] },
@@ -203,18 +210,20 @@ describe("tools: checkoutToolsDir", () => {
   let dir: string;
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("walks up to the folder holding tools.lock.json", () => {
+  test("walks up to the folder holding tools.lock.json", async () => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), "plainport-checkout-")));
     mkdirSync(join(dir, "repo", "dist", "nested"), { recursive: true });
     mkdirSync(join(dir, "elsewhere"));
     writeFileSync(join(dir, "repo", "tools.lock.json"), "{}");
-    expect(checkoutToolsDir(join(dir, "repo", "dist", "nested"))).toBe(join(dir, "repo", ".tools"));
-    expect(checkoutToolsDir(join(dir, "repo"))).toBe(join(dir, "repo", ".tools"));
-    expect(checkoutToolsDir(join(dir, "elsewhere"))).toBeUndefined();
+    expect(await checkoutToolsDir(nodeLocalIo, join(dir, "repo", "dist", "nested"))).toBe(
+      join(dir, "repo", ".tools"),
+    );
+    expect(await checkoutToolsDir(nodeLocalIo, join(dir, "repo"))).toBe(join(dir, "repo", ".tools"));
+    expect(await checkoutToolsDir(nodeLocalIo, join(dir, "elsewhere"))).toBeUndefined();
   });
 });
 
-// Compiles a probe that prints toolPath("restic", { env: {} }) against a copy of this module whose baked-in
+// Compiles a probe that prints toolPath(nodeLocalIo, "restic", { env: {} }) against a copy of this module whose baked-in
 // VERSION is `version`, so the build-kind detection runs exactly as it does in a shipped binary.
 describe("tools: compiled builds", () => {
   let dir: string;
@@ -227,14 +236,15 @@ describe("tools: compiled builds", () => {
     mkdirSync(join(tree, "node_modules", "@plainport"), { recursive: true });
     symlinkSync(join(repo, "packages", "contract"), join(tree, "node_modules", "@plainport", "contract"));
     writeFileSync(join(tree, "VERSION"), `${version}\n`);
-    for (const file of ["tools.ts", "version.ts"]) {
+    for (const file of ["io.ts", "node-io.ts", "tools.ts", "version.ts"]) {
       copyFileSync(join(import.meta.dir, file), join(tree, "packages", "core", "src", file));
     }
     const entry = join(tree, "probe.ts");
     writeFileSync(
       entry,
-      'import { toolPath } from "./packages/core/src/tools.ts";\n' +
-        'console.log(JSON.stringify(toolPath("restic", { env: {} })));\n',
+      'import { nodeLocalIo } from "./packages/core/src/node-io.ts";\n' +
+        'import { toolPath } from "./packages/core/src/tools.ts";\n' +
+        'console.log(JSON.stringify(await toolPath(nodeLocalIo, "restic", { env: {} })));\n',
     );
     const build = Bun.spawnSync([process.execPath, "build", "--compile", entry, "--outfile", outfile], {
       stdout: "pipe",
@@ -318,8 +328,8 @@ describeT1("tools: pinned binaries run from .tools/", () => {
   const lock = JSON.parse(readFileSync(join(repo, "tools.lock.json"), "utf8")) as {
     tools: Record<"restic" | "rclone", { version: string }>;
   };
-  const run = (name: "restic" | "rclone"): string => {
-    const found = toolPath(name, { env: {} });
+  const run = async (name: "restic" | "rclone"): Promise<string> => {
+    const found = await toolPath(nodeLocalIo, name, { env: {} });
     if (!found.ok) throw new Error(`${found.finding.message} ${found.finding.fix}`);
     expect(found.value.source).toBe("dev-tools");
     expect(found.value.path).toBe(join(repo, ".tools", `${hostTarget()}`, name));
@@ -328,11 +338,11 @@ describeT1("tools: pinned binaries run from .tools/", () => {
     return child.stdout.toString();
   };
 
-  test("restic version reports the pinned version", () => {
-    expect(run("restic")).toStartWith(`restic ${lock.tools.restic.version} `);
+  test("restic version reports the pinned version", async () => {
+    expect(await run("restic")).toStartWith(`restic ${lock.tools.restic.version} `);
   });
 
-  test("rclone version reports the pinned version", () => {
-    expect(run("rclone")).toStartWith(`rclone v${lock.tools.rclone.version}\n`);
+  test("rclone version reports the pinned version", async () => {
+    expect(await run("rclone")).toStartWith(`rclone v${lock.tools.rclone.version}\n`);
   });
 });

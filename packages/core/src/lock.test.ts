@@ -103,6 +103,21 @@ describe("lock: a lock file shared by processes on one machine", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  test("two ProcessInfo objects for one process share its lock state: neither breaks the other's lock", async () => {
+    const other: LocalIo = { fs: nodeLocalIo.fs, proc: { ...nodeLocalIo.proc } };
+    const first = await acquireLock(nodeLocalIo, lockPath, options(1000));
+    if (!first.ok) throw new Error(first.finding.message);
+    const busy = await acquireLock(other, lockPath, options(100));
+    expect(busy.ok).toBe(false);
+    if (!busy.ok) expect(busy.finding.message).toBe("this process holds thing");
+    expect(await first.value.stillHeld()).toBe(true);
+    const waiting = acquireLock(other, lockPath, options(10_000));
+    await first.value.release();
+    const second = await waiting;
+    if (!second.ok) throw new Error(second.finding.message);
+    await second.value.release();
+  });
+
   test("each acquisition's lock text carries its own token", async () => {
     const first = await acquireLock(nodeLocalIo, lockPath, options(1000));
     if (!first.ok) throw new Error(first.finding.message);

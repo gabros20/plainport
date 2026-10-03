@@ -1,5 +1,6 @@
 // The real LocalIo, on node:fs and the running process. Only the composition root (the CLI's main, and tests)
-// imports it; core modules take a LocalIo as a parameter (run decision D21).
+// imports it; core modules take a LocalIo as a parameter (run decision D21). Its `proc` is the one ProcessInfo of
+// this process: the host port reuses it rather than making another.
 
 import { constants } from "node:fs";
 import {
@@ -66,6 +67,15 @@ export const nodeLocalIo: LocalIo = {
     writable: async (path) => {
       try {
         await access(path, constants.W_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    executable: async (path) => {
+      try {
+        if (!(await stat(path)).isFile()) return false;
+        await access(path, constants.X_OK);
         return true;
       } catch {
         return false;

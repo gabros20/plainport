@@ -7,10 +7,12 @@
 // 2. the checkout's .tools/<os>-<arch>/, which `bun scripts/fetch-tools.ts` fills. This is a development aid:
 //    from source it is this checkout's; a development build (VERSION ends in -dev) walks up from the binary to the
 //    folder holding tools.lock.json, so `dist/plainport` works after a fetch. A release build never looks there.
+//
+// Every file system question goes through the LocalIo it is given (the host port in the CLI), never node:fs.
 
-import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
+import type { LocalIo } from "./io.ts";
 import { VERSION } from "./version.ts";
 
 export const TOOL_NAMES = ["restic", "rclone"] as const;
@@ -28,13 +30,19 @@ export const hostTarget = (
   return (TARGETS as readonly string[]).includes(key) ? (key as Target) : undefined;
 };
 
+const exists = async (io: LocalIo, path: string): Promise<boolean> => {
+  try {
+    await io.fs.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /** The .tools/ folder of the nearest checkout at or above `start`: the first folder holding tools.lock.json. */
-export const checkoutToolsDir = (
-  start: string,
-  exists: (path: string) => boolean = existsSync,
-): string | undefined => {
+export const checkoutToolsDir = async (io: LocalIo, start: string): Promise<string | undefined> => {
   for (let dir = resolve(start); ; dir = dirname(dir)) {
-    if (exists(join(dir, "tools.lock.json"))) return join(dir, ".tools");
+    if (await exists(io, join(dir, "tools.lock.json"))) return join(dir, ".tools");
     if (dirname(dir) === dir) return undefined;
   }
 };
@@ -61,7 +69,6 @@ export type ToolPathContext = {
   devToolsDir?: string | null;
   /** Default: hostTarget(). */
   target?: Target | null;
-  isExecutable?: (path: string) => boolean;
 };
 
 // A compiled binary serves its own modules from Bun's embedded file system.
@@ -71,31 +78,28 @@ const detectedBuild: BuildKind = !import.meta.dir.startsWith("/$bunfs/")
     ? "dev"
     : "release";
 
-const isExecutableFile = (path: string): boolean => {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const defaultDevToolsDir = (build: BuildKind, execPath: string | null): string | null => {
+const defaultDevToolsDir = async (
+  io: LocalIo,
+  build: BuildKind,
+  execPath: string | null,
+): Promise<string | null> => {
   if (build === "source") return resolve(import.meta.dir, "../../../.tools");
-  if (build === "dev" && execPath !== null) return checkoutToolsDir(dirname(execPath)) ?? null;
+  if (build === "dev" && execPath !== null) return (await checkoutToolsDir(io, dirname(execPath))) ?? null;
   return null;
 };
 
-export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPathResult => {
+export const toolPath = async (
+  io: LocalIo,
+  name: ToolName,
+  context: ToolPathContext = {},
+): Promise<ToolPathResult> => {
   const env = context.env ?? process.env;
   const build = context.build ?? detectedBuild;
   const execPath =
     context.execPath === undefined ? (build === "source" ? null : process.execPath) : context.execPath;
   const devToolsDir =
-    context.devToolsDir === undefined ? defaultDevToolsDir(build, execPath) : context.devToolsDir;
+    context.devToolsDir === undefined ? await defaultDevToolsDir(io, build, execPath) : context.devToolsDir;
   const target = context.target === undefined ? (hostTarget() ?? null) : context.target;
-  const isExecutable = context.isExecutable ?? isExecutableFile;
 
   const candidates: { path: string; source: ToolSource }[] = [];
   const toolsDir = env.PLAINPORT_TOOLS_DIR;
@@ -109,7 +113,7 @@ export const toolPath = (name: ToolName, context: ToolPathContext = {}): ToolPat
   }
 
   for (const candidate of candidates) {
-    if (isExecutable(candidate.path)) return ok(candidate);
+    if (await io.fs.executable(candidate.path)) return ok(candidate);
   }
   const searched = candidates.map((candidate) => candidate.path);
   let fix: string;
