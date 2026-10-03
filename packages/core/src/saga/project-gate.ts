@@ -7,7 +7,7 @@
 // what it checks is recover breaking a dead holder's lock. The body gets stillHeld(), to re-check the lock before an
 // irreversible step (lock.ts's known limit). Offload uses it now; onload and recover take the same lock.
 
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
 import { assertSystemError, type LocalIo } from "../io.ts";
@@ -15,6 +15,7 @@ import { type Journal, journalFile, readJournals } from "../journal/index.ts";
 import { acquireLock, type LockHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { readRegistry } from "../registry.ts";
+import { type CanonicalPath, canonicalPath, overlapOf } from "../roots/canonical.ts";
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "./journaled.ts";
 
@@ -68,11 +69,15 @@ export interface RegisteredFolder {
   id: string;
   address: string;
   folder: string;
+  /** The folder's canonical form (symlinks resolved, the volume's spelling, its case rule), for comparing. */
+  canon: CanonicalPath;
 }
 
 /**
  * Every registered project's effective folder on this device (D53 revised): `override ?? place`, where the place is
  * the root's binding here plus the path. A project whose root is not bound here, and has no override, has none.
+ * Folders are compared canonically (R1): a spelling in another case on a volume that ignores case, or one through a
+ * symlink, is the same folder.
  */
 export const registeredFolders = async (
   io: LocalIo,
@@ -93,25 +98,42 @@ export const registeredFolders = async (
   for (const [id, e] of Object.entries(registry.value.projects)) {
     const root = rootFolder.get(e.root);
     const folder = e.override ?? (root === undefined ? undefined : join(root, ...e.path.split("/")));
-    if (folder !== undefined) folders.push({ id, address: `${e.root}:${e.path}`, folder: resolve(folder) });
+    if (folder === undefined) continue;
+    const canon = await canonicalPath(io, folder, paths.home);
+    // A folder that cannot be resolved (a loop, no permission) holds nothing this device can reach.
+    if (canon.ok)
+      folders.push({ id, address: `${e.root}:${e.path}`, folder: canon.value.path, canon: canon.value });
   }
   return ok(folders);
 };
 
+export type Nested = RegisteredFolder & {
+  /** Its folder lies inside this one. */
+  inside: boolean;
+  /** Its folder is this one (R2). */
+  same: boolean;
+};
+
 /**
- * The registered projects nested with a folder (D53 revised), decided by effective folders, never by logical
- * paths: `inside`, those whose folder lies inside it; otherwise those whose folder holds it.
+ * The registered projects nested with a folder (D53 revised), decided by canonical effective folders, never by
+ * logical paths: those whose folder lies inside it (`inside`), is it (`same`), or holds it.
  */
-export const nestedProjects = (
+export const nestedProjects = async (
+  io: LocalIo,
+  paths: PlainportPaths,
   folders: readonly RegisteredFolder[],
   project: { id?: string; folder: string },
-): (RegisteredFolder & { inside: boolean })[] => {
-  const folder = resolve(project.folder);
-  return folders
-    .filter((f) => f.id !== project.id && f.folder !== folder)
-    .filter((f) => f.folder.startsWith(`${folder}/`) || folder.startsWith(`${f.folder}/`))
-    .map((f) => ({ ...f, inside: f.folder.startsWith(`${folder}/`) }))
-    .sort((x, y) => (x.id < y.id ? -1 : 1));
+): Promise<Result<Nested[]>> => {
+  const canon = await canonicalPath(io, project.folder, paths.home);
+  if (!canon.ok) return canon;
+  const found: Nested[] = [];
+  for (const f of folders) {
+    if (f.id === project.id) continue;
+    const relation = overlapOf(f.canon, canon.value);
+    if (relation === undefined) continue;
+    found.push({ ...f, inside: relation === "inside", same: relation === "same" });
+  }
+  return ok(found.sort((x, y) => (x.id < y.id ? -1 : 1)));
 };
 
 /**

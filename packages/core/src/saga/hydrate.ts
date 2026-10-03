@@ -18,7 +18,7 @@
 // and `plainport hydrate` (runHydrate) retries. `plainport dehydrate` (runDehydrate) is the way back: it removes the
 // installed dependencies a plugin claims and git does not track, nothing else.
 
-import { join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -40,6 +40,7 @@ import type { HostPorts } from "../ports/host.ts";
 import { preflight } from "../preflight/index.ts";
 import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
+import { canonicalPath } from "../roots/canonical.ts";
 import { refreshIndex } from "../scan/git.ts";
 import { scanTree } from "../scan/walk.ts";
 import { ulid } from "../ulid.ts";
@@ -426,7 +427,9 @@ export const runHydrate = async (
   // The registered projects nested with this one are locked too (D53, D56).
   const folders = await registeredFolders(host, paths, deps.env);
   if (!folders.ok) return folders;
-  const nested = nestedProjects(folders.value, { id, folder: dir });
+  const related = await nestedProjects(host, paths, folders.value, { id, folder: dir });
+  if (!related.ok) return related;
+  const nested = related.value;
   const gate = { io: host, paths, clock, log: deps.log };
   return withProjectLock(
     gate,
@@ -492,7 +495,9 @@ export const runDehydrate = async (
   // The registered projects nested with this one are locked too (D53, D56).
   const folders = await registeredFolders(host, paths, deps.env);
   if (!folders.ok) return folders;
-  const nested = nestedProjects(folders.value, { id, folder: dir });
+  const related = await nestedProjects(host, paths, folders.value, { id, folder: dir });
+  if (!related.ok) return related;
+  const nested = related.value;
   const gate = { io: host, paths, clock, log: deps.log };
   return withProjectLock(
     gate,
@@ -521,7 +526,9 @@ export const runDehydrate = async (
       if (!set.ok) return set;
       const removed: DehydrateOutcome["removed"] = [];
       // A registered inner project's dependencies are its own to remove (D56): its subtree is left alone.
-      const inner = nested.filter((n) => n.inside).map((n) => relative(resolve(dir), n.folder));
+      const canon = await canonicalPath(host, dir, paths.home);
+      if (!canon.ok) return canon;
+      const inner = nested.filter((n) => n.inside).map((n) => relative(canon.value.real, n.canon.real));
       const within = (path: string) => inner.some((p) => path === p || path.startsWith(`${p}/`));
       // Whatever was removed, the project is unhydrated from then on, however the run ends (N2).
       const markUnhydrated = async () => {

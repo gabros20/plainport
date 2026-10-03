@@ -100,7 +100,13 @@ import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
-import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
+import {
+  type Nested,
+  nestedProjects,
+  type ProjectLock,
+  registeredFolders,
+  withProjectLock,
+} from "./project-gate.ts";
 import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
@@ -451,7 +457,9 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   // Nesting by effective folders (D53 revised): a project placed inside this folder with --to counts.
   const folders = await registeredFolders(io, paths, deps.env);
   if (!folders.ok) return folders;
-  const nested = nestedProjects(folders.value, { id: projectId, folder });
+  const related = await nestedProjects(io, paths, folders.value, { id: projectId, folder });
+  if (!related.ok) return related;
+  const nested = related.value;
   return withProjectLock(gate, { id: projectId, address: ref.address }, (lock) => offloadLocked(lock), {
     related: nested,
   });
@@ -882,11 +890,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 /** The registered projects inside `folder` (D53) whose own folder is here. */
 const nestedHere = async (
   io: LocalIo,
-  nested: ReturnType<typeof nestedProjects>,
+  nested: readonly Nested[],
 ): Promise<Result<{ address: string; dir: string }[]>> => {
   const found: { address: string; dir: string }[] = [];
   for (const n of nested) {
-    if (!n.inside) continue;
+    // Inside it, or at the very same folder (R2): either way its files would go with this one.
+    if (!n.inside && !n.same) continue;
     const dir = n.folder;
     try {
       if ((await io.fs.lstat(dir)).kind === "dir") found.push({ address: n.address, dir });

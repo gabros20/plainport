@@ -359,13 +359,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   // Nesting by effective folders (D53 revised), from where this copy lands.
   const folders = await registeredFolders(io, paths, deps.env);
   if (!folders.ok) return folders;
-  const nested = nestedProjects(folders.value, { id, folder: landing });
+  const related = await nestedProjects(io, paths, folders.value, { id, folder: landing });
+  if (!related.ok) return related;
+  const nested = related.value;
   // --to into another registered project's folder would put this copy inside that project's snapshot (D53 revised).
   const holding = req.to === undefined ? undefined : nested.find((n) => !n.inside);
   if (holding !== undefined) {
     return fail(
       finding("project.nested", {
-        message: `${landing} lies inside ${holding.address}'s folder (${holding.folder}), so ${ref.address} was not onloaded there: an offload of ${holding.address} would take it along`,
+        message: `${landing} ${holding.same ? "is" : "lies inside"} ${holding.address}'s folder (${holding.folder}), so ${ref.address} was not onloaded there: an offload of ${holding.address} would take it along`,
         fix: `onload it outside every registered project's folder: plainport onload ${shellWord(ref.address)} --to <path>`,
         paths: [landing],
       }),

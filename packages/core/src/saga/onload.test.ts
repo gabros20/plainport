@@ -806,6 +806,77 @@ describe("onload: nesting by effective folder (D53 revised, N1)", () => {
   });
 });
 
+describe("onload: nesting by canonical folder (R1, R2)", () => {
+  const shelvedApi = async () => {
+    box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    box.file("work/api/src/api.ts", "export const api = 1;\n");
+    return value(await runOffload(offloadDeps(), { project: await ref("work:api") }));
+  };
+  /** work:web registered and here (offloaded once, onloaded back). */
+  const webHere = async () => {
+    await offload();
+    value(await onload());
+  };
+  /** A's copy placed at `spelling` (inside web), as an older build allowed, with work in it. */
+  const placeApiAt = async (spelling: string) => {
+    const apiId = await projectId("api");
+    box.file("work/web/vendor/api/src/api.ts", "export const api = 2; // edited in place\n");
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          projects: {
+            ...r.projects,
+            [apiId]: { ...(r.projects[apiId] as RegistryEntry), override: spelling },
+          },
+        },
+      })),
+    );
+  };
+  const expectWebOffloadRefused = async () => {
+    const blocked = await runOffload(offloadDeps(), { project: await ref("work:web") });
+    expect(!blocked.ok && [blocked.exitCode, blocked.finding.code]).toEqual([6, "project.nested"]);
+    expect(readFileSync(join(dir, "vendor/api/src/api.ts"), "utf8")).toContain("edited in place");
+  };
+  const insensitiveHere = async () => {
+    const probed = await canonicalPath(testHost(), dir, box.home);
+    return probed.ok && probed.value.caseInsensitive;
+  };
+
+  test("a --to typed in another case on a case-insensitive volume is inside B: refused, and B's offload too", async () => {
+    if (!(await insensitiveHere())) return; // a case-sensitive volume: the spellings are two folders
+    await shelvedApi();
+    await webHere();
+    const otherCase = join(box.home, "WORK/WEB/vendor/api");
+    const onloaded = await onload({ project: { address: "work:api" } as ProjectRef, to: otherCase });
+    expect(!onloaded.ok && [onloaded.exitCode, onloaded.finding.code]).toEqual([6, "project.nested"]);
+    await placeApiAt(otherCase);
+    await expectWebOffloadRefused();
+  });
+
+  test("a --to reached through a symlink is inside B: refused, and B's offload too", async () => {
+    await shelvedApi();
+    await webHere();
+    symlinkSync(join(box.home, "work"), join(box.home, "via"));
+    const linked = join(box.home, "via/web/vendor/api");
+    const onloaded = await onload({ project: { address: "work:api" } as ProjectRef, to: linked });
+    expect(!onloaded.ok && [onloaded.exitCode, onloaded.finding.code]).toEqual([6, "project.nested"]);
+    await placeApiAt(linked);
+    await expectWebOffloadRefused();
+  });
+
+  test("a --to equal to another registered project's folder (B shelved) is refused (R2)", async () => {
+    await shelvedApi();
+    await offload();
+    expect(existsSync(dir)).toBe(false);
+    const result = await onload({ project: { address: "work:api" } as ProjectRef, to: dir });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "project.nested"]);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+  });
+});
+
 describe("onload: a store that blips before the swap (N3)", () => {
   test("an unreachable store at the head re-read keeps the journal and staging; the next onload resumes", async () => {
     await offload();
