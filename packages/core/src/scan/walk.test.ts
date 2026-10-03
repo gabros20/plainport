@@ -13,7 +13,7 @@ import {
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { testHost } from "../../../host-macos/src/testing.ts";
+import { testHost } from "../testing/host.ts";
 import { scanTree, type TreeScan } from "./walk.ts";
 
 const { fs } = testHost();
@@ -169,5 +169,19 @@ describe("scan: expected failures carry a fix", () => {
       expect(result.finding.code).toBe("project.not-found");
       expect(result.finding.fix).toBeDefined();
     }
+  });
+});
+
+describe("scan: exceptions mean bugs", () => {
+  test("a lstat that throws something other than a system error is not an unreadable file: it propagates", async () => {
+    const broken = {
+      ...fs,
+      lstat: async (path: string) => {
+        if (path.endsWith("/boom.txt")) throw new TypeError("a fake went wrong");
+        return fs.lstat(path);
+      },
+    };
+    write("boom.txt", "x");
+    await expect(scanTree(broken, dir)).rejects.toThrow(TypeError);
   });
 });

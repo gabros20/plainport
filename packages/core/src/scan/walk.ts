@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, posix, resolve } from "node:path";
 import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
-import { errorCode, type LinkStat, type LocalFs } from "../io.ts";
+import { type LinkStat, type LocalFs, systemErrorCode } from "../io.ts";
 import { type Manifest, ManifestBuilder } from "./manifest.ts";
 
 export interface SizedPath {
@@ -63,7 +63,7 @@ const keepLargest = (largest: SizedPath[], candidate: SizedPath): void => {
 
 type Seen =
   | { name: string; stat: LinkStat; readable: boolean; target?: string }
-  | { name: string; stat?: undefined; error: unknown };
+  | { name: string; stat?: undefined; code: string; error: unknown };
 
 const look = async (fs: LocalFs, path: string, name: string): Promise<Seen> => {
   try {
@@ -72,7 +72,7 @@ const look = async (fs: LocalFs, path: string, name: string): Promise<Seen> => {
     if (stat.kind === "symlink") return { name, stat, readable: true, target: await fs.readlink(path) };
     return { name, stat, readable: true };
   } catch (error) {
-    return { name, error };
+    return { name, code: systemErrorCode(error), error };
   }
 };
 
@@ -92,7 +92,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
     real = await fs.realpath(top);
     if ((await fs.lstat(real)).kind !== "dir") return notFound();
   } catch (error) {
-    const code = errorCode(error);
+    const code = systemErrorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return notFound();
     return fail(
       finding("fs.unreadable", {
@@ -128,6 +128,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
     try {
       names = await fs.readdir(absolute);
     } catch (error) {
+      const code = systemErrorCode(error);
       if (folder === "") {
         return fail(
           finding("fs.unreadable", {
@@ -137,9 +138,9 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
           }),
         );
       }
-      // Listed as unreadable by the parent already when it was not readable; anything else (it vanished) shows
-      // as a change in the fingerprint.
-      if (errorCode(error) !== "ENOENT" && !scan.unreadable.includes(folder)) scan.unreadable.push(folder);
+      // A folder that cannot be listed is unreadable: its contents are unknown. One that vanished since its parent
+      // was listed is not; the parent's mtime already tells the fingerprint.
+      if (code !== "ENOENT") scan.unreadable.push(folder);
       hash.update(`!${folder}\0`);
       continue;
     }
@@ -152,7 +153,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
         const path = folder === "" ? item.name : `${folder}/${item.name}`;
         if (item.stat === undefined) {
           // Vanished since the folder was listed: the folder's mtime already tells the fingerprint.
-          if (errorCode(item.error) === "ENOENT") continue;
+          if (item.code === "ENOENT") continue;
           scan.unreadable.push(path);
           hash.update(`!${path}\0`);
           continue;

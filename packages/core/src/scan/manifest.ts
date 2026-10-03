@@ -97,7 +97,8 @@ export class ManifestBuilder {
     const n = this.count;
     const order = new Uint32Array(n);
     for (let i = 0; i < n; i++) order[i] = i;
-    const paths = this.paths;
+    // Copies, so adding to the builder afterwards cannot change a manifest already handed out.
+    const paths = this.paths.slice(0, n);
     order.sort((a, b) => {
       const x = paths[a] as string;
       const y = paths[b] as string;
@@ -110,7 +111,7 @@ export class ManifestBuilder {
       this.modes.slice(0, n),
       this.seconds.slice(0, n),
       this.nanos.slice(0, n),
-      this.targets,
+      new Map(this.targets),
       order,
     );
   }

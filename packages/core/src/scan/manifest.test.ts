@@ -51,3 +51,18 @@ describe("scan: the manifest", () => {
     for (const i of [0, 1, 4_242, 99_999, n - 1]) expect(manifest.get(pathOf(i))?.size).toBe(i);
   });
 });
+
+describe("manifest: a finished manifest is sealed", () => {
+  test("adding to the builder afterwards changes nothing in it", () => {
+    const builder = new ManifestBuilder();
+    builder.add({ path: "a", type: "file", size: 1, mode: 0o644, mtimeNs: 0n });
+    builder.add({ path: "l", type: "symlink", size: 0, mode: 0o777, mtimeNs: 0n, linkTarget: "a" });
+    const manifest = builder.finish();
+    builder.add({ path: "b", type: "file", size: 2, mode: 0o644, mtimeNs: 0n });
+    builder.add({ path: "m", type: "symlink", size: 0, mode: 0o777, mtimeNs: 0n, linkTarget: "b" });
+    expect(manifest.size).toBe(2);
+    expect([...manifest].map((e) => e.path)).toEqual(["a", "l"]);
+    expect(manifest.get("b")).toBeUndefined();
+    expect(manifest.get("l")?.linkTarget).toBe("a");
+  });
+});

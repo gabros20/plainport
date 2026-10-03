@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { testHost } from "../../../host-macos/src/testing.ts";
 import { type GitFixture, makeGitFixture } from "../testing/git-fixture.ts";
+import { testHost } from "../testing/host.ts";
 import { type GitFacts, gitFacts } from "./git.ts";
 import { scanTree } from "./walk.ts";
 
@@ -250,5 +250,25 @@ describe("scan: git facts fail closed (r4)", () => {
       expect(result.finding.code).toBe("git.failed");
       expect(result.finding.fix).toBeDefined();
     }
+  });
+});
+
+describe("scan: git only reads (q1)", () => {
+  test("a clean filter that would write (git-lfs style) is not run, and the system config is not read", async () => {
+    const dir = fx.repo("web");
+    const marker = join(fx.root, "filter-ran");
+    fx.git(dir, "config", "filter.lfs.clean", `sh -c 'echo ran >> ${marker}; cat'`);
+    fx.git(dir, "config", "filter.lfs.smudge", "cat");
+    fx.git(dir, "config", "filter.lfs.required", "true");
+    fx.write(join(dir, ".gitattributes"), "*.bin filter=lfs\n");
+    fx.write(join(dir, "blob.bin"), "payload\n");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "lfs-like");
+    rmSync(marker, { force: true });
+    // Same content, new mtime: git status must re-hash it, which is when the clean filter would run.
+    writeFileSync(join(dir, "blob.bin"), "payload\n");
+    const result = await gitFacts(host, dir, { env: fx.env });
+    expect(result.ok).toBe(true);
+    expect(existsSync(marker)).toBe(false);
   });
 });

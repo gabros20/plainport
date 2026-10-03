@@ -7,7 +7,10 @@
 // refreshing and rewriting the index, so reading git state never changes the fingerprint. -c core.fsmonitor=false
 // keeps git from starting its fsmonitor daemon: a daemon left behind would outlive the call and fail the capture
 // (process.output-incomplete), and would hold the folder open. core.untrackedCache=false keeps git from updating
-// that cache. The user's own config is otherwise read as usual.
+// that cache. git-lfs's clean filter, which `git status` would run on a racily-clean entry and which writes under
+// .git/lfs, is switched off (filter.lfs.* empty, not required); a repository's own other filters still run their
+// clean command on such entries, which is the one write these calls cannot rule out. The system config
+// (/etc/gitconfig, Xcode's, Homebrew's) is not read; the user's own config is.
 //
 // git runs only when the folder has a .git of its own, and GIT_CEILING_DIRECTORIES stops it at the folder's parent:
 // a .git that git cannot use (an empty folder, a broken pointer) is git.failed, never the facts of a repository
@@ -16,7 +19,7 @@
 
 import { dirname, join, resolve } from "node:path";
 import { type Failure, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
-import { errorCode, type LinkStat } from "../io.ts";
+import { type LinkStat, systemErrorCode } from "../io.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { capturedOutput, splitRecords } from "../runner/runner.ts";
 import type { RunOutcome } from "../runner/types.ts";
@@ -80,6 +83,14 @@ const FLAGS = [
   "core.quotePath=false",
   "-c",
   "color.ui=false",
+  "-c",
+  "filter.lfs.process=",
+  "-c",
+  "filter.lfs.clean=",
+  "-c",
+  "filter.lfs.smudge=",
+  "-c",
+  "filter.lfs.required=false",
 ];
 const PASSED = ["PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR"];
 const CAPTURE_BYTES = 256 * 1024 * 1024;
@@ -95,7 +106,14 @@ const gitEnv = (env: GitContext["env"]): Record<string, string> => {
     const value = env[name];
     if (value !== undefined) out[name] = value;
   }
-  return { ...out, LC_ALL: "C", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
+  return {
+    ...out,
+    LC_ALL: "C",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
+  };
 };
 
 const said = (outcome: RunOutcome): string => {
@@ -118,8 +136,8 @@ const gitFailed =
     );
 
 /**
- * Runs one read-only git command in dir; its whole stdout, only when git exited 0. git may not look above the
- * folder for a repository (its cwd is the folder's real path, so the ceiling is the real parent).
+ * Runs one read-only git command in the folder, by its real path; its whole stdout, only when git exited 0. git
+ * may not look above the folder for a repository: the ceiling is the real parent.
  */
 const git = async (
   host: HostPorts,
@@ -131,6 +149,7 @@ const git = async (
   try {
     real = await host.fs.realpath(dir);
   } catch (error) {
+    systemErrorCode(error);
     return unreadable(dir, error);
   }
   // The ceiling is a colon-separated list, so a parent path holding ':' cannot be one; without it git could walk
@@ -148,7 +167,7 @@ const git = async (
   const ran = await host.run({
     command: "git",
     args: [...FLAGS, ...args],
-    cwd: dir,
+    cwd: real,
     env: { ...gitEnv(ctx.env), GIT_CEILING_DIRECTORIES: ceiling },
     capture: { maxBytes: CAPTURE_BYTES },
     idleTimeoutMs: 120_000,
@@ -190,7 +209,8 @@ export const exists = async (host: HostPorts, path: string): Promise<Result<bool
     await host.fs.lstat(path);
     return ok(true);
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return ok(false);
+    const code = systemErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return ok(false);
     return unreadable(path, error);
   }
 };
@@ -215,15 +235,16 @@ export const dotGit = async (host: HostPorts, dir: string): Promise<Result<"dir"
   try {
     kind = (await host.fs.lstat(path)).kind;
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return ok("none");
+    const code = systemErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return ok("none");
     return unreadable(path, error);
   }
   if (kind === "symlink") {
     try {
       kind = (await host.fs.stat(path)).kind;
     } catch (error) {
-      if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR")
-        return notARepository(path, "a symlink leading nowhere");
+      const code = systemErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") return notARepository(path, "a symlink leading nowhere");
       return unreadable(path, error);
     }
     if (kind === "other") return notARepository(path, "a symlink to a special file");
@@ -242,6 +263,7 @@ export const gitPointer = async (host: HostPorts, dir: string, ctx: GitContext):
   try {
     stat = await host.fs.lstat(path);
   } catch (error) {
+    systemErrorCode(error);
     return unreadable(path, error, { path, kind: "file" });
   }
   if (stat.kind === "file" && stat.size <= MAX_POINTER_BYTES) {
@@ -249,6 +271,7 @@ export const gitPointer = async (host: HostPorts, dir: string, ctx: GitContext):
     try {
       content = await host.fs.readText(path);
     } catch (error) {
+      systemErrorCode(error);
       return unreadable(path, error, { path, kind: "file" });
     }
     const pointer = /^gitdir:[ \t]*(\S[^\r\n]*?)[ \t]*$/m.exec(content.split("\n")[0] ?? "")?.[1];
@@ -423,8 +446,9 @@ export const gitWorktrees = async (
   let real = resolve(dir);
   try {
     real = await host.fs.realpath(dir);
-  } catch {
-    // Compare against the spelling given.
+  } catch (error) {
+    // A path the file system refuses: compare against the spelling given, which can only count more as outside.
+    systemErrorCode(error);
   }
   const roots = [resolve(dir), real];
   const inside = (path: string) => roots.some((root) => path === root || path.startsWith(`${root}/`));
