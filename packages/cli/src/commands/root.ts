@@ -1,5 +1,6 @@
-// plainport root add | bind | list | scan (DESIGN.md "Roots", "CLI design"). add and bind write managed.toml
-// (safe_write); list and scan only read the config, and scan records what it finds in this device's registry.
+// plainport root add | bind | list | scan (DESIGN.md "Roots", "CLI design"). add and bind write managed.toml and
+// scan records what it finds in this device's registry.json, so all three are safe_write (run decision D23); list
+// only reads.
 // unbind and rename arrive later; bind --device for another device needs pairing (M3, run decision D22).
 
 import { fail, finding, ok } from "@plainport/contract";
@@ -196,7 +197,7 @@ export const rootBind = defineCommand({
 export const rootScan = defineCommand({
   name: "root scan",
   summary: "Find every project under a root's folder here and register the new ones",
-  risk: "read",
+  risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
   positionals: ["key"],

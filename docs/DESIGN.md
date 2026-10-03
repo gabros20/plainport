@@ -777,7 +777,7 @@ The CLI is a thin renderer over the core: it parses arguments, calls one core me
 | --- | --- | --- |
 | `plainport init` | confirm | Pick and name roots from a scan of likely folders, initialise or connect a store, save secrets in Keychain, print the recovery key. |
 | `plainport setup agents` | confirm | Symlink plainport's operating skill into each agent's skills folder; a hand-made folder with the same name is reported, never replaced. |
-| `plainport root add \| bind \| unbind \| rename \| scan \| list` | read, safe_write | Manage roots and each device's path for them; `scan` and `list` only read. `bind --device mini` runs on the mini over SSH. |
+| `plainport root add \| bind \| unbind \| rename \| scan \| list` | read, safe_write | Manage roots and each device's path for them; `list` only reads, and `scan` registers the projects it finds in this device's `registry.json`. `bind --device mini` runs on the mini over SSH. |
 | `plainport mv <project> <root>:<path>` | safe_write | Re-file a project under another root or relative path; for a shelved project it only updates the catalog. |
 | `plainport device add \| list \| role \| revoke` | read, confirm | Pair a machine over SSH and bind its roots, change its role, or revoke its keys everywhere; `list` only reads. |
 | `plainport store add \| list \| test \| remove` | read, safe_write, confirm | Manage stores. `test` checks reachability, credentials, write access and conditional-write support; `remove` needs `--yes`. |

@@ -25,14 +25,14 @@ const setUp = async () => {
 };
 
 describe("root: commands", () => {
-  test("init is confirm; root add and bind are safe_write; list and scan only read", () => {
+  test("init is confirm; root add, bind and scan are safe_write; list only reads (D23)", () => {
     const risk = (name: string) => findCommand(REGISTRY, name.split(" "))?.command.risk;
     expect(["init", "root add", "root bind", "root list", "root scan"].map(risk)).toEqual([
       "confirm",
       "safe_write",
       "safe_write",
       "read",
-      "read",
+      "safe_write",
     ]);
   });
 
