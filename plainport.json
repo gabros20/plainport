@@ -236,7 +236,7 @@
     {
       "name": "init",
       "summary": "Name this device, set up its roots and record the store snapshots go to",
-      "usage": "plainport init [--root <value>...] [--store-path <value>] [--device <value>]",
+      "usage": "plainport init [--root <value>...] [--store-path <value>] [--store-secret <value>] [--device <value>]",
       "risk": "confirm",
       "dryRun": false,
       "positionals": [],
@@ -252,6 +252,12 @@
           "type": "string",
           "multiple": false,
           "summary": "A local folder for the store, e.g. on an external disk; --store names it (default local)"
+        },
+        {
+          "name": "store-secret",
+          "type": "string",
+          "multiple": false,
+          "summary": "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD"
         },
         {
           "name": "device",
@@ -275,6 +281,10 @@
             "description": "A local folder for the store, e.g. on an external disk; --store names it (default local)",
             "type": "string",
             "minLength": 1
+          },
+          "store-secret": {
+            "description": "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD",
+            "type": "string"
           },
           "device": {
             "description": "This device's name in every root's bindings; default: the host name",
@@ -338,6 +348,10 @@
               },
               "path": {
                 "type": "string"
+              },
+              "id": {
+                "description": "The id in its meta/v1/store.json, once it is set up",
+                "type": "string"
               }
             },
             "required": [
@@ -368,7 +382,7 @@
           },
           "changed": {
             "type": "boolean",
-            "description": "This run wrote managed.toml or created device.json"
+            "description": "This run wrote managed.toml, created device.json or set the store up"
           },
           "findings": {
             "type": "array",
@@ -454,7 +468,7 @@
     {
       "name": "offload",
       "summary": "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
-      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps]",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
       "risk": "confirm",
       "dryRun": true,
       "positionals": [
@@ -477,6 +491,12 @@
           "type": "boolean",
           "multiple": false,
           "summary": "Keep installed dependencies (node_modules) in the snapshot"
+        },
+        {
+          "name": "allow",
+          "type": "string",
+          "multiple": true,
+          "summary": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)"
         }
       ],
       "arguments": {
@@ -499,6 +519,13 @@
           "keep-deps": {
             "description": "Keep installed dependencies (node_modules) in the snapshot",
             "type": "boolean"
+          },
+          "allow": {
+            "description": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -527,6 +554,23 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "store": {
+            "type": "string"
+          },
+          "stub": {
+            "description": "The .plainport stub left where the folder was",
+            "type": "string"
+          },
+          "trash": {
+            "type": "string",
+            "description": "Where the folder waits to be deleted, by a detached process"
+          },
+          "keepUntil": {
+            "description": "keepLocalFor: the trash is kept until then",
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
           }
         },
         "required": [
@@ -534,7 +578,9 @@
           "exitCode",
           "project",
           "snapshot",
-          "freedBytes"
+          "freedBytes",
+          "store",
+          "trash"
         ],
         "additionalProperties": {}
       },
@@ -860,6 +906,14 @@
             "--dry-run"
           ],
           "summary": "Plan offloading a project"
+        },
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--yes"
+          ],
+          "summary": "Offload a project without a prompt"
         }
       ]
     },
@@ -1537,6 +1591,13 @@
   ],
   "findings": [
     {
+      "code": "catalog.head-moved",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "The store's latest snapshot of the project is not the one this working copy came from (another copy was offloaded since, or the project is conflicted); nothing local is deleted"
+    },
+    {
       "code": "catalog.event-skipped",
       "severity": "warn",
       "allowable": false,
@@ -1544,18 +1605,18 @@
       "summary": "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed"
     },
     {
+      "code": "catalog.incomplete",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; sync the store or run plainport doctor"
+    },
+    {
       "code": "command.cancelled",
       "severity": "block",
       "allowable": false,
       "exitCode": 130,
       "summary": "The person answering the prompts cancelled; nothing was written"
-    },
-    {
-      "code": "command.unavailable",
-      "severity": "block",
-      "allowable": false,
-      "exitCode": 1,
-      "summary": "This build registers the command but cannot run it for real yet; its --dry-run preview works"
     },
     {
       "code": "command.unknown",
@@ -1684,6 +1745,13 @@
       "summary": "plainport cannot read some files or folders in the project, so a snapshot would be incomplete"
     },
     {
+      "code": "fs.cross-volume",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The project folder is on another volume than the folder it would be moved aside into, so release could not rename it in one step"
+    },
+    {
       "code": "git.failed",
       "severity": "block",
       "allowable": false,
@@ -1747,6 +1815,13 @@
       "summary": "A bug: an exception escaped a command; the message names it"
     },
     {
+      "code": "journal.pending",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back"
+    },
+    {
       "code": "plan.expired",
       "severity": "block",
       "allowable": false,
@@ -1754,11 +1829,25 @@
       "summary": "The approved plan is more than an hour old; plan again with --dry-run"
     },
     {
+      "code": "operation.cancelled",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local"
+    },
+    {
       "code": "plan.not-found",
       "severity": "block",
       "allowable": false,
       "exitCode": 4,
       "summary": "No saved plan has this id on this device"
+    },
+    {
+      "code": "plan.stale",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The folder changed since the plan was made (its fingerprint differs), or the plan is for another project; a fresh plan is saved"
     },
     {
       "code": "proc.cwd",
@@ -1829,6 +1918,13 @@
       "allowable": false,
       "exitCode": 2,
       "summary": "A project name matches more than one project; the message lists every candidate address"
+    },
+    {
+      "code": "project.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another plainport process holds this project's lock"
     },
     {
       "code": "project.not-found",
@@ -2027,11 +2123,39 @@
       "summary": "A create-only write found the key already there; the existing value is left as it was"
     },
     {
+      "code": "store.not-set-up",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store has no identity this device recorded (plainport init sets a store up: its store.json, its restic repository)"
+    },
+    {
+      "code": "store.secret-missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store's repository password could not be read from its secret reference (env: or file: in M1)"
+    },
+    {
+      "code": "store.setup-pending",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable"
+    },
+    {
       "code": "store.unreachable",
       "severity": "block",
       "allowable": false,
       "exitCode": 9,
       "summary": "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved"
+    },
+    {
+      "code": "store.unsupported",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder)"
     },
     {
       "code": "stub.invalid",
@@ -2060,6 +2184,20 @@
       "allowable": false,
       "exitCode": 6,
       "summary": "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept"
+    },
+    {
+      "code": "verify.changed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 7,
+      "summary": "Files in the project changed while the snapshot was being made, again after one retry; nothing local was deleted"
+    },
+    {
+      "code": "verify.mismatch",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 7,
+      "summary": "The snapshot's listing does not match the scan of the folder (entries, types, sizes, modes or link targets); nothing local was deleted"
     },
     {
       "code": "tool.missing",

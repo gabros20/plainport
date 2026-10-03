@@ -8,11 +8,12 @@ import { nodePlugin } from "@plainport/eco-node";
 import { createMacosChecks, createMacosHost, guardFromEnv, type MacosHost } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
 import { gate } from "./gate.ts";
-import { stopOnSignals } from "./interrupt.ts";
+import { Cancellation, stopOnSignals } from "./interrupt.ts";
 import { preloadPlans } from "./plans.ts";
 import { clackPrompter } from "./prompt.ts";
 import type { CommandContext, Ports, Registry } from "./registry.ts";
 import { type IO, Output } from "./render.ts";
+import { localStores } from "./stores.ts";
 
 export type { IO } from "./render.ts";
 
@@ -72,6 +73,9 @@ export const run = async (
       system: ports.system,
       checks: ports.checks,
       plugins: ports.plugins,
+      stores: ports.stores,
+      signal: ports.cancellation?.signal ?? new AbortController().signal,
+      holdSignal: () => ports.cancellation?.hold() ?? (() => {}),
       paths: () => resolvePaths(ports.env, { configFlag: globals.config, cwd: ports.cwd }),
     };
     const result = await command.handler(args, ctx);
@@ -112,7 +116,7 @@ export const run = async (
 /** The real ports. core's io is the macOS host port (guarded only when a test run names its real home); the plan
  * store holds the fresh plans saved on this device, read before the gate runs. Paths come from the environment,
  * never os.homedir(). */
-const realPorts = async (host: MacosHost): Promise<Ports> => {
+const realPorts = async (host: MacosHost, cancellation: Cancellation): Promise<Ports> => {
   const now = new Date();
   return {
     host: { home: process.env.HOME ?? "" },
@@ -125,6 +129,8 @@ const realPorts = async (host: MacosHost): Promise<Ports> => {
     system: host,
     checks: createMacosChecks(host),
     plugins: [nodePlugin],
+    stores: localStores(host, process.env),
+    cancellation,
   };
 };
 
@@ -138,14 +144,18 @@ if (import.meta.main) {
   const host = createMacosHost({ guard: guardFromEnv(process.env) });
   const argv = process.argv.slice(2);
   // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
-  const done = realPorts(host).then(
+  const cancellation = new Cancellation();
+  const done = realPorts(host, cancellation).then(
     (ports) => run(argv, io, ports),
     (error: unknown) =>
       new Output(io, { json: wantsJson(argv), quiet: false, verbose: false }, argv[0] ?? "plainport").failure(
         unexpected("loading saved plans", error),
       ),
   );
-  const release = stopOnSignals(host, done, { stderr: (text) => process.stderr.write(text) });
+  const release = stopOnSignals(host, done, {
+    stderr: (text) => process.stderr.write(text),
+    operation: cancellation,
+  });
   process.exitCode = await done;
   release();
 }

@@ -1,12 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { isUlid, PLAN_TTL_MS, PlanSchema } from "@plainport/core";
+import { fsBlobStore } from "@plainport/blob-fs";
+import { isUlid, nodeLocalIo, PLAN_TTL_MS, PlanSchema, StubSchema } from "@plainport/core";
+import { testHost as macosTestHost } from "@plainport/host-macos/testing";
+import { describeT1 } from "../../../../test/tiers.ts";
+import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
+import { type InvariantSubject, invariantViolations } from "../../../core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import { gate } from "../gate.ts";
+import { Cancellation } from "../interrupt.ts";
 import { preloadPlans } from "../plans.ts";
 import { type Ports, positionalsOf } from "../registry.ts";
-import { capture, sandboxPorts } from "../testing.ts";
+import { localStores } from "../stores.ts";
+import { capture, fakeEngineHooks, fakeRepositoryAt, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
 
 let box: Sandbox;
@@ -162,44 +169,192 @@ describe("offload: dry run", () => {
   });
 });
 
-describe("offload: a real run (the saga arrives in M1 Task 12)", () => {
+describe("offload: a real run", () => {
+  const ssd = () => join(box.home, "ssd");
+  const dir = () => join(box.home, "work/web");
+  const subject = async (): Promise<InvariantSubject> => {
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    const id = Object.entries(registry.projects as Record<string, { path: string }>).find(
+      ([, e]) => e.path === "web",
+    )?.[0];
+    const device = JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id;
+    return {
+      paths: box.paths,
+      device,
+      project: { id, dir: dir() },
+      roots: [join(box.home, "work")],
+      store: {
+        name: "local",
+        blob: fsBlobStore(nodeLocalIo, ssd()),
+        engine: fakeEngine(fakeRepositoryAt(ssd())),
+      },
+    };
+  };
+  const expectInvariants = async () => expect(await invariantViolations(await subject())).toEqual([]);
+  afterEach(() => fakeEngineHooks.delete(ssd()));
+
   test("without --yes or a plan it exits 3 with the exact re-run", async () => {
     const run = await cli(["offload", "work:web"]);
     expect(run.code).toBe(3);
     expect(run.err).toContain("re-run: plainport offload work:web --yes");
+    await expectInvariants();
   });
 
-  test("with --yes it refuses cleanly with command.unavailable and points at --dry-run", async () => {
+  test("with --yes it runs the saga: the folder leaves a stub, the store holds the snapshot and its event", async () => {
     const run = await cli(["offload", "work:web", "--yes", "--json"]);
-    expect(run.code).toBe(1);
-    expect(envelope(run.out).error).toMatchObject({
-      code: 1,
-      hint: "plainport offload work:web --dry-run",
-      finding: { code: "command.unavailable" },
+    expect(run.err).toBe("");
+    expect(run.code).toBe(0);
+    const lines = run.out
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const env = lines.at(-1);
+    expect(env).toMatchObject({
+      ok: true,
+      verb: "offload",
+      data: {
+        exitCode: 0,
+        project: "work:web",
+        store: "local",
+        stub: `${dir()}.plainport`,
+        trash: join(box.home, "work/.plainport-trash", env.data.op),
+      },
     });
-    expect(existsSync(join(box.home, "work/web/node_modules"))).toBe(true);
+    expect(env.data.snapshot).toBe(env.data.op);
+    expect(lines.filter((l) => l.type === "phase" && l.status === "start").map((l) => l.phase)).toEqual([
+      "resolve",
+      "preflight",
+      "scan",
+      "plan",
+      "snapshot",
+      "verify",
+      "commit",
+      "release",
+    ]);
+    expect(existsSync(dir())).toBe(false);
+    const stub = StubSchema.parse(JSON.parse(readFileSync(`${dir()}.plainport`, "utf8")));
+    expect(stub).toMatchObject({ root: "work", path: "web", store: "local", snapshot: env.data.op });
+    const events = readdirSync(join(ssd(), "meta/v1/events")).map((name) =>
+      JSON.parse(readFileSync(join(ssd(), "meta/v1/events", name), "utf8")),
+    );
+    expect(events.map((e) => e.type).sort()).toEqual(["offloaded", "root-created"]);
+    await expectInvariants();
+  });
+
+  test("human output names the snapshot, what was freed and the stub", async () => {
+    const run = await cli(["offload", "work:web", "--yes"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; freed [0-9.]+ KB\n/);
+    expect(run.out).toContain(`stub      ${dir()}.plainport`);
+    await expectInvariants();
   });
 
   test("a fresh plan id stands in for --yes; once the hour is over it no longer does", async () => {
     const planned = await cli(["offload", "work:web", "--dry-run", "--json"]);
     const { id } = envelope(planned.out).data;
-    const fresh = await preloadPlans(ports().io, ports().env, NOW);
-    const withPlan = await cli(["offload", "work:web", "--plan", id, "--json"], { plans: fresh });
-    expect(envelope(withPlan.out).error.finding.code).toBe("command.unavailable");
-
     const later = new Date(NOW.getTime() + PLAN_TTL_MS);
     const stale = await preloadPlans(ports().io, ports().env, later);
     const expired = await cli(["offload", "work:web", "--plan", id, "--json"], { plans: stale });
     expect(expired.code).toBe(3);
     expect(envelope(expired.out).error.finding.code).toBe("risk.needs-yes");
+
+    const fresh = await preloadPlans(ports().io, ports().env, NOW);
+    const withPlan = await cli(["offload", "work:web", "--plan", id, "--json"], { plans: fresh });
+    expect(withPlan.code).toBe(0);
+    expect(existsSync(dir())).toBe(false);
+    await expectInvariants();
   });
 
-  test("a plan approves only the command it was made for", async () => {
+  test("a folder changed since its plan exits 6 with plan.stale, naming a fresh plan; nothing is uploaded", async () => {
     const planned = await cli(["offload", "work:web", "--dry-run", "--json"]);
     const { id } = envelope(planned.out).data;
-    const store = await preloadPlans(ports().io, ports().env, NOW);
-    expect(store.approved("offload", id)).toBe(true);
-    expect(store.approved("onload", id)).toBe(false);
-    expect(store.approved("offload", "01J9Z6KB")).toBe(false);
+    box.file("work/web/src/main.ts", "changed");
+    const fresh = await preloadPlans(ports().io, ports().env, NOW);
+    const run = await cli(["offload", "work:web", "--plan", id, "--json"], { plans: fresh });
+    expect(run.code).toBe(6);
+    expect(envelope(run.out).error).toMatchObject({ finding: { code: "plan.stale" } });
+    expect(envelope(run.out).error.hint).toMatch(/--plan [0-9A-Z]{26}$/);
+    expect(existsSync(join(dir(), "src/main.ts"))).toBe(true);
+    expect(fakeRepositoryAt(ssd()).snapshots).toEqual([]);
+    await expectInvariants();
   });
+
+  test("a blocker exits 6; --allow <code> overrides an allowable one", async () => {
+    const git = Bun.spawnSync(["git", "init", "-q", dir()], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(git.exitCode).toBe(0);
+    box.file("work/web/.git/index.lock");
+    const blocked = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(blocked.code).toBe(6);
+    expect(envelope(blocked.out).error.finding.code).toBe("git.locked");
+    expect(existsSync(join(dir(), "src/main.ts"))).toBe(true);
+    await expectInvariants();
+    const allowed = await cli(["offload", "work:web", "--yes", "--allow", "git.locked", "--json"]);
+    expect(allowed.code).toBe(0);
+    await expectInvariants();
+  });
+
+  test("Ctrl-C during the upload stops at a safe point: exit 130, nothing deleted", async () => {
+    const cancellation = new Cancellation();
+    fakeEngineHooks.set(ssd(), { duringSnapshot: () => cancellation.abort() });
+    const run = await cli(["offload", "work:web", "--yes", "--json"], { cancellation });
+    expect(run.code).toBe(130);
+    expect(envelope(run.out).error.finding.code).toBe("operation.cancelled");
+    expect(cancellation.busy()).toBe(false);
+    expect(existsSync(join(dir(), "src/main.ts"))).toBe(true);
+    await expectInvariants();
+  });
+
+  test("a store init never set up refuses with store.not-set-up", async () => {
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    delete registry.stores;
+    writeFileSync(box.paths.registryFile, JSON.stringify(registry));
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(run.code).toBe(6);
+    expect(envelope(run.out).error).toMatchObject({
+      finding: { code: "store.not-set-up" },
+      hint: "plainport init --yes sets up the stores already configured",
+    });
+  });
+});
+
+describeT1("offload with the real restic on a temp external-disk store", () => {
+  test("init creates the repository; offload snapshots, verifies and releases; restic lists what the catalog names", async () => {
+    const host = macosTestHost();
+    const env = {
+      HOME: box.home,
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      PLAINPORT_STORE_PASSWORD: "t1-pw",
+    };
+    const real = (over: Partial<Ports> = {}) =>
+      ports({ env, system: host, io: host, stores: localStores(host, env), ...over });
+    const ssd = join(box.home, "t1-ssd");
+    const setup = await cli(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"], real());
+    expect(setup.code).toBe(0);
+    expect(existsSync(join(ssd, "repo/config"))).toBe(true);
+    box.file("work/web/.env", "TOKEN=op://vault/item\n");
+    symlinkSync("src/main.ts", join(box.home, "work/web/link"));
+    const run = await cli(["offload", "work:web", "--store", "t1", "--yes", "--json"], real());
+    expect(run.code).toBe(0);
+    const data = envelope(run.out).data;
+    expect(existsSync(join(box.home, "work/web"))).toBe(false);
+    const store = fsBlobStore(host, ssd);
+    const opened = await localStores(host, env).open("t1", { kind: "local", path: ssd }, "t1-pw");
+    if (!opened.ok) throw new Error(opened.finding.message);
+    const listed = await opened.value.engine.list({ tags: [`plainport:op=${data.op}`] });
+    expect(listed.ok && listed.value.length).toBe(1);
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    const id = Object.entries(registry.projects as Record<string, { path: string }>).find(
+      ([, e]) => e.path === "web",
+    )?.[0];
+    const violations = await invariantViolations({
+      paths: box.paths,
+      device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
+      project: { id, dir: join(box.home, "work/web") },
+      roots: [join(box.home, "work")],
+      store: { name: "t1", blob: store, engine: opened.value.engine },
+    });
+    expect(violations).toEqual([]);
+  }, 120_000);
 });

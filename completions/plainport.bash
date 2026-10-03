@@ -28,8 +28,8 @@ _plainport() {
   local opts=''
   if [[ -n $cmd ]]; then case "$cmd" in
     'help') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
-    'init') opts='--root --store-path --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
-    'offload') opts='--plan --keep-deps --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'init') opts='--root --store-path --store-secret --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'offload') opts='--plan --keep-deps --allow --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root add') opts='--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root bind') opts='--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root list') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;

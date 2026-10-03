@@ -10,7 +10,15 @@
 
 import type { PlainportEvent, Result, RiskClass, StreamEvent } from "@plainport/contract";
 import { RISK_CLASSES } from "@plainport/contract";
-import type { EcosystemPlugin, Env, HostChecks, HostPorts, LocalIo, PlainportPaths } from "@plainport/core";
+import type {
+  EcosystemPlugin,
+  Env,
+  HostChecks,
+  HostPorts,
+  LocalIo,
+  PlainportPaths,
+  StoreOpener,
+} from "@plainport/core";
 import { z } from "zod";
 import type { Prompter } from "./prompt.ts";
 
@@ -58,6 +66,10 @@ export interface Ports {
   checks: HostChecks;
   /** The ecosystem plugins, in detection order. */
   plugins: readonly EcosystemPlugin[];
+  /** Opens a store from config: its catalog events and its engine (blob-fs and restic in M1). */
+  stores: StoreOpener;
+  /** Ctrl-C's AbortSignal for the command (interrupt.ts); tests pass one to stop a saga. */
+  cancellation?: { readonly signal: AbortSignal; hold(): () => void };
 }
 
 /** The --config path; loading the file arrives with the config task. */
@@ -97,6 +109,11 @@ export interface CommandContext {
   system: HostPorts;
   checks: HostChecks;
   plugins: readonly EcosystemPlugin[];
+  stores: StoreOpener;
+  /** Aborted by Ctrl-C. A command that stops at its own safe points holds it (hold()) while it runs. */
+  signal: AbortSignal;
+  /** Marks the command as one that stops at its safe points when signalled; call the result when it ends. */
+  holdSignal(): () => void;
   /** plainport's config and state paths, from env and --config; config.no-home when HOME is unusable. */
   paths(): Result<PlainportPaths>;
 }

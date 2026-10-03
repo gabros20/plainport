@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "op": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "kind": {
+          "type": "string",
+          "const": "offload"
+        },
+        "step": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "pid": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "address": {
+              "type": "string",
+              "minLength": 1
+            },
+            "root": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "rootId": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^(?!\\.\\.?(?:\\/|$))[^/]+(?:\\/(?!\\.\\.?(?:\\/|$))[^/]+)*$"
+            },
+            "dir": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "address",
+            "root",
+            "rootId",
+            "path",
+            "dir"
+          ],
+          "additionalProperties": false
+        },
+        "store": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            }
+          },
+          "required": [
+            "name",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "rootCreated": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "plan": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "fingerprint": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "fingerprint"
+          ],
+          "additionalProperties": false
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "discarded": {
+          "type": "object",
+          "properties": {
+            "snapshot": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "event": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            }
+          },
+          "required": [
+            "snapshot",
+            "event"
+          ],
+          "additionalProperties": false
+        },
+        "verified": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "event": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "trash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stub": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keepUntil": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "step",
+              "at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "v",
+        "op",
+        "kind",
+        "step",
+        "startedAt",
+        "updatedAt",
+        "pid",
+        "host",
+        "project",
+        "store",
+        "attempts",
+        "history"
+      ],
+      "additionalProperties": false,
+      "title": "OffloadJournal",
+      "description": "journal/<op>.json: an offload's progress, for recover"
+    }
+  ],
+  "title": "Journal",
+  "description": "journal/<op>.json: a running or interrupted operation"
+}

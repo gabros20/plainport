@@ -116,6 +116,36 @@ describe("interrupt: signals to plainport stop its children", () => {
     expect(members(pgid)).toEqual([]);
   });
 
+  test("a saga holding the cancellation hears Ctrl-C through its signal, and its own report decides the exit", async () => {
+    const fixture = join(dir, "saga.ts");
+    writeFileSync(
+      fixture,
+      `import { createMacosHost } from ${JSON.stringify(join(import.meta.dir, "../../host-macos/src/index.ts"))};\n` +
+        `import { Cancellation, stopOnSignals } from ${JSON.stringify(join(import.meta.dir, "interrupt.ts"))};\n` +
+        "const host = createMacosHost();\n" +
+        "const operation = new Cancellation();\n" +
+        "const release = operation.hold();\n" +
+        // No child runs: without the hold, plainport would exit 130 at once instead of letting the saga report.
+        "const done = new Promise((resolve) => operation.signal.addEventListener('abort', () =>\n" +
+        "  setTimeout(() => { release(); resolve(42); }, 200)));\n" +
+        "stopOnSignals(host, done, { stderr: (t) => process.stderr.write(t), settleMs: 20_000, operation });\n" +
+        "console.log('ready');\n" +
+        "process.exitCode = await done;\n",
+    );
+    const parent = Bun.spawn([process.execPath, fixture], {
+      cwd: dir,
+      env: { ...env, HOME: dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    parents.push(parent);
+    const reader = parent.stdout.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
+    reader.releaseLock();
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(42);
+  });
+
   test("with no child running, Ctrl-C exits 130 at once, without waiting", async () => {
     const { parent } = await startParent("", "run");
     const started = performance.now();

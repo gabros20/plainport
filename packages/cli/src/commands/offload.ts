@@ -1,10 +1,12 @@
 // plainport offload (DESIGN.md "Offload process", "CLI design"). offload is confirm-class: it sends the project off
-// this machine and deletes the local copy. In this build only its preview runs: --dry-run (always read, D18) plans
-// the offload, prints the plan as DESIGN.md shows it, and saves it under plans/ so `--plan <id>` can approve it
-// (D36). The real run arrives with the offload saga (M1 Task 12); until then it refuses with command.unavailable
-// after the gate, so --yes or an approved plan still leaves everything as it was. A plan with blockers exits 6 with
-// the plan as the error's data (D14, D38). The argument is variadic in the contract; M1 takes one project (D38).
+// this machine and deletes the local copy, so it runs with --yes or an approved --plan <id> (D36). --dry-run (always
+// read, D18) plans the offload, prints the plan as DESIGN.md shows it, and saves it under plans/ so `--plan <id>` can
+// approve it; a plan with blockers exits 6 with the plan as the error's data (D14, D38). A real run is core's offload
+// saga: it plans afresh (with --plan, the folder must still match the approved plan), stops on blockers that
+// --allow does not override, snapshots, verifies, commits and releases. The argument is variadic in the contract;
+// M1 takes one project (D38).
 
+import { openEventMirror } from "@plainport/blob-fs";
 import { type Finding, fail, failWith, finding, ok, shellWord } from "@plainport/contract";
 import {
   ConfigLoader,
@@ -13,6 +15,7 @@ import {
   PlanSchema,
   planOffload,
   resolveProject,
+  runOffload,
   savePlan,
   systemErrorCode,
   ulid,
@@ -92,6 +95,9 @@ export const offload = defineCommand({
       .boolean()
       .optional()
       .meta({ description: "Keep installed dependencies (node_modules) in the snapshot" }),
+    allow: z.array(z.string()).optional().meta({
+      description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
+    }),
   }),
   output: z.looseObject({
     op: z.string(),
@@ -99,21 +105,25 @@ export const offload = defineCommand({
     project: z.string(),
     snapshot: z.string(),
     freedBytes: z.int().nonnegative(),
+    store: z.string(),
+    stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
+    trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
+    keepUntil: z.iso
+      .datetime()
+      .optional()
+      .meta({ description: "keepLocalFor: the trash is kept until then" }),
   }),
   examples: [
     { argv: ["offload", "work:clients/acme/web", "--dry-run"], summary: "Plan offloading a project" },
+    { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
   ],
-  human: (data) => `offloaded ${data.project} as snapshot ${data.snapshot}`,
+  human: (data) =>
+    [
+      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; freed ${formatBytes(data.freedBytes)}`,
+      ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
+      ...(data.keepUntil === undefined ? [] : [`kept      ${data.trash} until ${data.keepUntil}`]),
+    ].join("\n"),
   handler: async (args, ctx) => {
-    if (!ctx.dryRun) {
-      return fail(
-        finding("command.unavailable", {
-          message:
-            "offload cannot run for real in this build yet (the offload saga arrives in M1 Task 12); nothing was changed",
-          fix: `plainport offload ${args.project.map(shellWord).join(" ")} --dry-run`,
-        }),
-      );
-    }
     const local = await thisDevice(ctx);
     if (!local.ok) return local;
     const { paths, device } = local.value;
@@ -131,6 +141,37 @@ export const offload = defineCommand({
           fix: `plainport root bind ${ref.root} <path> if the root lives elsewhere on this device`,
         }),
       );
+    }
+    if (!ctx.dryRun) {
+      const release = ctx.holdSignal();
+      try {
+        const done = await runOffload(
+          {
+            host: ctx.system,
+            checks: ctx.checks,
+            plugins: ctx.plugins,
+            paths,
+            device,
+            env: ctx.env,
+            loader: new ConfigLoader(ctx.io, paths),
+            opener: ctx.stores,
+            openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
+            emit: (event) => ctx.output.emit(event),
+            log: (level, message) => ctx.output.log(level, message),
+            signal: ctx.signal,
+          },
+          {
+            project: ref,
+            ...(args.plan === undefined ? {} : { plan: args.plan }),
+            ...(args.allow === undefined ? {} : { allow: args.allow }),
+            ...(args["keep-deps"] === true ? { keepDeps: true } : {}),
+            ...(ctx.store === undefined ? {} : { store: ctx.store }),
+          },
+        );
+        return done.ok ? ok({ ...done.value, exitCode: 0 as const }) : done;
+      } finally {
+        release();
+      }
     }
     const now = ctx.clock.now();
     const op = ulid(now.getTime());
