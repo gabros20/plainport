@@ -57,7 +57,14 @@ import { captureTree, invariantViolations, type TreeCapture } from "../testing/i
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { ulid } from "../ulid.ts";
-import { type RecoverDeps, type RecoveryReport, recover } from "./recover.ts";
+import {
+  OFFLOAD_RECOVERY,
+  ONLOAD_RECOVERY,
+  RECOVERY_RULE_OUTCOMES,
+  type RecoverDeps,
+  type RecoveryReport,
+  recover,
+} from "./recover.ts";
 import { stagingJsonSchemas } from "./staging.ts";
 import { collectTrash, housekeeping, type TrashDeps } from "./trash.ts";
 
@@ -1937,5 +1944,89 @@ describe("fix wave r3: staging gc finds and staging it cannot reach", () => {
     renameSync(join(box.home, "old.away"), join(box.home, "old"));
     const back = value(await collectTrash(trashDeps(), { early: false }));
     expect([back.staging.length, back.stagingKept]).toEqual([1, []]);
+  });
+});
+
+describe("fix wave q1: recover's routing table, Ctrl-C and exit code (D64)", () => {
+  const crashApiAt = async (point: string) => {
+    box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    box.file("work/api/README.md", "# api\n");
+    const host = testHost({ faults: { at: point } });
+    await expect(runOffload(offloadDeps(host), { project: await ref("work:api") })).rejects.toBeInstanceOf(
+      InjectedFault,
+    );
+  };
+
+  test("every offload and onload step, and every after-effect seam's step, has exactly one rule with its outcomes", () => {
+    expect(Object.keys(OFFLOAD_RECOVERY).sort()).toEqual([...OFFLOAD_STEPS].sort());
+    expect(Object.keys(ONLOAD_RECOVERY).sort()).toEqual([...ONLOAD_STEPS].sort());
+    for (const step of Object.values(OFFLOAD_AFTER_EFFECT)) expect(OFFLOAD_RECOVERY[step]).toBeDefined();
+    for (const step of Object.values(ONLOAD_AFTER_EFFECT)) expect(ONLOAD_RECOVERY[step]).toBeDefined();
+    for (const rule of [...Object.values(OFFLOAD_RECOVERY), ...Object.values(ONLOAD_RECOVERY)])
+      expect(RECOVERY_RULE_OUTCOMES[rule].length).toBeGreaterThan(0);
+    expect(OFFLOAD_RECOVERY["offload.planned"]).toBe("roll-back");
+    expect(OFFLOAD_RECOVERY["offload.verified"]).toBe("search-store");
+    expect(OFFLOAD_RECOVERY["offload.release.delete"]).toBe("delete-trash");
+    expect(ONLOAD_RECOVERY["onload.swap.start"]).toBe("swap-check");
+  });
+
+  test("the first Ctrl-C stops recover at the next operation: exit 130, the rest pending with their journals", async () => {
+    await crashApiAt("offload.committed");
+    await crashOffloadAt("offload.committed");
+    const stop = new AbortController();
+    const result = await recover(
+      recoverDeps({
+        signal: stop.signal,
+        log: (_level, message) => {
+          if (message.includes(": finished")) stop.abort();
+        },
+      }),
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([130, "operation.cancelled"]);
+    const ops = reportOf(result).operations;
+    expect(ops.map((o) => [o.outcome, o.finding?.code])).toEqual([
+      ["finished", undefined],
+      ["pending", "operation.cancelled"],
+    ]);
+    // The finished one's detached delete may still hold its journal; the cancelled one keeps its own.
+    expect((await journals()).filter((j) => j.project.address === "work:web").map((j) => j.step)).toEqual([
+      "offload.committed",
+    ]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    const again = reportOf(await recover(recoverDeps())).operations;
+    expect(again.filter((o) => o.project === "work:web").map((o) => o.outcome)).toEqual(["finished"]);
+    await expectInvariants();
+  });
+
+  test("the exit code is the most severe across projects: a later diverged-after-commit (8) beats an earlier locked one (11) and an unreadable journal (6)", async () => {
+    await crashApiAt("offload.committed");
+    await crashOffloadAt("offload.committed");
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const api = (await journals()).find((j) => j.project.address === "work:api") as Journal;
+    mkdirSync(box.paths.journalDir, { recursive: true });
+    writeFileSync(
+      journalFile(box.paths, ulid()),
+      JSON.stringify({ v: 2, project: { id: ulid(), address: "work:other" } }),
+    );
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${api.project.id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      const result = await recover(recoverDeps());
+      expect(reportOf(result).operations.map((o) => [o.project, o.outcome])).toEqual([
+        ["work:api", "pending"],
+        ["work:web", "diverged-after-commit"],
+      ]);
+      expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([
+        8,
+        "offload.diverged-after-commit",
+      ]);
+    } finally {
+      await held.release();
+    }
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
   });
 });

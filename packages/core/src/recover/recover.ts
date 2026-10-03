@@ -1,6 +1,7 @@
 // plainport recover (ADR-0008, DESIGN.md "Offload process" and "Onload process" → Journal steps, "Edge cases →
 // Concurrency and interruption"): every open journal on this device is settled, under its project's lock (and the
-// locks of the registered projects nested with it, D53), by the recover tables in saga/offload.ts and saga/onload.ts.
+// locks of the registered projects nested with it, D53), by the step→rule tables OFFLOAD_RECOVERY and ONLOAD_RECOVERY
+// below (D64), which follow the recover tables in saga/offload.ts and saga/onload.ts.
 // Before a saga's commit it rolls back: the folder stays as it was, a staging folder goes, the journal goes. After the
 // commit it finishes, with the very functions the live sagas end with (releaseOffload, finishOnload). Where a lost
 // write (D24) leaves the journal one step behind its effects, the world decides, never the journal's last word:
@@ -64,8 +65,8 @@ import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
-import { OFFLOAD_STEPS, type OffloadStep } from "../saga/offload.ts";
-import { finishOnload, ONLOAD_STEPS, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
+import type { OffloadStep } from "../saga/offload.ts";
+import { finishOnload, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
 import {
   nestedProjects,
   type ProjectLock,
@@ -110,6 +111,8 @@ export interface RecoverDeps {
   log(level: "debug" | "info" | "warn", message: string): void;
   /** The command's clock (keepLocalFor deadlines, events); the host's when absent. */
   now?: () => Date;
+  /** Ctrl-C: recover stops before the next operation (each one is settled or still journaled), exit 130. */
+  signal?: AbortSignal;
 }
 
 export type RecoveredOperation = {
@@ -141,23 +144,94 @@ export type RecoveryReport = {
   unreadable: string[];
 };
 
-const BEFORE_SNAPSHOT: ReadonlySet<string> = new Set<OffloadStep>([
-  "offload.begin",
-  "offload.preflight.done",
-  "offload.scan.done",
-  "offload.strip.done",
-  "offload.planned",
-  "offload.snapshot.start",
-]);
-const RELEASING: ReadonlySet<string> = new Set<OffloadStep>([
-  "offload.committed",
-  "offload.release.trash",
-  "offload.release.moved",
-  "offload.release.stub",
-]);
-const ONLOAD_BEFORE_SWAP: ReadonlySet<string> = new Set<OnloadStep>(
-  ONLOAD_STEPS.slice(0, ONLOAD_STEPS.indexOf("onload.swap.start")),
-);
+/**
+ * How recover settles a journal at a step (D64), the table of the file comment:
+ *
+ *   roll-back      nothing committed: only the journal and the operation's staging go
+ *   discard        write the snapshot-discarded event the store lacks (D28), then roll back
+ *   search-store   look for this op's offloaded event (D50): none, roll back; a fork the fold's conflicts name, keep
+ *                  the folder; no head for another reason, pending (D61); otherwise committed, release
+ *   fork           append the fork event the store lacks, keep the folder
+ *   commit-check   the journaled event on the store and the operation's own: release; otherwise roll back
+ *   release        committed by the journal's word: finish the release (releaseOffload, D51)
+ *   delete-trash   a released offload: delete its trash once keepUntil, if any, has passed
+ *   swap-check     swapped (onloadSwapped): finish the onload; otherwise roll back
+ *   finish-onload  finish the onload (finishOnload)
+ *
+ * A step missing from the tables (a later version's) is pending, never routed by default. Every rule may also end
+ * `pending` (a store that does not answer, a lock held, a volume away).
+ */
+export type RecoveryRule =
+  | "roll-back"
+  | "discard"
+  | "search-store"
+  | "fork"
+  | "commit-check"
+  | "release"
+  | "delete-trash"
+  | "swap-check"
+  | "finish-onload";
+
+export const OFFLOAD_RECOVERY = {
+  "offload.begin": "roll-back",
+  "offload.preflight.done": "roll-back",
+  "offload.scan.done": "roll-back",
+  "offload.strip.done": "roll-back",
+  "offload.planned": "roll-back",
+  "offload.snapshot.start": "roll-back",
+  "offload.snapshot.discarded": "discard",
+  "offload.snapshot.done": "search-store",
+  "offload.verified": "search-store",
+  "offload.diverged": "fork",
+  "offload.commit.start": "commit-check",
+  "offload.committed": "release",
+  "offload.release.trash": "release",
+  "offload.release.moved": "release",
+  "offload.release.stub": "release",
+  "offload.release.delete": "delete-trash",
+} as const satisfies Record<OffloadStep, RecoveryRule>;
+
+export const ONLOAD_RECOVERY = {
+  "onload.begin": "roll-back",
+  "onload.restore.start": "roll-back",
+  "onload.restored": "roll-back",
+  "onload.verified": "roll-back",
+  "onload.swap.start": "swap-check",
+  "onload.swapped": "finish-onload",
+  "onload.commit.start": "finish-onload",
+  "onload.committed": "finish-onload",
+} as const satisfies Record<OnloadStep, RecoveryRule>;
+
+/** The outcomes each rule may reach, for the crash matrix (Task 15) to check a settled operation against. */
+export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly RecoveryOutcome[]>> = {
+  "roll-back": ["rolled-back", "pending"],
+  discard: ["rolled-back", "pending"],
+  "search-store": ["rolled-back", "forked", "finished", "diverged-after-commit", "pending"],
+  fork: ["forked", "pending"],
+  "commit-check": ["rolled-back", "finished", "diverged-after-commit", "pending"],
+  release: ["finished", "diverged-after-commit", "pending"],
+  "delete-trash": ["trash-deleted", "trash-kept", "pending"],
+  "swap-check": ["rolled-back", "finished", "pending"],
+  "finish-onload": ["finished", "pending"],
+};
+
+type OffloadRule = (typeof OFFLOAD_RECOVERY)[OffloadStep];
+type OnloadRule = (typeof ONLOAD_RECOVERY)[OnloadStep];
+const offloadRule = (step: string): OffloadRule | undefined =>
+  Object.hasOwn(OFFLOAD_RECOVERY, step) ? OFFLOAD_RECOVERY[step as OffloadStep] : undefined;
+const onloadRule = (step: string): OnloadRule | undefined =>
+  Object.hasOwn(ONLOAD_RECOVERY, step) ? ONLOAD_RECOVERY[step as OnloadStep] : undefined;
+
+/**
+ * Exit codes from the most severe down (D64): a kept folder with the user's edits or a conflict first, then a refusal,
+ * a pending journal, a held lock, a store that did not answer, a config problem, an unexpected failure. A cancel
+ * (130) outranks them all: the person stopped recover, and running it again reports the rest.
+ */
+const SEVERITY = [130, 8, 7, 6, 11, 9, 5, 1];
+const severity = (code: number): number => {
+  const at = SEVERITY.indexOf(code);
+  return at === -1 ? SEVERITY.length : at;
+};
 
 /** One operation's settlement, and the failure behind it when it is not settled (its exit code). */
 type Settled = { op: RecoveredOperation; problem?: Failure };
@@ -188,23 +262,38 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       ...group.filter((j) => j.step !== "offload.release.delete"),
       ...group.filter((j) => j.step === "offload.release.delete"),
     ];
-    settled.push(...(await settleProject(ordered)));
+    settled.push(...(deps.signal?.aborted ? ordered.map(cancelled) : await settleProject(ordered)));
   }
 
   const report: RecoveryReport = { operations: settled.map((s) => s.op), unreadable: read.unreadable };
-  if (read.unreadable.length > 0) {
-    return failWith(
-      finding("journal.pending", {
-        message: `${read.unreadable.join(", ")} ${read.unreadable.length === 1 ? "is a journal" : "are journals"} this version of plainport cannot read; ${read.unreadable.length === 1 ? "it was" : "they were"} left as ${read.unreadable.length === 1 ? "it is" : "they are"}`,
-        fix: "run the plainport that wrote it (plainport recover), or plainport doctor",
-        paths: read.unreadable,
-      }),
-      report,
+  const problems = settled.flatMap((s) => (s.problem === undefined ? [] : [s.problem]));
+  if (read.unreadable.length > 0)
+    problems.push(
+      fail(
+        finding("journal.pending", {
+          message: `${read.unreadable.join(", ")} ${read.unreadable.length === 1 ? "is a journal" : "are journals"} this version of plainport cannot read; ${read.unreadable.length === 1 ? "it was" : "they were"} left as ${read.unreadable.length === 1 ? "it is" : "they are"}`,
+          fix: "run the plainport that wrote it (plainport recover), or plainport doctor",
+          paths: read.unreadable,
+        }),
+      ),
+    );
+  // The most severe across every project (D64); among equals, the first.
+  const [worst] = [...problems].sort((a, b) => severity(a.exitCode) - severity(b.exitCode));
+  if (worst !== undefined) return failWith(worst.finding, report, worst.exitCode);
+  return ok(report);
+
+  /** An operation recover did not reach because Ctrl-C stopped it: still journaled, for the next recover. */
+  function cancelled(journal: Journal): Settled {
+    return pending(
+      journal,
+      fail(
+        finding("operation.cancelled", {
+          message: `recover was stopped before the ${journal.kind} ${journal.op} of ${journal.project.address}; it was left as it is with its journal`,
+          fix: "plainport recover",
+        }),
+      ),
     );
   }
-  const problem = settled.find((s) => s.problem !== undefined)?.problem;
-  if (problem !== undefined) return failWith(problem.finding, report, problem.exitCode);
-  return ok(report);
 
   /** A project's journals, oldest first, under its lock and its nested projects' (D53). */
   async function settleProject(journals: Journal[]): Promise<Settled[]> {
@@ -226,6 +315,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         const out: Settled[] = [];
         let held: RecoveredOperation | undefined;
         for (const journal of journals) {
+          // Ctrl-C: a safe point, since every operation before this one is settled or still journaled.
+          if (deps.signal?.aborted) {
+            out.push(cancelled(journal));
+            continue;
+          }
           // Read again under the lock: a detached delete or the onload before it may have closed it since.
           const now = await reread(journal.op);
           if (now === undefined) continue;
@@ -440,84 +534,102 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   async function settleOffload(journal: OffloadJournal, lock: ProjectLock): Promise<Settled> {
-    const step = journal.step;
-    if (!(OFFLOAD_STEPS as readonly string[]).includes(step)) return unknownStep(journal);
+    const rule = offloadRule(journal.step);
+    if (rule === undefined) return unknownStep(journal);
     // An operation whose volume is away keeps its journal, whatever its step: it is settled once the volume is back.
     const away = await unavailable(journal);
     if (away !== undefined) return away;
-    if (BEFORE_SNAPSHOT.has(step)) return rollBack(journal);
-    if (step === "offload.release.delete") return deleteTrash(journal);
-    if (RELEASING.has(step)) return release(journal, lock);
-
-    const store = await storeOf(journal);
-    if (!store.ok) return pending(journal, store);
-    const blob = store.value.blob;
-
-    if (step === "offload.snapshot.discarded") {
-      const discarded = journal.discarded;
-      if (discarded !== undefined) {
-        const there = await eventState(
-          blob,
-          discarded.event,
-          (e) =>
-            e.type === "snapshot-discarded" &&
-            e.op === journal.op &&
-            e.snapshot === journal.op &&
-            e.project === journal.project.id,
-        );
-        if (!there.ok) return pending(journal, there);
-        // A torn or foreign file under its id is no record: the discard is written again under a new id (D28).
-        let id = discarded.event;
-        if (typeof there.value === "object") {
-          const renamed = await newEventId(journal, (next) => ({ discarded: { ...discarded, event: next } }));
-          if (!renamed.ok) return pending(journal, renamed);
-          id = renamed.value;
-        }
-        if (there.value !== "ours") {
-          const written = await appendEvent(storeEventLog(blob), {
-            v: 1,
-            id,
-            type: "snapshot-discarded",
-            device: deps.device.id,
-            at: clock().toISOString(),
-            op: journal.op,
-            project: journal.project.id,
-            root: journal.project.rootId,
-            path: journal.project.path,
-            snapshot: journal.op,
-            stored: { [journal.store.name]: discarded.snapshot },
-          });
-          if (!written.ok) return pending(journal, written);
-        }
+    switch (rule) {
+      case "roll-back":
+        return rollBack(journal);
+      case "release":
+        return release(journal, lock);
+      case "delete-trash":
+        return deleteTrash(journal);
+      case "discard":
+      case "fork":
+      case "commit-check":
+      case "search-store": {
+        const store = await storeOf(journal);
+        if (!store.ok) return pending(journal, store);
+        if (rule === "discard") return discard(journal, store.value.blob);
+        if (rule === "fork") return keepFork(journal, store.value);
+        if (rule === "commit-check") return commitCheck(journal, store.value.blob, lock);
+        return searchStore(journal, store.value.blob, lock);
       }
-      return rollBack(journal);
+      default: {
+        const never: never = rule;
+        return never;
+      }
     }
+  }
 
-    if (step === "offload.diverged") return keepFork(journal, store.value);
-
-    if (step === "offload.commit.start") {
-      const there =
-        journal.event === undefined
-          ? ok("absent" as const)
-          : await eventState(
-              blob,
-              journal.event,
-              (e) =>
-                e.type === "offloaded" &&
-                e.op === journal.op &&
-                e.snapshot === journal.op &&
-                e.project === journal.project.id &&
-                (journal.verified === undefined || e.stored[journal.store.name] === journal.verified),
-            );
+  /** offload.snapshot.discarded: the snapshot-discarded event the store lacks is written (D28), then roll back. */
+  async function discard(journal: OffloadJournal, blob: BlobStore): Promise<Settled> {
+    const discarded = journal.discarded;
+    if (discarded !== undefined) {
+      const there = await eventState(
+        blob,
+        discarded.event,
+        (e) =>
+          e.type === "snapshot-discarded" &&
+          e.op === journal.op &&
+          e.snapshot === journal.op &&
+          e.project === journal.project.id,
+      );
       if (!there.ok) return pending(journal, there);
-      // Never appended: nothing was committed, and the folder was never touched (D24).
-      if (there.value === "absent") return rollBack(journal);
-      // A torn or foreign file is no commit (D41, D42): the folder stays, and the report says why.
-      if (there.value !== "ours") return rollBack(journal, there.value);
-      return committed(journal, lock, {});
+      // A torn or foreign file under its id is no record: the discard is written again under a new id (D28).
+      let id = discarded.event;
+      if (typeof there.value === "object") {
+        const renamed = await newEventId(journal, (next) => ({ discarded: { ...discarded, event: next } }));
+        if (!renamed.ok) return pending(journal, renamed);
+        id = renamed.value;
+      }
+      if (there.value !== "ours") {
+        const written = await appendEvent(storeEventLog(blob), {
+          v: 1,
+          id,
+          type: "snapshot-discarded",
+          device: deps.device.id,
+          at: clock().toISOString(),
+          op: journal.op,
+          project: journal.project.id,
+          root: journal.project.rootId,
+          path: journal.project.path,
+          snapshot: journal.op,
+          stored: { [journal.store.name]: discarded.snapshot },
+        });
+        if (!written.ok) return pending(journal, written);
+      }
     }
+    return rollBack(journal);
+  }
 
-    // snapshot.done, verified: the write after them may be the one a power loss dropped (D50).
+  /** offload.commit.start: the journaled event on the store, and the operation's own, is the commit. */
+  async function commitCheck(journal: OffloadJournal, blob: BlobStore, lock: ProjectLock): Promise<Settled> {
+    const there =
+      journal.event === undefined
+        ? ok("absent" as const)
+        : await eventState(
+            blob,
+            journal.event,
+            (e) =>
+              e.type === "offloaded" &&
+              e.op === journal.op &&
+              e.snapshot === journal.op &&
+              e.project === journal.project.id &&
+              (journal.verified === undefined || e.stored[journal.store.name] === journal.verified),
+          );
+    if (!there.ok) return pending(journal, there);
+    // Never appended: nothing was committed, and the folder was never touched (D24).
+    if (there.value === "absent") return rollBack(journal);
+    // A torn or foreign file is no commit (D41, D42): the folder stays, and the report says why.
+    if (there.value !== "ours") return rollBack(journal, there.value);
+    return committed(journal, lock, {});
+  }
+
+  /** snapshot.done, verified: the write after them may be the one a power loss dropped (D50). */
+  async function searchStore(journal: OffloadJournal, blob: BlobStore, lock: ProjectLock): Promise<Settled> {
     const events = await readEvents(storeEventLog(blob));
     if (!events.ok) return pending(journal, events);
     const made = events.value.events.find(
@@ -750,11 +862,26 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   async function settleOnload(journal: OnloadJournal): Promise<Settled> {
-    if (!(ONLOAD_STEPS as readonly string[]).includes(journal.step)) return unknownStep(journal);
+    const rule = onloadRule(journal.step);
+    if (rule === undefined) return unknownStep(journal);
     const away = await unavailable(journal);
     if (away !== undefined) return away;
-    if (ONLOAD_BEFORE_SWAP.has(journal.step)) return rollBack(journal);
-    if (journal.step === "onload.swap.start") {
+    switch (rule) {
+      case "roll-back":
+        return rollBack(journal);
+      case "swap-check":
+      case "finish-onload":
+        return finishOrRollBack(journal, rule === "swap-check");
+      default: {
+        const never: never = rule;
+        return never;
+      }
+    }
+  }
+
+  /** swap-check: swapped (onloadSwapped) finishes, else rolls back; finish-onload: finishes (finishOnload). */
+  async function finishOrRollBack(journal: OnloadJournal, check: boolean): Promise<Settled> {
+    if (check) {
       let swapped: boolean;
       try {
         swapped = await onloadSwapped(io, journal);

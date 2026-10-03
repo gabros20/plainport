@@ -73,7 +73,7 @@ export const recover = defineCommand({
     })
     .meta({
       description:
-        "What recover did with each open journal. A failure carries this report as data: exit 8 for diverged-after-commit, else the first pending operation's code",
+        "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 1",
     }),
   examples: [{ argv: ["recover"], summary: "Settle whatever was interrupted on this device" }],
   human: (data) =>
@@ -104,6 +104,7 @@ export const recover = defineCommand({
         openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
+        signal: ctx.signal,
       });
     } finally {
       release();
