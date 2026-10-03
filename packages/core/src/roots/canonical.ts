@@ -4,6 +4,7 @@
 // is probed read-only: an existing name is looked up with its case swapped and compared by device and inode.
 
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import { errorCode, type LocalIo } from "../io.ts";
 
 export interface CanonicalPath {
@@ -23,7 +24,49 @@ const sameFile = async (io: LocalIo, a: string, b: string): Promise<boolean> => 
     const [x, y] = await Promise.all([io.fs.stat(a), io.fs.stat(b)]);
     return x.dev === y.dev && x.ino === y.ino;
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return false;
+    // Not there, or not readable: either way not provably the same file, so the volume counts as case-sensitive.
+    if (errorCode(error) !== undefined) return false;
+    throw error;
+  }
+};
+
+const ABSENT = new Set(["ENOENT", "ENOTDIR"]);
+
+/**
+ * The finding for a path the file system refuses to resolve, as a user-caused failure (AGENTS.md rule 7): a
+ * permission problem is root.not-writable, anything else (a symlink loop, a name too long) root.path-missing.
+ */
+export const unresolvable = (path: string, error: unknown): Failure => {
+  const code = errorCode(error) ?? "error";
+  const reason = error instanceof Error ? error.message : String(error);
+  return code === "EACCES" || code === "EPERM"
+    ? fail(
+        finding("root.not-writable", {
+          message: `plainport cannot read ${path} (${reason})`,
+          fix: `make the folders on the way to ${path} readable (chmod u+rx), or choose another folder`,
+          paths: [path],
+        }),
+      )
+    : fail(
+        finding("root.path-missing", {
+          message: `${path} cannot be resolved (${reason})`,
+          fix: `fix the folder or symlink at ${path}, or choose another folder`,
+          paths: [path],
+        }),
+      );
+};
+
+/** What is at the path (following symlinks), undefined when nothing is; a refusal for a path that cannot be read. */
+export const probeKind = async (
+  io: LocalIo,
+  path: string,
+): Promise<Result<"dir" | "file" | "other" | undefined>> => {
+  try {
+    return ok((await io.fs.stat(path)).kind);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code !== undefined && ABSENT.has(code)) return ok(undefined);
+    if (code !== undefined) return unresolvable(path, error);
     throw error;
   }
 };
@@ -39,22 +82,25 @@ const ignoresCase = async (io: LocalIo, real: string): Promise<boolean> => {
   return false;
 };
 
-export const canonicalPath = async (io: LocalIo, path: string): Promise<CanonicalPath> => {
+/** The path's canonical form; a refusal (unresolvable) when the file system cannot resolve it. */
+export const canonicalPath = async (io: LocalIo, path: string): Promise<Result<CanonicalPath>> => {
   const absolute = resolve(path);
   const missing: string[] = [];
   let existing = absolute;
   for (;;) {
     try {
       const real = await io.fs.realpath(existing);
-      return {
+      return ok({
         path: absolute,
         real: missing.length === 0 ? real : join(real, ...missing.reverse()),
         caseInsensitive: await ignoresCase(io, real),
-      };
+      });
     } catch (error) {
       const code = errorCode(error);
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-      if (existing === dirname(existing)) return { path: absolute, real: absolute, caseInsensitive: false };
+      if (code === undefined) throw error;
+      if (!ABSENT.has(code)) return unresolvable(absolute, error);
+      if (existing === dirname(existing))
+        return ok({ path: absolute, real: absolute, caseInsensitive: false });
       missing.push(basename(existing));
       existing = dirname(existing);
     }

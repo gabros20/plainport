@@ -5,12 +5,12 @@
 
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import { errorCode, type LocalIo } from "../io.ts";
+import type { LocalIo } from "../io.ts";
 import { type Env, expandHome, type PlainportPaths } from "../paths.ts";
 import { type ProjectRegistry, RelativePathSchema, readRegistry } from "../registry.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { projectAt } from "./boundary.ts";
-import { canonicalPath, overlapOf } from "./canonical.ts";
+import { canonicalPath, overlapOf, probeKind } from "./canonical.ts";
 import { listRoots, type RootView } from "./roots.ts";
 
 export interface ProjectRef {
@@ -45,14 +45,10 @@ const notFound = (input: string, detail?: string) =>
     }),
   );
 
+/** What is at the path; a path the file system refuses (a symlink loop, no permission) names no project. */
 const kindAt = async (io: LocalIo, path: string) => {
-  try {
-    return (await io.fs.stat(path)).kind;
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
+  const probed = await probeKind(io, path);
+  return probed.ok ? probed.value : undefined;
 };
 
 const dirOf = (root: RootView | undefined, path: string, override?: string): string | undefined =>
@@ -85,11 +81,16 @@ const byPath = async (
   roots: RootView[],
   registry: ProjectRegistry,
 ): Promise<Result<ProjectRef>> => {
-  if ((await kindAt(io, path)) === undefined) return notFound(input, `${path} does not exist`);
-  const canon = await canonicalPath(io, path);
+  if ((await kindAt(io, path)) === undefined)
+    return notFound(input, `${path} does not exist or cannot be read`);
+  const resolved = await canonicalPath(io, path);
+  if (!resolved.ok) return notFound(input, resolved.finding.message);
+  const canon = resolved.value;
   for (const root of roots) {
     if (root.path === undefined) continue;
-    const rootCanon = await canonicalPath(io, root.path);
+    const rootResolved = await canonicalPath(io, root.path);
+    if (!rootResolved.ok) continue; // a root whose folder cannot be resolved holds nothing reachable here
+    const rootCanon = rootResolved.value;
     const relation = overlapOf(canon, rootCanon);
     if (relation === "same") return notFound(input, `${path} is the folder of root ${root.key} itself`);
     if (relation !== "inside") continue;

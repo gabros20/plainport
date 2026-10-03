@@ -9,10 +9,10 @@ import { ConfigLoader } from "../config/load.ts";
 import { updateManaged } from "../config/managed.ts";
 import { type ConfigLayer, ConfigLayerSchema } from "../config/schema.ts";
 import { readTomlFile } from "../config/toml.ts";
-import { errorCode, type LocalIo } from "../io.ts";
+import type { LocalIo } from "../io.ts";
 import { type Env, expandHome, type PlainportPaths } from "../paths.ts";
 import { RootKeySchema } from "../registry.ts";
-import { type CanonicalPath, canonicalPath, overlapOf } from "./canonical.ts";
+import { canonicalPath, overlapOf, probeKind } from "./canonical.ts";
 
 type RootTable = NonNullable<ConfigLayer["roots"]>[string];
 
@@ -41,14 +41,10 @@ export const displayPath = (path: string, home: string): string =>
 /** A binding as an absolute path; a relative one is taken relative to the home folder. */
 export const bindingPath = (binding: string, home: string): string => expandHome(binding, home, home);
 
+/** What is at the path, for display: a path that cannot be read counts as missing. */
 const kindAt = async (io: LocalIo, path: string): Promise<"dir" | "file" | "other" | undefined> => {
-  try {
-    return (await io.fs.stat(path)).kind;
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
+  const probed = await probeKind(io, path);
+  return probed.ok ? probed.value : undefined;
 };
 
 /** A path under `/Volumes/<name>` whose volume is not mounted. */
@@ -99,7 +95,7 @@ export const listRoots = async (
       findings.push(
         finding("root.defined-twice", {
           message: `config.toml and managed.toml both define root ${key}; config.toml's settings win`,
-          fix: `edit root ${key} in ${paths.configFile}, and remove it from config.toml to let plainport manage it`,
+          fix: `edit root ${key} in ${paths.configFile}, or remove it there to let plainport manage it in managed.toml`,
           paths: [paths.configFile, paths.managedFile],
         }),
       );
@@ -135,6 +131,8 @@ export interface WriteRootsOptions {
   create?: boolean;
   /** A local store to record, make the default, and give to each root added here (`init --store-path`). */
   store?: { name: string; path: string };
+  /** Runs under the lock once every check has passed, before anything is created or written; a refusal stops it. */
+  beforeWrite?: () => Promise<Result<unknown>>;
   timeoutMs?: number;
 }
 
@@ -240,7 +238,9 @@ export const writeRoots = async (
             }),
           );
         }
-        const kind = await kindAt(io, path);
+        const probed = await probeKind(io, path);
+        if (!probed.ok) return probed;
+        const kind = probed.value;
         if (kind === undefined && options.create !== true) {
           return fail(
             finding("root.path-missing", {
@@ -269,14 +269,24 @@ export const writeRoots = async (
           );
         }
 
-        const canon = await canonicalPath(io, path);
+        const resolved = await canonicalPath(io, path);
+        if (!resolved.ok) return resolved;
+        const canon = resolved.value;
         const others = new Set([...Object.keys(user.roots ?? {}), ...Object.keys(roots)]);
         others.delete(key);
         for (const other of [...others].sort()) {
           const binding = bindingOf(other);
           if (binding === undefined) continue;
           const otherPath = bindingPath(binding, home);
-          const otherCanon: CanonicalPath = await canonicalPath(io, otherPath);
+          const otherResolved = await canonicalPath(io, otherPath);
+          if (!otherResolved.ok) {
+            return fail({
+              ...otherResolved.finding,
+              message: `root ${other}'s folder cannot be checked for overlap: ${otherResolved.finding.message}`,
+              fix: `fix root ${other}'s folder, or point it elsewhere: plainport root bind ${other} <path>`,
+            });
+          }
+          const otherCanon = otherResolved.value;
           const relation = overlapOf(canon, otherCanon);
           if (relation === undefined) continue;
           const realNote =
@@ -335,6 +345,10 @@ export const writeRoots = async (
         written.store = { name, path };
       }
 
+      if (options.beforeWrite !== undefined) {
+        const before = await options.beforeWrite();
+        if (!before.ok) return before;
+      }
       for (const path of toCreate) {
         try {
           await io.fs.mkdirp(path);

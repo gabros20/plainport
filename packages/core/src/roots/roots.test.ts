@@ -238,8 +238,45 @@ describe("roots: config.toml wins", () => {
         code: "root.defined-twice",
         severity: "warn",
         paths: [box.paths.configFile, box.paths.managedFile],
+        fix: `edit root work in ${box.paths.configFile}, or remove it there to let plainport manage it in managed.toml`,
       }),
     ]);
+  });
+});
+
+describe("roots: unreadable paths are findings, not crashes", () => {
+  test("a symlink loop as the folder is root.path-missing", async () => {
+    symlinkSync(join(box.home, "loop"), join(box.home, "loop"));
+    const result = await write([{ kind: "add", key: "work", path: "~/loop/x" }]);
+    expect(result).toMatchObject({ ok: false, exitCode: 6, finding: { code: "root.path-missing" } });
+    if (result.ok) return;
+    expect(result.finding.fix).toBeDefined();
+  });
+
+  test("another root whose folder cannot be resolved stops the overlap check with its name", async () => {
+    symlinkSync(join(box.home, "loop"), join(box.home, "loop"));
+    box.file(".config/plainport/config.toml", '[roots.old]\non = { mbp = "~/loop/x" }\n');
+    box.dir("work");
+    const result = await write([{ kind: "add", key: "work", path: "~/work" }]);
+    expect(result).toMatchObject({ ok: false, exitCode: 6, finding: { code: "root.path-missing" } });
+    if (result.ok) return;
+    expect(result.finding.message).toContain("old");
+  });
+
+  test("a folder behind an unreadable parent is root.not-writable", async () => {
+    if (process.getuid?.() === 0) return; // root reads anything
+    const parent = box.dir("sealed");
+    box.dir("sealed/inside");
+    chmodSync(parent, 0o000);
+    try {
+      expect(await write([{ kind: "add", key: "work", path: "~/sealed/inside" }])).toMatchObject({
+        ok: false,
+        exitCode: 6,
+        finding: { code: "root.not-writable" },
+      });
+    } finally {
+      chmodSync(parent, 0o755);
+    }
   });
 });
 

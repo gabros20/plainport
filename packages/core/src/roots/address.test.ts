@@ -116,6 +116,15 @@ describe("roots: project addresses", () => {
     expect((await address("clients/old.plainport", join(box.home, "work"))).address).toBe("work:clients/old");
   });
 
+  test("a path through a symlink loop is project.not-found, not a crash", async () => {
+    symlinkSync(join(box.home, "work", "loop"), join(box.home, "work", "loop"));
+    expect(await resolve("~/work/loop/x")).toMatchObject({
+      ok: false,
+      exitCode: 4,
+      finding: { code: "project.not-found" },
+    });
+  });
+
   test("a damaged stub is stub.invalid", async () => {
     const stub = box.file("work/bad.plainport", "{}");
     expect(await resolve(stub)).toMatchObject({ ok: false, finding: { code: "stub.invalid" } });
