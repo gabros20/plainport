@@ -8,6 +8,6 @@
     "--json"
   ],
   "exitCode": 0,
-  "stdout": "{\"message_type\":\"initialized\",\"id\":\"74190c1f3b3d0bc398fbf63aeed41c97d35d993b301fe6cc069f24bd04921a37\",\"repository\":\"/tmp/restic-fixture/repo\"}\n",
+  "stdout": "{\"message_type\":\"initialized\",\"id\":\"cb8ea43f3a930133a3851f1e185ceca4a4903b5c9e799e7c70941d8a1590e223\",\"repository\":\"/tmp/restic-fixture/repo\"}\n",
   "stderr": ""
 }

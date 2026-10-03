@@ -5,12 +5,11 @@
     "--cache-dir",
     "/tmp/restic-fixture/cache",
     "restore",
-    "8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa",
-    "--target",
-    "/tmp/restic-fixture/restored",
+    "b673603b7fadbfec441ee6db9ee32089fba18cea30329b5a8c891425c7fa7b61",
+    "--target=/tmp/restic-fixture/restored",
     "--json"
   ],
   "exitCode": 0,
-  "stdout": "{\"message_type\":\"summary\",\"total_files\":4,\"files_restored\":4,\"total_bytes\":7,\"bytes_restored\":7}\n",
+  "stdout": "{\"message_type\":\"summary\",\"total_files\":5,\"files_restored\":5,\"total_bytes\":7,\"bytes_restored\":7}\n",
   "stderr": ""
 }

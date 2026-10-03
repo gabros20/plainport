@@ -9,5 +9,5 @@
   ],
   "exitCode": 11,
   "stdout": "{\"message_type\":\"summary\",\"num_errors\":1,\"broken_packs\":null,\"suggest_repair_index\":false,\"suggest_prune\":false}\n",
-  "stderr": "{\"message_type\":\"exit_error\",\"code\":11,\"message\":\"unable to create lock in backend: repository is already locked by PID 80049 on fixture-host by fixture-user (UID 501, GID 20)\\nlock was created at 2026-10-03 03:36:59 (537.336ms ago)\\nstorage ID 90370f04\\nthe `unlock` command can be used to remove stale locks\"}\n"
+  "stderr": "{\"message_type\":\"exit_error\",\"code\":11,\"message\":\"unable to create lock in backend: repository is already locked by PID 92681 on fixture-host by fixture-user (UID 501, GID 20)\\nlock was created at 2026-10-03 04:06:22 (518.257ms ago)\\nstorage ID b68c4328\\nthe `unlock` command can be used to remove stale locks\"}\n"
 }

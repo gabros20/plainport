@@ -31,6 +31,7 @@ const scrub = (text: string): string =>
     .replaceAll(`/private${root}`, FIXTURE_ROOT)
     .replaceAll(root, FIXTURE_ROOT)
     .replaceAll(`"hostname":"${hostname()}"`, '"hostname":"fixture-host"')
+    .replaceAll(` by ${userInfo().username}@${hostname()} `, " by fixture-user@fixture-host ")
     .replaceAll(` on ${hostname()} by ${userInfo().username} `, " on fixture-host by fixture-user ")
     .replaceAll(`"username":"${userInfo().username}"`, '"username":"fixture-user"')
     .replaceAll(`"user":"${userInfo().username}"`, '"user":"fixture-user"');
@@ -99,6 +100,7 @@ const holdLock = async () => {
     stderr: "pipe",
   });
   for (let i = 0; i < 100 && readdirSync(join(repo, "locks")).length === 0; i++) await Bun.sleep(50);
+  if (readdirSync(join(repo, "locks")).length === 0) throw new Error("the lock holder took no lock within 5 s");
   return child;
 };
 
@@ -111,6 +113,8 @@ try {
   writeFileSync(join(src, "sub", "b"), "x");
   writeFileSync(join(src, "node_modules", "dep.js"), "stripped\n");
   symlinkSync("a.txt", join(src, "link"));
+  // A name and a target that both hold " -> ", the separator of `ls -l`.
+  symlinkSync("x -> y", join(src, "sub", "odd -> name"));
 
   run("version", ["version", "--json"]);
   run("init", [...global, "init", "--json"]);
@@ -144,8 +148,10 @@ try {
   run("ls", [...global, "ls", "--json", id]);
   run("ls-missing", [...global, "ls", "--json", "0".repeat(64)]);
   run("snapshots-missing", [...global, "snapshots", "--json", "0".repeat(64)]);
+  run("ls-long", [...global, "ls", "-l", id]);
   run("cat-tree", [...global, "cat", "tree", `${id}:/`]);
-  run("restore", [...global, "restore", id, "--target", join(root, "restored"), "--json"], {
+  run("cat-tree-sub", [...global, "cat", "tree", `${id}:/sub`]);
+  run("restore", [...global, "restore", id, `--target=${join(root, "restored")}`, "--json"], {
     env: env({ RESTIC_PROGRESS_FPS: "1000" }),
   });
   run("check", [...global, "check", "--json"]);

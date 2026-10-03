@@ -14,6 +14,6 @@
     "."
   ],
   "exitCode": 0,
-  "stdout": "{\"message_type\":\"status\",\"percent_done\":1,\"total_files\":2,\"files_done\":2,\"total_bytes\":7,\"bytes_done\":7}\n{\"message_type\":\"summary\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":1781,\"data_added_packed\":1052,\"total_files_processed\":2,\"total_bytes_processed\":7,\"total_duration\":0.7226835,\"backup_start\":\"2026-10-03T03:36:50.42668+02:00\",\"backup_end\":\"2026-10-03T03:36:51.149369+02:00\",\"snapshot_id\":\"8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa\"}\n",
+  "stdout": "{\"message_type\":\"status\",\"percent_done\":1,\"total_files\":2,\"files_done\":2,\"total_bytes\":7,\"bytes_done\":7}\n{\"message_type\":\"status\",\"percent_done\":1,\"total_files\":2,\"files_done\":2,\"total_bytes\":7,\"bytes_done\":7}\n{\"message_type\":\"summary\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":2205,\"data_added_packed\":1130,\"total_files_processed\":2,\"total_bytes_processed\":7,\"total_duration\":0.726884375,\"backup_start\":\"2026-10-03T04:06:11.73934+02:00\",\"backup_end\":\"2026-10-03T04:06:12.466231+02:00\",\"snapshot_id\":\"b673603b7fadbfec441ee6db9ee32089fba18cea30329b5a8c891425c7fa7b61\"}\n",
   "stderr": ""
 }

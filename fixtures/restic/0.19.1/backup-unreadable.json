@@ -10,11 +10,11 @@
     "plainport",
     "--tag",
     "plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD",
-    "--parent=8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa",
+    "--parent=b673603b7fadbfec441ee6db9ee32089fba18cea30329b5a8c891425c7fa7b61",
     "--exclude=/tmp/restic-fixture/src/node_modules",
     "."
   ],
   "exitCode": 3,
-  "stdout": "{\"message_type\":\"summary\",\"files_new\":0,\"files_changed\":0,\"files_unmodified\":1,\"dirs_new\":0,\"dirs_changed\":1,\"dirs_unmodified\":0,\"data_blobs\":0,\"tree_blobs\":2,\"data_added\":1329,\"data_added_packed\":614,\"total_files_processed\":1,\"total_bytes_processed\":6,\"total_duration\":0.759307042,\"backup_start\":\"2026-10-03T03:36:51.171835+02:00\",\"backup_end\":\"2026-10-03T03:36:51.931148+02:00\",\"snapshot_id\":\"1876e1ccd991635551c8806924f101656409c9132d92a7221f3a3d8d9799cf2c\"}\n",
+  "stdout": "{\"message_type\":\"summary\",\"files_new\":0,\"files_changed\":0,\"files_unmodified\":1,\"dirs_new\":0,\"dirs_changed\":1,\"dirs_unmodified\":0,\"data_blobs\":0,\"tree_blobs\":2,\"data_added\":1752,\"data_added_packed\":867,\"total_files_processed\":1,\"total_bytes_processed\":6,\"total_duration\":0.745049792,\"backup_start\":\"2026-10-03T04:06:12.500723+02:00\",\"backup_end\":\"2026-10-03T04:06:13.245779+02:00\",\"snapshot_id\":\"a4c040162c84c7b96aaf02921082c370fcd771509be2122b26d8be1108fd850e\"}\n",
   "stderr": "{\"message_type\":\"error\",\"error\":{\"message\":\"/tmp/restic-fixture/src/sub/b: open sub/b: permission denied\"},\"during\":\"archival\",\"item\":\"/tmp/restic-fixture/src/sub/b\"}\n{\"message_type\":\"exit_error\",\"code\":3,\"message\":\"Warning: at least one source file could not be read\"}\n"
 }
