@@ -133,12 +133,21 @@ export const posixMode = (goMode: number): number =>
   (goMode & GO_SETGID ? 0o2000 : 0) |
   (goMode & GO_STICKY ? 0o1000 : 0);
 
+/**
+ * Tag values as stored in restic (run decision D26): restic splits a --tag value at commas, so "," is written as
+ * %2C, and "%" as %25 to keep that reversible. Reading decodes only those two sequences (either case of %2c), so a
+ * tag another tool wrote keeps any other percent sign as it is.
+ */
+export const encodeTag = (tag: string): string => tag.replaceAll("%", "%25").replaceAll(",", "%2C");
+export const decodeTag = (tag: string): string =>
+  tag.replace(/%(2[Cc]|25)/g, (sequence) => (sequence === "%25" ? "%" : ","));
+
 export const snapshotInfo = (snapshot: z.infer<typeof SnapshotObject>): SnapshotInfo => ({
   id: snapshot.id,
   time: snapshot.time,
   hostname: snapshot.hostname,
   paths: snapshot.paths,
-  tags: snapshot.tags ?? [],
+  tags: (snapshot.tags ?? []).map(decodeTag),
   ...(snapshot.parent ? { parent: snapshot.parent } : {}),
 });
 

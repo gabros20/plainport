@@ -2,3 +2,4 @@
 
 export const packageName = "@plainport/engine-restic";
 export { exactPattern, PINNED_RESTIC, type ResticEngineOptions, redactor, resticEngine } from "./engine.ts";
+export { decodeTag, encodeTag } from "./parse.ts";

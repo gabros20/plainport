@@ -193,6 +193,13 @@ describe("restic engine: snapshot", () => {
     expect(host.calls[1]?.args).toContain(`--exclude=${SRC}/a/we\\[ir\\]d\\*\\?\\\\x`);
   });
 
+  test("tag values percent-encode , and % (run decision D26), since restic splits --tag at commas", async () => {
+    const { host, engine, ctx } = setup([fixture("backup")]);
+    value(await engine.snapshot({ dir: SRC, excludes: [], tags: ["plainport:path=clients/a,b 100%"] }, ctx));
+    expect(host.calls[1]?.args).toContain("plainport:path=clients/a%2Cb 100%25");
+    expect(host.calls[1]?.args?.join(" ")).not.toContain("a,b");
+  });
+
   test("status lines become progress events of the snapshot phase", async () => {
     const { engine, events, ctx } = setup([fixture("backup")]);
     value(await engine.snapshot({ dir: SRC, excludes: [], tags: [] }, ctx));
@@ -228,7 +235,6 @@ describe("restic engine: snapshot", () => {
     ["a relative folder", { dir: "src", excludes: [], tags: [] }],
     ["an exclude outside the folder", { dir: SRC, excludes: ["../x"], tags: [] }],
     ["an absolute exclude", { dir: SRC, excludes: ["/etc"], tags: [] }],
-    ["a tag with a comma, which restic would split", { dir: SRC, excludes: [], tags: ["a,b"] }],
     ["an empty tag", { dir: SRC, excludes: [], tags: [""] }],
     ["a parent that is not a full snapshot id", { dir: SRC, excludes: [], tags: [], parent: "latest" }],
   ])("%s is refused before restic runs", async (_name, input) => {
@@ -259,6 +265,23 @@ describe("restic engine: list", () => {
     value(await engine.list({ tags: TAGS }));
     expect(host.calls[1]?.args?.slice(-4)).toEqual(["snapshots", "--json", "--tag", TAGS.join(",")]);
     expect(host.calls[1]?.capture).toBeDefined();
+  });
+
+  test("a tag filter is encoded, and the tags read back are decoded (D26)", async () => {
+    const encoded = "plainport:path=clients/a%2Cb 100%25";
+    const recorded = fixture("snapshots-tagged");
+    const stdout = recorded.stdout.replaceAll(`plainport:project=${FIXTURE_PROJECT}`, encoded);
+    const { host, engine } = setup([edited(recorded, { stdout })]);
+    const snapshots = value(await engine.list({ tags: ["plainport", "plainport:path=clients/a,b 100%"] }));
+    expect(host.calls[1]?.args?.slice(-2)).toEqual(["--tag", `plainport,${encoded}`]);
+    expect(snapshots[0]?.tags).toEqual(["plainport", "plainport:path=clients/a,b 100%"]);
+  });
+
+  test("a tag another tool wrote keeps any percent sequence other than %2C and %25", async () => {
+    const recorded = fixture("snapshots");
+    const stdout = recorded.stdout.replaceAll(`plainport:project=${FIXTURE_PROJECT}`, "x%41%2c%2525");
+    const { engine } = setup([edited(recorded, { stdout })]);
+    expect(value(await engine.list({}))[0]?.tags).toEqual(["plainport", "x%41,%25"]);
   });
 
   test("no match is an empty list", async () => {

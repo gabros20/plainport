@@ -25,7 +25,7 @@ import {
 } from "@plainport/core";
 import { z } from "zod";
 import lock from "../../../tools.lock.json" with { type: "json" };
-import { parseLine, parseListing, parseSnapshots, parseTree, type ResticLine } from "./parse.ts";
+import { encodeTag, parseLine, parseListing, parseSnapshots, parseTree, type ResticLine } from "./parse.ts";
 
 /** The restic version this plainport bundles and is tested with. */
 export const PINNED_RESTIC = lock.tools.restic.version;
@@ -73,8 +73,8 @@ const RELATIVE = z
       !path.split("/").includes(".."),
     { message: "a normalized path inside the folder" },
   );
-// restic splits a --tag value at commas, so a tag holding one would be stored as two.
-const TAG = z.string().regex(/^[^,]+$/, "a non-empty tag without commas");
+// Any non-empty tag: commas and percent signs are encoded on the way to restic (encodeTag, run decision D26).
+const TAG = z.string().min(1, "a non-empty tag");
 
 const SnapshotInputSchema = z.object({
   dir: ABSOLUTE,
@@ -399,7 +399,7 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       });
       const args = [
         "--json",
-        ...tags.flatMap((tag) => ["--tag", tag]),
+        ...tags.flatMap((tag) => ["--tag", encodeTag(tag)]),
         ...(parent === undefined ? [] : [`--parent=${parent}`]),
         ...excludes.map((path) => `--exclude=${exactPattern(`${dir === "/" ? "" : dir}/${path}`)}`),
         ".",
@@ -447,7 +447,10 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       if (!tags.ok) return tags;
       const version = await ensureVersion(ctx);
       if (!version.ok) return version;
-      const args = ["--json", ...(tags.value.length === 0 ? [] : ["--tag", tags.value.join(",")])];
+      const args = [
+        "--json",
+        ...(tags.value.length === 0 ? [] : ["--tag", tags.value.map(encodeTag).join(",")]),
+      ];
       const listed = await capture("snapshots", args, ctx);
       if (!listed.ok) return listed;
       return parseSnapshots(listed.value);

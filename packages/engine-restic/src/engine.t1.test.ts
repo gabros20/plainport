@@ -188,6 +188,21 @@ describeT1("restic engine: the real restic on a temp repository", () => {
   );
 
   test(
+    "a tag holding , and % round-trips through restic (D26)",
+    async () => {
+      const tag = "plainport:path=clients/acme,web 100%";
+      const taken = value(
+        await engine.snapshot({ dir: src, excludes, parent: snapshotId, tags: ["plainport", tag] }, ctx),
+      );
+      const listed = value(await engine.list({ tags: [tag] }));
+      expect(listed.map((snapshot) => snapshot.id)).toEqual([taken.id]);
+      expect(listed[0]?.tags).toEqual(["plainport", tag]);
+      expect(value(await engine.list({ tags: ["plainport:path=clients/acme"] }))).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
     "check passes on the healthy repository",
     async () => {
       expect(value(await engine.check())).toEqual({ ok: true, errors: 0, messages: [] });
