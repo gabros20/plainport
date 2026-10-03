@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { FindingSchema, type PlainportEvent } from "@plainport/contract";
 import { RingBuffer } from "./ring-buffer.ts";
-import { runProcess } from "./runner.ts";
+import { runProcess, splitRecords } from "./runner.ts";
 import type { ChildProcess, GroupSignal, RunSpec, Spawner } from "./types.ts";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -343,5 +343,83 @@ describe("runner (fake spawner): deadlines and cancelling", () => {
     await expect(runProcess(new FakeSpawner(), spec({ outputLimitBytes: -1 }))).rejects.toThrow(
       /outputLimitBytes/,
     );
+  });
+});
+
+describe("runner (fake spawner): capturing the whole stdout", () => {
+  test("capture returns every stdout byte, beyond the tail limit, and splitRecords splits on NUL", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "first\0sec");
+      child.write("stdout", `ond\0${"z".repeat(5000)}\0`);
+      child.exit(0);
+    });
+    const result = await runProcess(
+      spawner,
+      spec({ outputLimitBytes: 16, capture: { maxBytes: 1_000_000 } }),
+    );
+    if (!result.ok) throw new Error(result.finding.message);
+    const { captured } = result.value;
+    expect(captured).toBeInstanceOf(Uint8Array);
+    expect(captured?.length).toBe(5 + 1 + 6 + 1 + 5000 + 1);
+    const records = splitRecords(captured as Uint8Array, 0).map((r) => new TextDecoder().decode(r));
+    expect(records).toEqual(["first", "second", "z".repeat(5000)]);
+    expect(result.value.stdout.droppedBytes).toBeGreaterThan(0);
+  });
+
+  test("without capture there is no captured field", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "x\n");
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec());
+    expect(result.ok && result.value.captured).toBeUndefined();
+  });
+
+  test("output past the capture cap fails the run as process.output-too-large and stops the group", async () => {
+    let running = true;
+    const spawner = new FakeSpawner(async (child) => {
+      // Bounded, so a broken cap fails the test instead of hanging it.
+      for (let i = 0; running && child.leaderAlive && i < 200; i++) {
+        child.write("stdout", "y".repeat(100));
+        await ms(1);
+      }
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    running = false;
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-too-large" } });
+    expect(spawner.signals[0]).toBe("SIGTERM");
+  });
+
+  test("a capture cap must be positive", async () => {
+    await expect(runProcess(new FakeSpawner(), spec({ capture: { maxBytes: 0 } }))).rejects.toThrow(
+      /maxBytes/,
+    );
+  });
+
+  test("splitRecords keeps empty records in the middle and drops only the final empty one", () => {
+    const records = splitRecords(encode("a\n\nb\n"), 10).map((r) => new TextDecoder().decode(r));
+    expect(records).toEqual(["a", "", "b"]);
+    expect(splitRecords(encode("tail"), 10).map((r) => new TextDecoder().decode(r))).toEqual(["tail"]);
+    expect(splitRecords(new Uint8Array(0), 0)).toEqual([]);
+  });
+});
+
+describe("runner (fake spawner): pipes held by a process outside the group", () => {
+  test("the run still returns soon after the group is gone, with what was read", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "before the daemon\n");
+      // The leader exits and nothing is left in its group, but an escaped daemon keeps both pipes open.
+      child.leftovers = 1;
+      child.exit(0);
+      child.leftovers = 0;
+    });
+    const started = performance.now();
+    const result = await runProcess(spawner, spec());
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(result).toMatchObject({
+      ok: true,
+      value: { exitCode: 0, stdout: { text: "before the daemon\n" } },
+    });
   });
 });

@@ -1,5 +1,5 @@
 export { RingBuffer } from "./ring-buffer.ts";
-export { RUN_DEFAULTS, runProcess } from "./runner.ts";
+export { RUN_DEFAULTS, runProcess, splitRecords } from "./runner.ts";
 export type {
   ChildProcess,
   GroupSignal,

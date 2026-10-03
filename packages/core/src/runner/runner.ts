@@ -41,21 +41,40 @@ const TAIL_LINES_IN_MESSAGE = 5;
 const TAIL_CHARS_IN_MESSAGE = 600;
 
 type Settings = Record<keyof typeof RUN_DEFAULTS, number>;
-type Stop = "idle" | "timeout" | "cancelled" | "error";
+type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "error";
+
+const positive = (name: string, value: number): number => {
+  if (!Number.isFinite(value) || value <= 0)
+    throw new RangeError(`runProcess: ${name} must be positive, got ${value}`);
+  return value;
+};
 
 const settingsOf = (spec: RunSpec): Settings => {
   const settings: Settings = { ...RUN_DEFAULTS };
   for (const key of Object.keys(RUN_DEFAULTS) as (keyof Settings)[]) {
     const value = spec[key];
     if (value === undefined) continue;
-    if (!Number.isFinite(value) || value <= 0)
-      throw new RangeError(`runProcess: ${key} must be positive, got ${value}`);
-    settings[key] = value;
+    settings[key] = positive(key, value);
   }
   return settings;
 };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits for the promise, or `ms` at most; the timer is cleared either way, so it never outlives the wait. */
+const within = async (promise: Promise<unknown>, ms: number): Promise<boolean> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 /** Polls until the condition holds or the time is up; true if it held. */
 const until = async (condition: () => boolean, ms: number): Promise<boolean> => {
@@ -179,10 +198,62 @@ class Collector {
   }
 }
 
+/** All of stdout, up to a hard cap; past it, the bytes are let go and the run fails (never a shortened ok). */
+class Capture {
+  private chunks: Uint8Array[] = [];
+  private size = 0;
+  private overflowed = false;
+
+  constructor(
+    private readonly maxBytes: number,
+    private readonly onOverflow: () => void,
+  ) {}
+
+  push(chunk: Uint8Array): void {
+    if (this.overflowed) return;
+    if (this.size + chunk.length > this.maxBytes) {
+      this.overflowed = true;
+      this.chunks = [];
+      this.onOverflow();
+      return;
+    }
+    this.chunks.push(chunk.slice());
+    this.size += chunk.length;
+  }
+
+  bytes(): Uint8Array {
+    const out = new Uint8Array(this.size);
+    let at = 0;
+    for (const chunk of this.chunks) {
+      out.set(chunk, at);
+      at += chunk.length;
+    }
+    return out;
+  }
+}
+
+/**
+ * Splits captured output into records at a separator byte (0 for `git -z`, 10 for lines). Empty records between
+ * separators are kept; a final empty one (output ending in the separator) is not. Records stay bytes: file names
+ * need not be UTF-8, so decoding is the caller's choice.
+ */
+export const splitRecords = (bytes: Uint8Array, separator: number): Uint8Array[] => {
+  const records: Uint8Array[] = [];
+  let start = 0;
+  for (;;) {
+    const end = bytes.indexOf(separator, start);
+    if (end === -1) break;
+    records.push(bytes.subarray(start, end));
+    start = end + 1;
+  }
+  if (start < bytes.length) records.push(bytes.subarray(start));
+  return records;
+};
+
 /** Reads a stream to its end (or until cancelled) into the collector. */
 const pump = async (
   stream: ReadableStream<Uint8Array>,
-  collector: Collector,
+  collector: { push(chunk: Uint8Array): void; end(): void },
   onChunk: () => void,
   readers: { cancel(): Promise<void> }[],
 ): Promise<void> => {
@@ -230,7 +301,7 @@ const spawnFailed = (spec: RunSpec, error: unknown): Failure => {
 const stoppedFailure = (
   stop: Exclude<Stop, "error">,
   label: string,
-  settings: Settings,
+  settings: Settings & { captureMaxBytes?: number },
   stdout: OutputTail,
   stderr: OutputTail,
 ): Failure => {
@@ -252,12 +323,20 @@ const stoppedFailure = (
       );
     case "cancelled":
       return fail(finding("process.cancelled", { message: `${label} was cancelled and stopped${said}` }));
+    case "too-large":
+      return fail(
+        finding("process.output-too-large", {
+          message: `${label} printed more than ${settings.captureMaxBytes} bytes on stdout, more than the caller can take whole, and was stopped`,
+          fix: "narrow what the command lists (a sub-folder, a filter), or raise the capture limit for this call",
+        }),
+      );
   }
 };
 
 /** Runs one child to completion through the spawner. See the file comment for what it guarantees. */
 export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Result<RunOutcome>> => {
-  const settings = settingsOf(spec);
+  const settings = { ...settingsOf(spec), captureMaxBytes: spec.capture?.maxBytes };
+  if (spec.capture !== undefined) positive("capture.maxBytes", spec.capture.maxBytes);
   const label = basename(spec.command);
   const empty: OutputTail = { text: "", droppedBytes: 0 };
   if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, empty, empty);
@@ -313,12 +392,23 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   const onError = (error: unknown): void => requestStop("error", error);
   const stdout = new Collector("stdout", settings, label, spec, onError);
   const stderr = new Collector("stderr", settings, label, spec, onError);
+  const capture =
+    spec.capture === undefined
+      ? undefined
+      : new Capture(spec.capture.maxBytes, () => requestStop("too-large"));
+  const stdoutSink = {
+    push: (chunk: Uint8Array): void => {
+      stdout.push(chunk);
+      capture?.push(chunk);
+    },
+    end: (): void => stdout.end(),
+  };
   const readers: { cancel(): Promise<void> }[] = [];
   const touch = (): void => {
     lastActivity = performance.now();
   };
   const pumps = Promise.all([
-    pump(child.stdout, stdout, touch, readers),
+    pump(child.stdout, stdoutSink, touch, readers),
     pump(child.stderr, stderr, touch, readers),
   ]);
 
@@ -348,18 +438,10 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       leftoversStopped = true;
       await stopGroup();
     }
-    await Promise.race([exited, sleep(REAP_MS)]);
+    if (exit === undefined) await within(exited, REAP_MS);
 
     // Once the group is gone its pipes close; a process that left the group may hold them, so bound the wait.
-    let drainTimer: ReturnType<typeof setTimeout> | undefined;
-    const drained = await Promise.race([
-      pumps.then(() => true),
-      new Promise<false>((resolve) => {
-        drainTimer = setTimeout(() => resolve(false), DRAIN_MS);
-      }),
-    ]);
-    clearTimeout(drainTimer);
-    if (!drained) {
+    if (!(await within(pumps, DRAIN_MS))) {
       for (const reader of readers) reader.cancel().catch(() => {});
       await pumps;
     }
@@ -368,8 +450,11 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     clearTimeout(idleTimer);
     clearTimeout(overallTimer);
     spec.signal?.removeEventListener("abort", onAbort);
-    // Only when something above threw: never leave the group running.
-    if (!finished && !groupStopped) await stopGroup();
+    if (!finished) {
+      // Only when something above threw: never leave the group running, nor a reader on a pipe someone holds.
+      if (!groupStopped) await stopGroup();
+      for (const reader of readers) reader.cancel().catch(() => {});
+    }
   }
 
   // A callback that threw is a bug, also when it threw while the last lines drained.
@@ -384,5 +469,6 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     stderr: stderr.tail(),
     leftoversStopped,
     durationMs: Math.round(performance.now() - started),
+    ...(capture === undefined ? {} : { captured: capture.bytes() }),
   });
 };

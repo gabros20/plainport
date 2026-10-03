@@ -38,6 +38,13 @@ export interface RunSpec {
   outputLimitBytes?: number;
   /** Lines longer than this reach onLine and log events cut, marked truncated. Default 64 KiB. */
   maxLineBytes?: number;
+  /**
+   * Keep ALL of stdout, as bytes, in RunOutcome.captured: for output parsed as data (`git ls-files -z`, `restic
+   * snapshots --json`), where a tail would silently lose entries. Past maxBytes the group is stopped and the run
+   * fails as process.output-too-large; it is never cut short and reported ok. The bounded tails and onLine work as
+   * without it. splitRecords splits the bytes at a separator.
+   */
+  capture?: { maxBytes: number };
   /** Every complete line as it arrives (parsers, progress). A throw is a bug: the group is stopped, then it
    * propagates. */
   onLine?: (line: OutputLine) => void;
@@ -50,7 +57,10 @@ export interface RunSpec {
   };
 }
 
-/** The newest bytes of one stream, decoded as UTF-8, and how many older bytes were dropped to keep it bounded. */
+/**
+ * The newest bytes of one stream, decoded as UTF-8, and how many older bytes were dropped to keep it bounded. It is
+ * for messages and logs: when droppedBytes > 0 the start is missing, so never parse it as data (use capture).
+ */
 export interface OutputTail {
   text: string;
   droppedBytes: number;
@@ -63,6 +73,8 @@ export interface RunOutcome {
   signal: string | null;
   stdout: OutputTail;
   stderr: OutputTail;
+  /** All of stdout when RunSpec.capture was given; absent otherwise. */
+  captured?: Uint8Array;
   /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). */
   leftoversStopped: boolean;
   durationMs: number;
