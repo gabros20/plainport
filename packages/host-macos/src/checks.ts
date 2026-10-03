@@ -33,15 +33,14 @@ import {
   type CheckContext,
   capturedOutput,
   type DockerMounts,
-  errorCode,
   type HostChecks,
   type HostPorts,
   type ProcessUse,
   type RunOutcome,
   splitRecords,
+  systemErrorCode,
 } from "@plainport/core";
 import { z } from "zod";
-import { PATH_REFUSED } from "./guard.ts";
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const LSOF = "/usr/sbin/lsof";
@@ -58,21 +57,34 @@ const DOCKER_ENV = [
   "DOCKER_CERT_PATH",
   "DOCKER_TLS_VERIFY",
 ];
-/** Where the engines install the CLI without touching PATH (Docker Desktop, OrbStack) or Homebrew puts it. */
-const DOCKER_CLI_FOLDERS = (home: string | undefined): string[] => [
-  ...(home === undefined ? [] : [join(home, ".docker", "bin"), join(home, ".orbstack", "bin")]),
+/** Where the engines install the CLI without touching PATH (Docker Desktop, OrbStack), or Homebrew puts it. */
+export const DOCKER_CLI_FOLDERS: readonly string[] = [
+  "~/.docker/bin",
+  "~/.orbstack/bin",
   "/usr/local/bin",
   "/opt/homebrew/bin",
 ];
 /** Where a daemon's socket shows up, besides DOCKER_HOST. */
-const DOCKER_SOCKETS = (home: string | undefined): string[] => [
+export const DOCKER_SOCKETS: readonly string[] = [
   "/var/run/docker.sock",
-  ...(home === undefined
-    ? []
-    : [join(home, ".docker", "run", "docker.sock"), join(home, ".orbstack", "run", "docker.sock")]),
+  "~/.docker/run/docker.sock",
+  "~/.orbstack/run/docker.sock",
 ];
 /** Docker Desktop's VM mounts the host's file system here, and names bind sources below it. */
 const HOST_MNT = "/host_mnt";
+
+export interface MacosChecksOptions {
+  /** Folders searched for the docker CLI after PATH; `~/` means the check's HOME. Tests pass []. */
+  dockerCliFolders?: readonly string[];
+  /** Where a daemon's socket may be, besides DOCKER_HOST; `~/` means the check's HOME. Tests pass []. */
+  dockerSockets?: readonly string[];
+}
+
+/** Entries with `~/` spelled out for this HOME; without a HOME, those are left out. */
+const inHome = (entries: readonly string[], home: string | undefined): string[] =>
+  entries.flatMap((entry) =>
+    entry.startsWith("~/") ? (home === undefined ? [] : [join(home, entry.slice(2))]) : [entry],
+  );
 
 /** A bind source's spellings on the host: as reported, and with an engine's VM prefix removed. */
 const hostSpellings = (source: string): string[] =>
@@ -98,7 +110,7 @@ const spellings = async (host: HostPorts, dir: string, code: CheckCode): Promise
     const real = await host.fs.realpath(given);
     return ok(real === given ? [given] : [given, real]);
   } catch (error) {
-    if (errorCode(error) === PATH_REFUSED) throw error;
+    systemErrorCode(error);
     return fail(
       finding(code, {
         message: `could not find the real path of ${dir}, so it was not checked: ${error instanceof Error ? error.message : String(error)}`,
@@ -226,7 +238,144 @@ export const daemonDown = (stderr: string): boolean =>
   !/permission denied/i.test(stderr) &&
   /connect: no such file or directory|connect: connection refused/i.test(stderr);
 
-export const createMacosChecks = (host: HostPorts): HostChecks => {
+type Blocker = (message: string, fix: string) => Failure;
+type Described = z.infer<typeof InspectSchema>;
+interface Mount {
+  container: string;
+  name: string;
+  source: string;
+}
+
+/**
+ * The docker CLI to run: the first executable `docker` on PATH, then in the engines' folders. undefined when every
+ * folder was searched and none holds one. An empty or relative PATH entry means the working directory, which is /
+ * for every child here. A folder that cannot be searched, or a docker that cannot be run, leaves the question open.
+ */
+export const findDockerCli = async (
+  host: HostPorts,
+  env: Readonly<Record<string, string | undefined>>,
+  folders: readonly string[],
+  notKnown: Blocker,
+): Promise<Result<string | undefined>> => {
+  const searched = [...new Set([...(env.PATH ?? "").split(":"), ...inHome(folders, env.HOME)])];
+  for (const entry of searched) {
+    const folder = resolve("/", entry);
+    const candidate = join(folder, "docker");
+    let kind: string;
+    try {
+      kind = (await host.fs.stat(candidate)).kind;
+    } catch (error) {
+      const code = systemErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      return notKnown(
+        `could not tell whether docker is installed: ${candidate}: ${error instanceof Error ? error.message : String(error)}`,
+        `make ${shellWord(folder)} searchable (chmod u+x ${shellWord(folder)}) or take it off PATH, then re-run`,
+      );
+    }
+    // A folder or a special file named docker is not the CLI; a shell would skip it too.
+    if (kind !== "file") continue;
+    if (!(await host.fs.executable(candidate))) {
+      return notKnown(
+        `docker is installed at ${candidate} but cannot be run by this user, so its containers were not checked`,
+        `chmod u+x ${shellWord(candidate)}, or take ${shellWord(folder)} off PATH; then re-run`,
+      );
+    }
+    return ok(candidate);
+  }
+  return ok(undefined);
+};
+
+/** A daemon socket that is there, from DOCKER_HOST (unix://) or the known places; undefined when none is. */
+export const daemonSocket = async (
+  host: HostPorts,
+  env: Readonly<Record<string, string | undefined>>,
+  sockets: readonly string[],
+  notKnown: Blocker,
+): Promise<Result<string | undefined>> => {
+  const fromHost = /^unix:\/\/(\/.+)$/.exec(env.DOCKER_HOST ?? "")?.[1];
+  for (const socket of [...(fromHost === undefined ? [] : [fromHost]), ...inHome(sockets, env.HOME)]) {
+    try {
+      await host.fs.stat(socket);
+      return ok(socket);
+    } catch (error) {
+      const code = systemErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      return notKnown(
+        `could not tell whether a docker daemon is running: ${socket}: ${error instanceof Error ? error.message : String(error)}`,
+        "make the socket's folder searchable, or stop docker; then re-run",
+      );
+    }
+  }
+  return ok(undefined);
+};
+
+/** docker inspect's output as containers with mounts; output that cannot be read that way is env.docker-mount. */
+const describedContainers = (bytes: Uint8Array, dir: string): Result<Described> => {
+  let json: unknown;
+  try {
+    json = JSON.parse(new TextDecoder().decode(bytes) || "[]");
+  } catch (error) {
+    return fail(
+      finding("env.docker-mount", {
+        message: `could not read docker inspect's output for ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+        paths: [dir],
+        fix: "check that docker works (docker inspect), then re-run",
+      }),
+    );
+  }
+  const described = decode(InspectSchema, json, "docker inspect's output");
+  if (described.ok) return described;
+  return fail(
+    finding("env.docker-mount", {
+      message: `could not check which containers mount ${dir}: ${described.finding.message}`,
+      paths: [dir],
+      fix: "check that this docker CLI works (docker inspect on a running container), then re-run",
+    }),
+  );
+};
+
+/**
+ * The bind mounts that reach the folder's files: a source that is the folder (under either spelling), something
+ * inside it, or a folder holding it. A source is compared as the engine spells it, as the host would, and with
+ * symlinks resolved.
+ */
+export const matchingMounts = async (
+  host: HostPorts,
+  described: Described,
+  roots: readonly string[],
+): Promise<Mount[]> => {
+  const mounts: Mount[] = [];
+  for (const container of described) {
+    for (const mount of container.Mounts ?? []) {
+      if (mount.Type !== "bind" || !isAbsolute(mount.Source)) continue;
+      const spelled = hostSpellings(mount.Source);
+      const resolved: string[] = [];
+      for (const source of spelled) {
+        try {
+          resolved.push(await host.fs.realpath(source));
+        } catch (error) {
+          // Gone, or not on this disk: its spelling is all there is.
+          systemErrorCode(error);
+        }
+      }
+      const reaches = [...spelled, ...resolved].some(
+        (source) => under(roots, source) || roots.some((root) => under([source], root)),
+      );
+      if (reaches) {
+        mounts.push({
+          container: container.Id,
+          name: container.Name.replace(/^\//, ""),
+          source: mount.Source,
+        });
+      }
+    }
+  }
+  return mounts;
+};
+
+export const createMacosChecks = (host: HostPorts, options: MacosChecksOptions = {}): HostChecks => {
+  const cliFolders = options.dockerCliFolders ?? DOCKER_CLI_FOLDERS;
+  const sockets = options.dockerSockets ?? DOCKER_SOCKETS;
   const capture = (command: string, args: string[], env: Record<string, string>, ctx: CheckContext) =>
     host.run({
       command,
@@ -359,78 +508,32 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         if (value !== undefined) env[name] = value;
       }
       const unavailable = (reason: string): Result<DockerMounts> => ok({ available: false, reason });
+      const notKnown: Blocker = (message, fix) =>
+        fail(finding("env.docker-mount", { message, paths: [dir], fix }));
       const notChecked = (what: string, outcome: RunOutcome): Failure =>
-        fail(
-          finding("env.docker-mount", {
-            message: `could not check which containers mount ${dir}: ${what} failed with exit code ${outcome.exitCode}: ${lastLines(outcome)}`,
-            paths: [dir],
-            fix: "check that docker works (docker ps), or stop docker, then re-run",
-          }),
+        notKnown(
+          `could not check which containers mount ${dir}: ${what} failed with exit code ${outcome.exitCode}: ${lastLines(outcome)}`,
+          "check that docker works (docker ps), or stop docker, then re-run",
         );
+      const checkFailed = asCheck("env.docker-mount", `check which containers mount ${dir}`, dir);
 
       const spelled = await spellings(host, dir, "env.docker-mount");
       if (!spelled.ok) return spelled;
-      const roots = spelled.value;
-      const notKnown = (message: string, fix: string): Failure =>
-        fail(finding("env.docker-mount", { message, paths: [dir], fix }));
 
-      // Docker is "not installed" only when every PATH entry and every folder an engine installs the CLI in was
-      // looked in, none holds a docker, and no daemon socket is there. An entry that cannot be searched, or a
-      // docker that cannot be run, leaves the question open, and a daemon may be running. An empty or relative
-      // PATH entry means the working directory, which is / for every child here.
-      let docker: string | undefined;
-      const folders = [...new Set([...(env.PATH ?? "").split(":"), ...DOCKER_CLI_FOLDERS(env.HOME)])];
-      for (const entry of folders) {
-        const folder = resolve("/", entry);
-        const candidate = join(folder, "docker");
-        let kind: string;
-        try {
-          kind = (await host.fs.stat(candidate)).kind;
-        } catch (error) {
-          const code = errorCode(error);
-          if (code === "ENOENT" || code === "ENOTDIR") continue;
-          if (code === PATH_REFUSED) throw error;
-          return notKnown(
-            `could not tell whether docker is installed: ${candidate}: ${error instanceof Error ? error.message : String(error)}`,
-            `make ${shellWord(folder)} searchable (chmod u+x ${shellWord(folder)}) or take it off PATH, then re-run`,
-          );
-        }
-        // A folder or a special file named docker is not the CLI; a shell would skip it too.
-        if (kind !== "file") continue;
-        if (!(await host.fs.executable(candidate))) {
-          return notKnown(
-            `docker is installed at ${candidate} but cannot be run by this user, so its containers were not checked`,
-            `chmod u+x ${shellWord(candidate)}, or take ${shellWord(folder)} off PATH; then re-run`,
-          );
-        }
-        docker = candidate;
-        break;
-      }
-      if (docker === undefined) {
+      const docker = await findDockerCli(host, env, cliFolders, notKnown);
+      if (!docker.ok) return docker;
+      if (docker.value === undefined) {
         // No CLI anywhere known: a daemon socket would still mean containers may be running, unchecked.
-        const fromHost = /^unix:\/\/(\/.+)$/.exec(env.DOCKER_HOST ?? "")?.[1];
-        for (const socket of [...(fromHost === undefined ? [] : [fromHost]), ...DOCKER_SOCKETS(env.HOME)]) {
-          try {
-            await host.fs.stat(socket);
-          } catch (error) {
-            const code = errorCode(error);
-            if (code === "ENOENT" || code === "ENOTDIR") continue;
-            if (code === PATH_REFUSED) throw error;
-            return notKnown(
-              `could not tell whether a docker daemon is running: ${socket}: ${error instanceof Error ? error.message : String(error)}`,
-              "make the socket's folder searchable, or stop docker; then re-run",
-            );
-          }
-          return notKnown(
-            `a docker daemon socket exists at ${socket}, but no docker command was found on PATH or in ${DOCKER_CLI_FOLDERS(env.HOME).join(", ")}, so its containers were not checked`,
-            "add the docker CLI's folder to PATH (Docker Desktop: ~/.docker/bin; OrbStack: ~/.orbstack/bin; Homebrew: /opt/homebrew/bin), or stop the docker daemon; then re-run",
-          );
-        }
-        return unavailable("docker is not installed");
+        const socket = await daemonSocket(host, env, sockets, notKnown);
+        if (!socket.ok) return socket;
+        if (socket.value === undefined) return unavailable("docker is not installed");
+        return notKnown(
+          `a docker daemon socket exists at ${socket.value}, but no docker command was found on PATH or in ${inHome(cliFolders, env.HOME).join(", ")}, so its containers were not checked`,
+          "add the docker CLI's folder to PATH (Docker Desktop: ~/.docker/bin; OrbStack: ~/.orbstack/bin; Homebrew: /opt/homebrew/bin), or stop the docker daemon; then re-run",
+        );
       }
-      const checkFailed = asCheck("env.docker-mount", `check which containers mount ${dir}`, dir);
 
-      const listed = await capture(docker, ["ps", "--quiet", "--no-trunc"], env, ctx);
+      const listed = await capture(docker.value, ["ps", "--quiet", "--no-trunc"], env, ctx);
       if (!listed.ok) return checkFailed(listed);
       if (listed.value.exitCode !== 0 && daemonDown(listed.value.stderr.text))
         return unavailable("docker is not running");
@@ -443,10 +546,11 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         .filter((id) => id !== "");
       if (containers.length === 0) return ok({ available: true, mounts: [] });
 
-      const inspected = await capture(docker, ["inspect", ...containers], env, ctx);
+      const inspected = await capture(docker.value, ["inspect", ...containers], env, ctx);
       if (!inspected.ok) return checkFailed(inspected);
       const outcome = inspected.value;
-      // A container that stopped since `docker ps` is "No such object"; the rest are still described.
+      // A container that stopped since `docker ps` is "No such object"; the rest are still described. Accepted
+      // only when stderr was read whole, so no other error hides behind the tolerated lines.
       const vanishedOnly =
         outcome.exitCode === 1 &&
         outcome.signal === null &&
@@ -459,60 +563,9 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         ? ok(outcome.captured ?? new Uint8Array())
         : capturedOutput(outcome, (o) => notChecked("docker inspect", o));
       if (!bytes.ok) return bytes;
-      let json: unknown;
-      try {
-        json = JSON.parse(decoder.decode(bytes.value) || "[]");
-      } catch (error) {
-        return fail(
-          finding("env.docker-mount", {
-            message: `could not read docker inspect's output for ${dir}: ${error instanceof Error ? error.message : String(error)}`,
-            paths: [dir],
-            fix: "check that docker works (docker inspect), then re-run",
-          }),
-        );
-      }
-      const described = decode(InspectSchema, json, "docker inspect's output");
-      if (!described.ok) {
-        return fail(
-          finding("env.docker-mount", {
-            message: `could not check which containers mount ${dir}: ${described.finding.message}`,
-            paths: [dir],
-            fix: "check that this docker CLI works (docker inspect on a running container), then re-run",
-          }),
-        );
-      }
-
-      const mounts: { container: string; name: string; source: string }[] = [];
-      for (const container of described.value) {
-        for (const mount of container.Mounts ?? []) {
-          if (mount.Type !== "bind" || !isAbsolute(mount.Source)) continue;
-          // As the engine spells it, as the host would, and each with symlinks resolved.
-          const sources = hostSpellings(mount.Source);
-          for (const spelled of [...sources]) {
-            try {
-              sources.push(await host.fs.realpath(spelled));
-            } catch {
-              // Gone, or not on this disk: its spelling is all there is.
-            }
-          }
-          // The folder itself, something inside it, or a folder that holds it: each reaches the project's files.
-          if (
-            sources.some(
-              (source) =>
-                under(roots, source) ||
-                under([source], roots[0] as string) ||
-                under([source], roots.at(-1) as string),
-            )
-          ) {
-            mounts.push({
-              container: container.Id,
-              name: container.Name.replace(/^\//, ""),
-              source: mount.Source,
-            });
-          }
-        }
-      }
-      return ok({ available: true, mounts });
+      const described = describedContainers(bytes.value, dir);
+      if (!described.ok) return described;
+      return ok({ available: true, mounts: await matchingMounts(host, described.value, spelled.value) });
     },
   };
 };

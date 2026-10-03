@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,17 +15,24 @@ import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok } from "@plainport/contract";
 import { type HostPorts, preflight, type RunOutcome, type RunSpec } from "@plainport/core";
 import { makeGitFixture } from "../../core/src/testing/git-fixture.ts";
-import { createMacosChecks, parseLsof } from "./checks.ts";
+import { createMacosChecks, DOCKER_CLI_FOLDERS, parseLsof } from "./checks.ts";
 import { testHost } from "./testing.ts";
 
 const host = testHost();
-const checks = createMacosChecks(host);
-const env = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+// Hermetic: no engine folder, no socket; docker is found only where a test puts it. HOME and DOCKER_HOST in `env`
+// point into the sandbox, so no test reaches the machine's docker or the real ~/.docker.
+const checks = createMacosChecks(host, { dockerCliFolders: [], dockerSockets: [] });
 let dir: string;
+let env: { PATH: string; HOME: string; DOCKER_HOST: string };
 let children: Bun.Subprocess[];
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), "plainport-checks-")));
+  env = {
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    HOME: join(dir, "home"),
+    DOCKER_HOST: `unix://${join(dir, "none.sock")}`,
+  };
   children = [];
 });
 afterEach(async () => {
@@ -80,8 +86,20 @@ const fakeDocker = (): Record<string, string> => {
 const timedOut = fail(finding("process.timeout", { message: "ran past its deadline" }));
 const cancelled = fail(finding("process.cancelled", { message: "stopped" }));
 
-/** Waits until lsof sees the child, so the check is not racing its start. */
-const settle = () => Bun.sleep(150);
+/**
+ * Waits until lsof lists a process using the folder that `is` accepts, so a check is not racing a child's start; a
+ * child that never shows up fails the test after the deadline rather than hanging it.
+ */
+const settle = async (folder: string, is: (p: Awaited<ReturnType<typeof parseLsof>>[number]) => boolean) => {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const listed = await checks.processesUsing(folder, { env });
+    if (listed.ok && listed.value.some(is)) return;
+    if (Date.now() > deadline) throw new Error(`no process using ${folder} matched within 10 s`);
+    await Bun.sleep(25);
+  }
+};
+const byPid = (child: Bun.Subprocess | undefined) => (p: { pid: number }) => p.pid === child?.pid;
 
 describe("macOS checks: processes using the folder (lsof)", () => {
   test("parses lsof's field output: cwd, open files, ancestors; leaves out plainport and its own lsof", () => {
@@ -125,7 +143,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
   test("a process working inside the folder is found", async () => {
     mkdirSync(join(dir, "src"));
     children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: join(dir, "src") }));
-    await settle();
+    await settle(dir, byPid(children[0]));
     const result = await checks.processesUsing(dir, { env });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -139,7 +157,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     const file = join(dir, "data.db");
     writeFileSync(file, "x");
     children.push(Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', file], { cwd: "/" }));
-    await settle();
+    await settle(dir, byPid(children[0]));
     // Given by its /var spelling: lsof reports /private/var.
     const spelled = dir.replace(/^\/private\/var\//, "/var/");
     const result = await checks.processesUsing(spelled, { env });
@@ -158,7 +176,8 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     children.push(
       Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(odd, "f.txt")], { cwd: "/" }),
     );
-    await settle();
+    await settle(odd, byPid(children[0]));
+    await settle(odd, byPid(children[1]));
     const result = await checks.processesUsing(odd, { env });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -175,7 +194,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     children.push(
       Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(dir, name)], { cwd: "/" }),
     );
-    await settle();
+    await settle(dir, byPid(children[0]));
     const result = await checks.processesUsing(dir, { env });
     expect(result.ok && result.value.find((p) => p.pid === children[0]?.pid)?.files).toEqual([
       join(dir, name),
@@ -188,7 +207,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
       const repo = fx.repo("web");
       fx.git(repo, "fsmonitor--daemon", "start");
       try {
-        await settle();
+        await settle(repo, (p) => p.args?.includes("fsmonitor--daemon run") ?? false);
         const result = await checks.processesUsing(repo, { env });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
@@ -200,7 +219,9 @@ describe("macOS checks: processes using the folder (lsof)", () => {
           .split(":")
           .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
           .join(":");
-        const report = await preflight(host, checks, repo, { env: { ...fx.env, PATH } });
+        const report = await preflight(host, checks, repo, {
+          env: { ...fx.env, PATH, DOCKER_HOST: env.DOCKER_HOST },
+        });
         expect(report.ok && report.value.fsmonitor).toEqual([daemon?.pid as number]);
         expect(report.ok && report.value.findings).toEqual([]);
       } finally {
@@ -378,21 +399,9 @@ describe("macOS checks: docker bind mounts", () => {
   });
 
   test("docker not installed is not a finding: it is unavailable", async () => {
-    // The real host, with a PATH and a HOME that have no docker. The system folders and /var/run are searched
-    // too, so on a machine that has docker there the answer is "not running" (DOCKER_HOST names a missing
-    // socket) or, with a system socket and no CLI, a blocker.
-    const systemCli = ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"].some((p) => existsSync(p));
-    const systemSocket = existsSync("/var/run/docker.sock");
-    const result = await checks.dockerMounts(dir, {
-      env: { PATH: dir, HOME: join(dir, "home"), DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
-    });
-    if (systemCli) {
-      expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not running" } });
-    } else if (systemSocket) {
-      expect(!result.ok && result.finding.code).toBe("env.docker-mount");
-    } else {
-      expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
-    }
+    // The real host; PATH, the CLI folders (none) and the sockets (none) hold no docker.
+    const result = await checks.dockerMounts(dir, { env: { PATH: dir, HOME: env.HOME } });
+    expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
   });
 
   test("docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)", async () => {
@@ -484,7 +493,8 @@ describe("macOS checks: preflight with the real checks", () => {
     children.push(
       Bun.spawn(["/bin/sh", "-c", 'exec 3>>"$0"; exec /bin/sleep 30', join(web, "server.log")], { cwd: "/" }),
     );
-    await settle();
+    await settle(web, byPid(children[0]));
+    await settle(web, byPid(children[1]));
     const busy = await preflight(host, checks, web, { env });
     expect(busy.ok).toBe(true);
     if (busy.ok) {
@@ -544,26 +554,6 @@ describe("macOS checks: fail closed", () => {
   });
 });
 
-/**
- * The real host, with the system folders docker may live in (/usr/local/bin, /opt/homebrew/bin, /var/run) hidden,
- * so a machine with docker installed answers like one without.
- */
-const withoutSystemDocker = (base: HostPorts = host): HostPorts => {
-  const hidden = (path: string) => /^\/(usr\/local\/bin|opt\/homebrew\/bin|var\/run)\//.test(path);
-  const enoent = (path: string) => Object.assign(new Error(`ENOENT: hidden, ${path}`), { code: "ENOENT" });
-  return {
-    ...base,
-    fs: {
-      ...base.fs,
-      stat: async (path) => {
-        if (hidden(path)) throw enoent(path);
-        return base.fs.stat(path);
-      },
-      executable: async (path) => (hidden(path) ? false : base.fs.executable(path)),
-    },
-  };
-};
-
 describe("macOS checks: docker as each engine reports it (r4)", () => {
   /** A recorded-shape inspect listing with __PROJECT__ replaced by the folder's spelling the engine uses. */
   const fixture = (name: string, project: string): string =>
@@ -608,9 +598,10 @@ describe("macOS checks: docker as each engine reports it (r4)", () => {
     const server = createServer();
     try {
       await new Promise<void>((done) => server.listen(join(home, ".docker", "run", "docker.sock"), done));
-      const result = await createMacosChecks(withoutSystemDocker()).dockerMounts(dir, {
-        env: { PATH: dir, HOME: home },
-      });
+      const result = await createMacosChecks(host, {
+        dockerCliFolders: ["~/.docker/bin", "~/.orbstack/bin"],
+        dockerSockets: ["~/.docker/run/docker.sock"],
+      }).dockerMounts(dir, { env: { PATH: dir, HOME: home } });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.finding.code).toBe("env.docker-mount");
@@ -626,7 +617,7 @@ describe("macOS checks: docker as each engine reports it (r4)", () => {
     const server = createServer();
     try {
       await new Promise<void>((done) => server.listen(join(dir, "engine.sock"), done));
-      const result = await createMacosChecks(withoutSystemDocker()).dockerMounts(dir, {
+      const result = await checks.dockerMounts(dir, {
         env: { PATH: dir, HOME: join(dir, "home"), DOCKER_HOST: `unix://${join(dir, "engine.sock")}` },
       });
       expect(!result.ok && result.finding.code).toBe("env.docker-mount");
@@ -641,7 +632,10 @@ describe("macOS checks: docker as each engine reports it (r4)", () => {
     writeFileSync(join(home, ".orbstack", "bin", "docker"), "#!/bin/sh\nexit 99\n");
     chmodSync(join(home, ".orbstack", "bin", "docker"), 0o755);
     const { host: fake, specs } = scripted(outcome({ out: "" }));
-    const result = await createMacosChecks(fake).dockerMounts(dir, { env: { PATH: dir, HOME: home } });
+    const result = await createMacosChecks(fake, {
+      dockerCliFolders: DOCKER_CLI_FOLDERS,
+      dockerSockets: [],
+    }).dockerMounts(dir, { env: { PATH: dir, HOME: home } });
     expect(result).toEqual({ ok: true, value: { available: true, mounts: [] } });
     expect(specs[0]?.command).toBe(join(home, ".orbstack", "bin", "docker"));
   });
@@ -676,5 +670,46 @@ describe("macOS checks: folders find could not search (r4)", () => {
       ok: true,
       value: { placeholders: ["a.mov"], unsearchable: ["locked", "deep/er"] },
     });
+  });
+});
+
+describe("macOS checks: hermetic docker discovery (q1)", () => {
+  test("the CLI folders and the sockets are parameters: with none, and none on PATH, docker is not installed", async () => {
+    const hermetic = createMacosChecks(host, { dockerCliFolders: [], dockerSockets: [] });
+    const result = await hermetic.dockerMounts(dir, {
+      env: { PATH: dir, HOME: join(dir, "home"), DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
+    });
+    expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
+  });
+
+  test("~/ in a folder or socket entry means the check's HOME, and is skipped without one", async () => {
+    const home = join(dir, "home");
+    mkdirSync(join(home, "cli"), { recursive: true });
+    writeFileSync(join(home, "cli", "docker"), "#!/bin/sh\nexit 99\n");
+    chmodSync(join(home, "cli", "docker"), 0o755);
+    const { host: fake, specs } = scripted(outcome({ out: "" }));
+    const found = createMacosChecks(fake, { dockerCliFolders: ["~/cli"], dockerSockets: [] });
+    expect(await found.dockerMounts(dir, { env: { PATH: dir, HOME: home } })).toEqual({
+      ok: true,
+      value: { available: true, mounts: [] },
+    });
+    expect(specs[0]?.command).toBe(join(home, "cli", "docker"));
+    expect(await found.dockerMounts(dir, { env: { PATH: dir } })).toEqual({
+      ok: true,
+      value: { available: false, reason: "docker is not installed" },
+    });
+  });
+
+  test("a realpath failure that is not a system error is a bug: the check throws", async () => {
+    const broken: HostPorts = {
+      ...scripted().host,
+      fs: {
+        ...host.fs,
+        realpath: async () => {
+          throw new TypeError("a fake went wrong");
+        },
+      },
+    };
+    await expect(createMacosChecks(broken).processesUsing(dir, { env })).rejects.toThrow(TypeError);
   });
 });
