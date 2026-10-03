@@ -1717,3 +1717,40 @@ describe("fix wave r2: sizes and the staging record's schema", () => {
     expect(stagingJsonSchemas()["staging-record"]).toMatchObject({ title: "StagingRecord" });
   });
 });
+
+describe("fix wave r3: an incomplete catalog is no fork (D61)", () => {
+  for (const step of ["offload.snapshot.done", "offload.verified"] as const) {
+    test(`at ${step}, this op's event with the catalog incomplete stays pending; once the events arrive, it finishes`, async () => {
+      // The first offload, then an onload: the second offload's base is the first snapshot.
+      value(await offloadNow());
+      await waitJournalsGone();
+      value(await runOnload(onloadDeps(testHost()), { project: await ref(), hydrate: false }));
+      await crashOffloadAt("offload.commit.appended");
+      const journal = onlyJournal<OffloadJournal>();
+      const { event: _e, verified: _v, ...rest } = journal;
+      await rewrite(
+        step === "offload.verified" ? { ...rest, verified: journal.verified, step } : { ...rest, step },
+      );
+      // The store's listing lacks the first offload's event: the catalog names a base it does not hold (D41).
+      const first = (await storeEvents()).find((e) => e.type === "offloaded" && e.op !== journal.op);
+      const key = `meta/v1/events/${first?.id}.json`;
+      const held = store.data.get(key) as Uint8Array;
+      store.data.delete(key);
+      const before = reportOf(await recover(recoverDeps()));
+      expect(before.operations.map((o) => [o.outcome, o.finding?.code])).toEqual([
+        ["pending", "catalog.incomplete"],
+      ]);
+      expect((await journals()).map((j) => [j.op, j.step])).toEqual([[journal.op, step]]);
+      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+      expect(existsSync(`${dir}.plainport`)).toBe(false);
+      // The missing event arrives: the commit is the head, so the release finishes and no fork was made.
+      store.data.set(key, held);
+      const after = reportOf(await recover(recoverDeps()));
+      expect(after.operations.map((o) => [o.outcome, o.state])).toEqual([["finished", "shelved"]]);
+      const fold = foldCatalog(await storeEvents()).projects[journal.project.id];
+      expect([fold?.status, fold?.conflicts, fold?.head]).toEqual(["shelved", [], journal.op]);
+      await expectShelved();
+      await expectInvariants();
+    });
+  }
+});

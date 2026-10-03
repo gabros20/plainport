@@ -20,16 +20,19 @@
 //   offload.snapshot.done, offload.verified  the next step's write (commit.start or diverged) may be the one a power
 //                                          loss dropped after its event reached the store (D24, D50), so first
 //                                          search the store for an offloaded event of this op (every event carries
-//                                          `op`) that names a snapshot in `attempts`. None: roll back. One that the
-//                                          catalog folds as the project's head (snapshot = op): it was committed,
-//                                          so go on as from offload.committed (the fingerprint check included). One
-//                                          that is not the head (the project forked): handle it as offload.diverged
+//                                          `op`) that names a snapshot in `attempts`. None: roll back. One the
+//                                          fold's conflicts name (the project forked): handle it as
+//                                          offload.diverged. No head for another reason (a base the catalog does
+//                                          not hold): pending, journal kept (D61). Otherwise (the head is this
+//                                          snapshot or one made from it): committed, so go on as from
+//                                          offload.committed (the fingerprint check included)
 //   offload.diverged                       the head moved: the event (`event`, `diverged`) keeps the snapshot as a
 //                                          fork. Append it if the store lacks it, never release, remove the journal
 //   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, go on as
 //                                          from offload.committed; if not, roll back (a lost write never deletes a
 //                                          folder, D24)
-//   offload.committed .. release.stub      committed: finish release as the journal's `release` says (rename,
+//   offload.committed .. release.stub      committed (the journal's word: its committed write follows the
+//                                          event's durable append, D24): finish release as `release` says (rename,
 //                                          stub, registry, delete), but while the folder still stands at
 //                                          project.dir, only if scanTree(project.dir) still has the verified
 //                                          fingerprint (plan.fingerprint: the plan of the attempt that was verified).

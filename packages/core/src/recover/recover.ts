@@ -8,7 +8,8 @@
 //   offload, up to snapshot.start           roll back
 //   offload.snapshot.discarded              write the snapshot-discarded event the store lacks (D28), roll back
 //   offload.snapshot.done, offload.verified  search the store for this op's offloaded event (D50): none, roll back;
-//                                           the head, journal it as committed and release; forked, keep the folder
+//                                           named by the fold's conflicts, keep the folder (forked); no head (the
+//                                           catalog incomplete), pending (D61); otherwise committed: release
 //   offload.diverged                        append the fork event the store lacks, keep the folder
 //   offload.commit.start                    the event on the store: committed, release; not there: roll back
 //   offload.committed .. release.stub       release (releaseOffload: the D51 fingerprint guard, the derived trash)
@@ -32,10 +33,11 @@ import {
   ok,
   type ProjectState,
   type Result,
+  shellWord,
 } from "@plainport/contract";
 import { TEMP_SUFFIX } from "../atomic.ts";
 import { type CatalogEvent, OffloadedEventSchema } from "../catalog/events.ts";
-import { foldCatalog } from "../catalog/fold.ts";
+import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
 import { identityChanged, readStoreIdentity } from "../catalog/identity.ts";
 import {
   appendEvent,
@@ -457,7 +459,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         const there = await eventState(
           blob,
           discarded.event,
-          (e) => e.type === "snapshot-discarded" && e.op === journal.op && e.snapshot === journal.op,
+          (e) =>
+            e.type === "snapshot-discarded" &&
+            e.op === journal.op &&
+            e.snapshot === journal.op &&
+            e.project === journal.project.id,
         );
         if (!there.ok) return pending(journal, there);
         // A torn or foreign file under its id is no record: the discard is written again under a new id (D28).
@@ -522,13 +528,35 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         journal.attempts.includes(e.stored[journal.store.name] ?? ""),
     );
     if (made === undefined) return rollBack(journal);
-    const head = foldCatalog(events.value.events).projects[journal.project.id]?.head;
-    if (head !== journal.op) {
-      // Forked: the event keeps the snapshot as a fork, as offload.diverged does, and the folder stays.
+    const folded = foldCatalog(events.value.events).projects[journal.project.id];
+    // Forked only when the fold's conflicts name this snapshot (D61): the event keeps it as a fork, as
+    // offload.diverged does, and the folder stays.
+    if (folded?.conflicts.some((fork) => fork.includes(journal.op))) {
       const closed = await close(journal);
       return closed ?? { op: entry(journal, "forked", "conflicted") };
     }
+    // No head for another reason (a base the catalog does not hold, a fork elsewhere in the chain): neither a commit
+    // nor a fork can be told yet, so the journal stays until the catalog is whole.
+    if (folded === undefined || folded.head === null) return pending(journal, headUnknown(journal, folded));
+    // The head is this snapshot, or one made from it since: committed.
     return committed(journal, lock, { event: made.id, verified: made.stored[journal.store.name] as string });
+  }
+
+  function headUnknown(journal: OffloadJournal, folded: CatalogProject | undefined): Failure {
+    const missing = folded?.missing ?? [];
+    if (folded !== undefined && missing.length === 0 && folded.conflicts.length > 0)
+      return fail(
+        finding("catalog.head-moved", {
+          message: `${journal.project.address} is conflicted in the catalog, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
+          fix: `plainport resolve ${shellWord(journal.project.address)} settles which copy wins, then run plainport recover`,
+        }),
+      );
+    return fail(
+      finding("catalog.incomplete", {
+        message: `the catalog of ${journal.project.address} ${missing.length === 0 ? "has no single head" : `names snapshots it does not hold (${missing.join(", ")})`}, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
+        fix: "connect the store that holds them, or run plainport doctor, then run plainport recover",
+      }),
+    );
   }
 
   /** The event is on the store: the journal says committed, then release goes on. */
@@ -625,7 +653,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       const there = await eventState(
         store.blob,
         id,
-        (e) => e.type === "offloaded" && e.op === journal.op && e.snapshot === journal.op,
+        (e) =>
+          e.type === "offloaded" &&
+          e.op === journal.op &&
+          e.snapshot === journal.op &&
+          e.project === journal.project.id,
       );
       if (!there.ok) return pending(journal, there);
       // A torn or foreign file under its id is no record of the fork: it is written again under a new id.
