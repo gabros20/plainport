@@ -22,6 +22,7 @@
 // What it cannot settle now (a store that does not answer, a lock a live process holds, a folder in the way) stays
 // pending, its journal kept, and the report says why; recover can run again at any time.
 
+import { join } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -32,6 +33,7 @@ import {
   type ProjectState,
   type Result,
 } from "@plainport/contract";
+import { TEMP_SUFFIX } from "../atomic.ts";
 import { type CatalogEvent, OffloadedEventSchema } from "../catalog/events.ts";
 import { foldCatalog } from "../catalog/fold.ts";
 import {
@@ -221,10 +223,14 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
           // Read again under the lock: a detached delete or the onload before it may have closed it since.
           const now = await reread(journal.op);
           if (now === undefined) continue;
+          // The step found: settling moves the journal on.
+          const found = now.step;
           const result = now.kind === "offload" ? await settleOffload(now, lock) : await settleOnload(now);
+          result.op.step = found;
+          await removeTemporaries(now.op);
           deps.log(
             result.problem === undefined ? "info" : "warn",
-            `${now.kind} ${now.op} of ${now.project.address} at ${now.step}: ${result.op.outcome}${
+            `${now.kind} ${now.op} of ${now.project.address} at ${found}: ${result.op.outcome}${
               result.problem === undefined
                 ? ""
                 : ` (${result.problem.finding.code}: ${result.problem.finding.message})`
@@ -237,6 +243,30 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       { related: related.value, resume: () => true },
     );
     return done.ok ? done.value : unsettled(done);
+  }
+
+  /**
+   * A journal write a kill cut short leaves `<op>.json.<pid>.<hex>.tmp` (atomic.ts); under the project's lock nobody
+   * else writes this operation's journal, so they are removed, as locked-file.ts removes its own.
+   */
+  async function removeTemporaries(op: string): Promise<void> {
+    const prefix = `${op}.json.`;
+    let names: string[];
+    try {
+      names = await io.fs.readdir(paths.journalDir);
+    } catch (error) {
+      systemErrorCode(error);
+      return;
+    }
+    for (const name of names) {
+      if (!name.startsWith(prefix) || !name.endsWith(TEMP_SUFFIX)) continue;
+      if (!/^\d+\.[0-9a-f]+$/.test(name.slice(prefix.length, -TEMP_SUFFIX.length))) continue;
+      try {
+        await io.fs.unlink(join(paths.journalDir, name));
+      } catch (error) {
+        systemErrorCode(error);
+      }
+    }
   }
 
   async function reread(op: string): Promise<Journal | undefined> {

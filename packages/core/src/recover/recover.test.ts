@@ -238,6 +238,11 @@ const offloadNow = async () => {
   return runOffload(offloadDeps(host), { project: await ref() });
 };
 
+/** The detached delete removes the trash, then the journal, after the call returns. */
+const waitJournalsGone = async () => {
+  for (let i = 0; i < 400 && readdirSync(box.paths.journalDir).length > 0; i++) await Bun.sleep(25);
+};
+
 /** The trash folders under the root's holder. */
 const trashes = (): string[] => {
   const holder = join(box.home, "work/.plainport-trash");
@@ -1176,6 +1181,26 @@ describe("trash deleted twice at once (a detached delete still running)", () => 
     const host = racing();
     const report = reportOf(await recover(recoverDeps({ host, loader: new ConfigLoader(host, box.paths) })));
     expect(report.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+    await expectInvariants();
+  });
+});
+
+describe("recover: what the smoke found", () => {
+  test("the report names the step recover found, not the one it reached", async () => {
+    await crashOffloadAt("offload.release.renamed");
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.step, op?.outcome]).toEqual(["offload.release.trash", "finished"]);
+  });
+
+  test("a journal write a kill cut short leaves a temporary file; recover removes it with the journal", async () => {
+    await crashOffloadAt("offload.release.renamed");
+    const journal = onlyJournal<OffloadJournal>();
+    const temp = `${journalFile(box.paths, journal.op)}.99999.0123456789ab.tmp`;
+    writeFileSync(temp, "{ half a jour");
+    await recover(recoverDeps());
+    await waitJournalsGone();
+    expect(existsSync(temp)).toBe(false);
+    expect(readdirSync(box.paths.journalDir)).toEqual([]);
     await expectInvariants();
   });
 });
