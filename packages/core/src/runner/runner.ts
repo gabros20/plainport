@@ -31,6 +31,8 @@ export const RUN_DEFAULTS = Object.freeze({
 
 /** How often the runner checks whether a stopped group is empty. */
 const POLL_MS = 10;
+/** Once the leader has exited, how often TERM is repeated for members that may have missed it (forked as it went out). */
+const RETERM_MS = 100;
 /** After KILL, how long to wait for the group to be gone; KILL cannot be ignored, so this only bounds a process
  * stuck in the kernel. */
 const REAP_MS = 5_000;
@@ -78,16 +80,6 @@ const within = async (promise: Promise<unknown>, ms: number): Promise<boolean> =
     ]);
   } finally {
     clearTimeout(timer);
-  }
-};
-
-/** Polls until the condition holds or the time is up; true if it held. */
-const until = async (condition: () => boolean, ms: number): Promise<boolean> => {
-  const deadline = performance.now() + ms;
-  for (;;) {
-    if (condition()) return true;
-    if (performance.now() >= deadline) return false;
-    await sleep(POLL_MS);
   }
 };
 
@@ -545,12 +537,30 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   });
   const groupGone = (): boolean => exit !== undefined && !spawner.signalGroup(pgid, 0);
   let groupStopped = false;
+  // A group signal reaches only the processes that exist when it is delivered: a member being forked at that
+  // instant never gets it. So once the leader is gone (its own cleanup can no longer be cut short by a second TERM),
+  // TERM is repeated every RETERM_MS for whatever is left, and KILL is repeated until the group is empty. While the
+  // leader runs it gets one TERM only: many programs read a second one as "quit now, skip the cleanup".
   const stopGroup = async (): Promise<void> => {
     groupStopped = true;
     spawner.signalGroup(pgid, "SIGTERM");
-    if (await until(groupGone, settings.killGraceMs)) return;
-    spawner.signalGroup(pgid, "SIGKILL");
-    await until(groupGone, REAP_MS);
+    const graceEnds = performance.now() + settings.killGraceMs;
+    let lastTerm = performance.now();
+    for (;;) {
+      if (groupGone()) return;
+      if (performance.now() >= graceEnds) break;
+      if (exit !== undefined && performance.now() - lastTerm >= RETERM_MS) {
+        spawner.signalGroup(pgid, "SIGTERM");
+        lastTerm = performance.now();
+      }
+      await sleep(POLL_MS);
+    }
+    const reapEnds = performance.now() + REAP_MS;
+    for (;;) {
+      spawner.signalGroup(pgid, "SIGKILL");
+      await sleep(POLL_MS);
+      if (groupGone() || performance.now() >= reapEnds) return;
+    }
   };
 
   let reason: Stop | undefined;
