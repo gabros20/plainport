@@ -45,7 +45,7 @@ import { scanTree } from "../scan/walk.ts";
 import { ulid } from "../ulid.ts";
 import { withProjectLock } from "./project-gate.ts";
 
-export interface HydrateStepReport {
+export type HydrateStepReport = {
   /** The install root, relative to the project; "" is the project folder. */
   path: string;
   /** The install as a person would type it, without a version manager's wrapper. */
@@ -53,9 +53,9 @@ export interface HydrateStepReport {
   ok: boolean;
   /** The install's exit code when it ran and failed; null when a signal ended it. */
   exitCode?: number | null;
-}
+};
 
-export interface HydrateReport {
+export type HydrateReport = {
   /**
    * installed: every install ran and succeeded. failed: one failed (restored-unhydrated). skipped: --no-hydrate.
    * reused: the folder came back with its dependencies (renamed back from the trash). none: nothing to install.
@@ -64,7 +64,7 @@ export interface HydrateReport {
   steps: HydrateStepReport[];
   /** What the project file asks to run that M1 never runs, untrusted (D54): hydrate.command, hooks.<name>. */
   untrusted: string[];
-}
+};
 
 export interface HydrateDeps {
   host: HostPorts;
@@ -346,13 +346,13 @@ export interface HydrateCommandDeps extends Omit<HydrateDeps, "op"> {
   now?: () => Date;
 }
 
-export interface HydrateOutcome {
+export type HydrateOutcome = {
   op: string;
   exitCode: 0 | 10;
   project: string;
   dir: string;
   hydrate: HydrateReport;
-}
+};
 
 /** The project's folder on this device, checked to be a folder; project.not-found when it is not here. */
 const folderOf = async (host: HostPorts, ref: ProjectRef, verb: string): Promise<Result<string>> => {
@@ -426,13 +426,13 @@ export interface DehydrateDeps extends HydrateCommandDeps {
   checks: HostChecks;
 }
 
-export interface DehydrateOutcome {
+export type DehydrateOutcome = {
   op: string;
   project: string;
   dir: string;
   removed: { path: string; bytes: number }[];
   freedBytes: number;
-}
+};
 
 /**
  * `plainport dehydrate`: removes the project's installed dependencies, only those a plugin claims as installed

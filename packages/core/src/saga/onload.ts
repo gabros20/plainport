@@ -187,7 +187,7 @@ export interface OnloadRequest {
   store?: string;
 }
 
-export interface OnloadOutcome {
+export type OnloadOutcome = {
   op: string;
   /** 10: restored, not hydrated (the install failed); the outcome is then the failure's data (D14). */
   exitCode: 0 | 10;
@@ -206,7 +206,7 @@ export interface OnloadOutcome {
   files: number;
   bytes: number;
   hydrate: HydrateReport;
-}
+};
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 

@@ -3,7 +3,7 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, join as joinPath } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
@@ -254,8 +254,8 @@ export const FAKE_REGISTRY: Registry = [
 
 /**
  * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
- * project, an empty git repository), store local, and the folders the examples name (~/personal,
- * ~/Developer/Work). cleanup() removes it.
+ * project, an empty git repository, and a shelved one, work:clients/acme/api), store local, and the folders the
+ * examples name (~/personal, ~/Developer/Work). cleanup() removes it.
  */
 export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
@@ -275,6 +275,20 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   if (setup.code !== 0) {
     rmSync(home, { recursive: true, force: true });
     throw new Error(`example home setup failed: ${setup.err}`);
+  }
+  // A shelved project for onload's examples: offloaded once (an empty git repository with a README; no package
+  // manager, so its onload installs nothing).
+  const api = join(home, "work/clients/acme/api");
+  mkdirSync(api, { recursive: true });
+  writeFileSync(join(api, "README.md"), "# api\n");
+  const apiGit = Bun.spawnSync(["git", "init", "-q", api], {
+    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1" },
+  });
+  if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
+  const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
+  if (shelved.code !== 0) {
+    rmSync(home, { recursive: true, force: true });
+    throw new Error(`example home setup failed: ${shelved.err}`);
   }
   return { home, ports, cleanup: () => rmSync(home, { recursive: true, force: true }) };
 };

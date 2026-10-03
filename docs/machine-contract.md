@@ -188,16 +188,21 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; `fix` suggests `--keep-deps` |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
 | `fs.cross-volume` | block | no | 6 | The project folder is on another volume than its root, so release could not move it aside in one rename |
+| `fs.case-collision` | block | no | 6 | The snapshot holds names that differ only by case and the landing volume ignores case; nothing is restored, and `fix` names `--to <path>` on a case-sensitive volume |
+| `fs.no-space` | block | no | 6 | The landing volume has less free space than the snapshot, the dependencies recorded at offload and a 10% margin need; nothing is restored |
 | `fs.write-failed` | block | no | 1 | A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved; after a commit, `fix` is `plainport recover` |
 | `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own `.git` included; `paths` lists them |
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
+| `hydrate.failed` | block | no | 10 | The files are restored but installing the dependencies failed (restored-unhydrated). The error's `data` is the command's output (the project, the snapshot, the install that failed, D14) and `fix` is `plainport hydrate <project>` |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
+| `lease.held` | warn | no | 8 | Another device holds the project's lease; a warning, or a refusal with exit 8 when `onload.leases = "strict"` |
 | `offload.diverged-after-commit` | block | no | 8 | Raised by `offload` (an edit between verification and the rename) and by `plainport recover` (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no `resolve` is needed. The error's `data` has `kind: "diverged-after-commit"`, where a fork (`catalog.head-moved`) has `kind: "fork"` (D51, D52) |
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
 | `path.stub-occupied` | block | no | 6 | Something other than this project's stub is at `<project>.plainport`, where the stub would go; plainport never overwrites it (D47) |
+| `path.occupied` | block | no | 6 | Something already stands where `onload` would put the project; it never merges, and `fix` names `--to <path>` (or, for the folder `offload.diverged-after-commit` kept, says to keep working in it) |
 | `plan.stale` | block | no | 6 | The folder, the options or the config changed since the approved plan was made, or the plan is for another project; a fresh plan is saved, `fix` names its id and the error's `data` is that plan (D14) |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
@@ -206,11 +211,13 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `process.spawn-failed` | block | no | 1 | A child process could not be started; `paths` names the program and its working folder |
 | `process.timeout` | block | no | 1 | A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output |
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
-| `project.locked` | block | no | 11 | Another plainport process holds the project's lock (`locks/<project>.lock`); a lock left by a dead process is broken instead |
+| `project.locked` | block | no | 11 | Another plainport process holds the project's lock (`locks/<project>.lock`), or the lock of a registered project nested with it (D53); a lock left by a dead process is broken instead |
+| `project.nested` | block | no | 6 | The folder holds another registered project that is on this device; `fix` offloads the inner project first (D53) |
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
 | `registry.locked` | block | no | 11 | Another process holds `registry.json.lock` |
 | `registry.unreadable` | block | no | 6 | `registry.json` exists but plainport may not read it; `fix` is about permissions, and the file is left as it is |
+| `snapshot.not-found` | block | no | 4 | The catalog has no snapshot of the project with this id (`--snapshot`), or the store holds no copy of it; `fix` names the head or the store that holds it |
 | `risk.needs-yes` | block | no | 3 | A confirm-class command ran without `--yes` or an approved `--plan`; `fix` is the exact re-run |
 | `root.defined-twice` | warn | no | 6 | `config.toml` and `managed.toml` both define a root; `config.toml` wins key by key, and `fix` says where to edit |
 | `root.exists` | block | no | 6 | A root with this key already exists; `fix` is the `root bind` command |
@@ -222,6 +229,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `root.synced-folder` | warn | yes | 6 | The root is inside an iCloud Drive or Dropbox folder |
 | `root.unbound` | block | no | 6 | The root has no folder on this device; `fix` is `plainport root bind <root> <path>` |
 | `strip.kept` | info | no | 6 | Paths a plugin or `strip.extra` proposed stay in the snapshot; the message says why for each (git tracks it, `strip.keep` or `strip.never` matches, it holds a repository, dependencies are kept) |
+| `toolchain.mismatch` | warn | no | 6 | The project asks for a tool version (`.nvmrc`, `engines`, `packageManager`) that is not active and no version manager (mise, fnm, Volta) on PATH can activate; the install runs with what is there |
 | `store.failed` | block | no | 1 | A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error |
 | `store.identity-changed` | block | no | 6 | The store at a configured path is not the one this device knows: its `meta/v1/store.json` names another id, or none. Nothing is synced, and nothing is written to either side |
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
@@ -234,7 +242,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 | `verify.changed` | block | no | 7 | Files changed while the snapshot was made, again after one retry; nothing local was deleted |
-| `verify.mismatch` | block | no | 7 | The snapshot's listing does not match the scan (entries, types, sizes, modes or link targets); nothing local was deleted |
+| `verify.mismatch` | block | no | 7 | The snapshot's listing does not match the folder (entries, types, sizes, modes or link targets): at offload the scan of the project, and nothing local was deleted; at onload the restored staging folder, which is removed while the stub stays |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
 | `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>` |
 

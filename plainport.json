@@ -1372,6 +1372,457 @@
       ]
     },
     {
+      "name": "onload",
+      "summary": "Restore a shelved project into place and reinstall its dependencies",
+      "usage": "plainport onload <project> [--to <value>] [--snapshot <value>] [--no-hydrate]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "to",
+          "type": "string",
+          "multiple": false,
+          "summary": "Land it in this folder instead of its root's place"
+        },
+        {
+          "name": "snapshot",
+          "type": "string",
+          "multiple": false,
+          "summary": "Restore this older snapshot instead of the head"
+        },
+        {
+          "name": "no-hydrate",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Restore the files without installing dependencies"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "to": {
+            "description": "Land it in this folder instead of its root's place",
+            "type": "string"
+          },
+          "snapshot": {
+            "description": "Restore this older snapshot instead of the head",
+            "type": "string"
+          },
+          "no-hydrate": {
+            "description": "Restore the files without installing dependencies",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 0
+              },
+              {
+                "type": "number",
+                "const": 10
+              }
+            ],
+            "description": "10: the files are restored but the install failed; this is then the error's data (D14)"
+          },
+          "project": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "The snapshot restored"
+          },
+          "over": {
+            "type": "string",
+            "description": "The head the onload was written over; the copy's next offload builds on it (D43)"
+          },
+          "store": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "Where the project now is"
+          },
+          "restored": {
+            "type": "string",
+            "enum": [
+              "restore",
+              "reuse"
+            ],
+            "description": "restore: from the store; reuse: the same head's folder renamed back from the trash"
+          },
+          "files": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hydrate": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "installed",
+                  "failed",
+                  "skipped",
+                  "reused",
+                  "none"
+                ],
+                "description": "installed: every install succeeded. failed: one failed (restored-unhydrated, exit 10). skipped: --no-hydrate. reused: the folder came back with its dependencies. none: nothing to install"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The install root, relative to the project; \"\" is the project"
+                    },
+                    "command": {
+                      "type": "string",
+                      "description": "The frozen install, e.g. npm ci"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "exitCode": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "command",
+                    "ok"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "untrusted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+              }
+            },
+            "required": [
+              "status",
+              "steps",
+              "untrusted"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "op",
+          "exitCode",
+          "project",
+          "snapshot",
+          "over",
+          "store",
+          "dir",
+          "restored",
+          "files",
+          "bytes",
+          "hydrate"
+        ],
+        "additionalProperties": {},
+        "description": "The project onloaded; with exit 10, restored but not hydrated (D14)"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api"
+          ],
+          "summary": "Bring a shelved project back"
+        },
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api",
+            "--to",
+            "~/Developer/api",
+            "--no-hydrate"
+          ],
+          "summary": "Land it elsewhere, files only"
+        }
+      ]
+    },
+    {
+      "name": "hydrate",
+      "summary": "Install a project's dependencies again with its own package manager (frozen)",
+      "usage": "plainport hydrate <project>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or .",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or ."
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 0
+              },
+              {
+                "type": "number",
+                "const": 10
+              }
+            ]
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          },
+          "hydrate": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "installed",
+                  "failed",
+                  "skipped",
+                  "reused",
+                  "none"
+                ],
+                "description": "installed: every install succeeded. failed: one failed (restored-unhydrated, exit 10). skipped: --no-hydrate. reused: the folder came back with its dependencies. none: nothing to install"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The install root, relative to the project; \"\" is the project"
+                    },
+                    "command": {
+                      "type": "string",
+                      "description": "The frozen install, e.g. npm ci"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "exitCode": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "command",
+                    "ok"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "untrusted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+              }
+            },
+            "required": [
+              "status",
+              "steps",
+              "untrusted"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "op",
+          "exitCode",
+          "project",
+          "dir",
+          "hydrate"
+        ],
+        "additionalProperties": {},
+        "description": "The installs run; with exit 10, the one that failed (D14)"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "hydrate",
+            "work:clients/acme/web"
+          ],
+          "summary": "Reinstall a project's dependencies"
+        }
+      ]
+    },
+    {
+      "name": "dehydrate",
+      "summary": "Remove a project's installed dependencies (only what a plugin claims and git does not track)",
+      "usage": "plainport dehydrate <project>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or .",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or ."
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "path",
+                "bytes"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "freedBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "dir",
+          "removed",
+          "freedBytes"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "dehydrate",
+            "work:clients/acme/web"
+          ],
+          "summary": "Free the space its node_modules takes"
+        }
+      ]
+    },
+    {
       "name": "root add",
       "summary": "Add a root, optionally with this device's folder for it; the global --store sets its store",
       "usage": "plainport root add <key> [<path>] [--label <value>] [--create]",
