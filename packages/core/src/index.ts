@@ -28,6 +28,7 @@ export {
 export * from "./registry.ts";
 export * from "./roots/index.ts";
 export * from "./runner/index.ts";
+export * from "./scan/index.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";
 export * from "./ulid.ts";
