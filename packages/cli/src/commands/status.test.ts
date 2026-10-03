@@ -448,3 +448,86 @@ describe("status and ls: fix wave r3 (unreadable journals)", () => {
     expect((await cli(["ls"])).out).toContain(`${path}: a journal this version of plainport cannot read`);
   });
 });
+
+describe("status and ls: fix wave q1 (lazy views, the view model in core)", () => {
+  /** Ports whose io and host record every folder listed. */
+  const counted = () => {
+    const listed: string[] = [];
+    const base = ports();
+    const wrap = <
+      F extends { entries: (p: string) => Promise<unknown>; readdir: (p: string) => Promise<string[]> },
+    >(
+      fs: F,
+    ): F => ({
+      ...fs,
+      entries: (p: string) => {
+        listed.push(p);
+        return fs.entries(p);
+      },
+      readdir: (p: string) => {
+        listed.push(p);
+        return fs.readdir(p);
+      },
+    });
+    return {
+      listed,
+      ports: {
+        ...base,
+        io: { ...base.io, fs: wrap(base.io.fs) },
+        system: { ...base.system, fs: wrap(base.system.fs) },
+      } as Ports,
+    };
+  };
+
+  test("status <project> walks only that project's folder; ls never walks a dependency folder", async () => {
+    for (let i = 0; i < 50; i++) box.file(`work/api/src/f${i}.ts`, "x");
+    box.file("work/api/node_modules/dep/index.js", "x".repeat(4000));
+    box.file("work/web/node_modules/dep/index.js", "x".repeat(4000));
+    await cli(["root", "scan", "work"]);
+    const one = counted();
+    const status = await capture(["status", "work:web", "--json"], REGISTRY, { ports: one.ports });
+    expect(status.code).toBe(0);
+    expect(one.listed.filter((p) => p.startsWith(join(box.home, "work/api")))).toEqual([]);
+    const all = counted();
+    const ls = await capture(["ls", "--json"], REGISTRY, { ports: all.ports });
+    expect(ls.code).toBe(0);
+    expect(all.listed.filter((p) => p.includes("/node_modules"))).toEqual([]);
+    const api = data("ls", ls.out).projects.find((p: { address: string }) => p.address === "work:api");
+    expect(api.bytes).toBeGreaterThan(50);
+    expect(api.bytes).toBeLessThan(4000);
+  });
+
+  test("the view carries the next step, its local details, typed conditions with details, kept trash and every open journal", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
+    await cli(["offload", "work:api", "--yes"]);
+    const shelved = data("status", (await cli(["status", "work:api", "--json"])).out);
+    expect(shelved.next).toEqual({ command: "plainport onload work:api", reason: expect.any(String) });
+    expect(shelved.trash).toEqual([
+      {
+        op: expect.any(String),
+        path: expect.stringContaining(".plainport-trash"),
+        keepUntil: expect.any(String),
+        deleting: false,
+      },
+    ]);
+    await cli(["root", "scan", "work"]);
+    const local = data("status", (await cli(["status", "work:web", "--json"])).out);
+    expect(local).toMatchObject({ gitWarnings: expect.any(Array), strippableBytes: expect.any(Number) });
+    expect(local.next).toBeUndefined();
+    await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
+    const [name] = readdirSync(box.paths.journalDir).filter((n) => {
+      const j = JSON.parse(readFileSync(join(box.paths.journalDir, n), "utf8"));
+      return j.project.address === "work:web";
+    });
+    const path = join(box.paths.journalDir, name as string);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), pid: 99_999_999 }));
+    const open = data("status", (await cli(["status", "work:web", "--json"])).out);
+    expect(open.journals.map((j: { step: string; running: boolean }) => [j.step, j.running])).toEqual([
+      ["offload.committed", false],
+    ]);
+    expect(open.conditionDetails).toEqual([
+      { condition: "interrupted", message: expect.stringContaining("offload.committed") },
+    ]);
+    expect(open.next).toEqual({ command: "plainport recover", reason: expect.any(String) });
+  });
+});

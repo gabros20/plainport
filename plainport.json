@@ -707,7 +707,7 @@
                   "maximum": 9007199254740991
                 },
                 "journal": {
-                  "description": "Its open journal; when not running, plainport recover settles it",
+                  "description": "Its newest open journal; when not running, plainport recover settles it",
                   "type": "object",
                   "properties": {
                     "op": {
@@ -735,6 +735,149 @@
                   ],
                   "additionalProperties": {}
                 },
+                "journals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "offload",
+                          "onload"
+                        ]
+                      },
+                      "step": {
+                        "type": "string"
+                      },
+                      "running": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "kind",
+                      "step",
+                      "running"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "Every open journal of it, oldest first (the order recover settles them in)"
+                },
+                "trash": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "type": "string"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "keepUntil": {
+                        "type": "string"
+                      },
+                      "deleting": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "path",
+                      "deleting"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "Released offloads' trash awaiting deletion: kept until keepUntil, or deleting while its detached delete runs (D64)"
+                },
+                "conditionDetails": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "condition": {
+                        "type": "string",
+                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "finding": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                            "title": "FindingCode",
+                            "description": "Stable dotted code, e.g. git.unpushed"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "info",
+                              "warn",
+                              "block"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "paths": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "fix": {
+                            "description": "The exact next step, e.g. a command to run",
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "allowable": {
+                            "type": "boolean",
+                            "description": "May --allow <code> override it?"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "severity",
+                          "message",
+                          "allowable"
+                        ],
+                        "additionalProperties": {},
+                        "title": "Finding"
+                      }
+                    },
+                    "required": [
+                      "condition",
+                      "message"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "One sentence per condition, with the finding behind it when there is one"
+                },
+                "next": {
+                  "description": "What to do next, when anything is to be done",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command",
+                    "reason"
+                  ],
+                  "additionalProperties": {}
+                },
                 "unreadableJournals": {
                   "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
                   "type": "array",
@@ -753,7 +896,10 @@
                 "here",
                 "head",
                 "snapshots",
-                "stale"
+                "stale",
+                "journals",
+                "trash",
+                "conditionDetails"
               ],
               "additionalProperties": {},
               "description": "A project as this device sees it"
@@ -1038,7 +1184,7 @@
             "maximum": 9007199254740991
           },
           "journal": {
-            "description": "Its open journal; when not running, plainport recover settles it",
+            "description": "Its newest open journal; when not running, plainport recover settles it",
             "type": "object",
             "properties": {
               "op": {
@@ -1066,6 +1212,149 @@
             ],
             "additionalProperties": {}
           },
+          "journals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offload",
+                    "onload"
+                  ]
+                },
+                "step": {
+                  "type": "string"
+                },
+                "running": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "op",
+                "kind",
+                "step",
+                "running"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Every open journal of it, oldest first (the order recover settles them in)"
+          },
+          "trash": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "deleting": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "op",
+                "path",
+                "deleting"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Released offloads' trash awaiting deletion: kept until keepUntil, or deleting while its detached delete runs (D64)"
+          },
+          "conditionDetails": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "condition": {
+                  "type": "string",
+                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                      "title": "FindingCode",
+                      "description": "Stable dotted code, e.g. git.unpushed"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "info",
+                        "warn",
+                        "block"
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fix": {
+                      "description": "The exact next step, e.g. a command to run",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "allowable": {
+                      "type": "boolean",
+                      "description": "May --allow <code> override it?"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "severity",
+                    "message",
+                    "allowable"
+                  ],
+                  "additionalProperties": {},
+                  "title": "Finding"
+                }
+              },
+              "required": [
+                "condition",
+                "message"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "One sentence per condition, with the finding behind it when there is one"
+          },
+          "next": {
+            "description": "What to do next, when anything is to be done",
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
           "unreadableJournals": {
             "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
             "type": "array",
@@ -1084,7 +1373,10 @@
           "here",
           "head",
           "snapshots",
-          "stale"
+          "stale",
+          "journals",
+          "trash",
+          "conditionDetails"
         ],
         "additionalProperties": {},
         "description": "A project as this device sees it"

@@ -10,52 +10,65 @@ import {
   ConfigLoader,
   type Device,
   expandHome,
-  findView,
+  type KnownProject,
+  loadProjects,
   type PlainportPaths,
   type ProjectRef,
-  type ProjectStatus,
-  projectViews,
+  type ProjectSet,
   resolveProject,
-  type Views,
+  type ViewDeps,
 } from "@plainport/core";
 import type { CommandContext } from "../registry.ts";
 import { thisDevice } from "./local.ts";
 
 const EXPLICIT_PATH = /^(\.{1,2}(\/|$)|\/|~(\/|$))/;
 
-/** This device, and every project it knows with its state (core's projectViews). */
+/** What core's views read, for this command. */
+export const viewDeps = (ctx: CommandContext, paths: PlainportPaths, device: Device): ViewDeps => ({
+  io: ctx.io,
+  paths,
+  env: ctx.env,
+  device,
+  loader: new ConfigLoader(ctx.io, paths),
+  opener: ctx.stores,
+  openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
+  now: () => ctx.clock.now(),
+  plugins: ctx.plugins,
+  planning: { host: ctx.system, checks: ctx.checks, plugins: ctx.plugins },
+});
+
+/** This device, and every project it knows (core's loadProjects); each one's view is built only when asked for. */
 export const knownProjects = async (
   ctx: CommandContext,
-): Promise<Result<{ paths: PlainportPaths; device: Device; views: Views }>> => {
+): Promise<Result<{ paths: PlainportPaths; device: Device; set: ProjectSet }>> => {
   const local = await thisDevice(ctx);
   if (!local.ok) return local;
   const { paths, device } = local.value;
-  const read = await projectViews({
-    io: ctx.io,
-    paths,
-    env: ctx.env,
-    device,
-    loader: new ConfigLoader(ctx.io, paths),
-    opener: ctx.stores,
-    openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
-    now: () => ctx.clock.now(),
-  });
+  const read = await loadProjects(viewDeps(ctx, paths, device));
   if (!read.ok) return read;
-  return ok({ paths, device, views: read.value });
+  return ok({ paths, device, set: read.value });
 };
 
+/** project.not-found for a project neither this device nor any catalog knows. */
+export const notKnown = (address: string) =>
+  fail(
+    finding("project.not-found", {
+      message: `neither this device nor the catalog of any store it set up knows ${address}`,
+      fix: "plainport ls lists the projects; plainport root scan <root> registers a root's projects",
+    }),
+  );
+
 /** A project the views know, as core's operations take it. */
-const refOf = (view: ProjectStatus): ProjectRef => ({
-  address: view.address,
-  root: view.root,
-  path: view.path,
-  id: view.id,
-  ...(view.dir === undefined ? {} : { dir: view.dir }),
-  ...(view.stub === undefined ? {} : { stub: view.stub }),
+const refOf = (known: KnownProject): ProjectRef => ({
+  address: known.address,
+  root: known.root,
+  path: known.path,
+  id: known.id,
+  ...(known.dir === undefined ? {} : { dir: known.dir }),
   match: "address",
 });
 
-const ambiguous = (input: string, matches: readonly ProjectStatus[], command: string) =>
+const ambiguous = (input: string, matches: readonly KnownProject[], command: string) =>
   fail(
     finding("project.ambiguous", {
       message: `${input} names more than one project: ${matches.map((p) => p.address).join(", ")}`,
@@ -63,20 +76,20 @@ const ambiguous = (input: string, matches: readonly ProjectStatus[], command: st
     }),
   );
 
-/** The project `input` names (see the file comment), and its view when the views hold it. */
+/** The project `input` names (see the file comment), and the known project when one matches. */
 export const resolveKnown = async (
   ctx: CommandContext,
-  known: { paths: PlainportPaths; device: Device; views: Views },
+  known: { paths: PlainportPaths; device: Device; set: ProjectSet },
   input: string,
   command: string,
-): Promise<Result<{ ref: ProjectRef; view?: ProjectStatus }>> => {
-  const { paths, device, views } = known;
+): Promise<Result<{ ref: ProjectRef; known?: KnownProject }>> => {
+  const { paths, device, set } = known;
   if (!EXPLICIT_PATH.test(input) && !input.includes(":")) {
     const suffix = input.replace(/^\/+|\/+$/g, "");
-    const matches = views.projects.filter((p) => p.path === suffix || p.path.endsWith(`/${suffix}`));
+    const matches = set.known.filter((p) => p.path === suffix || p.path.endsWith(`/${suffix}`));
     if (matches.length > 1) return ambiguous(input, matches, command);
     const [only] = matches;
-    if (only !== undefined) return ok({ ref: refOf(only), view: only });
+    if (only !== undefined) return ok({ ref: refOf(only), known: only });
   }
   const resolved = await resolveProject(ctx.io, paths, input, {
     cwd: ctx.cwd,
@@ -84,16 +97,19 @@ export const resolveKnown = async (
     device: device.name,
   });
   if (resolved.ok) {
-    const view = findView(views, resolved.value);
-    return ok({ ref: resolved.value, ...(view.ok ? { view: view.value } : {}) });
+    const ref = resolved.value;
+    const match =
+      (ref.id === undefined ? undefined : set.known.find((p) => p.id === ref.id)) ??
+      set.known.find((p) => p.address === ref.address);
+    return ok({ ref, ...(match === undefined ? {} : { known: match }) });
   }
   if (
     EXPLICIT_PATH.test(input) &&
     (resolved.finding.code === "project.not-found" || resolved.finding.code === "root.none")
   ) {
     const at = expandHome(input, paths.home, ctx.cwd).replace(/\/+$/, "");
-    const found = views.projects.find((p) => p.dir === at || `${p.dir}.plainport` === at);
-    if (found !== undefined) return ok({ ref: refOf(found), view: found });
+    const found = set.known.find((p) => p.dir === at || `${p.dir}.plainport` === at);
+    if (found !== undefined) return ok({ ref: refOf(found), known: found });
   }
   return resolved;
 };

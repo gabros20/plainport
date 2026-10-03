@@ -1,16 +1,9 @@
-import { type Finding, FindingSchema, ok, ProjectStateSchema, shellWord } from "@plainport/contract";
-import {
-  ConfigLoader,
-  findView,
-  type PlainportPaths,
-  type ProjectStatus,
-  planOffload,
-  type Views,
-} from "@plainport/core";
+import { FindingSchema, ok, ProjectStateSchema } from "@plainport/contract";
+import { PROJECT_CONDITIONS, type ProjectStatus } from "@plainport/core";
 import { z } from "zod";
-import { type CommandContext, defineCommand } from "../registry.ts";
+import { defineCommand } from "../registry.ts";
 import { formatBytes } from "./offload.ts";
-import { knownProjects, resolveKnown } from "./resolve.ts";
+import { knownProjects, notKnown, resolveKnown } from "./resolve.ts";
 
 export const ProjectStatusSchema = z
   .looseObject({
@@ -68,7 +61,43 @@ export const ProjectStatusSchema = z
         running: z.boolean(),
       })
       .optional()
-      .meta({ description: "Its open journal; when not running, plainport recover settles it" }),
+      .meta({ description: "Its newest open journal; when not running, plainport recover settles it" }),
+    journals: z
+      .array(
+        z.looseObject({
+          op: z.string(),
+          kind: z.enum(["offload", "onload"]),
+          step: z.string(),
+          running: z.boolean(),
+        }),
+      )
+      .meta({ description: "Every open journal of it, oldest first (the order recover settles them in)" }),
+    trash: z
+      .array(
+        z.looseObject({
+          op: z.string(),
+          path: z.string(),
+          keepUntil: z.string().optional(),
+          deleting: z.boolean(),
+        }),
+      )
+      .meta({
+        description:
+          "Released offloads' trash awaiting deletion: kept until keepUntil, or deleting while its detached delete runs (D64)",
+      }),
+    conditionDetails: z
+      .array(
+        z.looseObject({
+          condition: z.string().meta({ description: `One of ${PROJECT_CONDITIONS.join(", ")}; an open set` }),
+          message: z.string(),
+          finding: FindingSchema.optional(),
+        }),
+      )
+      .meta({ description: "One sentence per condition, with the finding behind it when there is one" }),
+    next: z
+      .looseObject({ command: z.string(), reason: z.string() })
+      .optional()
+      .meta({ description: "What to do next, when anything is to be done" }),
     unreadableJournals: z.array(z.string()).optional().meta({
       description:
         "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
@@ -97,23 +126,6 @@ const freshness = (p: {
     : p.syncedAt === undefined
       ? `store ${p.store ?? "?"} not reached, never synced`
       : `store ${p.store ?? "?"} not reached; stale, last synced ${p.syncedAt}`;
-
-/** What to do next for a project in this state. */
-const nextStep = (p: z.output<typeof ProjectStatusSchema>): string | undefined => {
-  const address = shellWord(p.address);
-  if ((p.journal !== undefined && !p.journal.running) || p.unreadableJournals !== undefined)
-    return "plainport recover";
-  if (p.conditions.includes("diverged-after-commit"))
-    return `keep working in the folder; plainport offload ${address} --yes builds on snapshot ${p.head}`;
-  if (p.conditions.includes("incomplete"))
-    return "connect the store that holds every snapshot, or plainport doctor";
-  if (p.state === "conflicted")
-    return `plainport resolve ${address} (M2); plainport restore ${address} --snapshot <id> --to <path> reads either copy`;
-  if (p.state === "restored-unhydrated") return `plainport hydrate ${address}`;
-  if (p.state === "shelved") return `plainport onload ${address}`;
-  if (p.state === "unavailable") return "mount the volume its root lives on";
-  return undefined;
-};
 
 const LABEL = 9;
 const row = (label: string, text: string): string => `  ${label.padEnd(LABEL)}${text}`;
@@ -152,49 +164,19 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     ),
   );
   lines.push(row("catalog", freshness(p)));
-  if (p.journal !== undefined)
-    lines.push(
-      row(
-        "journal",
-        `${p.journal.kind} ${p.journal.op} ${p.journal.running ? "running" : "interrupted"} at ${p.journal.step}`,
-      ),
-    );
+  for (const j of p.journals)
+    lines.push(row("journal", `${j.kind} ${j.op} ${j.running ? "running" : "interrupted"} at ${j.step}`));
   for (const path of p.unreadableJournals ?? [])
     lines.push(row("journal", `${path} cannot be read by this version of plainport`));
-  const next = nextStep(p);
-  if (next !== undefined) lines.push(row("next", next));
-  return lines.join("\n");
-};
-
-/**
- * A project whose folder is here: its git warnings and what an offload would strip now, from a read-only scan (the
- * offload's own planning, as --dry-run makes it, without saving a plan). A scan that cannot run says why in the log.
- */
-const localDetails = async (
-  ctx: CommandContext,
-  paths: PlainportPaths,
-  view: ProjectStatus,
-): Promise<{ gitWarnings?: Finding[]; strippableBytes?: number }> => {
-  if (!view.here || view.dir === undefined || view.state === "offloading" || view.state === "onloading")
-    return {};
-  const planned = await planOffload(ctx.system, ctx.checks, ctx.plugins, {
-    dir: view.dir,
-    project: { address: view.address, root: view.root, path: view.path, id: view.id },
-    loader: new ConfigLoader(ctx.io, paths),
-    env: ctx.env,
-    now: ctx.clock.now(),
-  });
-  if (!planned.ok) {
-    ctx.output.log(
-      "warn",
-      `${view.address} could not be scanned (${planned.finding.code}: ${planned.finding.message})`,
+  for (const t of p.trash)
+    lines.push(
+      row(
+        "trash",
+        `${t.path} ${t.deleting ? "being deleted" : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
+      ),
     );
-    return {};
-  }
-  return {
-    gitWarnings: planned.value.findings.filter((f) => f.code.startsWith("git.")),
-    strippableBytes: planned.value.strip.reduce((sum, s) => sum + s.bytes, 0),
-  };
+  if (p.next !== undefined) lines.push(row("next", `${p.next.command}  (${p.next.reason})`));
+  return lines.join("\n");
 };
 
 export const status = defineCommand({
@@ -222,10 +204,10 @@ export const status = defineCommand({
     if (!known.ok) return known;
     const named = await resolveKnown(ctx, known.value, args.project ?? ".", "status");
     if (!named.ok) return named;
-    const view =
-      named.value.view === undefined ? findView(known.value.views, named.value.ref) : ok(named.value.view);
-    if (!view.ok) return view;
-    return ok({ ...view.value, ...(await localDetails(ctx, known.value.paths, view.value)) });
+    if (named.value.known === undefined) return notKnown(named.value.ref.address);
+    // Only this project's view is built, with its local details (D64 quality: views are lazy).
+    for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
+    return ok(await known.value.set.view(named.value.known.id, { detail: true }));
   },
 });
 
@@ -290,12 +272,14 @@ export const ls = defineCommand({
   handler: async (args, ctx) => {
     const read = await knownProjects(ctx);
     if (!read.ok) return read;
-    const all: Views = read.value.views;
-    let projects = all.projects.filter(
-      (p) =>
-        (args.root === undefined || p.root === args.root) &&
-        (args.local !== true || p.here) &&
-        (args.shelved !== true || p.state === "shelved"),
+    const all = read.value.set;
+    // Views only for the root asked for; the size column needs each folder's size (dependency folders not walked).
+    const views: ProjectStatus[] = [];
+    for (const known of all.known)
+      if (args.root === undefined || known.root === args.root)
+        views.push(await all.view(known.id, { sizes: true }));
+    let projects = views.filter(
+      (p) => (args.local !== true || p.here) && (args.shelved !== true || p.state === "shelved"),
     );
     if (args.sort === "size") projects = [...projects].sort((a, b) => (b.bytes ?? -1) - (a.bytes ?? -1));
     if (args.sort === "age")
