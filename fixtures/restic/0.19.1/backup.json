@@ -1,0 +1,19 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "backup",
+    "--json",
+    "--tag",
+    "plainport",
+    "--tag",
+    "plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD",
+    "--exclude=/tmp/restic-fixture/src/node_modules",
+    "."
+  ],
+  "exitCode": 0,
+  "stdout": "{\"message_type\":\"status\",\"percent_done\":1,\"total_files\":2,\"files_done\":2,\"total_bytes\":7,\"bytes_done\":7}\n{\"message_type\":\"summary\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":1781,\"data_added_packed\":1052,\"total_files_processed\":2,\"total_bytes_processed\":7,\"total_duration\":0.7226835,\"backup_start\":\"2026-10-03T03:36:50.42668+02:00\",\"backup_end\":\"2026-10-03T03:36:51.149369+02:00\",\"snapshot_id\":\"8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa\"}\n",
+  "stderr": ""
+}

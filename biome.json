@@ -3,7 +3,7 @@
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!.claude", "!docs", "!plainport.json", "!schemas", "!completions"]
+    "includes": ["**", "!.claude", "!docs", "!plainport.json", "!schemas", "!completions", "!fixtures"]
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 110 },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },

@@ -1,0 +1,14 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "ls",
+    "--json",
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "exitCode": 1,
+  "stdout": "",
+  "stderr": "Load(<snapshot/0000000000>, 0, 0) failed: open /tmp/restic-fixture/repo/snapshots/0000000000000000000000000000000000000000000000000000000000000000: no such file or directory\nLoad(<snapshot/0000000000>, 0, 0) failed: open /tmp/restic-fixture/repo/snapshots/0000000000000000000000000000000000000000000000000000000000000000: no such file or directory\n{\"message_type\":\"exit_error\",\"code\":1,\"message\":\"failed to load snapshot [null]: open /tmp/restic-fixture/repo/snapshots/0000000000000000000000000000000000000000000000000000000000000000: no such file or directory\"}\n"
+}

@@ -1,0 +1,13 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "check",
+    "--json"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"message_type\":\"summary\",\"num_errors\":0,\"broken_packs\":null,\"suggest_repair_index\":false,\"suggest_prune\":false}\n",
+  "stderr": ""
+}

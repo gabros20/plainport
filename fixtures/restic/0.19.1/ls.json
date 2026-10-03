@@ -1,0 +1,14 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "ls",
+    "--json",
+    "8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"time\":\"2026-10-03T03:36:50.42668+02:00\",\"tree\":\"2aefa136e656560b87287e7cd2ca689560c5880f67dd25b2de32da2937597c81\",\"paths\":[\"/tmp/restic-fixture/src\"],\"hostname\":\"fixture-host\",\"username\":\"fixture-user\",\"uid\":501,\"gid\":20,\"excludes\":[\"/tmp/restic-fixture/src/node_modules\"],\"tags\":[\"plainport\",\"plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD\"],\"program_version\":\"restic 0.19.1\",\"summary\":{\"backup_start\":\"2026-10-03T03:36:50.42668+02:00\",\"backup_end\":\"2026-10-03T03:36:51.149369+02:00\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":1781,\"data_added_packed\":1052,\"total_files_processed\":2,\"total_bytes_processed\":7},\"id\":\"8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa\",\"short_id\":\"8aff9622\",\"message_type\":\"snapshot\",\"struct_type\":\"snapshot\"}\n{\"name\":\"a.txt\",\"type\":\"file\",\"path\":\"/a.txt\",\"uid\":501,\"gid\":20,\"size\":6,\"mode\":420,\"permissions\":\"-rw-r--r--\",\"mtime\":\"2026-10-03T03:36:47.319437918+02:00\",\"atime\":\"2026-10-03T03:36:47.319437918+02:00\",\"ctime\":\"2026-10-03T03:36:47.319437918+02:00\",\"inode\":360367526,\"message_type\":\"node\",\"struct_type\":\"node\"}\n{\"name\":\"link\",\"type\":\"symlink\",\"path\":\"/link\",\"uid\":501,\"gid\":20,\"mode\":134218221,\"permissions\":\"Lrwxr-xr-x\",\"mtime\":\"2026-10-03T03:36:47.319688004+02:00\",\"atime\":\"2026-10-03T03:36:47.319688004+02:00\",\"ctime\":\"2026-10-03T03:36:47.319729254+02:00\",\"inode\":360367529,\"message_type\":\"node\",\"struct_type\":\"node\"}\n{\"name\":\"sub\",\"type\":\"dir\",\"path\":\"/sub\",\"uid\":501,\"gid\":20,\"mode\":2147484141,\"permissions\":\"drwxr-xr-x\",\"mtime\":\"2026-10-03T03:36:47.319499627+02:00\",\"atime\":\"2026-10-03T03:36:47.319499627+02:00\",\"ctime\":\"2026-10-03T03:36:47.319499627+02:00\",\"inode\":360367524,\"message_type\":\"node\",\"struct_type\":\"node\"}\n{\"name\":\"b\",\"type\":\"file\",\"path\":\"/sub/b\",\"uid\":501,\"gid\":20,\"size\":1,\"mode\":420,\"permissions\":\"-rw-r--r--\",\"mtime\":\"2026-10-03T03:36:47.319540044+02:00\",\"atime\":\"2026-10-03T03:36:47.319540044+02:00\",\"ctime\":\"2026-10-03T03:36:47.319540044+02:00\",\"inode\":360367527,\"message_type\":\"node\",\"struct_type\":\"node\"}\n",
+  "stderr": ""
+}
