@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import type { Prompter } from "../prompt.ts";
@@ -157,6 +157,27 @@ describe("init: from flags", () => {
     const again = await init(["--yes", "--json"]);
     expect(again.code).toBe(0);
     expect(envelope(again.out).data.device).toMatchObject({ id, name: "mbp", created: false });
+    const human = await init(["--yes"]);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain("nothing changed");
+    expect(human.out).not.toContain("settings written");
+  });
+
+  test("a device.json that cannot be created leaves no bindings behind", async () => {
+    if (process.getuid?.() === 0) return; // root writes anywhere
+    box.dir("work");
+    const state = box.dir(".local/state/plainport");
+    chmodSync(state, 0o555);
+    const argv = ["--root", "work=~/work", "--store-path", "~/A", "--device", "mbp", "--yes", "--json"];
+    let run: Awaited<ReturnType<typeof init>>;
+    try {
+      run = await init(argv);
+    } finally {
+      chmodSync(state, 0o755);
+    }
+    expect(run.code).toBe(1);
+    expect(envelope(run.out).error.finding.code).toBe("config.write-failed");
+    expect(existsSync(box.paths.managedFile)).toBe(false);
   });
 
   test("--device cannot rename an existing device", async () => {
@@ -236,6 +257,18 @@ describe("init: interactive scan (TTY, injected prompter)", () => {
     const run = await init(["--root", "work=~/work", "--device", "mbp", "--yes"], { isTTY: true, prompt });
     expect(run.code).toBe(0);
     expect(calls).toEqual([expect.objectContaining({ kind: "text" })]);
+  });
+
+  test("picking no folder is refused with the flags to pass instead; nothing is written", async () => {
+    box.repo("work/a");
+    const { prompt } = scripted([[]]);
+    const run = await init(["--yes", "--json"], { isTTY: true, prompt });
+    expect(run.code).toBe(2);
+    const error = envelope(run.out).error;
+    expect(error.finding.code).toBe("usage.invalid");
+    expect(error.hint).toContain("--root <key>=<path>");
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+    expect(existsSync(box.paths.deviceFile)).toBe(false);
   });
 
   test("cancelling a prompt exits 130 and writes nothing", async () => {

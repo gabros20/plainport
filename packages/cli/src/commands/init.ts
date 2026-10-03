@@ -67,7 +67,8 @@ const parseRoots = (values: readonly string[]): Result<Root[]> => {
   return ok(roots);
 };
 
-/** Asks for roots: picks from the scan of likely folders, or one folder typed in, then a key for each. */
+/** Asks for roots: picks from the scan of likely folders, or one folder typed in, then a key for each. An empty list
+ * means the person picked none; undefined means they cancelled. */
 const askRoots = async (ctx: CommandContext, candidates: RootCandidate[]): Promise<Root[] | undefined> => {
   const home = ctx.env.HOME ?? "";
   let picked: string[];
@@ -133,6 +134,7 @@ export const init = defineCommand({
     roots: z.array(z.looseObject({ key: z.string(), path: z.string().optional() })),
     store: z.looseObject({ name: z.string(), path: z.string() }).optional(),
     files: z.looseObject({ config: z.string(), managed: z.string(), device: z.string() }),
+    changed: z.boolean().meta({ description: "This run wrote managed.toml or created device.json" }),
     findings: FindingsSchema,
   }),
   examples: [
@@ -140,14 +142,18 @@ export const init = defineCommand({
       argv: ["init", "--root", "work=~/work", "--store-path", "/Volumes/Archive/plainport", "--yes"],
       summary: "Set up without prompts",
     },
-    { argv: ["init", "--yes"], summary: "Set up interactively, from a scan of likely folders" },
+    {
+      argv: ["init", "--yes"],
+      summary:
+        "Re-check setup from the roots and store already configured (on a TTY, asks for what is missing)",
+    },
   ],
   human: (data) =>
     [
       `device ${data.device.name}${data.device.created ? " (new)" : ""}`,
       ...data.roots.map((r) => `root ${r.key}${r.path === undefined ? "" : ` at ${r.path}`}`),
       ...(data.store === undefined ? [] : [`store ${data.store.name} at ${data.store.path}`]),
-      `settings written to ${data.files.managed}`,
+      data.changed ? `settings written to ${data.files.managed}` : "nothing changed: already set up",
       ...findingLines(data.findings),
     ].join("\n"),
   handler: async (args, ctx) => {
@@ -183,6 +189,18 @@ export const init = defineCommand({
       if (needRoots) {
         const asked = await askRoots(ctx, await rootCandidates(ctx.io, home));
         if (asked === undefined) return cancelled();
+        if (asked.length === 0) {
+          return fail(
+            finding("usage.invalid", {
+              message: "init needs at least one root, and no folder was picked",
+              fix: [
+                `plainport init --root ${ROOT_FORM}`,
+                ...(needStore && storePath === undefined ? ["--store-path <path>"] : []),
+                "--yes",
+              ].join(" "),
+            }),
+          );
+        }
         roots = asked;
       }
       if (needStore) {
@@ -249,20 +267,28 @@ export const init = defineCommand({
     let findings: z.output<typeof FindingsSchema> = [];
     let writtenRoots: { key: string; path?: string }[] = [];
     let writtenStore: { name: string; path: string } | undefined;
-    if (changes.length > 0 || store !== undefined) {
+    // The identity is created inside the managed.toml update, after its checks and before its write: a refused
+    // root leaves no device.json, and a device.json that cannot be created leaves no bindings under its name.
+    const made: { device?: Awaited<ReturnType<typeof ensureDevice>> } = {};
+    const createDevice = async () => {
+      made.device = await ensureDevice(ctx.io, paths, { role: "owner", name, clock: ctx.clock });
+      return made.device;
+    };
+    const writes = changes.length > 0 || store !== undefined;
+    if (writes) {
       const written = await writeRoots(ctx.io, paths, {
         device: name,
         cwd: ctx.cwd,
         changes,
         ...(store !== undefined && { store }),
+        beforeWrite: createDevice,
       });
       if (!written.ok) return written;
       findings = written.value.findings;
       writtenRoots = written.value.roots;
       writtenStore = written.value.store;
     }
-
-    const device = await ensureDevice(ctx.io, paths, { role: "owner", name, clock: ctx.clock });
+    const device = made.device ?? (await createDevice());
     if (!device.ok) return device;
     const { id, role } = device.value.device;
     return ok({
@@ -270,6 +296,7 @@ export const init = defineCommand({
       roots: writtenRoots,
       ...(writtenStore !== undefined && { store: writtenStore }),
       files: { config: paths.configFile, managed: paths.managedFile, device: paths.deviceFile },
+      changed: writes || device.value.created,
       findings,
     });
   },
