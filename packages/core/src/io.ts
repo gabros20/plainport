@@ -28,6 +28,13 @@ export interface LocalFs {
   writable(path: string): Promise<boolean>;
   /** Whether the path is a regular file (symlinks followed) this process may execute; false when missing. */
   executable(path: string): Promise<boolean>;
+  /** What is at the path itself: a symlink is described, never followed. Rejects with ENOENT when nothing is. */
+  lstat(path: string): Promise<LinkStat>;
+  /** A symlink's target, as stored. */
+  readlink(path: string): Promise<string>;
+  /** Whether this process may read the path (access(2) with R_OK, so ACLs count); false when missing. Opens
+   * nothing, so a placeholder file is not downloaded. */
+  readable(path: string): Promise<boolean>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";
@@ -37,6 +44,19 @@ export interface FileStat {
   /** Device and inode: two paths with equal ones are the same file. */
   dev: number;
   ino: number;
+}
+
+/** One entry as lstat(2) sees it, for the scan. Sockets, FIFOs and device files are their own kinds. */
+export interface LinkStat {
+  kind: "file" | "dir" | "symlink" | "socket" | "fifo" | "device";
+  /** Bytes: a file's length, a symlink's target length. */
+  size: number;
+  /** Permission bits, setuid, setgid and sticky included (st_mode & 0o7777). */
+  mode: number;
+  /** Nanoseconds since the epoch. */
+  mtimeNs: bigint;
+  /** The inode's change time, which every write, chmod or replace moves and nothing can set back. */
+  ctimeNs: bigint;
 }
 
 export interface DirEntry {

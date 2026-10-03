@@ -6,17 +6,38 @@ import { constants } from "node:fs";
 import {
   access,
   link,
+  lstat,
   mkdir,
   open,
   readdir,
   readFile,
+  readlink,
   realpath,
   rename,
   stat,
   unlink,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { type DirEntry, errorCode, type FileKind, type LocalIo } from "./io.ts";
+import { type DirEntry, errorCode, type FileKind, type LinkStat, type LocalIo } from "./io.ts";
+
+const linkKindOf = (info: {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  isSocket(): boolean;
+  isFIFO(): boolean;
+}): LinkStat["kind"] =>
+  info.isSymbolicLink()
+    ? "symlink"
+    : info.isDirectory()
+      ? "dir"
+      : info.isFile()
+        ? "file"
+        : info.isSocket()
+          ? "socket"
+          : info.isFIFO()
+            ? "fifo"
+            : "device";
 
 const kindOf = (entry: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
   entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other";
@@ -76,6 +97,25 @@ export const nodeLocalIo: LocalIo = {
       try {
         if (!(await stat(path)).isFile()) return false;
         await access(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    lstat: async (path) => {
+      const info = await lstat(path, { bigint: true });
+      return {
+        kind: linkKindOf(info),
+        size: Number(info.size),
+        mode: Number(info.mode) & 0o7777,
+        mtimeNs: info.mtimeNs,
+        ctimeNs: info.ctimeNs,
+      };
+    },
+    readlink: (path) => readlink(path),
+    readable: async (path) => {
+      try {
+        await access(path, constants.R_OK);
         return true;
       } catch {
         return false;

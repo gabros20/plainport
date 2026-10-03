@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { finding } from "@plainport/contract";
 import { acquireLock, InjectedFault, nodeLocalIo } from "@plainport/core";
 import { createMacosHost } from "./index.ts";
+import { testHost } from "./testing.ts";
 
 const env = { PATH: "/usr/bin:/bin" };
 let dir: string;
@@ -51,6 +52,27 @@ describe("host: the macOS host port implements LocalIo", () => {
     expect(await fs.executable(join(dir, "a"))).toBe(false);
     await expect(fs.readText(join(dir, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(readFileSync(join(dir, "a", "three.txt"), "utf8")).toBe("one");
+  });
+
+  test("lstat, readlink and readable describe an entry without following it (scan)", async () => {
+    const { fs } = testHost();
+    writeFileSync(join(dir, "file.txt"), "12345");
+    chmodSync(join(dir, "file.txt"), 0o640);
+    symlinkSync("file.txt", join(dir, "link"));
+    Bun.spawnSync(["/usr/bin/mkfifo", join(dir, "pipe")]);
+    const file = await fs.lstat(join(dir, "file.txt"));
+    expect(file).toMatchObject({ kind: "file", size: 5, mode: 0o640 });
+    expect(typeof file.mtimeNs).toBe("bigint");
+    expect(file.ctimeNs).toBeGreaterThan(0n);
+    expect(await fs.lstat(join(dir, "link"))).toMatchObject({ kind: "symlink", size: 8 });
+    expect(await fs.lstat(join(dir, "pipe"))).toMatchObject({ kind: "fifo" });
+    expect(await fs.lstat(dir)).toMatchObject({ kind: "dir" });
+    expect(await fs.readlink(join(dir, "link"))).toBe("file.txt");
+    expect(await fs.readable(join(dir, "file.txt"))).toBe(true);
+    chmodSync(join(dir, "file.txt"), 0o200);
+    expect(await fs.readable(join(dir, "file.txt"))).toBe(false);
+    expect(await fs.readable(join(dir, "missing"))).toBe(false);
+    await expect(fs.lstat(join(dir, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("every host shares the process's one ProcessInfo, so locks see one process", async () => {

@@ -8,6 +8,7 @@ export {
   errorCode,
   type FileKind,
   type FileStat,
+  type LinkStat,
   type LocalFs,
   type LocalIo,
   type ProcessInfo,

@@ -157,6 +157,9 @@ const READS = [
   "entries",
   "writable",
   "executable",
+  "lstat",
+  "readlink",
+  "readable",
 ] as const;
 const WRITES = ["writeTextDurable", "unlink", "mkdirp"] as const;
 
