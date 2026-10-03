@@ -50,7 +50,8 @@ const startParent = async (
       `  host.run({ command: "/bin/sh", args: ["-c", ${JSON.stringify(script)}], cwd: ${JSON.stringify(dir)},\n` +
       `  env: { PATH: "/usr/bin:/bin" }, killGraceMs: 300, onLine: (line) => console.log(line.text) });\n` +
       `const done = ${done};\n` +
-      `stopOnSignals(host, done, { stderr: ${stderr} });\n` +
+      // A long settle wait, so a regression to waiting is unmistakable even on a loaded host.
+      `stopOnSignals(host, done, { stderr: ${stderr}, settleMs: 20_000 });\n` +
       "process.exitCode = await done;\n",
   );
   const parent = Bun.spawn([process.execPath, fixture], {
@@ -120,6 +121,7 @@ describe("interrupt: signals to plainport stop its children", () => {
     const started = performance.now();
     parent.kill("SIGINT");
     expect(await parent.exited).toBe(130);
-    expect(performance.now() - started).toBeLessThan(1000);
-  });
+    // Waiting would take the fixture's 20 s settle time; at once is far less, even on a loaded host.
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 30_000);
 });

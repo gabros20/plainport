@@ -94,7 +94,7 @@ describe("runner: real process groups (host-macos)", () => {
     expect(result).toMatchObject({ ok: false, exitCode: 130, finding: { code: "process.cancelled" } });
     expect(pids).toHaveLength(2);
     for (const pid of pids) expect(alive(pid)).toBe(false);
-  });
+  }, 30_000);
 
   test("an output flood stays bounded: the tail is outputLimitBytes, the rest is counted", async () => {
     let lines = 0;
@@ -133,17 +133,18 @@ describe("runner: real process groups (host-macos)", () => {
     const result = await host.run(sh("echo starting; sleep 60", { idleTimeoutMs: 300 }));
     expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.idle-timeout" } });
     if (!result.ok) expect(result.finding.message).toContain("starting");
-    expect(performance.now() - started).toBeLessThan(5000);
-  });
+    // Far below the child's 60 s; loose enough for a loaded CI host.
+    expect(performance.now() - started).toBeLessThan(20_000);
+  }, 30_000);
 
   test("the overall deadline fires on slow but steady output", async () => {
     const started = performance.now();
     const result = await host.run(
-      sh("while :; do echo tick; sleep 0.05; done", { idleTimeoutMs: 2000, timeoutMs: 500 }),
+      sh("while :; do echo tick; sleep 0.05; done", { idleTimeoutMs: 30_000, timeoutMs: 500 }),
     );
     expect(result).toMatchObject({ ok: false, finding: { code: "process.timeout" } });
-    expect(performance.now() - started).toBeLessThan(5000);
-  });
+    expect(performance.now() - started).toBeLessThan(20_000);
+  }, 30_000);
 
   test("abort mid-run leaves no process behind", async () => {
     const controller = new AbortController();
@@ -157,18 +158,47 @@ describe("runner: real process groups (host-macos)", () => {
     );
     expect(result).toMatchObject({ ok: false, exitCode: 130, finding: { code: "process.cancelled" } });
     expect(members(groups[0] as number)).toEqual([]);
-  });
+  }, 30_000);
 
   test("processes the leader leaves running in its group are stopped when it exits", async () => {
     const pids: number[] = [];
     const started = performance.now();
     const result = await host.run(
-      sh("(sleep 60; echo late) & echo $!; exit 0", { onLine: (line) => pids.push(Number(line.text)) }),
+      sh("(sleep 60; echo late) & echo $!; exit 0", {
+        killGraceMs: 20_000,
+        onLine: (line) => pids.push(Number(line.text)),
+      }),
     );
     expect(result).toMatchObject({ ok: true, value: { exitCode: 0, leftoversStopped: true } });
     expect(alive(pids[0] as number)).toBe(false);
-    expect(performance.now() - started).toBeLessThan(5000);
-  });
+    // Stopped by TERM, well inside the 20 s grace, even when the sleep was forked as the first TERM went out.
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 30_000);
+
+  test("leftovers stop promptly every time, also when the runner's TERM races the fork (CI phase 4)", async () => {
+    const started = performance.now();
+    for (let i = 0; i < 40; i++) {
+      const result = await host.run(
+        sh("(sleep 60; echo late) & echo started; exit 0", { killGraceMs: 20_000 }),
+      );
+      expect(result).toMatchObject({ ok: true, value: { leftoversStopped: true } });
+    }
+    // 40 runs: with a single TERM, about one in ten waited out the full 20 s grace on a loaded host.
+    expect(performance.now() - started).toBeLessThan(15_000);
+  }, 60_000);
+
+  test("a member forked after TERM went out (a TERM trap that forks) is stopped by TERM too, not left for KILL", async () => {
+    const started = performance.now();
+    const result = await host.run(
+      sh("trap 'sleep 60 & exit 0' TERM; echo ready; while :; do sleep 0.1; done", {
+        timeoutMs: 300,
+        killGraceMs: 20_000,
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.timeout" } });
+    expect(members(groups[0] as number)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 30_000);
 
   test("in capture mode, leftovers the leader did not wait for make the run process.output-incomplete", async () => {
     const result = await host.run(
@@ -220,9 +250,12 @@ describe("runner: nothing outlives a run (host-macos)", () => {
       script,
       `import { createMacosHost } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
         `const result = await createMacosHost().run({ command: "/bin/echo", args: ["hi"], cwd: ${JSON.stringify(dir)}, env: { PATH: "/usr/bin:/bin" } });\n` +
-        `console.log(result.ok ? "ran" : result.finding.code);\n`,
+        `console.log(result.ok ? "ran" : result.finding.code);\n` +
+        // Measured inside the child, from the run's end to the process's exit, so a slow start-up on a loaded
+        // host does not count; a leaked 5 s timer would.
+        "const ended = performance.now();\n" +
+        'process.on("exit", () => console.log(Math.round(performance.now() - ended)));\n',
     );
-    const started = performance.now();
     const result = await host.run({
       command: process.execPath,
       args: [script],
@@ -230,10 +263,11 @@ describe("runner: nothing outlives a run (host-macos)", () => {
       env: { ...env, HOME: dir },
       timeoutMs: 20_000,
     });
-    const elapsed = performance.now() - started;
-    expect(result).toMatchObject({ ok: true, value: { exitCode: 0, stdout: { text: "ran\n" } } });
-    expect(elapsed).toBeLessThan(2500);
-  });
+    if (!result.ok) throw new Error(result.finding.message);
+    const [ran, lingered] = result.value.stdout.text.trim().split("\n");
+    expect(ran).toBe("ran");
+    expect(Number(lingered)).toBeLessThan(2500);
+  }, 30_000);
 });
 
 describe("runner: capturing the whole stdout (host-macos)", () => {
