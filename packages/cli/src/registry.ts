@@ -10,7 +10,9 @@
 
 import type { PlainportEvent, Result, RiskClass, StreamEvent } from "@plainport/contract";
 import { RISK_CLASSES } from "@plainport/contract";
+import type { Env, LocalIo, PlainportPaths } from "@plainport/core";
 import { z } from "zod";
+import type { Prompter } from "./prompt.ts";
 
 declare module "zod" {
   interface GlobalMeta {
@@ -39,6 +41,14 @@ export interface Ports {
   host: HostPort;
   clock: Clock;
   plans: PlanStore;
+  /** The file system and process calls core makes (run decision D21). */
+  io: LocalIo;
+  /** The environment plainport's paths and settings come from: HOME, XDG_*, PLAINPORT_*. Tests sandbox it. */
+  env: Env;
+  /** What relative paths on the command line mean. */
+  cwd: string;
+  /** Asks a person; used only when ctx.input is true. */
+  prompt: Prompter;
 }
 
 /** The --config path; loading the file arrives with the config task. */
@@ -71,6 +81,12 @@ export interface CommandContext {
   clock: Clock;
   config: ConfigRef;
   output: OutputPort;
+  io: LocalIo;
+  env: Env;
+  cwd: string;
+  prompt: Prompter;
+  /** plainport's config and state paths, from env and --config; config.no-home when HOME is unusable. */
+  paths(): Result<PlainportPaths>;
 }
 
 export type Example = {

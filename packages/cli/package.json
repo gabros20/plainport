@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@clack/prompts": "1.8.1",
     "@plainport/contract": "workspace:*",
     "@plainport/core": "workspace:*",
     "zod": "4.6.5"

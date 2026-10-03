@@ -3,12 +3,16 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
+import { nodeLocalIo } from "@plainport/core";
 import { z } from "zod";
 import { help } from "./commands/help.ts";
+import { REGISTRY } from "./commands/index.ts";
 import { type IO, run } from "./main.ts";
+import type { Prompter } from "./prompt.ts";
 import { type CommandContext, defineCommand, type Ports, type Registry } from "./registry.ts";
 
 export const seen: { name: string; args: unknown; ctx: CommandContext }[] = [];
@@ -16,11 +20,36 @@ export const seen: { name: string; args: unknown; ctx: CommandContext }[] = [];
 /** Plan ids the fake plan store treats as approved, as `<command> <id>`. */
 export const approvedPlans = new Set<string>();
 
-/** Ports for tests: a home folder that is never created, a fixed clock, and the approvedPlans set. */
+/** A prompter that fails the test: commands must not prompt unless a test injects one. */
+export const noPrompts: Prompter = {
+  multiselect: async ({ message }) => {
+    throw new Error(`unexpected prompt: ${message}`);
+  },
+  text: async ({ message }) => {
+    throw new Error(`unexpected prompt: ${message}`);
+  },
+};
+
+const FAKE_HOME = join(tmpdir(), "plainport-fake-home-never-created");
+
+/** Ports for tests: a home folder that is never created, a fixed clock, the approvedPlans set and no prompts. */
 export const fakePorts = (): Ports => ({
-  host: { home: join(tmpdir(), "plainport-fake-home-never-created") },
+  host: { home: FAKE_HOME },
   clock: { now: () => new Date("2026-10-03T12:00:00Z") },
   plans: { approved: (command, id) => approvedPlans.has(`${command} ${id}`) },
+  io: nodeLocalIo,
+  env: { HOME: FAKE_HOME },
+  cwd: FAKE_HOME,
+  prompt: noPrompts,
+});
+
+/** Ports whose HOME (and cwd) is a test's sandbox, so commands read and write only inside it. */
+export const sandboxPorts = (home: string, overrides: Partial<Ports> = {}): Ports => ({
+  ...fakePorts(),
+  host: { home },
+  env: { HOME: home },
+  cwd: home,
+  ...overrides,
 });
 
 const done = z.looseObject({ done: z.string() });
@@ -171,6 +200,28 @@ export const FAKE_REGISTRY: Registry = [
   }),
 ];
 
+/**
+ * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
+ * project), store local, and the folders the examples name (~/personal, ~/Developer/Work). cleanup() removes it.
+ */
+export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
+  const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
+  for (const dir of ["work/clients/acme/web/.git", "personal", "Developer/Work"]) {
+    mkdirSync(join(home, dir), { recursive: true });
+  }
+  const ports = sandboxPorts(home);
+  const setup = await capture(
+    ["init", "--root", "work=~/work", "--store-path", "~/store", "--device", "mbp", "--yes"],
+    REGISTRY,
+    { ports },
+  );
+  if (setup.code !== 0) {
+    rmSync(home, { recursive: true, force: true });
+    throw new Error(`example home setup failed: ${setup.err}`);
+  }
+  return { home, ports, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+};
+
 export interface Captured {
   code: number;
   out: string;
@@ -181,7 +232,7 @@ export interface Captured {
 export const capture = async (
   argv: string[],
   registry: Registry = FAKE_REGISTRY,
-  options: { isTTY?: boolean; stdout?: (text: string) => void } = {},
+  options: { isTTY?: boolean; stdout?: (text: string) => void; ports?: Ports } = {},
 ): Promise<Captured> => {
   let out = "";
   let err = "";
@@ -196,6 +247,6 @@ export const capture = async (
     },
     isTTY: options.isTTY ?? false,
   };
-  const code = await run(argv, io, fakePorts(), registry);
+  const code = await run(argv, io, options.ports ?? fakePorts(), registry);
   return { code, out, err };
 };

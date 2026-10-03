@@ -8,16 +8,17 @@ import Ajv2020 from "ajv/dist/2020";
 import { REGISTRY } from "./commands/index.ts";
 import { generateFiles, staleFiles, writeFiles } from "./generate.ts";
 import type { Registry } from "./registry.ts";
-import { capture, FAKE_REGISTRY } from "./testing.ts";
+import { capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
 import { VERSION } from "./version.ts";
 
 const repoRoot = join(import.meta.dir, "../../..");
 
 const ajv = new Ajv2020({ strict: false, allErrors: true });
 
-/** Runs every example of `registry` with --json against fake ports and checks the result three ways: the stream rule
- * (parseJsonLines), the declared Zod schema, and the JSON Schemas published in plainport.json and schemas/. */
-const roundTrip = (label: string, registry: Registry) => {
+/** Runs every example of `registry` with --json and checks the result three ways: the stream rule (parseJsonLines),
+ * the declared Zod schema, and the JSON Schemas published in plainport.json and schemas/. With `sandboxed`, each
+ * example runs in a fresh example home (exampleHome); otherwise against the fake ports. */
+const roundTrip = (label: string, registry: Registry, sandboxed = false) => {
   const manifest = JSON.parse(generateFiles(registry).get("plainport.json") ?? "");
   const checkEnvelope = ajv.compile(contractJsonSchemas().envelope);
   for (const command of registry) {
@@ -27,8 +28,18 @@ const roundTrip = (label: string, registry: Registry) => {
       const published = manifest.commands.find((c: { name: string }) => c.name === command.name);
       for (const example of command.examples) {
         const dry = example.argv.includes("--dry-run");
-        const run = await capture([...example.argv, "--json"], registry);
-        expect(run.code).toBe(0);
+        const home = sandboxed ? await exampleHome() : undefined;
+        let run: Awaited<ReturnType<typeof capture>>;
+        try {
+          run = await capture([...example.argv, "--json"], registry, home && { ports: home.ports });
+        } finally {
+          home?.cleanup();
+        }
+        expect({ argv: example.argv, code: run.code, out: run.code === 0 ? "" : run.out }).toEqual({
+          argv: example.argv,
+          code: 0,
+          out: "",
+        });
         const schema = dry && command.dryRun !== false ? command.dryRun.plan : command.output;
         const parsed = parseJsonLines(run.out, schema);
         if (!parsed.ok) throw new Error(`${example.argv.join(" ")}: ${parsed.finding.message}`);
@@ -46,7 +57,7 @@ describe("contract round trip: every command's --json output matches its declare
   test("every registered command has an example", () => {
     for (const command of REGISTRY) expect(command.examples.length).toBeGreaterThan(0);
   });
-  roundTrip("registry", REGISTRY);
+  roundTrip("registry", REGISTRY, true);
   // help's examples name version, which the fake registry does not have; the real registry covers help.
   roundTrip(
     "fake",
@@ -256,7 +267,7 @@ describe("completions", () => {
           expect(run.stderr.toString()).toBe("");
           return run.stdout.toString().split("\n").filter(Boolean);
         };
-        expect(complete(REGISTRY, "plainport ")).toEqual(["help", "version"]);
+        expect(complete(REGISTRY, "plainport ")).toEqual(["help", "init", "root", "version"]);
         expect(complete(REGISTRY, "plainport he")).toEqual(["help"]);
         expect(complete(REGISTRY, "plainport help v")).toEqual(["version"]);
         expect(complete(REGISTRY, "plainport version --j")).toEqual(["--json"]);

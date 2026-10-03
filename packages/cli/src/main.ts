@@ -2,10 +2,11 @@
 // I/O, ports and registry as arguments so tests drive it in process with fakes; the binary passes the real ones.
 // Whatever throws, from the gate to the last write, ends as one internal.unexpected refusal (exit 1).
 
-import { homedir } from "node:os";
 import { decode, type Failure, fail, finding } from "@plainport/contract";
+import { nodeLocalIo, resolvePaths } from "@plainport/core";
 import { REGISTRY } from "./commands/index.ts";
 import { gate } from "./gate.ts";
+import { clackPrompter } from "./prompt.ts";
 import type { CommandContext, Ports, Registry } from "./registry.ts";
 import { type IO, Output } from "./render.ts";
 
@@ -60,6 +61,11 @@ export const run = async (
       clock: ports.clock,
       config: { path: globals.config },
       output: { emit: (event) => out.event(event), log: (level, message) => out.log(level, message) },
+      io: ports.io,
+      env: ports.env,
+      cwd: ports.cwd,
+      prompt: ports.prompt,
+      paths: () => resolvePaths(ports.env, { configFlag: globals.config, cwd: ports.cwd }),
     };
     const result = await command.handler(args, ctx);
     if (!result.ok) return out.failure(result);
@@ -90,11 +96,15 @@ export const run = async (
 };
 
 /** The real ports. The host port is a placeholder until Task 7; no plan store exists until Task 10, so no plan id
- * is approved yet and confirm commands need --yes. */
+ * is approved yet and confirm commands need --yes. Paths come from the environment, never os.homedir(). */
 const realPorts = (): Ports => ({
-  host: { home: homedir() },
+  host: { home: process.env.HOME ?? "" },
   clock: { now: () => new Date() },
   plans: { approved: () => false },
+  io: nodeLocalIo,
+  env: process.env,
+  cwd: process.cwd(),
+  prompt: clackPrompter,
 });
 
 if (import.meta.main) {
