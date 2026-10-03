@@ -224,7 +224,8 @@ const value = <T>(
 const offload = async (path = "web") => {
   const done = value(await runOffload(offloadDeps(), { project: await ref(`work:${path}`) }));
   if (done.keepUntil === undefined)
-    for (let i = 0; i < 200 && existsSync(join(box.home, "work/.plainport-trash", done.op)); i++)
+    // The detached delete may be slow on a loaded runner: up to 30 s.
+    for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", done.op)); i++)
       await Bun.sleep(25);
   return done;
 };
@@ -282,6 +283,12 @@ const treeOf = (
   };
   walk("");
   return out;
+};
+
+/** Aborts once the fake install has started (its call is in the log), not on a timer. */
+const abortOnceInstalling = async (stop: AbortController, calls = 1) => {
+  for (let i = 0; i < 2000 && pmCalls().length < calls; i++) await Bun.sleep(10);
+  stop.abort();
 };
 
 /** Writes a lock for the project as a live plainport elsewhere would hold it. */
@@ -411,6 +418,9 @@ describe("onload: the round trip", () => {
       expect(j.staging).toBe(join(box.home, "work/.plainport-staging", j.op));
     }
     expect(seen.find((j) => j.step === "onload.commit.start")?.event).toEqual(expect.any(String));
+    // At swap.start, recover reads the folder the swap moves from: staging here, reuse.folder for a rename-back (M12).
+    const swap = seen.find((j) => j.step === "onload.swap.start");
+    expect(swap?.staging ?? swap?.reuse?.folder).toEqual(expect.any(String));
     // Every field recover reads at a step is in the journal at that step.
     for (const j of seen) {
       for (const field of ONLOAD_RECOVERY_NEEDS[j.step as keyof typeof ONLOAD_RECOVERY_NEEDS]) {
@@ -1131,13 +1141,13 @@ describe("onload: hydration", () => {
 
   test("Ctrl-C during the install after a good restore exits 130; the project is restored-unhydrated (D56)", async () => {
     const off = await offload();
-    writeFileSync(join(bin, "npm"), '#!/bin/sh\necho "$PWD|npm $*" >> "$FAKE_PM_LOG"\nexec sleep 30\n');
+    writeFileSync(join(bin, "npm"), '#!/bin/sh\necho "$PWD|npm $*" >> "$FAKE_PM_LOG"\nexec sleep 600\n');
     chmodSync(join(bin, "npm"), 0o755);
     const stop = new AbortController();
     const host = testHost({
       faults: {
         onStep: (step) => {
-          if (step === "onload.committed") setTimeout(() => stop.abort(), 300);
+          if (step === "onload.committed") void abortOnceInstalling(stop);
         },
       },
     });
@@ -1153,7 +1163,7 @@ describe("onload: hydration", () => {
 
     // plainport hydrate, stopped the same way, also exits 130 and leaves the project restored-unhydrated.
     const again = new AbortController();
-    setTimeout(() => again.abort(), 300);
+    void abortOnceInstalling(again, 2);
     const hydrated = await runHydrate(
       {
         host: testHost(),

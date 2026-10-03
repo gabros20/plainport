@@ -886,6 +886,8 @@ const nestedHere = async (
   const found: { address: string; dir: string }[] = [];
   for (const n of nested) {
     if (!n.inside) continue;
+    // Where it physically is: its override when it has one (inside only if that lies in the folder), else its place.
+    if (n.override !== undefined && !n.override.startsWith(`${folder}/`)) continue;
     const dir = n.override ?? join(folder, ...n.path.slice(path.length + 1).split("/"));
     try {
       if ((await io.fs.lstat(dir)).kind === "dir") found.push({ address: n.address, dir });

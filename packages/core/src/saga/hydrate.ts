@@ -113,6 +113,7 @@ export interface Toolchain {
 }
 
 const MANAGERS = ["mise", "fnm", "volta"] as const;
+const EXACT = /^v?\d+(?:\.\d+){0,2}$/;
 
 /** An exact or partial version (20, 20.11, v20.11.0), as a semver range; an alias (lts/*, latest) is undefined. */
 const asRange = (version: string): string | undefined => {
@@ -133,9 +134,12 @@ export const resolveToolchain = async (
   env: Env,
   requirements: readonly ToolRequirement[],
   signal?: AbortSignal,
+  /** The project folder: versions are asked there, where shims read the project's own pins. */
+  cwd = "/",
 ): Promise<Toolchain> => {
   const findings: Finding[] = [];
-  const pinned = requirements.find((r) => r.tool === "node" && r.pinned && asRange(r.version) !== undefined);
+  // Only an exact or partial version (20, 20.11, v20.11.0) is handed to a manager; a range is compared instead.
+  const pinned = requirements.find((r) => r.tool === "node" && r.pinned && EXACT.test(r.version.trim()));
   let manager: (typeof MANAGERS)[number] | undefined;
   if (pinned !== undefined) {
     for (const name of MANAGERS) {
@@ -152,7 +156,7 @@ export const resolveToolchain = async (
     const ran = await host.run({
       command: tool,
       args: ["--version"],
-      cwd: "/",
+      cwd,
       env: installEnv(env),
       timeoutMs: VERSION_TIMEOUT_MS,
       idleTimeoutMs: VERSION_TIMEOUT_MS,
@@ -274,7 +278,7 @@ export const hydrateProject = async (
     if (plugin.toolchain !== undefined) requirements.push(...(await plugin.toolchain(ctx)));
     installs.push(...(await plugin.hydrate(ctx)).steps);
   }
-  const toolchain = await resolveToolchain(host, deps.env, requirements, deps.signal);
+  const toolchain = await resolveToolchain(host, deps.env, requirements, deps.signal, dir);
   for (const f of toolchain.findings) deps.emit({ type: "finding", op, finding: f });
   if (toolchain.manager !== undefined)
     deps.log(
@@ -426,6 +430,9 @@ export const runHydrate = async (
     gate,
     { id, address: ref.address },
     async () => {
+      // Looked at again under the lock: an offload may have finished in between.
+      const here = await folderOf(host, ref, "hydrate");
+      if (!here.ok) return here;
       const done = await hydrateProject({ ...deps, op }, dir, ref.address);
       const marked = await markHydrated(host, paths, id, done.failure === undefined);
       if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
@@ -487,6 +494,9 @@ export const runDehydrate = async (
     gate,
     { id, address: ref.address },
     async () => {
+      // Looked at again under the lock: an offload may have finished in between.
+      const here = await folderOf(host, ref, "dehydrate");
+      if (!here.ok) return here;
       // A dev server or an editor in the folder would see its dependencies vanish: the same process checks offload has.
       const checked = await preflight(host, deps.checks, dir, {
         env: deps.env,
@@ -512,6 +522,14 @@ export const runDehydrate = async (
         .map((n) => n.path.slice(ref.path.length + 1));
       const within = (path: string) => inner.some((p) => path === p || path.startsWith(`${p}/`));
       for (const entry of set.value.filter((e) => !within(e.path))) {
+        // Ctrl-C between removals: what is gone is regenerable, and plainport hydrate puts it back.
+        if (deps.signal?.aborted)
+          return fail(
+            finding("operation.cancelled", {
+              message: `dehydrate of ${ref.address} was stopped after ${removed.length} of its dependency folders were removed`,
+              fix: `plainport hydrate ${shellWord(ref.address)} puts them back, or re-run plainport dehydrate to finish`,
+            }),
+          );
         const path = join(dir, ...entry.path.split("/"));
         try {
           await host.fs.removeTree(path);

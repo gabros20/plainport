@@ -184,6 +184,31 @@ describe("hydrate: the core meets the toolchain", () => {
     ]);
   });
 
+  test("versions are asked in the project folder, where a shim (corepack, mise, asdf) reads its pin (M2)", async () => {
+    const dir = join(root, "web");
+    mkdirSync(dir);
+    fake("pnpm", `case "$PWD" in *web) echo 9.12.0;; *) echo 8.0.0;; esac`);
+    const toolchain = await resolveToolchain(
+      testHost(),
+      offlineEnv(`${bin}:/usr/bin:/bin`),
+      [{ tool: "pnpm", version: "9.12.0", source: "package.json packageManager", pinned: false }],
+      undefined,
+      dir,
+    );
+    expect(toolchain.findings).toEqual([]);
+  });
+
+  test("a range in a version file is compared, never handed to a manager as a version (M2)", async () => {
+    fake("fnm", "exit 0");
+    fake("node", 'echo "v20.11.0"');
+    const toolchain = await resolveToolchain(testHost(), offlineEnv(`${bin}:/usr/bin:/bin`), [
+      { tool: "node", version: ">=18", source: "mise.toml", pinned: true },
+    ]);
+    expect(toolchain.manager).toBeUndefined();
+    expect(toolchain.wrap(["npm", "ci"])).toEqual(["npm", "ci"]);
+    expect(toolchain.findings).toEqual([]);
+  });
+
   test("the toolchain step's warning reaches the event stream, and the install runs through the manager", async () => {
     const dir = project("npm");
     writeFileSync(join(dir, ".nvmrc"), "20.11.0\n");

@@ -123,7 +123,7 @@ const offloaded = async (): Promise<string> => {
   const run = await cli(["offload", "work:web", "--yes", "--json"]);
   if (run.code !== 0) throw new Error(run.err);
   const op = envelope(run.out).data.op as string;
-  for (let i = 0; i < 200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+  for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
     await Bun.sleep(25);
   return op;
 };
@@ -314,7 +314,7 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
     const off = await run(["offload", "work:web", "--store", "t1", "--yes", "--json"]);
     expect(off.code).toBe(0);
     const op = envelope(off.out).data.op as string;
-    for (let i = 0; i < 200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+    for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
       await Bun.sleep(25);
     expect(existsSync(dir())).toBe(false);
 

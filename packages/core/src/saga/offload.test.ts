@@ -29,7 +29,7 @@ import { listPlans, savePlan } from "../plan/store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { readRegistry, updateRegistry } from "../registry.ts";
+import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { includedFingerprint, scanTree } from "../scan/walk.ts";
 import { posixDeleteTrash } from "../spawner.ts";
@@ -837,6 +837,19 @@ describe("offload: nested registered projects (D53)", () => {
     expect(result.ok ? "" : result.finding.fix).toContain("plainport offload work:web/packages/inner");
     expect(engine.calls).toEqual([]);
     await expectUntouched();
+  });
+
+  test("an inner project onloaded elsewhere (--to) is not inside the folder, whatever stands there (M6)", async () => {
+    const id = await registerInner("web/packages/inner");
+    const elsewhere = box.dir("elsewhere/inner");
+    await updateRegistry(testHost(), box.paths, (r) =>
+      ok({
+        ...r,
+        projects: { ...r.projects, [id]: { ...(r.projects[id] as RegistryEntry), override: elsewhere } },
+      }),
+    );
+    value(await offload());
+    await expectInvariants();
   });
 
   test("a registered inner project that is shelved (no folder here) does not block", async () => {

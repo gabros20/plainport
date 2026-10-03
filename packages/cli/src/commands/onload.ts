@@ -245,20 +245,25 @@ export const dehydrate = defineCommand({
     const found = await project(ctx, args.project);
     if (!found.ok) return found;
     const { paths, ref } = found.value;
-    return runDehydrate(
-      {
-        host: ctx.system,
-        checks: ctx.checks,
-        plugins: ctx.plugins,
-        env: ctx.env,
-        loader: new ConfigLoader(ctx.io, paths),
-        paths,
-        emit: (event) => ctx.output.emit(event),
-        log: (level, message) => ctx.output.log(level, message),
-        signal: ctx.signal,
-        now: () => ctx.clock.now(),
-      },
-      { project: ref },
-    );
+    const release = ctx.holdSignal();
+    try {
+      return await runDehydrate(
+        {
+          host: ctx.system,
+          checks: ctx.checks,
+          plugins: ctx.plugins,
+          env: ctx.env,
+          loader: new ConfigLoader(ctx.io, paths),
+          paths,
+          emit: (event) => ctx.output.emit(event),
+          log: (level, message) => ctx.output.log(level, message),
+          signal: ctx.signal,
+          now: () => ctx.clock.now(),
+        },
+        { project: ref },
+      );
+    } finally {
+      release();
+    }
   },
 });
