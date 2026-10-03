@@ -218,3 +218,23 @@ describe("scan: git facts", () => {
     }
   });
 });
+
+describe("scan: git facts fail closed", () => {
+  test("a FIFO named .git is not opened: the facts block instead", async () => {
+    const dir = join(fx.root, "piped");
+    mkdirSync(dir);
+    Bun.spawnSync(["/usr/bin/mkfifo", join(dir, ".git")]);
+    const result = await gitFacts(host, dir, { env: fx.env });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.finding.code).toBe("fs.unreadable");
+  });
+
+  test("a folder with an unusable .git inside another repository is git.failed, never the parent's facts", async () => {
+    const parent = fx.repo("parent");
+    const dir = join(parent, "sub");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    const result = await gitFacts(host, dir, { env: fx.env });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.finding.code).toBe("git.failed");
+  });
+});

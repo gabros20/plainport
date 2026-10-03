@@ -8,10 +8,15 @@
 // keeps git from starting its fsmonitor daemon: a daemon left behind would outlive the call and fail the capture
 // (process.output-incomplete), and would hold the folder open. core.untrackedCache=false keeps git from updating
 // that cache. The user's own config is otherwise read as usual.
+//
+// git runs only when the folder has a .git of its own, and GIT_CEILING_DIRECTORIES stops it at the folder's parent:
+// a .git that git cannot use (an empty folder, a broken pointer) is git.failed, never the facts of a repository
+// that holds the project. A .git that is not a folder or a regular file (a FIFO, a socket, a device, a dangling
+// link) is never opened: it is fs.unreadable, since neither plainport nor git can read a repository from it.
 
 import { dirname, join, resolve } from "node:path";
 import { type Failure, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
-import { errorCode } from "../io.ts";
+import { errorCode, type LinkStat } from "../io.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { capturedOutput, splitRecords } from "../runner/runner.ts";
 import type { RunOutcome } from "../runner/types.ts";
@@ -78,6 +83,8 @@ const FLAGS = [
 ];
 const PASSED = ["PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR"];
 const CAPTURE_BYTES = 256 * 1024 * 1024;
+/** A gitdir pointer is one line holding a path; anything bigger is left for git to judge, unread. */
+const MAX_POINTER_BYTES = 64 * 1024;
 const CHANGED_SAMPLE = 20;
 const NUL = 0;
 const NL = 10;
@@ -110,18 +117,27 @@ const gitFailed =
       }),
     );
 
-/** Runs one read-only git command in dir; its whole stdout, only when git exited 0. */
+/**
+ * Runs one read-only git command in dir; its whole stdout, only when git exited 0. git may not look above the
+ * folder for a repository (its cwd is the folder's real path, so the ceiling is the real parent).
+ */
 const git = async (
   host: HostPorts,
   dir: string,
   ctx: GitContext,
   args: readonly string[],
 ): Promise<Result<Uint8Array>> => {
+  let real: string;
+  try {
+    real = await host.fs.realpath(dir);
+  } catch (error) {
+    return unreadable(dir, error);
+  }
   const ran = await host.run({
     command: "git",
     args: [...FLAGS, ...args],
     cwd: dir,
-    env: gitEnv(ctx.env),
+    env: { ...gitEnv(ctx.env), GIT_CEILING_DIRECTORIES: dirname(real) },
     capture: { maxBytes: CAPTURE_BYTES },
     idleTimeoutMs: 120_000,
     timeoutMs: 600_000,
@@ -167,16 +183,67 @@ export const exists = async (host: HostPorts, path: string): Promise<Result<bool
   }
 };
 
-/** What .git is in the folder: a folder (a repository), a file (a pointer: worktree or submodule), or nothing. */
+/** fs.unreadable for a .git that is neither a folder nor a regular file: never opened, so never a repository. */
+const notARepository = (path: string, what: string): Failure =>
+  fail(
+    finding("fs.unreadable", {
+      message: `${path} is ${what}, which plainport never opens, and git cannot read a repository from it`,
+      paths: [path],
+      fix: `remove it (rm ${shellWord(path)}) or move it out of the project, then re-run`,
+    }),
+  );
+
+/**
+ * What .git is in the folder: a folder (a repository), a regular file (a pointer: worktree or submodule), or
+ * nothing. A symlink is followed to one of those; a FIFO, socket, device or dangling link is fs.unreadable.
+ */
 export const dotGit = async (host: HostPorts, dir: string): Promise<Result<"dir" | "file" | "none">> => {
   const path = join(dir, ".git");
+  let kind: string;
   try {
-    const stat = await host.fs.lstat(path);
-    return ok(stat.kind === "dir" ? "dir" : "file");
+    kind = (await host.fs.lstat(path)).kind;
   } catch (error) {
     if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return ok("none");
     return unreadable(path, error);
   }
+  if (kind === "symlink") {
+    try {
+      kind = (await host.fs.stat(path)).kind;
+    } catch (error) {
+      if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR")
+        return notARepository(path, "a symlink leading nowhere");
+      return unreadable(path, error);
+    }
+    if (kind === "other") return notARepository(path, "a symlink to a special file");
+  }
+  if (kind === "dir" || kind === "file") return ok(kind);
+  return notARepository(path, `a ${kind === "other" ? "special file" : kind}`);
+};
+
+/**
+ * Where a .git pointer file points. A small regular file is read and parsed here; anything else (a symlink, a
+ * file too big to be a pointer, or one not in `gitdir: <path>` form) is left to git, whose refusal is git.failed.
+ */
+export const gitPointer = async (host: HostPorts, dir: string, ctx: GitContext): Promise<Result<string>> => {
+  const path = join(dir, ".git");
+  let stat: LinkStat;
+  try {
+    stat = await host.fs.lstat(path);
+  } catch (error) {
+    return unreadable(path, error, { path, kind: "file" });
+  }
+  if (stat.kind === "file" && stat.size <= MAX_POINTER_BYTES) {
+    let content: string;
+    try {
+      content = await host.fs.readText(path);
+    } catch (error) {
+      return unreadable(path, error, { path, kind: "file" });
+    }
+    const pointer = /^gitdir:[ \t]*(\S[^\r\n]*?)[ \t]*$/m.exec(content.split("\n")[0] ?? "")?.[1];
+    if (pointer !== undefined && pointer !== "") return ok(pointer);
+  }
+  const answer = await git(host, dir, ctx, ["rev-parse", "--absolute-git-dir"]);
+  return answer.ok ? ok(text(answer.value).trim()) : answer;
 };
 
 const IN_PROGRESS: readonly [string, InProgress][] = [

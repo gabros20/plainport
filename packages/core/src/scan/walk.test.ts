@@ -160,3 +160,14 @@ describe("scan: the fingerprint", () => {
     await changed("link retargeted");
   });
 });
+
+describe("scan: expected failures carry a fix", () => {
+  test("project.not-found says how to find the project again", async () => {
+    const result = await scanTree(fs, join(dir, "nope"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.finding.code).toBe("project.not-found");
+      expect(result.finding.fix).toBeDefined();
+    }
+  });
+});

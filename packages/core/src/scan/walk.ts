@@ -80,7 +80,13 @@ const look = async (fs: LocalFs, path: string, name: string): Promise<Seen> => {
 export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeScan>> => {
   const top = resolve(dir);
   const notFound = () =>
-    fail(finding("project.not-found", { message: `${dir} does not exist or is not a folder`, paths: [dir] }));
+    fail(
+      finding("project.not-found", {
+        message: `${dir} does not exist or is not a folder`,
+        paths: [dir],
+        fix: `check the path (ls -d ${shellWord(dir)}); if the project moved, run the command with its new path, or name it by address (root:path)`,
+      }),
+    );
   let real: string;
   try {
     real = await fs.realpath(top);
