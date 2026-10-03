@@ -6,6 +6,11 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@plainport/core": "workspace:*"
+    "@plainport/contract": "workspace:*",
+    "@plainport/core": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@plainport/host-macos": "workspace:*"
   }
 }

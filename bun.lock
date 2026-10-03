@@ -50,7 +50,12 @@
     "packages/engine-restic": {
       "name": "@plainport/engine-restic",
       "dependencies": {
+        "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
+        "zod": "4.6.5",
+      },
+      "devDependencies": {
+        "@plainport/host-macos": "workspace:*",
       },
     },
     "packages/host-macos": {
