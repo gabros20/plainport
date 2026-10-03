@@ -119,6 +119,31 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A bug: an exception escaped a command; the message names it",
   },
+  "process.cancelled": {
+    severity: "block",
+    allowable: false,
+    exitCode: 130,
+    summary: "A child process was cancelled; its whole process group was stopped",
+  },
+  "process.idle-timeout": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A child process printed nothing for its idle deadline; its whole process group was stopped",
+  },
+  "process.spawn-failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary:
+      "A child process could not be started: the program or its working folder is missing or not usable",
+  },
+  "process.timeout": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A child process ran past its overall deadline; its whole process group was stopped",
+  },
   "project.ambiguous": {
     severity: "block",
     allowable: false,

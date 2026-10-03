@@ -1223,6 +1223,34 @@
       "summary": "A bug: an exception escaped a command; the message names it"
     },
     {
+      "code": "process.cancelled",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "A child process was cancelled; its whole process group was stopped"
+    },
+    {
+      "code": "process.idle-timeout",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process printed nothing for its idle deadline; its whole process group was stopped"
+    },
+    {
+      "code": "process.spawn-failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process could not be started: the program or its working folder is missing or not usable"
+    },
+    {
+      "code": "process.timeout",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process ran past its overall deadline; its whole process group was stopped"
+    },
+    {
       "code": "project.ambiguous",
       "severity": "block",
       "allowable": false,

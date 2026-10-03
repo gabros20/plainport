@@ -182,6 +182,10 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `device.invalid` | block | no | 6 | `device.json`, this device's identity, is unreadable; plainport never replaces it |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
+| `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
+| `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
+| `process.spawn-failed` | block | no | 1 | A child process could not be started; `paths` names the program and its working folder |
+| `process.timeout` | block | no | 1 | A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output |
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
