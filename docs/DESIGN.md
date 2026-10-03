@@ -200,7 +200,7 @@ The choice is low-risk because every adapter sits behind the six-method `BlobSto
 | Store | Restic repository | Metadata | Notes |
 | --- | --- | --- | --- |
 | Peer device (Mac mini, VPS) | `rclone:` backend running `rclone serve restic --stdio --append-only` over SSH | Peer RPC over the same SSH link | The recommended hub. Other devices can only append; pruning runs there when you ask |
-| External SSD or local disk | `/Volumes/Archive/plainport/repo` | `node:fs` with exclusive create | Fastest; not off-site |
+| External SSD or local disk | `/Volumes/Archive/plainport/repo` | `node:fs` with exclusive create (a hard link where the volume has them, an `O_EXCL` open on exFAT and FAT) | Fastest; not off-site |
 | NAS over SFTP | `sftp:nas:/volume1/plainport/repo` | rclone over SFTP | For a NAS that can't run plainport; full access, so no append-only |
 | S3-compatible bucket (Backblaze B2, Hetzner, Scaleway, MinIO) | `s3:https://<endpoint>/<bucket>/repo` | rclone over S3, same bucket | Best as the hub's offsite replica. Pick an EU region; keep only the latest object version |
 | Restic REST server | `rest:https://nas:8000/plainport` | Not supported | Use a peer store instead; the REST protocol can't hold metadata files |
@@ -487,9 +487,9 @@ Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `snapshot
 **Fold rules** (how state is computed from events):
 
 - **Status** is the latest `offloaded` or `onloaded` along the chain of `base` references. Clocks are for display only, so skew between machines can't reorder history.
-- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event: the deepest along the `base` chain. A discarded snapshot is never a head; two equally deep heads leave no single head.
+- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event: the one tip of the `base` chain, a snapshot nothing kept was made from. A discarded snapshot is never a head. There is no head while the project is conflicted, or while an event names a base the catalog does not hold (a partial mirror): the head is then incomplete, onload refuses until the events are synced, and an older snapshot never becomes the head by default.
 - **Snapshot IDs are plainport ULIDs.** For an offload, the snapshot ID is the operation's ULID. `restic copy` gives a snapshot a new restic ID in every repository, so `stored` maps each store to its own restic ID.
-- **Conflict:** two `offloaded` events with the same `base` mean two copies diverged. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
+- **Conflict:** a kept snapshot with two or more kept children, `offloaded` or `checkpointed` alike, means two copies diverged; two `offloaded` events with the same `base` are the common case, and two first offloads (no base) count too. A checkpoint on one side never hides the fork. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
 - **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device. An onload counts as later than the snapshot it restored and earlier than anything made from it. If several devices have such an event, the one furthest along the chain holds the lease, then the smallest event id, so a project has at most one.
 - **Address** is root plus relative path (`work:clients/acme/web`), unique within its root. The ULID stays fixed across renames, re-filing and moves; a move changes the landing path, never the address.
 - **Bindings** are each device's latest `root-bound` for a root. The device's own config always wins; the event is its published copy for other devices to plan with.
