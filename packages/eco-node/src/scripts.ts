@@ -2,17 +2,19 @@
 // package script writes them; a hand-made dist/ is the user's to keep). A script writes the folder when one of its
 // commands
 //
-// - names it with an output flag (--outDir dist, --outdir=dist, -o dist, --outfile=dist/index.js),
-// - names a path in it (cp -r public dist/, ./dist), or
+// - names it with an output flag: a long one (--outDir dist, --outdir=dist, --outfile=dist/index.js), or a short one
+//   only for a tool known to mean output by it (ncc -o, tsup -d, babel -d),
+// - copies into it, as the destination of a copy tool (cp -r public dist/, cpx 'src/**' dist), or
 // - runs a tool whose default output it is (vite build → dist, react-scripts build → build), with no output flag
 //   saying otherwise.
 //
-// A command that deletes (rm, rimraf) writes nothing, and a bare word is not a path: `npm run build` and `next build`
-// name a script and a subcommand, not the folder.
+// Anything else is not a write, so when unsure the folder is kept: a path read (node dist/index.js, serve -s build,
+// aws s3 sync build/ s3://…), a short flag of an unknown tool (gh-pages -d build publishes it), a deletion (rm,
+// rimraf), and a bare word: `npm run build` and `next build` name a script and a subcommand, not the folder.
 
 export type OutputFolder = "dist" | "build";
 
-/** Flags whose value is where a build writes. */
+/** Long flags whose value is where a build writes. */
 const OUTPUT_FLAGS = new Set([
   "--outDir",
   "--outdir",
@@ -23,9 +25,21 @@ const OUTPUT_FLAGS = new Set([
   "--output-path",
   "--output",
   "--out",
-  "-o",
-  "-d",
 ]);
+
+/** Short flags that mean "output here" only for these tools; elsewhere -o and -d mean other things. */
+const SHORT_OUTPUT_FLAGS: ReadonlyMap<string, readonly string[]> = new Map([
+  ["ncc", ["-o"]],
+  ["tsup", ["-d"]],
+  ["babel", ["-d", "-o"]],
+  ["swc", ["-d", "-o"]],
+  ["webpack", ["-o"]],
+  ["rollup", ["-o", "-d"]],
+  ["microbundle", ["-o"]],
+]);
+
+/** Copy tools: their last argument is the destination they write. */
+const COPIERS = new Set(["cp", "cpx", "cpy", "copyfiles", "ncp", "rsync", "ditto"]);
 
 /** Commands that delete; what they name is not written. */
 const DELETERS = new Set(["rm", "rimraf", "del", "del-cli", "trash", "shx"]);
@@ -58,12 +72,6 @@ const firstFolder = (path: string): string =>
     .replace(/^(\.\/)+/, "")
     .split("/")[0] ?? "";
 
-/** Whether a word is a path inside the folder, spelled as a path: dist/, dist/x, ./dist. */
-const isPathIn = (word: string, folder: OutputFolder): boolean => {
-  const path = unquote(word);
-  return path === `./${folder}` || path.startsWith(`./${folder}/`) || path.startsWith(`${folder}/`);
-};
-
 /** Whether one command (no && or ;) writes the folder. */
 const commandWrites = (command: string, folder: OutputFolder): boolean => {
   const words = command
@@ -83,17 +91,21 @@ const commandWrites = (command: string, folder: OutputFolder): boolean => {
   const args = words.slice(at + 1);
   if (DELETERS.has(program)) return false;
 
+  const short = SHORT_OUTPUT_FLAGS.get(program) ?? [];
   const outputs: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
     const eq = arg.indexOf("=");
     const flag = eq === -1 ? arg : arg.slice(0, eq);
-    if (!OUTPUT_FLAGS.has(flag)) continue;
+    if (!OUTPUT_FLAGS.has(flag) && !short.includes(flag)) continue;
     const value = eq === -1 ? args[++i] : arg.slice(eq + 1);
     if (value !== undefined) outputs.push(value);
   }
   if (outputs.length > 0) return outputs.some((value) => firstFolder(value) === folder);
-  if (args.some((arg) => isPathIn(arg, folder))) return true;
+  if (COPIERS.has(program)) {
+    const destination = args.filter((arg) => !arg.startsWith("-")).at(-1);
+    return destination !== undefined && firstFolder(destination) === folder;
+  }
   return DEFAULTS.some(
     (d) => d.folder === folder && d.tool === program && (d.sub === undefined || args[0] === d.sub),
   );

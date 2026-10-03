@@ -12,6 +12,8 @@ describe("Node plugin: dist/ and build/ are proposed only when a package script 
       "bun build ./src/index.ts --outdir dist",
       "babel src --out-dir dist",
       "ncc build index.js -o dist",
+      "cpx 'src/**/*.json' dist",
+      "copyfiles -u 1 src/**/*.html dist",
       "parcel build index.html --dist-dir dist",
       "esbuild src/a.ts --outfile=dist/a.js",
       "cp -r public dist/",
@@ -78,5 +80,26 @@ describe("Node plugin: dist/ and build/ are proposed only when a package script 
     expect(writes("rimraf dist && tsc --outDir dist", "dist")).toBe("build");
     expect(writes("vite build; cp -r static out", "dist")).toBe("build");
     expect(writes("vite build --outDir out && echo dist", "dist")).toBeUndefined();
+  });
+
+  test("a script that only reads the folder does not write it", () => {
+    for (const script of [
+      "node dist/index.js",
+      "node ./dist/server.js",
+      "http-server ./build",
+      "serve -s build",
+      "aws s3 sync build/ s3://bucket",
+      "gh-pages -d build",
+      "gh-pages -d dist",
+      "some-tool -o dist",
+      "cp dist/a.js public/",
+      "jest --coverage dist/",
+    ]) {
+      expect({ script, dist: writes(script, "dist"), build: writes(script, "build") }).toEqual({
+        script,
+        dist: undefined,
+        build: undefined,
+      });
+    }
   });
 });
