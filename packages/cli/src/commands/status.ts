@@ -4,11 +4,23 @@
 // store (D45); an unreachable store is read from the mirror, marked stale, or never synced.
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { ok, ProjectStateSchema, shellWord } from "@plainport/contract";
+import {
+  type Finding,
+  FindingSchema,
+  fail,
+  finding,
+  ok,
+  ProjectStateSchema,
+  type Result,
+  shellWord,
+} from "@plainport/contract";
 import {
   ConfigLoader,
+  expandHome,
   findView,
+  type PlainportPaths,
   type ProjectStatus,
+  planOffload,
   projectViews,
   resolveProject,
   type Views,
@@ -57,6 +69,15 @@ export const ProjectStatusSchema = z
       .string()
       .optional()
       .meta({ description: "When the catalog last came from the store; absent: never" }),
+    gitWarnings: z
+      .array(FindingSchema)
+      .optional()
+      .meta({ description: "status, for a project whose folder is here: the git findings a scan makes now" }),
+    strippableBytes: z
+      .int()
+      .nonnegative()
+      .optional()
+      .meta({ description: "status, for a project whose folder is here: what an offload would strip now" }),
     journal: z
       .looseObject({
         op: z.string(),
@@ -151,6 +172,9 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     ),
   );
   if (p.base !== undefined) lines.push(row("base", p.base));
+  if (p.strippableBytes !== undefined)
+    lines.push(row("strip", `${formatBytes(p.strippableBytes)} an offload would strip now`));
+  for (const f of p.gitWarnings ?? []) lines.push(row(f.severity, `${f.code}  ${f.message}`));
   lines.push(
     row(
       "lease",
@@ -170,6 +194,62 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
   const next = nextStep(p);
   if (next !== undefined) lines.push(row("next", next));
   return lines.join("\n");
+};
+
+const EXPLICIT_PATH = /^(\.{1,2}(\/|$)|\/|~(\/|$))/;
+
+/**
+ * What the resolver cannot name, matched against the views (DESIGN "Project arguments"): a path whose folder is gone
+ * (the registry's folder for it, or its stub's path), and a unique suffix of an address the catalog alone knows.
+ */
+const matchView = (views: Views, input: string, absolute: string): Result<ProjectStatus> | undefined => {
+  if (EXPLICIT_PATH.test(input)) {
+    const at = absolute.replace(/\/+$/, "");
+    const found = views.projects.find((p) => p.dir === at || `${p.dir}.plainport` === at);
+    return found === undefined ? undefined : ok(found);
+  }
+  const suffix = input.includes(":") ? undefined : input.replace(/^\/+|\/+$/g, "");
+  if (suffix === undefined || suffix === "") return undefined;
+  const matches = views.projects.filter((p) => p.path === suffix || p.path.endsWith(`/${suffix}`));
+  if (matches.length === 1) return ok(matches[0] as ProjectStatus);
+  if (matches.length === 0) return undefined;
+  return fail(
+    finding("project.ambiguous", {
+      message: `${input} names more than one project: ${matches.map((p) => p.address).join(", ")}`,
+      fix: `name it by its address, e.g. plainport status ${shellWord(matches[0]?.address ?? input)}`,
+    }),
+  );
+};
+
+/**
+ * A project whose folder is here: its git warnings and what an offload would strip now, from a read-only scan (the
+ * offload's own planning, as --dry-run makes it, without saving a plan). A scan that cannot run says why in the log.
+ */
+const localDetails = async (
+  ctx: CommandContext,
+  paths: PlainportPaths,
+  view: ProjectStatus,
+): Promise<{ gitWarnings?: Finding[]; strippableBytes?: number }> => {
+  if (!view.here || view.dir === undefined || view.state === "offloading" || view.state === "onloading")
+    return {};
+  const planned = await planOffload(ctx.system, ctx.checks, ctx.plugins, {
+    dir: view.dir,
+    project: { address: view.address, root: view.root, path: view.path, id: view.id },
+    loader: new ConfigLoader(ctx.io, paths),
+    env: ctx.env,
+    now: ctx.clock.now(),
+  });
+  if (!planned.ok) {
+    ctx.output.log(
+      "warn",
+      `${view.address} could not be scanned (${planned.finding.code}: ${planned.finding.message})`,
+    );
+    return {};
+  }
+  return {
+    gitWarnings: planned.value.findings.filter((f) => f.code.startsWith("git.")),
+    strippableBytes: planned.value.strip.reduce((sum, s) => sum + s.bytes, 0),
+  };
 };
 
 export const status = defineCommand({
@@ -201,12 +281,16 @@ export const status = defineCommand({
       env: ctx.env,
       device: device.name,
     });
-    if (!resolved.ok) return resolved;
-    return findView(read.value.views, resolved.value);
+    const input = args.project ?? ".";
+    const view = resolved.ok
+      ? findView(read.value.views, resolved.value)
+      : resolved.finding.code === "project.not-found" || resolved.finding.code === "root.none"
+        ? (matchView(read.value.views, input, expandHome(input, paths.home, ctx.cwd)) ?? resolved)
+        : resolved;
+    if (!view.ok) return view;
+    return ok({ ...view.value, ...(await localDetails(ctx, paths, view.value)) });
   },
 });
-
-const LOCAL_STATES: ReadonlySet<string> = new Set(["local", "restored-unhydrated", "onloading"]);
 
 const lsRow = (p: ProjectStatus, width: number): string => {
   const device = p.lease === undefined ? "-" : p.lease.here ? "here" : p.lease.device.slice(0, 10);
@@ -263,7 +347,7 @@ export const ls = defineCommand({
     let projects = all.projects.filter(
       (p) =>
         (args.root === undefined || p.root === args.root) &&
-        (args.local !== true || (p.here && LOCAL_STATES.has(p.state))) &&
+        (args.local !== true || p.here) &&
         (args.shelved !== true || p.state === "shelved"),
     );
     if (args.sort === "size") projects = [...projects].sort((a, b) => (b.bytes ?? -1) - (a.bytes ?? -1));

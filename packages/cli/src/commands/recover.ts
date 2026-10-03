@@ -142,8 +142,12 @@ export const gc = defineCommand({
         .meta({ description: "Before its deadline, or being renamed back by an onload" }),
       skipped: z.array(TrashItemSchema.extend({ finding: FindingDataSchema })),
       freedBytes: z.int().nonnegative(),
+      staging: z.array(z.string()).meta({
+        description:
+          "Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed (D60)",
+      }),
     })
-    .meta({ description: "The trash deleted and kept" }),
+    .meta({ description: "The trash deleted and kept, and the abandoned staging removed" }),
   examples: [
     { argv: ["gc"], summary: "Delete trash whose deadline has passed" },
     { argv: ["gc", "--now", "--yes"], summary: "Delete every kept trash now" },
@@ -158,6 +162,7 @@ export const gc = defineCommand({
       lines.push(
         `kept ${k.trash} (${k.project})${k.reason === undefined ? ` until ${k.keepUntil}` : `: ${k.reason}`}`,
       );
+    for (const st of data.staging) lines.push(`removed ${st}, an abandoned staging folder`);
     return lines.length === 0 ? "no trash to delete" : lines.join("\n");
   },
   handler: async (args, ctx) => {

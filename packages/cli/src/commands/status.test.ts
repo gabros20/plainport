@@ -305,3 +305,64 @@ describe("restore, through the CLI (D58)", () => {
     expect((await cli(["restore", "work:api"])).code).toBe(2);
   });
 });
+
+describe("status and ls: fix wave r1", () => {
+  test("status names a project by the path of a folder that is gone (stub = false), through the registry", async () => {
+    writeFileSync(box.paths.configFile, "version = 1\n[offload]\nstub = false\n");
+    await offloaded();
+    expect(existsSync(join(box.home, "work/api"))).toBe(false);
+    expect(existsSync(join(box.home, "work/api.plainport"))).toBe(false);
+    const run = await cli(["status", join(box.home, "work/api"), "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("status", run.out)).toMatchObject({ address: "work:api", state: "shelved" });
+  });
+
+  test("status names a project the catalog alone knows by a unique suffix", async () => {
+    await offloaded();
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    const id = projectId("api") as string;
+    delete registry.projects[id];
+    writeFileSync(box.paths.registryFile, JSON.stringify(registry));
+    const run = await cli(["status", "api", "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("status", run.out)).toMatchObject({ address: "work:api", state: "shelved" });
+  });
+
+  test("a local project's status has its git warnings and what an offload would strip now", async () => {
+    box.file("work/web/node_modules/dep/index.js", "x".repeat(2000));
+    const git = (args: string[]) =>
+      Bun.spawnSync(["git", ...args], {
+        cwd: dir(),
+        env: {
+          PATH,
+          HOME: box.home,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@x",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@x",
+        },
+      });
+    git(["init", "-q"]);
+    writeFileSync(join(dir(), ".gitignore"), "node_modules\n");
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    await cli(["root", "scan", "work"]);
+    const run = await cli(["status", "work:web", "--json"]);
+    expect(run.code).toBe(0);
+    const status = data("status", run.out);
+    expect(status.state).toBe("local");
+    expect(status.strippableBytes).toBe(2000);
+    expect(status.gitWarnings.map((f: { code: string }) => f.code)).toContain("git.unpushed");
+  });
+
+  test("ls --local lists every project whose folder is here, an interrupted offload's too", async () => {
+    await cli(["root", "scan", "work"]);
+    await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
+    const local = data("ls", (await cli(["ls", "--local", "--json"])).out);
+    expect(local.projects.map((p: { address: string; state: string }) => [p.address, p.state])).toEqual([
+      ["work:api", "local"],
+      ["work:web", "offloading"],
+    ]);
+  });
+});

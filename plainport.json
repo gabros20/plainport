@@ -650,6 +650,62 @@
                   "description": "When the catalog last came from the store; absent: never",
                   "type": "string"
                 },
+                "gitWarnings": {
+                  "description": "status, for a project whose folder is here: the git findings a scan makes now",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                        "title": "FindingCode",
+                        "description": "Stable dotted code, e.g. git.unpushed"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "info",
+                          "warn",
+                          "block"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "fix": {
+                        "description": "The exact next step, e.g. a command to run",
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "allowable": {
+                        "type": "boolean",
+                        "description": "May --allow <code> override it?"
+                      }
+                    },
+                    "required": [
+                      "code",
+                      "severity",
+                      "message",
+                      "allowable"
+                    ],
+                    "additionalProperties": {},
+                    "title": "Finding"
+                  }
+                },
+                "strippableBytes": {
+                  "description": "status, for a project whose folder is here: what an offload would strip now",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "journal": {
                   "description": "Its open journal; when not running, plainport recover settles it",
                   "type": "object",
@@ -909,6 +965,62 @@
           "syncedAt": {
             "description": "When the catalog last came from the store; absent: never",
             "type": "string"
+          },
+          "gitWarnings": {
+            "description": "status, for a project whose folder is here: the git findings a scan makes now",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "strippableBytes": {
+            "description": "status, for a project whose folder is here: what an offload would strip now",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "journal": {
             "description": "Its open journal; when not running, plainport recover settles it",
@@ -2755,16 +2867,24 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "staging": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed (D60)"
           }
         },
         "required": [
           "deleted",
           "kept",
           "skipped",
-          "freedBytes"
+          "freedBytes",
+          "staging"
         ],
         "additionalProperties": {},
-        "description": "The trash deleted and kept"
+        "description": "The trash deleted and kept, and the abandoned staging removed"
       },
       "plan": null,
       "examples": [
@@ -4071,7 +4191,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 2,
-      "summary": "The arguments or options do not match the command's declared arguments"
+      "summary": "The arguments or options do not match the command's declared arguments; also restore without --snapshot when the project has no head, listing the candidate ids (D60)"
     },
     {
       "code": "fs.case-collision",

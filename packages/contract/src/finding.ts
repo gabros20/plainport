@@ -594,7 +594,8 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 2,
-    summary: "The arguments or options do not match the command's declared arguments",
+    summary:
+      "The arguments or options do not match the command's declared arguments; also restore without --snapshot when the project has no head, listing the candidate ids (D60)",
   },
   "fs.case-collision": {
     severity: "block",

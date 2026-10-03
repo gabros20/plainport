@@ -245,7 +245,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `verify.changed` | block | no | 7 | Files changed while the snapshot was made, again after one retry; nothing local was deleted |
 | `verify.mismatch` | block | no | 7 | The snapshot's listing does not match the folder (entries, types, sizes, modes or link targets): at offload the scan of the project, and nothing local was deleted; at onload the restored staging folder, which is removed while the stub stays |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
-| `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>` |
+| `usage.invalid` | block | no | 2 | The arguments or options do not match the command's declared arguments; `fix` is `plainport help <command>`. Also `restore` without `--snapshot` when the project has no head (incomplete or conflicted): the message lists the candidate ids (D60) |
 
 Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless` (DESIGN.md "Edge cases").
 
