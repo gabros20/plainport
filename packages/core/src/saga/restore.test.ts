@@ -488,3 +488,38 @@ describe("restore: fix wave r1", () => {
     expect(existsSync(join(to, "src/main.ts"))).toBe(true);
   });
 });
+
+describe("restore: fix wave r2", () => {
+  test("the space check leaves out the stripped dependencies, which a restore never installs", async () => {
+    writeFileSync(join(dir, "node_modules/dep/index.js"), "x".repeat(200_000));
+    await offload();
+    const real = testHost();
+    const host: HostPorts = { ...real, fs: { ...real.fs, freeBytes: async () => 60_000 } };
+    const result = await runRestore(deps(host), { project: await ref(), to: join(box.home, "old/web") });
+    expect(result.ok ? "restored" : result.finding.code).toBe("restored");
+  });
+
+  test("a folder that appears at the landing path right before the copy lands is never replaced", async () => {
+    await offload();
+    const to = join(box.home, "old/web");
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        // Another process makes an empty folder at the landing path at the last moment.
+        mkdir: async (path) => {
+          if (path === to) mkdirSync(to, { recursive: true });
+          return real.fs.mkdir(path);
+        },
+        rename: async (from, target) => {
+          if (target === to && !existsSync(to)) mkdirSync(to, { recursive: true });
+          return real.fs.rename(from, target);
+        },
+      },
+    };
+    const result = await runRestore(deps(host), { project: await ref(), to });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "path.occupied"]);
+    expect(readdirSync(to)).toEqual([]);
+  });
+});

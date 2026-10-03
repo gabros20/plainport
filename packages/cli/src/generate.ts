@@ -7,7 +7,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { contractJsonSchemas, EXIT, EXIT_CODE_MEANINGS, FINDINGS, PLAINPORT_JSON } from "@plainport/contract";
-import { catalogJsonSchemas, configJsonSchemas, journalJsonSchemas } from "@plainport/core";
+import {
+  catalogJsonSchemas,
+  configJsonSchemas,
+  journalJsonSchemas,
+  stagingJsonSchemas,
+} from "@plainport/core";
 import { z } from "zod";
 import { GLOBAL_OPTIONS } from "./gate.ts";
 import { type AnyCommand, commandInfo, optionsOf, type Registry, registryProblems } from "./registry.ts";
@@ -212,6 +217,7 @@ export const generateFiles = (registry: Registry): Map<string, string> => {
     ...configJsonSchemas(),
     ...catalogJsonSchemas(),
     ...journalJsonSchemas(),
+    ...stagingJsonSchemas(),
   };
   for (const name of Object.keys(schemas).sort()) {
     files.set(`schemas/${name}.json`, json(schemas[name as keyof typeof schemas]));

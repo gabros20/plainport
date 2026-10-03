@@ -39,7 +39,7 @@ import { foldCatalog } from "../catalog/fold.ts";
 import { identityChanged, readStoreIdentity } from "../catalog/identity.ts";
 import {
   appendEvent,
-  eventAt,
+  eventForOp,
   MIRROR_EVENTS_PREFIX,
   readEvents,
   STORE_EVENTS_PREFIX,
@@ -74,6 +74,7 @@ import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } fr
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
+import { ulid } from "../ulid.ts";
 import { removeTrash } from "./trash.ts";
 
 /**
@@ -221,15 +222,34 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       project,
       async (lock) => {
         const out: Settled[] = [];
+        let held: RecoveredOperation | undefined;
         for (const journal of journals) {
           // Read again under the lock: a detached delete or the onload before it may have closed it since.
           const now = await reread(journal.op);
           if (now === undefined) continue;
+          // An earlier operation of the project that stays pending holds the later ones: their order matters (an
+          // onload renaming a trash back before that trash's deletion).
+          if (held !== undefined) {
+            out.push(
+              pending(
+                now,
+                fail(
+                  finding("journal.pending", {
+                    message: `the ${held.kind} ${held.op} of ${now.project.address} is not settled, so the ${now.kind} ${now.op} after it waits`,
+                    fix: "settle what the earlier operation's finding names, then run plainport recover",
+                    paths: [journalFile(paths, now.op)],
+                  }),
+                ),
+              ),
+            );
+            continue;
+          }
           // The step found: settling moves the journal on.
           const found = now.step;
           const result = now.kind === "offload" ? await settleOffload(now, lock) : await settleOnload(now);
           result.op.step = found;
           await removeTemporaries(now.op);
+          if (result.op.outcome === "pending") held = result.op;
           deps.log(
             result.problem === undefined ? "info" : "warn",
             `${now.kind} ${now.op} of ${now.project.address} at ${found}: ${result.op.outcome}${
@@ -335,26 +355,19 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     return opened;
   }
 
+  async function eventState(store: BlobStore, id: string, ours: (event: CatalogEvent) => boolean) {
+    return eventForOp(storeEventLog(store), id, ours);
+  }
+
   /**
-   * What the store holds under an event id: "absent", "ours" only when the file parses, validates and is the event
-   * the journal names (`ours`), else the finding that says why it is not: a torn write (D42) or another event is never
-   * taken for a commit. A failure when the store cannot say.
+   * Journals a new id for an event whose file under the old one is torn or another's (D41, D42): the old file stays,
+   * skipped by every reader, and the record is written whole under the new id, journaled first so a crash repeats it.
    */
-  async function eventState(
-    store: BlobStore,
-    id: string,
-    ours: (event: CatalogEvent) => boolean,
-  ): Promise<Result<"absent" | "ours" | Finding>> {
-    const found = await eventAt(storeEventLog(store), id);
-    if (!found.ok) return found;
-    if (found.value === null) return ok("absent");
-    if ("skipped" in found.value) return ok(found.value.skipped);
-    if (ours(found.value.event)) return ok("ours");
-    return ok(
-      finding("catalog.event-skipped", {
-        message: `${STORE_EVENTS_PREFIX}${id}.json is another operation's event, not the one this journal names; it is left as it is`,
-      }),
-    );
+  async function newEventId(journal: OffloadJournal, change: (id: string) => Partial<OffloadJournal>) {
+    const id = ulid(clock().getTime());
+    const saga = openSaga<OffloadJournal, OffloadStep>(sagaContext("offload"), journal);
+    const written = await saga.step(journal.step as OffloadStep, change(id));
+    return written.ok ? ok(id) : written;
   }
 
   /** The project's root folder: when it is not there (an unmounted volume), nothing of the operation can be settled. */
@@ -427,12 +440,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   async function settleOffload(journal: OffloadJournal, lock: ProjectLock): Promise<Settled> {
     const step = journal.step;
     if (!(OFFLOAD_STEPS as readonly string[]).includes(step)) return unknownStep(journal);
+    // An operation whose volume is away keeps its journal, whatever its step: it is settled once the volume is back.
+    const away = await unavailable(journal);
+    if (away !== undefined) return away;
     if (BEFORE_SNAPSHOT.has(step)) return rollBack(journal);
-    // From here recover may touch the folder or its trash: never while their volume is away.
-    if (step !== "offload.snapshot.discarded") {
-      const away = await unavailable(journal);
-      if (away !== undefined) return away;
-    }
     if (step === "offload.release.delete") return deleteTrash(journal);
     if (RELEASING.has(step)) return release(journal, lock);
 
@@ -449,12 +460,17 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
           (e) => e.type === "snapshot-discarded" && e.op === journal.op && e.snapshot === journal.op,
         );
         if (!there.ok) return pending(journal, there);
-        // A torn or foreign file under its id stays as it is: the snapshot no event names is never a head (D28).
-        if (typeof there.value === "object") return rollBack(journal, there.value);
-        if (there.value === "absent") {
+        // A torn or foreign file under its id is no record: the discard is written again under a new id (D28).
+        let id = discarded.event;
+        if (typeof there.value === "object") {
+          const renamed = await newEventId(journal, (next) => ({ discarded: { ...discarded, event: next } }));
+          if (!renamed.ok) return pending(journal, renamed);
+          id = renamed.value;
+        }
+        if (there.value !== "ours") {
           const written = await appendEvent(storeEventLog(blob), {
             v: 1,
-            id: discarded.event,
+            id,
             type: "snapshot-discarded",
             device: deps.device.id,
             at: clock().toISOString(),
@@ -612,12 +628,14 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         (e) => e.type === "offloaded" && e.op === journal.op && e.snapshot === journal.op,
       );
       if (!there.ok) return pending(journal, there);
+      // A torn or foreign file under its id is no record of the fork: it is written again under a new id.
+      let eventId = id;
       if (typeof there.value === "object") {
-        // A torn fork event: the catalog skips it, so nothing records the fork; the folder stays local.
-        const closed = await close(journal);
-        return closed ?? { op: { ...entry(journal, "rolled-back", "local"), finding: there.value } };
+        const renamed = await newEventId(journal, (next) => ({ event: next }));
+        if (!renamed.ok) return pending(journal, renamed);
+        eventId = renamed.value;
       }
-      if (there.value === "absent") {
+      if (there.value !== "ours") {
         // The journal does not hold the event's totals: they are read again from the snapshot's listing. What was
         // stripped is not known any more, so the event records none.
         let files = 0;
@@ -641,7 +659,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         }
         const appended = await appendEvent(storeEventLog(store.blob), {
           v: 1,
-          id,
+          id: eventId,
           type: "offloaded",
           device: deps.device.id,
           at: clock().toISOString(),

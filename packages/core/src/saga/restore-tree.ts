@@ -108,6 +108,8 @@ export const checkSnapshot = async (options: {
   resuming: boolean;
   address: string;
   elsewhere: string;
+  /** Whether the dependencies the offload stripped will be installed there too (onload); restore never does. */
+  dependencies?: boolean;
 }): Promise<Result<SnapshotTotals>> => {
   const { io, nearest, address } = options;
   let files = 0;
@@ -152,7 +154,7 @@ export const checkSnapshot = async (options: {
   }
   // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
   const made = await producedBy(options.store, options.event);
-  const stripped = made?.stats.strippedBytes ?? 0;
+  const stripped = options.dependencies === false ? 0 : (made?.stats.strippedBytes ?? 0);
   const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
   // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore
   // already holds part of it in staging, and verification still catches a short one, so it is not counted again.

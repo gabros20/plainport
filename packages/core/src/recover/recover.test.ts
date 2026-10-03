@@ -58,6 +58,7 @@ import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-st
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { ulid } from "../ulid.ts";
 import { type RecoverDeps, type RecoveryReport, recover } from "./recover.ts";
+import { stagingJsonSchemas } from "./staging.ts";
 import { collectTrash, housekeeping, type TrashDeps } from "./trash.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
@@ -1515,5 +1516,204 @@ describe("fix wave r1: views with a broken mirror read the store (D45)", () => {
     const views = value(await projectViews(viewDeps({ opener: gone })));
     const [web] = views.projects;
     expect([web?.stale, web?.conditions]).toEqual([true, ["catalog-unreadable"]]);
+  });
+});
+
+describe("fix wave r2: every event recovery relies on must validate", () => {
+  const torn = async (id: string) =>
+    value(await store.put(`meta/v1/events/${id}.json`, new TextEncoder().encode(`{"v":1,"id":"${id}","ty`)));
+  const settle = async () => {
+    for (let i = 0; i < 400 && (await journals()).length > 0; i++) await Bun.sleep(25);
+  };
+
+  test("a torn onloaded event is no record: recover writes a whole one, so the lease is held", async () => {
+    value(await offloadNow());
+    await settle();
+    const host = testHost({ faults: { at: "onload.commit.start" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const journal = onlyJournal<OnloadJournal>();
+    await torn(journal.event as string);
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect(op?.outcome).toBe("finished");
+    const onloaded = (await storeEvents()).filter((e) => e.type === "onloaded");
+    expect(onloaded).toHaveLength(1);
+    const id = (await projectId()) as string;
+    const state = foldCatalog(await storeEvents()).projects[id];
+    expect([state?.status, state?.lease?.device]).toEqual(["local", device.id]);
+    await expectInvariants();
+  });
+
+  test("a torn snapshot-discarded event is no record: recover writes a whole one before it rolls back (D28)", async () => {
+    engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/main.ts"), 0o000);
+    await crashOffloadAt("offload.snapshot.discarded");
+    chmodSync(join(dir, "src/main.ts"), 0o644);
+    const journal = onlyJournal<OffloadJournal>();
+    await torn(journal.discarded?.event as string);
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect(op?.outcome).toBe("rolled-back");
+    const id = journal.project.id;
+    expect(foldCatalog(await storeEvents()).projects[id]?.discarded).toEqual([journal.op]);
+    await expectLocalUntouched();
+  });
+
+  test("a torn fork event is no record: recover writes a whole one, so the project shows conflicted", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try fails" })),
+    };
+    expect((await offloadNow()).ok).toBe(false);
+    const pid = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    engine.hooks.duringSnapshot = async () => {
+      engine.hooks.duringSnapshot = undefined;
+      const s = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: s,
+          op: s,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: pid,
+          root: rootId,
+          path: "web",
+          snapshot: s,
+          stored: { ssd: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    await crashOffloadAt("offload.diverged");
+    const journal = onlyJournal<OffloadJournal>();
+    await torn(journal.event as string);
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect(foldCatalog(await storeEvents()).projects[pid]?.status).toBe("conflicted");
+    await expectLocalUntouched();
+  });
+});
+
+describe("fix wave r2: a pending operation holds its project's later ones", () => {
+  test("a released trash an onload stuck at an unknown step renames back is not deleted", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [offload] = (await journals()) as OffloadJournal[];
+    const host = testHost({ faults: { at: "onload.begin" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const onload = (await journals()).find((j) => j.kind === "onload") as OnloadJournal;
+    expect(onload.reuse?.op).toBe(offload?.op);
+    await rewrite({ ...onload, step: "onload.future-step" });
+    const later = new Date(Date.parse(offload?.keepUntil as string) + 1000);
+    const report = reportOf(await recover(recoverDeps({ now: () => later })));
+    expect(report.operations.map((o) => [o.kind, o.outcome])).toEqual([
+      ["onload", "pending"],
+      ["offload", "pending"],
+    ]);
+    expect(report.operations[1]?.finding?.message).toContain(onload.op);
+    expect(trashes()).toHaveLength(1);
+    expect(await journals()).toHaveLength(2);
+  });
+
+  test("an interrupted offload whose root is away keeps its journal, even before its snapshot", async () => {
+    await crashOffloadAt("offload.planned");
+    renameSync(join(box.home, "work"), join(box.home, "work.away"));
+    const report = reportOf(await recover(recoverDeps()));
+    expect(report.operations.map((o) => [o.outcome, o.state])).toEqual([["pending", "unavailable"]]);
+    expect(await journals()).toHaveLength(1);
+    renameSync(join(box.home, "work.away"), join(box.home, "work"));
+  });
+});
+
+describe("fix wave r2: gc never deletes staging it cannot prove unowned, and says what failed", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const holder = () => join(box.home, "work/.plainport-staging");
+
+  test("an unreadable journal may own any staging: nothing is swept, and gc says why (journal.pending)", async () => {
+    mkdirSync(join(holder(), ulid()), { recursive: true });
+    mkdirSync(box.paths.journalDir, { recursive: true });
+    writeFileSync(journalFile(box.paths, ulid()), "{ not a journal");
+    const result = await collectTrash(trashDeps(), { early: false });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "journal.pending"]);
+    expect(readdirSync(holder())).toHaveLength(1);
+  });
+
+  test("a staging holder that cannot be read is a coded finding, not an exception", async () => {
+    mkdirSync(join(holder(), ulid()), { recursive: true });
+    chmodSync(holder(), 0o000);
+    try {
+      const result = await collectTrash(trashDeps(), { early: false });
+      expect(result.ok ? 0 : result.finding.code).toBe("fs.unreadable");
+    } finally {
+      chmodSync(holder(), 0o755);
+    }
+  });
+
+  test("a recorded staging folder that cannot be removed fails gc with the finding", async () => {
+    value(await offloadNow());
+    engine.hooks.duringRestore = () => {
+      throw new InjectedFault("restore");
+    };
+    await expect(
+      runRestore(
+        {
+          host: testHost(),
+          paths: box.paths,
+          device,
+          env: env(),
+          loader: new ConfigLoader(testHost(), box.paths),
+          opener,
+          openMirror: async () => ({ ok: true, value: mirror }),
+          emit: () => {},
+          log: () => {},
+        },
+        { project: await ref(), to: join(box.home, "old/web") },
+      ),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    engine.hooks.duringRestore = undefined;
+    const real = testHost();
+    const failing: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        removeTree: async (path) => {
+          if (path.includes(".plainport-staging"))
+            throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          return real.fs.removeTree(path);
+        },
+      },
+    };
+    const result = await collectTrash({ ...trashDeps(), host: failing }, { early: false });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
+    expect(readdirSync(join(box.home, "old/.plainport-staging"))).toHaveLength(1);
+  });
+});
+
+describe("fix wave r2: sizes and the staging record's schema", () => {
+  test("a project never offloaded has its folder's size in ls", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try fails" })),
+    };
+    expect((await offloadNow()).ok).toBe(false);
+    const views = value(
+      await projectViews({
+        io: testHost(),
+        paths: box.paths,
+        env: env(),
+        device,
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+      }),
+    );
+    expect(views.projects[0]?.bytes).toBeGreaterThan(400);
+  });
+
+  test("the staging record is published as a JSON Schema", () => {
+    expect(Object.keys(stagingJsonSchemas())).toEqual(["staging-record"]);
+    expect(stagingJsonSchemas()["staging-record"]).toMatchObject({ title: "StagingRecord" });
   });
 });

@@ -94,7 +94,7 @@ const reread = async (io: LocalIo, paths: PlainportPaths, op: string): Promise<J
 };
 
 /** Bytes of the files below a folder; what cannot be read counts as nothing. */
-const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
+export const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
   let total = 0;
   const visit = async (at: string) => {
     let entries: Awaited<ReturnType<LocalIo["fs"]["entries"]>>;
@@ -244,8 +244,8 @@ export const collectTrash = async (
     }
   }
   const swept = await sweepStaging(deps, clock);
-  if (!swept.ok) problem ??= swept;
-  else report.staging.push(...swept.value);
+  report.staging.push(...swept.removed);
+  problem ??= swept.problems[0];
   if (problem !== undefined) return failWith(problem.finding, report, problem.exitCode);
   return ok(report);
 };
@@ -256,13 +256,17 @@ export const collectTrash = async (
  * journal is gone (a lost write, D24). The holders are listed before the journals and records are read: an operation
  * writes its journal or record before it makes its staging folder, so a folder listed is owned by something read.
  */
-const sweepStaging = async (deps: TrashDeps, clock: () => Date): Promise<Result<string[]>> => {
+const sweepStaging = async (
+  deps: TrashDeps,
+  clock: () => Date,
+): Promise<{ removed: string[]; problems: Failure[] }> => {
   const { host, paths } = deps;
   const io: LocalIo = host;
   const removed: string[] = [];
+  const problems: Failure[] = [];
   const holders = new Set<string>();
   const device = await readDevice(io, paths);
-  if (!device.ok) return device;
+  if (!device.ok) return { removed, problems: [device] };
   const roots = await listRoots(io, paths, {
     env: deps.env,
     ...(device.value === undefined ? {} : { device: device.value.name }),
@@ -281,29 +285,55 @@ const sweepStaging = async (deps: TrashDeps, clock: () => Date): Promise<Result<
     } catch (error) {
       const code = systemErrorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR") continue;
-      throw error;
+      problems.push(
+        fail(
+          finding("fs.unreadable", {
+            message: `${holder} cannot be read (${code}), so the staging folders in it were left as they are`,
+            fix: `check that you can read ${holder}, then re-run plainport gc`,
+            paths: [holder],
+          }),
+        ),
+      );
+      continue;
     }
     for (const name of names) if (isUlid(name)) listed.push([holder, name]);
   }
-  let owners: Set<string>;
+  let read: Awaited<ReturnType<typeof readJournals>>;
   let records: Awaited<ReturnType<typeof readStagingRecords>>;
   try {
-    owners = new Set((await readJournals(io, paths)).journals.map((j) => j.op));
+    read = await readJournals(io, paths);
     records = await readStagingRecords(io, paths);
   } catch (error) {
-    return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+    problems.push(writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir));
+    return { removed, problems };
   }
+  const owners = new Set(read.journals.map((j) => j.op));
   const recorded = new Set(records.map((r) => r.staging));
-  try {
+  // A journal this version cannot read may own any staging folder: none without an owner is removed (fail closed).
+  if (read.unreadable.length > 0) {
+    if (listed.some(([holder, name]) => !owners.has(name) && !recorded.has(join(holder, name))))
+      problems.push(
+        fail(
+          finding("journal.pending", {
+            message: `${read.unreadable.join(", ")} cannot be read by this version of plainport and may own a staging folder, so no staging folder without a known owner was removed`,
+            fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run plainport gc",
+            paths: read.unreadable,
+          }),
+        ),
+      );
+  } else {
     for (const [holder, name] of listed) {
       const staging = join(holder, name);
       if (owners.has(name) || recorded.has(staging)) continue;
-      await io.fs.removeTree(staging);
-      await removeHolderIfEmpty(io, holder);
+      try {
+        await io.fs.removeTree(staging);
+        await removeHolderIfEmpty(io, holder);
+      } catch (error) {
+        problems.push(writeFailed(error, `removing the abandoned staging folder ${staging}`, false, staging));
+        continue;
+      }
       removed.push(staging);
     }
-  } catch (error) {
-    return writeFailed(error, "removing an abandoned staging folder", false, paths.stateDir);
   }
   for (const record of records) {
     // Its folder's volume away: the record stays for when it is back.
@@ -332,9 +362,12 @@ const sweepStaging = async (deps: TrashDeps, clock: () => Date): Promise<Result<
       },
       { resume: () => true },
     );
-    if (!done.ok) deps.log("info", `${record.staging} is left: ${done.finding.message}`);
+    if (done.ok) continue;
+    if (done.finding.code === "project.locked")
+      deps.log("info", `${record.staging} is left: ${done.finding.message}`);
+    else problems.push(done);
   }
-  return ok(removed);
+  return { removed, problems };
 };
 
 export type Housekept = {

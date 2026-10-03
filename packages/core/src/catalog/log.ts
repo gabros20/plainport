@@ -190,6 +190,25 @@ export const eventAt = async (
   return ok("finding" in parsed ? { skipped: parsed.finding } : { event: parsed });
 };
 
+/**
+ * Whether the store holds this operation's own event under `id` (`ours` decides what that means): "absent" when
+ * nothing is there, "ours" only when the file parses, validates and passes `ours`, else the catalog.event-skipped
+ * finding that says why it is not. A torn write (D41, D42) or another event is never taken for a record; recovery uses
+ * this for every event it relies on. A failure when the store cannot say.
+ */
+export const eventForOp = async (
+  log: EventLog,
+  id: string,
+  ours: (event: CatalogEvent) => boolean,
+): Promise<Result<"absent" | "ours" | Finding>> => {
+  const found = await eventAt(log, id);
+  if (!found.ok) return found;
+  if (found.value === null) return ok("absent");
+  if ("skipped" in found.value) return ok(found.value.skipped);
+  if (ours(found.value.event)) return ok("ours");
+  return ok(skipped(keyOf(log, id), "it is another operation's event, not the one this journal names"));
+};
+
 export interface EventsRead {
   /** Every usable event, sorted by id. */
   events: CatalogEvent[];

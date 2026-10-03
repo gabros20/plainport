@@ -50,7 +50,7 @@ import {
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
 import { catalogReader } from "../catalog/head.ts";
-import { appendEvent, STORE_EVENTS_PREFIX, storeEventLog } from "../catalog/log.ts";
+import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
@@ -1018,19 +1018,30 @@ export const finishOnload = async (
     }
   }
 
-  // The onloaded event: its id journaled before it is appended, appended only if the store lacks it.
-  const eventId = journal.event ?? ulid(ctx.clock().getTime());
+  // The onloaded event: its id journaled before it is appended, appended unless the store holds it whole. A torn or
+  // foreign file under the id is no record (D41, D42): the event is written again under a new id, journaled first.
+  let eventId = journal.event ?? ulid(ctx.clock().getTime());
   if (!reached("onload.commit.start")) {
     const starting = await saga.step("onload.commit.start", { event: eventId });
     if (!starting.ok) return starting;
   }
-  const held = await ctx.store.stat(`${STORE_EVENTS_PREFIX}${eventId}.json`);
+  const held = await eventForOp(
+    storeEventLog(ctx.store),
+    eventId,
+    (e) => e.type === "onloaded" && e.op === journal.op && e.project === journal.project.id,
+  );
   if (!held.ok)
     return withFix(
       held,
       `the files are in ${target}; run plainport recover once the store answers, to record the onload`,
     );
-  if (held.value === null) {
+  if (typeof held.value === "object") {
+    ctx.log("warn", `${held.value.message}; the onloaded event is written again under a new id`);
+    eventId = ulid(ctx.clock().getTime());
+    const again = await saga.step("onload.commit.start", { event: eventId });
+    if (!again.ok) return again;
+  }
+  if (held.value !== "ours") {
     const appended = await appendEvent(storeEventLog(ctx.store), {
       v: 1,
       id: eventId,

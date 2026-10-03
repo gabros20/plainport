@@ -27,7 +27,7 @@ import { catalogReader } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
-import { assertSystemError, type LocalIo } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -276,6 +276,8 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       resuming: false,
       address: ref.address,
       elsewhere: command(chosen.snapshot),
+      // A restore installs nothing: the stripped dependencies need no room (D58).
+      dependencies: false,
     });
     if (!listed.ok) return signal?.aborted ? cancelled() : listed;
     phase("preflight", "end");
@@ -293,19 +295,29 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       fix: `nothing was left at ${to}; re-run the restore, and if it fails again run restic check on the store`,
     });
     if (!restored.ok) return restored;
+    // The landing folder is made exclusively, then the restored one renamed over it: rename(2) replaces only this
+    // restore's own empty folder, never one something else made (D58). Anything put into it meanwhile refuses.
+    const occupied = (): Failure =>
+      fail(
+        finding("path.occupied", {
+          message: `${to} appeared while snapshot ${chosen.snapshot} was restored; it was left alone`,
+          fix: command(chosen.snapshot),
+          paths: [to],
+        }),
+      );
     try {
-      // Something that appeared since preflight is not merged into.
-      if ((await kindAt(io, to)) !== undefined) {
-        return fail(
-          finding("path.occupied", {
-            message: `${to} appeared while snapshot ${chosen.snapshot} was restored; it was left alone`,
-            fix: command(chosen.snapshot),
-            paths: [to],
-          }),
-        );
-      }
+      await io.fs.mkdir(to);
+    } catch (error) {
+      if (systemErrorCode(error) === "EEXIST") return occupied();
+      return writeFailed(error, `making ${to}`, false, to);
+    }
+    try {
       await io.fs.rename(staging, to);
     } catch (error) {
+      const code = systemErrorCode(error);
+      if (code === "ENOTEMPTY" || code === "EEXIST") return occupied();
+      // Its own empty folder goes again; anything in it stays.
+      await removeHolderIfEmpty(io, to);
       return writeFailed(error, `moving ${staging} to ${to}`, false, to);
     }
     // The rename landed: the copy is there whatever the flush says.

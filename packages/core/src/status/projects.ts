@@ -32,6 +32,7 @@ import { type Journal, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack } from "../saga/project-gate.ts";
@@ -88,7 +89,7 @@ export type ProjectStatus = {
   lease?: { device: string; at: string; base: string; here: boolean };
   /** Snapshots the catalog holds of it. */
   snapshots: number;
-  /** Files' bytes in the head snapshot, and the dependencies its offload stripped. */
+  /** Files' bytes in the head snapshot (a project never offloaded: its folder's size now), and what it stripped. */
   bytes?: number;
   strippedBytes?: number;
   /** The newest of its snapshots, its lease and this device's onload. */
@@ -323,6 +324,8 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
         }
       }
     }
+    // Never offloaded, here: the folder's own size now, so ls can show and sort it.
+    if (bytes === undefined && head === null && here && dir !== undefined) bytes = await treeBytes(io, dir);
     const lastActivity = newest([
       ...Object.values(catalog?.snapshots ?? {}).map((s) => s.at),
       lease?.at,

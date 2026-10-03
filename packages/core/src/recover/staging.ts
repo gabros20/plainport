@@ -10,14 +10,19 @@ import { errorCode, type LocalIo, systemErrorCode } from "../io.ts";
 import type { PlainportPaths } from "../paths.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
 
-export const StagingRecordSchema = z.strictObject({
-  v: z.literal(1),
-  op: UlidSchema,
-  /** The project whose lock the restore holds while it runs. */
-  project: z.strictObject({ id: UlidSchema, address: z.string().min(1) }),
-  /** `<parent>/.plainport-staging/<op>`. */
-  staging: z.string().min(1),
-});
+export const StagingRecordSchema = z
+  .strictObject({
+    v: z.literal(1),
+    op: UlidSchema,
+    /** The project whose lock the restore holds while it runs. */
+    project: z.strictObject({ id: UlidSchema, address: z.string().min(1) }),
+    /** `<parent>/.plainport-staging/<op>`. */
+    staging: z.string().min(1),
+  })
+  .meta({
+    title: "StagingRecord",
+    description: "staging/<op>.json in plainport's state: a restore's staging folder, for gc (D60)",
+  });
 export type StagingRecord = z.infer<typeof StagingRecordSchema>;
 
 const recordsDir = (paths: PlainportPaths): string => join(paths.stateDir, "staging");
@@ -78,3 +83,11 @@ export const removeHolderIfEmpty = async (io: LocalIo, holder: string): Promise<
     if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "ENOENT") throw error;
   }
 };
+
+/** The JSON Schema of the staging record, published in schemas/ by `bun run contract`. */
+export const stagingJsonSchemas = (): Record<"staging-record", Record<string, unknown>> => ({
+  "staging-record": z.toJSONSchema(StagingRecordSchema, { target: "draft-2020-12", io: "input" }) as Record<
+    string,
+    unknown
+  >,
+});
