@@ -365,5 +365,5 @@
   ],
   "additionalProperties": false,
   "title": "CatalogStateCache",
-  "description": "state.json beside a store's or a mirror's events: a rebuildable cache of the catalog fold"
+  "description": "state.json beside a store's local event mirror: a rebuildable cache of the catalog fold"
 }

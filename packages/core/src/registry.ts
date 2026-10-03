@@ -44,6 +44,9 @@ export const ProjectRegistrySchema = z
     projects: z.record(UlidSchema, RegistryEntrySchema),
     /** Root key → the root's ULID, as its root-created catalog event names it. */
     roots: z.record(RootKeySchema, UlidSchema).optional(),
+    /** Store name in config → the id in that store's meta/v1/store.json (D45): which mirror is its, and what a sync
+     * must find there. */
+    stores: z.record(z.string().min(1), UlidSchema).optional(),
   })
   .meta({ title: "ProjectRegistry", description: "registry.json: this device's projects by ULID" });
 export type ProjectRegistry = z.infer<typeof ProjectRegistrySchema>;

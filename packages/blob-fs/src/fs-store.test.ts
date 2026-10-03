@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   appendEvent,
   type CatalogEvent,
+  ensureStoreIdentity,
   guardedFs,
   type LocalIo,
   loadCatalog,
@@ -165,25 +166,27 @@ describe("blob-fs event mirror", () => {
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-  test("openEventMirror creates <cache>/plainport/<store> through the io and returns a store on it", async () => {
+  const STORE_ID = ulid(900, (b) => b);
+
+  test("openEventMirror creates <cache>/plainport/<store id> through the io and returns a store on it", async () => {
     const paths = resolvePaths({ HOME: home });
     if (!paths.ok) throw new Error(paths.finding.message);
-    const mirror = await openEventMirror(io, paths.value, "ssd");
+    const mirror = await openEventMirror(io, paths.value, STORE_ID);
     if (!mirror.ok) throw new Error(mirror.finding.message);
-    expect(existsSync(join(home, ".cache/plainport/ssd"))).toBe(true);
+    expect(existsSync(join(home, ".cache/plainport", STORE_ID))).toBe(true);
     expect((await mirror.value.put("events/x.json", bytes("{}"))).ok).toBe(true);
-    expect(readFileSync(join(home, ".cache/plainport/ssd/events/x.json"), "utf8")).toBe("{}");
+    expect(readFileSync(join(home, ".cache/plainport", STORE_ID, "events/x.json"), "utf8")).toBe("{}");
     // Opening it again is fine.
-    expect((await openEventMirror(io, paths.value, "ssd")).ok).toBe(true);
+    expect((await openEventMirror(io, paths.value, STORE_ID)).ok).toBe(true);
   });
 
   test("a cache folder that cannot be made is store.failed naming the cache, never 'mount the disk'", async () => {
     writeFileSync(join(home, ".cache"), "a file where the folder should be");
     const paths = resolvePaths({ HOME: home });
     if (!paths.ok) throw new Error(paths.finding.message);
-    const mirror = await openEventMirror(io, paths.value, "ssd");
+    const mirror = await openEventMirror(io, paths.value, STORE_ID);
     expect(mirror).toMatchObject({ ok: false, finding: { code: "store.failed" } });
-    expect(mirror.ok || mirror.finding.message).toContain(".cache/plainport/ssd");
+    expect(mirror.ok || mirror.finding.message).toContain(`.cache/plainport/${STORE_ID}`);
     expect(mirror.ok || mirror.finding.fix).not.toContain("mount");
   });
 });
@@ -216,6 +219,13 @@ describe("blob-fs carries the catalog", () => {
     const storeRoot = join(dir, "ssd");
     mkdirSync(storeRoot);
     const store = fsBlobStore(io, storeRoot);
+    const STORE_ID = ulid(900, (b) => b);
+    const identity = await ensureStoreIdentity(store, () => STORE_ID);
+    expect(identity.ok && identity.value.id).toBe(STORE_ID);
+    expect(JSON.parse(readFileSync(join(storeRoot, "meta/v1/store.json"), "utf8"))).toEqual({
+      v: 1,
+      id: STORE_ID,
+    });
     for (const n of [1, 2]) expect((await appendEvent(storeEventLog(store), event(n))).ok).toBe(true);
     expect(readdirSync(join(storeRoot, "meta/v1/events")).sort()).toEqual([
       `${event(1).id}.json`,
@@ -224,16 +234,18 @@ describe("blob-fs carries the catalog", () => {
 
     const paths = resolvePaths({ HOME: dir });
     if (!paths.ok) throw new Error(paths.finding.message);
-    const opened = await openEventMirror(io, paths.value, "ssd");
+    const opened = await openEventMirror(io, paths.value, STORE_ID);
     if (!opened.ok) throw new Error(opened.finding.message);
     const mirror = opened.value;
-    const mirrorRoot = join(dir, ".cache", "plainport", "ssd");
+    const mirrorRoot = join(dir, ".cache", "plainport", STORE_ID);
+    const now = new Date("2026-10-03T12:00:00.000Z");
 
-    const online = await loadCatalog({ store, mirror });
+    const online = await loadCatalog({ store, mirror, storeId: STORE_ID, now });
     if (!online.ok) throw new Error(online.finding.message);
-    expect(online.value).toMatchObject({ stale: false, source: "store" });
+    expect(online.value).toMatchObject({ stale: false, source: "store", syncedAt: now.toISOString() });
     expect(online.value.state.projects[idAt(1)]).toMatchObject({ status: "shelved", head: idAt(502) });
-    expect(existsSync(join(storeRoot, "meta/v1/state.json"))).toBe(true);
+    // D45: a read never writes to the store.
+    expect(readdirSync(join(storeRoot, "meta/v1")).sort()).toEqual(["events", "store.json"]);
     expect(existsSync(join(mirrorRoot, "state.json"))).toBe(true);
     expect(readdirSync(join(mirrorRoot, "events")).length).toBe(2);
     const offlineEvents = await readEvents(mirrorEventLog(mirror));
@@ -241,8 +253,13 @@ describe("blob-fs carries the catalog", () => {
 
     // The disk is unplugged: the same state comes from the mirror, marked stale.
     rmSync(storeRoot, { recursive: true, force: true });
-    const offline = await loadCatalog({ store, mirror });
+    const offline = await loadCatalog({ store, mirror, storeId: STORE_ID, now: new Date() });
     if (!offline.ok) throw new Error(offline.finding.message);
-    expect(offline.value).toMatchObject({ stale: true, source: "mirror", state: online.value.state });
+    expect(offline.value).toMatchObject({
+      stale: true,
+      source: "mirror",
+      state: online.value.state,
+      syncedAt: now.toISOString(),
+    });
   });
 });

@@ -26,6 +26,12 @@ describe("catalog: a root key's ULID", () => {
     expect(ProjectRegistrySchema.safeParse({ ...registry, roots: { Work: RECORDED } }).success).toBe(false);
   });
 
+  test("registry.json records each store's id by config name (D45), so an offline read finds its mirror", () => {
+    const registry = { v: 1, projects: {}, stores: { ssd: RECORDED } };
+    expect(ProjectRegistrySchema.safeParse(registry).success).toBe(true);
+    expect(ProjectRegistrySchema.safeParse({ ...registry, stores: { ssd: "nope" } }).success).toBe(false);
+  });
+
   test("the registry's record wins; else the catalog's first root-created for the key; else none", () => {
     const state = foldCatalog([created(idAt(101), SECOND, "work"), created(idAt(100), FIRST, "work")]);
     const empty = { v: 1 as const, projects: {} };

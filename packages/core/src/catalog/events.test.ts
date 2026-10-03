@@ -94,7 +94,12 @@ describe("catalog: event schemas", () => {
 
   test("the published JSON Schemas cover every event type and the state.json cache", () => {
     const schemas = catalogJsonSchemas();
-    expect(Object.keys(schemas).sort()).toEqual(["catalog-event", "catalog-state"]);
+    expect(Object.keys(schemas).sort()).toEqual([
+      "catalog-event",
+      "catalog-state",
+      "event-mirror",
+      "store-identity",
+    ]);
     const text = JSON.stringify(schemas["catalog-event"]);
     for (const type of CATALOG_EVENT_TYPES) expect(text).toContain(`"${type}"`);
     // D41: a non-empty stored map is published too, not only checked in TypeScript.

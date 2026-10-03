@@ -1,5 +1,5 @@
-// This machine's mirror of a store's catalog events (DESIGN.md "Local state per machine": ~/.cache/plainport/<store>/
-// events/), so `plainport ls` works offline. The mirror is a blob-fs store on plainport's own cache folder, which is
+// This machine's mirror of a store's catalog events (DESIGN.md "Local state per machine": ~/.cache/plainport/<store
+// id>/events/, keyed by the store's identity, D45), so `plainport ls` works offline. The mirror is a blob-fs store on plainport's own cache folder, which is
 // created here when missing; every read and write goes through the io given, so the host port's guard sees it.
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
@@ -12,13 +12,13 @@ import {
 } from "@plainport/core";
 import { fsBlobStore } from "./fs-store.ts";
 
-/** The event mirror for the store named `storeName`, its folder made if needed. Use it with mirrorEventLog. */
+/** The event mirror for the store with this id (its meta/v1/store.json), its folder made if needed. Pass it to loadCatalog. */
 export const openEventMirror = async (
   io: LocalIo,
   paths: PlainportPaths,
-  storeName: string,
+  storeId: string,
 ): Promise<Result<BlobStore>> => {
-  const dir = eventMirrorDir(paths, storeName);
+  const dir = eventMirrorDir(paths, storeId);
   try {
     await io.fs.mkdirp(dir);
   } catch (error) {

@@ -24,16 +24,20 @@ import { z } from "zod";
 import { describeIssues } from "../config/toml.ts";
 import type { PlainportPaths } from "../paths.ts";
 import type { BlobEntry, BlobStore } from "../ports/blob-store.ts";
-import { isUlid } from "../ulid.ts";
+import { isUlid, UlidSchema } from "../ulid.ts";
 import { CATALOG_EVENT_TYPES, type CatalogEvent, CatalogEventSchema } from "./events.ts";
 import { type CatalogState, CatalogStateSchema, compare, FOLD_VERSION, foldCatalog } from "./fold.ts";
+import { identityChanged, readStoreIdentity } from "./identity.ts";
 
 /** Where events live on a store, and in a local mirror. */
 export const STORE_EVENTS_PREFIX = "meta/v1/events/";
 export const MIRROR_EVENTS_PREFIX = "events/";
+/** The store-side fold cache DESIGN's layout allows. Reads never write to a store (D45), so M1 never writes it. */
 export const STATE_KEY = "meta/v1/state.json";
 /** The fold cached beside a mirror's events. */
 export const MIRROR_STATE_KEY = "state.json";
+/** Beside a mirror's events: the store it mirrors, its last sync, and store files it could not copy. */
+export const MIRROR_FILE_KEY = "mirror.json";
 
 /** A folder of event files: a BlobStore and the prefix the events sit under. */
 export interface EventLog {
@@ -45,12 +49,13 @@ export const storeEventLog = (store: BlobStore): EventLog => ({ store, prefix: S
 export const mirrorEventLog = (store: BlobStore): EventLog => ({ store, prefix: MIRROR_EVENTS_PREFIX });
 
 /**
- * The root of a store's event mirror, `<cache>/plainport/<store>`; its events go under `events/`. The store's name is
- * config text, so it is percent-encoded into one folder name that never reaches outside the cache.
+ * The root of a store's event mirror, `<cache>/plainport/<store id>` (D45): keyed by the id in the store's
+ * meta/v1/store.json, never by its name in config. Its events go under `events/`. Passing anything but a ULID is a bug.
  */
-export const eventMirrorDir = (paths: PlainportPaths, storeName: string): string => {
-  const encoded = encodeURIComponent(storeName);
-  return join(paths.cacheDir, /^\.+$/.test(encoded) ? "%2E".repeat(encoded.length) : encoded);
+export const eventMirrorDir = (paths: PlainportPaths, storeId: string): string => {
+  if (!isUlid(storeId))
+    throw new RangeError(`eventMirrorDir: ${JSON.stringify(storeId)} is not a store id (a ULID)`);
+  return join(paths.cacheDir, storeId);
 };
 
 const keyOf = (log: EventLog, id: string): string => `${log.prefix}${id}.json`;
@@ -192,104 +197,18 @@ const sizesById = (listed: Listed): Map<string, number> => {
   return sizes;
 };
 
-/**
- * Copies one event from one log to the other, if it reads as a whole event. Returns the bytes written, or a
- * catalog.event-skipped finding when the source holds something else (torn, foreign) or the target already holds a
- * different event under the id. appendEvent keeps it create-only and completes the target's own torn copy (D42).
- */
-const copyEvent = async (
-  from: EventLog,
-  to: EventLog,
-  id: string,
-): Promise<
-  | { ok: true; value: { size: number } | Finding | undefined }
-  | { ok: false; at: "from" | "to"; failure: Failure }
-> => {
-  const key = keyOf(from, id);
-  const bytes = await from.store.get(key);
-  if (!bytes.ok) return { ok: false, at: "from", failure: bytes };
-  if (bytes.value === null) return ok(undefined);
-  const parsed = parseEvent(key, id, bytes.value);
-  if ("code" in parsed) return ok(parsed);
-  const written = await appendEvent(to, parsed);
-  if (written.ok) return ok({ size: encodeEvent(parsed).length });
-  if (written.finding.code === "store.key-exists") {
-    return ok(
-      skipped(keyOf(to, id), `it differs from the copy in the other log (${key}); both are kept as they are`),
-    );
-  }
-  return { ok: false, at: "to", failure: written };
-};
-
-export interface Synced {
-  /** Events copied from the store into the mirror. */
-  copied: number;
-  /** Events the mirror held that the store lacked, uploaded to it. */
-  uploaded: number;
-  /** Events that could not be copied either way. */
-  findings: Finding[];
-}
-
-type SyncFailure = { ok: false; side: "store" | "mirror"; failure: Failure };
-
-/** One sync, and the mirror's listing as it stands afterwards; a failure says which side failed. */
-const syncLogs = async (
-  remote: EventLog,
-  mirror: EventLog,
-): Promise<{ ok: true; value: Synced & { mirrored: Listed } } | SyncFailure> => {
-  const theirs = await listEvents(remote);
-  if (!theirs.ok) return { ok: false, side: "store", failure: theirs };
-  const mine = await listEvents(mirror);
-  if (!mine.ok) return { ok: false, side: "mirror", failure: mine };
-  const remoteSizes = sizesById(theirs.value);
-  const mirrorSizes = sizesById(mine.value);
-  const findings: Finding[] = [];
-  let copied = 0;
-  let uploaded = 0;
-  for (const [id, size] of [...remoteSizes].sort(([a], [b]) => compare(a, b))) {
-    // Held under the same name and size: never fetched again. A different size is a torn copy on one side.
-    if (mirrorSizes.get(id) === size) continue;
-    const result = await copyEvent(remote, mirror, id);
-    if (!result.ok)
-      return { ok: false, side: result.at === "from" ? "store" : "mirror", failure: result.failure };
-    if (result.value === undefined) continue;
-    if ("code" in result.value) findings.push(result.value);
-    else {
-      mirrorSizes.set(id, result.value.size);
-      copied++;
-    }
-  }
-  for (const id of [...mirrorSizes.keys()].sort(compare)) {
-    if (remoteSizes.has(id)) continue;
-    const result = await copyEvent(mirror, remote, id);
-    if (!result.ok)
-      return { ok: false, side: result.at === "from" ? "mirror" : "store", failure: result.failure };
-    // A mirror file that does not read as an event is reported by the mirror's own read; not twice.
-    if (result.value !== undefined && !("code" in result.value)) uploaded++;
-  }
-  // The mirror's listing now: what it held, with what was copied in.
-  const entries = new Map(mine.value.entries.map((entry) => [entry.key, entry]));
-  const ids = new Map(mine.value.ids);
-  for (const [id, size] of mirrorSizes) {
-    const key = keyOf(mirror, id);
-    entries.set(key, { key, size });
-    ids.set(key, id);
-  }
-  const mirrored = { entries: [...entries.values()].sort((a, b) => compare(a.key, b.key)), ids };
-  return ok({ copied, uploaded, findings, mirrored });
-};
-
-/**
- * Brings a store and its local mirror to the union of their events (replication is a union), with one listing of
- * each: only events the mirror does not hold under the same name and size are fetched, and only events the store
- * lacks are uploaded. When the store cannot be listed this fails and the mirror is left as it was.
- */
-export const syncMirror = async (remote: EventLog, mirror: EventLog): Promise<Result<Synced>> => {
-  const synced = await syncLogs(remote, mirror);
-  if (!synced.ok) return synced.failure;
-  const { copied, uploaded, findings } = synced.value;
-  return ok({ copied, uploaded, findings });
-};
+export const MirrorFileSchema = z
+  .strictObject({
+    v: z.literal(1),
+    /** The id of the store mirrored (its meta/v1/store.json). */
+    store: UlidSchema,
+    lastSyncedAt: z.iso.datetime(),
+    /** Store files that could not be copied (torn, a newer type, other bytes than the mirror's), by event id: not
+     * fetched again while their size is the same, and reported each time. */
+    skipped: z.record(z.string(), z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema })),
+  })
+  .meta({ title: "EventMirror", description: "mirror.json beside a store's local event mirror" });
+export type MirrorFile = z.infer<typeof MirrorFileSchema>;
 
 /** A cached fold: reused only when it was built by this FOLD_VERSION from exactly the events listed now. */
 export const StateCacheSchema = z
@@ -297,7 +216,7 @@ export const StateCacheSchema = z
     v: z.literal(1),
     /** The FOLD_VERSION that built it. */
     fold: z.int().positive(),
-    /** sha256 over the sorted `<key>\0<size>` of every file listed under the events prefix (D43). */
+    /** sha256 over the sorted `<name>\0<size>` of every file listed under the mirror's events/ (D43). */
     digest: z.string().regex(/^[0-9a-f]{64}$/),
     count: z.int().nonnegative(),
     state: CatalogStateSchema,
@@ -306,7 +225,7 @@ export const StateCacheSchema = z
   })
   .meta({
     title: "CatalogStateCache",
-    description: "state.json beside a store's or a mirror's events: a rebuildable cache of the catalog fold",
+    description: "state.json beside a store's local event mirror: a rebuildable cache of the catalog fold",
   });
 export type StateCache = z.infer<typeof StateCacheSchema>;
 
@@ -316,87 +235,248 @@ const digestOf = (log: EventLog, entries: BlobEntry[]): string =>
     .update(entries.map((entry) => `${entry.key.slice(log.prefix.length)}\0${entry.size}`).join("\n"))
     .digest("hex");
 
-const readCache = async (store: BlobStore, key: string): Promise<StateCache | undefined> => {
+/** A JSON document a schema checks; undefined when missing, damaged or of another shape. */
+const readJson = async <S extends z.ZodType>(
+  store: BlobStore,
+  key: string,
+  schema: S,
+): Promise<Result<z.output<S> | undefined>> => {
   const bytes = await store.get(key);
-  if (!bytes.ok || bytes.value === null) return undefined;
+  if (!bytes.ok) return bytes;
+  if (bytes.value === null) return ok(undefined);
   try {
-    const checked = StateCacheSchema.safeParse(JSON.parse(decoder.decode(bytes.value)));
-    return checked.success ? checked.data : undefined;
+    const checked = schema.safeParse(JSON.parse(decoder.decode(bytes.value)));
+    return ok(checked.success ? checked.data : undefined);
   } catch {
-    return undefined; // not JSON: a cache is never trusted, only rebuilt
+    return ok(undefined); // not JSON: a cache is never trusted, only rebuilt
   }
 };
 
 export interface LoadedCatalog {
   state: CatalogState;
-  /** catalog.event-skipped for every file left out, and any event the sync could not copy. */
+  /** catalog.event-skipped for every file left out, on the store or in the mirror. */
   findings: Finding[];
   /** Whether a cached fold was reused. */
   cached: boolean;
-  /** True when the store could not be reached: the state is the mirror's, as of its last sync. */
+  /** True when the store could not be reached: the state is the mirror's, as of syncedAt. */
   stale: boolean;
   source: "store" | "mirror";
+  /** When the state was last brought up to date with the store; absent when this device never synced it. */
+  syncedAt?: string;
+  /** Events this read copied from the store into the mirror. */
+  copied: number;
   /** Why the state is stale: the store's store.unreachable finding. */
   unreachable?: Finding;
+  /** Why the mirror was not used although the store was reachable; the state was read from the store directly. */
+  mirrorFailure?: Finding;
 }
 
-/**
- * The catalog, the one way to read it (D43): syncs the store and this machine's mirror, folds the union and returns
- * it. When the store is unreachable, the mirror's state is returned marked stale. The fold is cached beside the
- * mirror (and, best effort, on the store as meta/v1/state.json) and reused only when it was built by this FOLD_VERSION
- * from the same event names and sizes. A store that fails for another reason, or a mirror that cannot be read, fails.
- */
-export const loadCatalog = async (stores: {
-  store: BlobStore;
-  mirror: BlobStore;
-}): Promise<Result<LoadedCatalog>> => {
-  const remote = storeEventLog(stores.store);
-  const mirror = mirrorEventLog(stores.mirror);
-  const synced = await syncLogs(remote, mirror);
-  let listed: Listed;
-  let unreachable: Finding | undefined;
-  let syncFindings: Finding[] = [];
-  if (synced.ok) {
-    listed = synced.value.mirrored;
-    syncFindings = synced.value.findings;
-  } else if (synced.side === "store" && synced.failure.finding.code === "store.unreachable") {
-    unreachable = synced.failure.finding;
-    const own = await listEvents(mirror);
-    if (!own.ok) return own;
-    listed = own.value;
-  } else {
-    return synced.failure;
-  }
-  const stale = unreachable !== undefined;
-  const status = {
-    stale,
-    source: stale ? ("mirror" as const) : ("store" as const),
-    ...(unreachable && { unreachable }),
-  };
-
+/** Folds the mirror's listing, through the cache beside it. Cache writes are best effort. */
+const foldMirror = async (
+  mirror: EventLog,
+  listed: Listed,
+): Promise<Result<{ state: CatalogState; findings: Finding[]; cached: boolean }>> => {
   const digest = digestOf(mirror, listed.entries);
   const count = listed.entries.length;
-  const cache = await readCache(stores.mirror, MIRROR_STATE_KEY);
-  if (
-    cache !== undefined &&
-    cache.fold === FOLD_VERSION &&
-    cache.digest === digest &&
-    cache.count === count
-  ) {
-    return ok({
-      state: cache.state,
-      findings: [...syncFindings, ...cache.findings],
-      cached: true,
-      ...status,
-    });
+  const cache = await readJson(mirror.store, MIRROR_STATE_KEY, StateCacheSchema);
+  if (!cache.ok) return cache;
+  const hit = cache.value;
+  if (hit !== undefined && hit.fold === FOLD_VERSION && hit.digest === digest && hit.count === count) {
+    return ok({ state: hit.state, findings: hit.findings, cached: true });
   }
   const read = await readListed(mirror, listed);
   if (!read.ok) return read;
   const state = foldCatalog(read.value.events);
   const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings: read.value.findings };
-  const bytes = encoder.encode(`${JSON.stringify(next)}\n`);
-  // Caches only: a failed write is ignored, and the next read folds again.
-  await stores.mirror.put(MIRROR_STATE_KEY, bytes);
-  if (!stale) await stores.store.put(STATE_KEY, bytes);
-  return ok({ state, findings: [...syncFindings, ...read.value.findings], cached: false, ...status });
+  await mirror.store.put(MIRROR_STATE_KEY, encoder.encode(`${JSON.stringify(next)}\n`));
+  return ok({ state, findings: read.value.findings, cached: false });
+};
+
+/** Which side failed: a store failure decides the outcome, a mirror failure only sends the read to the store. */
+type Fault = { ok: false; side: "store" | "mirror"; failure: Failure };
+const storeFault = (failure: Failure): Fault => ({ ok: false, side: "store", failure });
+const mirrorFault = (failure: Failure): Fault => ({ ok: false, side: "mirror", failure });
+
+/**
+ * Copies one store file into the mirror byte for byte, if it reads as a whole event, so its name and size match on
+ * both sides and it is never fetched again. A torn mirror copy (a prefix of these bytes) is completed (D42).
+ */
+const download = async (
+  remote: EventLog,
+  mirror: EventLog,
+  id: string,
+): Promise<{ ok: true; value: number | Finding | undefined } | Fault> => {
+  const key = keyOf(remote, id);
+  const bytes = await remote.store.get(key);
+  if (!bytes.ok) return storeFault(bytes);
+  if (bytes.value === null) return ok(undefined);
+  const parsed = parseEvent(key, id, bytes.value);
+  if ("code" in parsed) return ok(parsed);
+  const target = keyOf(mirror, id);
+  const createOnly = mirror.store.capabilities().createIfAbsent;
+  const put = await mirror.store.put(target, bytes.value, createOnly ? { ifNotExists: true } : {});
+  if (put.ok) return ok(bytes.value.length);
+  if (put.finding.code !== "store.key-exists") return mirrorFault(put);
+  const held = await mirror.store.get(target);
+  if (!held.ok) return mirrorFault(held);
+  const mine = held.value;
+  if (
+    mine !== null &&
+    mine.length < bytes.value.length &&
+    sameBytes(mine, bytes.value.subarray(0, mine.length))
+  ) {
+    const completed = await mirror.store.put(target, bytes.value);
+    return completed.ok ? ok(bytes.value.length) : mirrorFault(completed);
+  }
+  if (mine !== null && sameBytes(mine, bytes.value)) return ok(bytes.value.length);
+  return ok(
+    skipped(key, `the mirror holds other bytes under its name (${target}); both are kept as they are`),
+  );
+};
+
+/**
+ * Brings the mirror up to the store: one listing of each, fetching only files the mirror does not hold under the same
+ * name and size and has not already found unreadable at that size. It only downloads: a read never writes to a store
+ * (D45). Returns the mirror's listing as it stands afterwards.
+ */
+const syncDown = async (
+  remote: EventLog,
+  mirror: EventLog,
+  storeId: string,
+  now: Date,
+): Promise<{ ok: true; value: { listed: Listed; copied: number; findings: Finding[] } } | Fault> => {
+  const theirs = await listEvents(remote);
+  if (!theirs.ok) return storeFault(theirs);
+  const recorded = await readJson(mirror.store, MIRROR_FILE_KEY, MirrorFileSchema);
+  if (!recorded.ok) return mirrorFault(recorded);
+  if (recorded.value !== undefined && recorded.value.store !== storeId) {
+    return mirrorFault(identityChanged(storeId, recorded.value.store, "local event mirror"));
+  }
+  const mine = await listEvents(mirror);
+  if (!mine.ok) return mirrorFault(mine);
+  const known = recorded.value?.skipped ?? {};
+  const mirrorSizes = sizesById(mine.value);
+  const skippedNow: MirrorFile["skipped"] = {};
+  const findings: Finding[] = [];
+  let copied = 0;
+  for (const [id, size] of [...sizesById(theirs.value)].sort(([a], [b]) => compare(a, b))) {
+    if (mirrorSizes.get(id) === size) continue;
+    const before = known[id];
+    if (before !== undefined && before.size === size) {
+      skippedNow[id] = before;
+      findings.push(before.finding);
+      continue;
+    }
+    const result = await download(remote, mirror, id);
+    if (!result.ok) return result;
+    if (result.value === undefined) continue;
+    if (typeof result.value === "number") {
+      mirrorSizes.set(id, result.value);
+      copied++;
+    } else {
+      skippedNow[id] = { size, finding: result.value };
+      findings.push(result.value);
+    }
+  }
+  const file: MirrorFile = { v: 1, store: storeId, lastSyncedAt: now.toISOString(), skipped: skippedNow };
+  const written = await mirror.store.put(MIRROR_FILE_KEY, encoder.encode(`${JSON.stringify(file)}\n`));
+  if (!written.ok) return mirrorFault(written);
+  const entries = new Map(mine.value.entries.map((entry) => [entry.key, entry]));
+  const ids = new Map(mine.value.ids);
+  for (const [id, size] of mirrorSizes) {
+    const key = keyOf(mirror, id);
+    entries.set(key, { key, size });
+    ids.set(key, id);
+  }
+  const listed = { entries: [...entries.values()].sort((a, b) => compare(a.key, b.key)), ids };
+  return ok({ listed, copied, findings });
+};
+
+/** The mirror alone, while the store is unreachable: its state as of its last sync, marked stale. */
+const readOffline = async (
+  mirror: EventLog,
+  storeId: string,
+  unreachable: Finding,
+): Promise<Result<LoadedCatalog>> => {
+  const recorded = await readJson(mirror.store, MIRROR_FILE_KEY, MirrorFileSchema);
+  if (!recorded.ok) return recorded;
+  if (recorded.value !== undefined && recorded.value.store !== storeId) {
+    return identityChanged(storeId, recorded.value.store, "local event mirror");
+  }
+  const listed = await listEvents(mirror);
+  if (!listed.ok) return listed;
+  const folded = await foldMirror(mirror, listed.value);
+  if (!folded.ok) return folded;
+  const skippedOnStore = Object.values(recorded.value?.skipped ?? {}).map((entry) => entry.finding);
+  return ok({
+    ...folded.value,
+    findings: [...skippedOnStore, ...folded.value.findings],
+    stale: true,
+    source: "mirror",
+    ...(recorded.value && { syncedAt: recorded.value.lastSyncedAt }),
+    copied: 0,
+    unreachable,
+  });
+};
+
+/**
+ * The catalog, the one way to read it (D43, D45). It checks the store's identity against `storeId` (what this device
+ * recorded for the store: store.identity-changed when it differs), brings this device's mirror up to the store
+ * (download only: a read never writes to a store), and folds the mirror's events through the cache beside them.
+ *
+ * - The store unreachable: the mirror's state, marked stale, with the time of its last sync (none if never synced).
+ * - The mirror broken (cannot be listed, read or written, or recorded for another store) while the store is
+ *   reachable: the store's events are read and folded directly, with the reason in mirrorFailure.
+ * - Any other store failure fails the call.
+ */
+export const loadCatalog = async (options: {
+  store: BlobStore;
+  mirror: BlobStore;
+  storeId: string;
+  now: Date;
+}): Promise<Result<LoadedCatalog>> => {
+  const remote = storeEventLog(options.store);
+  const mirror = mirrorEventLog(options.mirror);
+  const offline = (failure: Failure): Promise<Result<LoadedCatalog>> | Failure =>
+    failure.finding.code === "store.unreachable"
+      ? readOffline(mirror, options.storeId, failure.finding)
+      : failure;
+
+  const identity = await readStoreIdentity(options.store);
+  if (!identity.ok) return offline(identity);
+  if (identity.value !== options.storeId) return identityChanged(options.storeId, identity.value, "store");
+
+  const synced = await syncDown(remote, mirror, options.storeId, options.now);
+  let mirrorFailure: Finding | undefined;
+  if (synced.ok) {
+    const folded = await foldMirror(mirror, synced.value.listed);
+    if (folded.ok) {
+      return ok({
+        ...folded.value,
+        findings: [...synced.value.findings, ...folded.value.findings],
+        stale: false,
+        source: "store",
+        syncedAt: options.now.toISOString(),
+        copied: synced.value.copied,
+      });
+    }
+    mirrorFailure = folded.finding;
+  } else if (synced.side === "store") {
+    return offline(synced.failure);
+  } else {
+    mirrorFailure = synced.failure.finding;
+  }
+  // The mirror is only a cache: read the store directly.
+  const direct = await readEvents(remote);
+  if (!direct.ok) return offline(direct);
+  return ok({
+    state: foldCatalog(direct.value.events),
+    findings: direct.value.findings,
+    cached: false,
+    stale: false,
+    source: "store",
+    syncedAt: options.now.toISOString(),
+    copied: 0,
+    mirrorFailure,
+  });
 };
