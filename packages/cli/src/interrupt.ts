@@ -41,6 +41,15 @@ export const stopOnSignals = (
     () => {},
   );
   let stopping = false;
+  // After SIGHUP the terminal may be gone, and a write to it can throw: that must never end the handler before the
+  // children are stopped.
+  const say = (text: string): void => {
+    try {
+      options.stderr(text);
+    } catch {
+      // Nowhere to say it.
+    }
+  };
   const handler = (signal: NodeJS.Signals): void => {
     // Finished already: the command's own code and envelope stand, and the normal exit follows.
     if (stopping || finished !== undefined) return;
@@ -49,11 +58,11 @@ export const stopOnSignals = (
     // stopAll cancels synchronously, so no run can start after this line.
     const stopped = host.stopAll();
     if (!running) {
-      options.stderr(`plainport: ${signal}: exiting\n`);
+      say(`plainport: ${signal}: exiting\n`);
       exit(130);
       return;
     }
-    options.stderr(`plainport: ${signal}: stopping child processes, then exiting\n`);
+    say(`plainport: ${signal}: stopping child processes, then exiting\n`);
     void (async () => {
       try {
         await stopped;

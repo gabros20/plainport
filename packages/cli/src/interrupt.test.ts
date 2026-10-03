@@ -38,6 +38,7 @@ afterEach(async () => {
 const startParent = async (
   script: string,
   done = "run.then((result) => (result.ok ? 0 : result.exitCode))",
+  stderr = "(text) => process.stderr.write(text)",
 ): Promise<{ parent: Bun.Subprocess<"ignore", "pipe", "pipe">; pgid: number }> => {
   const fixture = join(dir, "parent.ts");
   writeFileSync(
@@ -49,7 +50,7 @@ const startParent = async (
       `  host.run({ command: "/bin/sh", args: ["-c", ${JSON.stringify(script)}], cwd: ${JSON.stringify(dir)},\n` +
       `  env: { PATH: "/usr/bin:/bin" }, killGraceMs: 300, onLine: (line) => console.log(line.text) });\n` +
       `const done = ${done};\n` +
-      "stopOnSignals(host, done, { stderr: (text) => process.stderr.write(text) });\n" +
+      `stopOnSignals(host, done, { stderr: ${stderr} });\n` +
       "process.exitCode = await done;\n",
   );
   const parent = Bun.spawn([process.execPath, fixture], {
@@ -100,6 +101,17 @@ describe("interrupt: signals to plainport stop its children", () => {
     const { parent, pgid } = await startParent("echo $$; sleep 60", "run.then(() => 0)");
     parent.kill("SIGINT");
     expect(await parent.exited).toBe(0);
+    expect(members(pgid)).toEqual([]);
+  });
+
+  test("a stderr that throws (a tty gone after SIGHUP) still lets the children be stopped before the exit", async () => {
+    const { parent, pgid } = await startParent(
+      "echo $$; sleep 60",
+      undefined,
+      '() => { throw new Error("EIO: the terminal is gone"); }',
+    );
+    parent.kill("SIGHUP");
+    expect(await parent.exited).toBe(130);
     expect(members(pgid)).toEqual([]);
   });
 
