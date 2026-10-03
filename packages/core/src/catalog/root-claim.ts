@@ -3,9 +3,11 @@
 // root's root-created event, so of two roots' first offloads at once exactly one claims the store and the other is
 // refused before it writes anything. A store set up before claims existed has none until its first offload after.
 //
-// On a store without hard links the file is created in place (D41), so a crash can leave a strict prefix of it. A
-// prefix of this root's own claim is completed, as appendEvent completes its own torn event (D42); any other bytes
-// are never replaced.
+// On a store without hard links the file is created in place (D41): a reader can see it empty or partial while its
+// writer is still writing, and a crash can leave it so. Unlike an event's key, this key is shared by every root, so a
+// partial file says nothing about whose claim it is: it is read again a few times (a writer finishes in
+// milliseconds), then refused with store.failed. A claim is never written over (D51). A store without create-only
+// writes (none in M1) gets a plain write and a read-back; M2+ stores of that kind need a conditional write here.
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
@@ -21,9 +23,6 @@ export const RootClaimSchema = z.strictObject({ v: z.literal(1), root: UlidSchem
 export type RootClaim = z.infer<typeof RootClaimSchema>;
 
 const encode = (root: string): Uint8Array => new TextEncoder().encode(`${JSON.stringify({ v: 1, root })}\n`);
-
-const isPrefix = (bytes: Uint8Array, of: Uint8Array): boolean =>
-  bytes.length < of.length && bytes.every((b, i) => b === of[i]);
 
 type Read = { kind: "absent" } | { kind: "root"; root: string } | { kind: "bytes"; bytes: Uint8Array };
 
@@ -42,35 +41,56 @@ const read = async (store: BlobStore): Promise<Result<Read>> => {
   return ok({ kind: "bytes", bytes: got.value });
 };
 
-const damaged = () =>
+/** How often a partial claim is read before it is refused, and how long to wait between reads. */
+const READS = 5;
+const WAIT_MS = 200;
+
+export interface ClaimOptions {
+  /** Waits between reads of a partial claim; a timer by default. */
+  wait?: (ms: number) => Promise<void>;
+}
+
+const partial = () =>
   fail(
     finding("store.failed", {
-      message: `the store's root claim ${ROOT_CLAIM_KEY} is not valid and is not a half-written claim by this root; it was left as it is`,
-      fix: `check which root the store's catalog serves (its root-created events), write {"v":1,"root":"<that root's ULID>"} to ${ROOT_CLAIM_KEY}, and re-run`,
+      message: `the store's root claim ${ROOT_CLAIM_KEY} is empty or partial: another plainport offload is writing it, or one stopped while writing it; nothing was written`,
+      fix: "wait for any plainport offload to this store to finish (on this device or another), then re-run; if it stays like this, run plainport doctor",
       paths: [ROOT_CLAIM_KEY],
     }),
   );
 
+/** The claim once it settles: a file another root is still writing in place is read again, READS times in all. */
+const settled = async (store: BlobStore, options: ClaimOptions): Promise<Result<Read>> => {
+  const wait = options.wait ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+  let found = await read(store);
+  for (let reads = 1; found.ok && found.value.kind === "bytes" && reads < READS; reads++) {
+    await wait(WAIT_MS);
+    found = await read(store);
+  }
+  return found;
+};
+
 /**
  * Claims the store for `root` when no root has claimed it, and returns the root that holds the claim: `root` itself,
  * or the other root that holds it (the caller refuses with store.root-mismatch). Nothing is written when the store is
- * already claimed.
+ * already claimed, or while its claim is partial.
  */
 export const claimStoreRoot = async (
   store: BlobStore,
   root: string,
+  options: ClaimOptions = {},
 ): Promise<Result<{ root: string; created: boolean }>> => {
-  const ours = encode(root);
-  const found = await read(store);
+  const found = await settled(store, options);
   if (!found.ok) return found;
   if (found.value.kind === "root") return ok({ root: found.value.root, created: false });
-  if (found.value.kind === "bytes" && !isPrefix(found.value.bytes, ours)) return damaged();
-  const createOnly = found.value.kind === "absent" && store.capabilities().createIfAbsent;
-  const put = await store.put(ROOT_CLAIM_KEY, ours, createOnly ? { ifNotExists: true } : {});
+  if (found.value.kind === "bytes") return partial();
+  const createOnly = store.capabilities().createIfAbsent;
+  const put = await store.put(ROOT_CLAIM_KEY, encode(root), createOnly ? { ifNotExists: true } : {});
   if (!put.ok && put.finding.code !== "store.key-exists") return put;
-  // Read back: a refused create lost to another root, and an in-place write may have raced one (D41).
-  const now = await read(store);
+  // Read back: a refused create lost to another root, whose write may still be in progress (D41).
+  const now = await settled(store, options);
   if (!now.ok) return now;
-  if (now.value.kind !== "root") return now.value.kind === "absent" && !put.ok ? put : damaged();
-  return ok({ root: now.value.root, created: put.ok && now.value.root === root });
+  if (now.value.kind === "root")
+    return ok({ root: now.value.root, created: put.ok && now.value.root === root });
+  return now.value.kind === "bytes" || put.ok ? partial() : put;
 };
