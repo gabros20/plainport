@@ -11,9 +11,12 @@
 // - Each status event gets a position on that chain: an offloaded event sits at its snapshot's depth (2·d), and an
 //   onloaded event just after the snapshot it restored (2·d + 1), so before anything made from that working copy.
 // - Status is the event furthest along the chain: offloaded → shelved, onloaded → local; local when there is none.
-//   Two offloaded events with the same base (none counts as one base) make the project conflicted until a resolved
-//   event (M2) picks one.
-// - Heads are the deepest offloaded or checkpointed snapshots; `head` is the one head, or null when there are several.
+// - A fork makes the project conflicted until a resolved event (M2) picks a side (D41): a kept snapshot with two or
+//   more kept children, offloaded or checkpointed alike. Two first offloads (no base) are a fork too. DESIGN's "two
+//   offloaded events with the same base" is the special case; a checkpoint on one side must not hide the other.
+// - Heads are the tips: kept snapshots nothing kept was made from. `head` is the one tip, and only when the chain is
+//   whole: it is null when the project is conflicted, when a base or an onloaded snapshot is missing from the events
+//   (`missing`: a partial mirror, D41; an older snapshot never becomes the head by default), or when bases loop.
 // - The lease: an onloaded event with no offloaded event from the same device further along the chain. Of several
 //   such, the one furthest along wins, then the smallest event id, so there is at most one (invariant 5).
 //
@@ -51,8 +54,10 @@ export const CatalogProjectSchema = z.strictObject({
   head: UlidSchema.nullable(),
   heads: z.array(UlidSchema),
   lease: LeaseSchema.nullable(),
-  /** Groups of snapshots offloaded from the same base, each sorted. */
+  /** Each fork: the kept snapshots made from one base, sorted. */
   conflicts: z.array(z.array(UlidSchema)),
+  /** Snapshots that events name as a base but the catalog does not hold; while any is listed there is no head. */
+  missing: z.array(UlidSchema),
   discarded: z.array(UlidSchema),
   snapshots: z.record(UlidSchema, SnapshotSchema),
 });
@@ -101,6 +106,7 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   for (const e of producers) if (!made.has(e.snapshot)) made.set(e.snapshot, e);
 
   const depth = new Map<string, number>();
+  let cyclic = false;
   for (const start of [...made.keys()].sort(compare)) {
     const path: string[] = [];
     const onPath = new Set<string>();
@@ -112,7 +118,10 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
         below = known;
         break;
       }
-      if (onPath.has(at)) break; // a cycle: cut here, as if the base were unknown
+      if (onPath.has(at)) {
+        cyclic = true; // only a broken writer makes one: cut here, and trust no head
+        break;
+      }
       path.push(at);
       onPath.add(at);
       at = made.get(at)?.base;
@@ -135,7 +144,7 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   }
 
   const byBase = new Map<string, Set<string>>();
-  for (const e of offloads) {
+  for (const e of producers) {
     const key = e.base ?? "";
     byBase.set(key, (byBase.get(key) ?? new Set()).add(e.snapshot));
   }
@@ -144,8 +153,16 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     .map((snaps) => [...snaps].sort(compare))
     .sort((a, b) => compare(a.join(), b.join()));
 
-  const deepest = Math.max(0, ...depth.values());
-  const heads = [...made.keys()].filter((s) => depth.get(s) === deepest).sort(compare);
+  const parents = new Set(
+    producers.flatMap((e) => (e.base === undefined || e.base === e.snapshot ? [] : [e.base])),
+  );
+  const heads = [...made.keys()].filter((s) => !parents.has(s) && made.get(s)?.base !== s).sort(compare);
+  const missing = [
+    ...new Set(
+      [...producers, ...onloads].flatMap((e) => (e.base === undefined || made.has(e.base) ? [] : [e.base])),
+    ),
+  ].sort(compare);
+  const whole = conflicts.length === 0 && missing.length === 0 && !cyclic;
 
   let lease: (typeof onloads)[number] | undefined;
   for (const o of onloads) {
@@ -175,11 +192,12 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     root: address.root,
     path: address.path,
     status: conflicts.length > 0 ? "conflicted" : tip?.type === "offloaded" ? "shelved" : "local",
-    head: heads.length === 1 ? (heads[0] as string) : null,
+    head: whole && heads.length === 1 ? (heads[0] as string) : null,
     heads,
     lease:
       lease === undefined ? null : { device: lease.device, event: lease.id, base: lease.base, at: lease.at },
     conflicts,
+    missing,
     discarded: [...discarded].sort(compare),
     snapshots,
   };

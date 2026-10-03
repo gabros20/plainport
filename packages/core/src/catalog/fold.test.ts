@@ -156,7 +156,39 @@ describe("catalog: fold rules", () => {
     ];
     const p = project(foldCatalog(events));
     expect(p.status).toBe("conflicted");
-    expect(p.head).toBe(S(4));
+    // D41: a conflicted project has no head; both branch tips are listed.
+    expect(p.head).toBeNull();
+    expect(p.heads).toEqual([S(2), S(4)]);
+  });
+
+  test("a fork through a checkpoint is conflicted too (D41): any kept snapshot with two kept children", () => {
+    // The spec review's example: A and B both onload S1; A checkpoints S2; B offloads S3; A offloads S4 from S2.
+    const events = [
+      offloaded(E(1), A, S(1)),
+      onloaded(E(2), A, S(1)),
+      onloaded(E(3), B, S(1)),
+      checkpointed(E(4), A, S(2), S(1)),
+      offloaded(E(5), B, S(3), S(1)),
+      offloaded(E(6), A, S(4), S(2)),
+    ];
+    const p = project(foldCatalog(events));
+    expect(p.status).toBe("conflicted");
+    expect(p.head).toBeNull();
+    expect(p.conflicts).toEqual([[S(2), S(3)]]);
+    expect(p.heads).toEqual([S(3), S(4)]);
+  });
+
+  test("two checkpoints from one snapshot are a fork as well", () => {
+    const events = [
+      offloaded(E(1), A, S(1)),
+      checkpointed(E(2), A, S(2), S(1)),
+      checkpointed(E(3), B, S(3), S(1)),
+    ];
+    expect(project(foldCatalog(events))).toMatchObject({
+      status: "conflicted",
+      head: null,
+      conflicts: [[S(2), S(3)]],
+    });
   });
 
   test("a checkpoint moves the head but not the status, and keeps the lease", () => {
@@ -216,11 +248,34 @@ describe("catalog: fold rules", () => {
     expect(project(foldCatalog(events)).lease).toMatchObject({ device: B, event: E(5), base: S(2) });
   });
 
-  test("a base the catalog does not hold, and a cycle of bases, still fold", () => {
+  test("a base the catalog does not hold marks the head incomplete, never an older snapshot (D41)", () => {
     const unknownBase = project(foldCatalog([offloaded(E(1), A, S(2), S(1))]));
-    expect(unknownBase).toMatchObject({ status: "shelved", head: S(2) });
+    expect(unknownBase).toMatchObject({ status: "shelved", head: null, missing: [S(1)] });
+    // A mirror that lost S3's event: S1 <- S2 <- (S3) <- S4. S2 must not become the head.
+    const gap = project(
+      foldCatalog([offloaded(E(1), A, S(1)), offloaded(E(2), A, S(2), S(1)), offloaded(E(4), A, S(4), S(3))]),
+    );
+    expect(gap).toMatchObject({ head: null, missing: [S(3)] });
+    // An onload of a snapshot the catalog lacks is a gap too.
+    expect(project(foldCatalog([offloaded(E(1), A, S(1)), onloaded(E(2), A, S(9))]))).toMatchObject({
+      head: null,
+      missing: [S(9)],
+    });
+    // With every event present, the head is back and nothing is missing.
+    const whole = project(
+      foldCatalog([
+        offloaded(E(1), A, S(1)),
+        offloaded(E(2), A, S(2), S(1)),
+        offloaded(E(3), A, S(3), S(2)),
+        offloaded(E(4), A, S(4), S(3)),
+      ]),
+    );
+    expect(whole).toMatchObject({ head: S(4), missing: [] });
+  });
+
+  test("a cycle of bases still folds, whatever the order", () => {
     const cycle = foldCatalog([offloaded(E(1), A, S(1), S(2)), offloaded(E(2), A, S(2), S(1))]);
-    expect(project(cycle).heads.length).toBeGreaterThan(0);
+    expect(project(cycle).head).toBeNull(); // only a broken writer makes a cycle: no head is trusted
     const reversed = foldCatalog([offloaded(E(2), A, S(2), S(1)), offloaded(E(1), A, S(1), S(2))]);
     expect(reversed).toEqual(cycle);
   });
@@ -392,6 +447,22 @@ const withPermutation = (arb: fc.Arbitrary<CatalogEvent[]>) =>
   );
 
 describe("catalog: fold properties (fast-check)", () => {
+  test("a head is only ever named for a complete, unconflicted chain, and it is the one tip", () => {
+    fc.assert(
+      fc.property(fc.oneof(historyArb.map(simulate), tangledArb), (events) => {
+        for (const p of Object.values(foldCatalog(events).projects)) {
+          if (p.head === null) continue;
+          expect(p.missing).toEqual([]);
+          expect(p.conflicts).toEqual([]);
+          expect(p.heads).toEqual([p.head]);
+          // No kept snapshot is made from the head.
+          expect(Object.values(p.snapshots).some((s) => s.base === p.head)).toBe(false);
+        }
+      }),
+      RUNS,
+    );
+  });
+
   test("invariant 4: folding any permutation of simulated histories gives the same state", () => {
     fc.assert(
       fc.property(withPermutation(historyArb.map(simulate)), ([events, shuffled]) => {
@@ -437,13 +508,13 @@ describe("catalog: fold properties (fast-check)", () => {
     );
   });
 
-  test("conflicted exactly when two kept offloaded events share a base", () => {
+  test("conflicted exactly when a kept snapshot (or no base) has two kept children (D41)", () => {
     fc.assert(
       fc.property(fc.oneof(historyArb.map(simulate), tangledArb), (events) => {
         const dropped = new Set(events.flatMap((e) => (e.type === "snapshot-discarded" ? [e.snapshot] : [])));
         const byBase = new Map<string, Set<string>>();
         for (const e of events) {
-          if (e.type !== "offloaded" || dropped.has(e.snapshot)) continue;
+          if ((e.type !== "offloaded" && e.type !== "checkpointed") || dropped.has(e.snapshot)) continue;
           const key = e.base ?? "";
           byBase.set(key, (byBase.get(key) ?? new Set()).add(e.snapshot));
         }
