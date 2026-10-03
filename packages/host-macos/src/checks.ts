@@ -121,7 +121,8 @@ const InspectSchema = z.array(
   }),
 );
 
-const DAEMON_DOWN = /cannot connect to the docker daemon|is the docker daemon running|error during connect/i;
+const DAEMON_DOWN =
+  /cannot connect to the docker daemon|is the docker daemon running|failed to connect to the docker api|error during connect/i;
 
 export const createMacosChecks = (host: HostPorts): HostChecks => {
   const capture = (command: string, args: string[], env: Record<string, string>, ctx: CheckContext) =>

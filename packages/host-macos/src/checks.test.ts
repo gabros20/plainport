@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
-import type { HostPorts, RunOutcome, RunSpec } from "@plainport/core";
+import { type HostPorts, preflight, type RunOutcome, type RunSpec } from "@plainport/core";
 import { createMacosChecks, parseLsof } from "./checks.ts";
 import { testHost } from "./testing.ts";
 
@@ -228,6 +228,30 @@ describe("macOS checks: docker bind mounts", () => {
     expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
   });
 
+  test("docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)", async () => {
+    const hasDocker = Bun.which("docker", { PATH: process.env.PATH ?? "" }) !== null;
+    const result = await checks.dockerMounts(dir, {
+      env: { PATH: process.env.PATH ?? "", HOME: dir, DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: { available: false, reason: hasDocker ? "docker is not running" : "docker is not installed" },
+    });
+  });
+
+  test("both wordings docker uses for an unreachable daemon count as not running", async () => {
+    for (const text of [
+      "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
+      "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    ]) {
+      const { host: fake } = scripted(outcome({ exitCode: 1, stderr: { text, droppedBytes: 0 } }));
+      expect(await createMacosChecks(fake).dockerMounts(dir, { env })).toEqual({
+        ok: true,
+        value: { available: false, reason: "docker is not running" },
+      });
+    }
+  });
+
   test("docker's daemon not running is not a finding: it is unavailable", async () => {
     const { host: fake } = scripted(
       outcome({
@@ -265,5 +289,27 @@ describe("macOS checks: docker bind mounts", () => {
     const result = await createMacosChecks(fake).dockerMounts(dir, { env });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.finding.code).toBe("env.docker-mount");
+  });
+});
+
+describe("macOS checks: preflight with the real checks", () => {
+  test("proc.cwd and proc.open-files come from real processes; an idle folder has neither", async () => {
+    mkdirSync(join(dir, "web"));
+    const web = join(dir, "web");
+    writeFileSync(join(web, "server.log"), "");
+    const idle = await preflight(host, checks, web, { env });
+    expect(idle.ok && idle.value.findings).toEqual([]);
+
+    children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: web }));
+    children.push(
+      Bun.spawn(["/bin/sh", "-c", 'exec 3>>"$0"; exec /bin/sleep 30', join(web, "server.log")], { cwd: "/" }),
+    );
+    await settle();
+    const busy = await preflight(host, checks, web, { env });
+    expect(busy.ok).toBe(true);
+    if (busy.ok) {
+      expect(busy.value.findings.map((f) => f.code)).toEqual(["proc.open-files", "proc.cwd"]);
+      expect(busy.value.findings[0]?.paths).toEqual([join(web, "server.log")]);
+    }
   });
 });
