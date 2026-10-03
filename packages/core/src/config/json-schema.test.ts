@@ -22,6 +22,21 @@ describe("config: published JSON Schemas", () => {
     expect(check({ defaultStore: "mini" })).toBe(false);
   });
 
+  test("manifest-entry.json describes one scan manifest entry, as the scan writes it", () => {
+    const check = ajv.compile(schemas["manifest-entry"]);
+    const entry = {
+      path: "src/a.ts",
+      type: "file",
+      size: 3,
+      mode: 420,
+      mtime: "2026-10-03T01:36:47.319437918Z",
+    };
+    expect(check(entry)).toBe(true);
+    expect(check({ path: "l", type: "symlink", mode: 493, mtime: entry.mtime, linkTarget: "a" })).toBe(true);
+    expect(check({ ...entry, type: "fifo" })).toBe(false);
+    expect(check({ ...entry, path: "" })).toBe(false);
+  });
+
   test("device.json needs a ULID, a name and a role", () => {
     const check = ajv.compile(schemas.device);
     const device = {

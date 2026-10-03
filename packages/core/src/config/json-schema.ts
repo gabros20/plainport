@@ -1,15 +1,16 @@
 // JSON Schemas for the files plainport reads, published in schemas/ by `bun run contract`: editors can check
 // config.toml, managed.toml and .plainport.toml against them (each file may set any subset of keys, since tables
-// merge), and other tools can read device.json, registry.json and .plainport stubs.
+// merge), and other tools can read device.json, registry.json, .plainport stubs and the scan's manifest entries.
 
 import { z } from "zod";
 import { DeviceSchema } from "../device.ts";
 import { ProjectRegistrySchema } from "../registry.ts";
+import { ManifestEntrySchema } from "../scan/manifest.ts";
 import { StubSchema } from "../stub.ts";
 import { ConfigLayerSchema, ProjectConfigSchema } from "./schema.ts";
 
 export const configJsonSchemas = (): Record<
-  "config" | "project-config" | "device" | "registry" | "stub",
+  "config" | "project-config" | "device" | "registry" | "stub" | "manifest-entry",
   Record<string, unknown>
 > => {
   const schema = (s: z.ZodType) =>
@@ -22,5 +23,6 @@ export const configJsonSchemas = (): Record<
     device: schema(DeviceSchema),
     registry: schema(ProjectRegistrySchema),
     stub: schema(StubSchema),
+    "manifest-entry": schema(ManifestEntrySchema),
   };
 };
