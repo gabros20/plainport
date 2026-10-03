@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { type Finding, fail, finding, ok } from "@plainport/contract";
 import { testHost } from "../../../host-macos/src/testing.ts";
@@ -10,11 +11,14 @@ import { type PreflightReport, preflight, scanFindings } from "./index.ts";
 
 const host = testHost();
 let fx: GitFixture;
+let servers: Server[] = [];
 
 beforeEach(() => {
   fx = makeGitFixture("plainport-preflight-");
 });
-afterEach(() => {
+afterEach(async () => {
+  for (const server of servers) await new Promise((done) => server.close(done));
+  servers = [];
   Bun.spawnSync(["/bin/chmod", "-R", "u+rwx", fx.root]);
   fx.cleanup();
 });
@@ -122,38 +126,64 @@ describe("preflight: processes", () => {
     expect(report.findings[0]?.message).toContain("Code Helper (900)");
   });
 
+  const listen = async (path: string): Promise<void> => {
+    const server = createServer();
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(path, done));
+  };
+  const DAEMON = "git fsmonitor--daemon run --detach --ipc-threads=8";
+
   test("git's fsmonitor daemon is not a blocker: it is listed to be stopped", async () => {
     const dir = fx.repo("web");
+    const socket = join(dir, ".git", "fsmonitor--daemon.ipc");
+    await listen(socket);
     const report = await run(dir, {
       processesUsing: async () =>
-        ok([
-          use({
-            pid: 321,
-            command: "git",
-            cwd: true,
-            files: [join(dir, ".git", "fsmonitor--daemon.ipc")],
-            fileCount: 1,
-          }),
-        ]),
+        ok([use({ pid: 321, command: "git", args: DAEMON, cwd: true, files: [socket], fileCount: 1 })]),
     });
     expect(report.findings).toEqual([]);
     expect(report.fsmonitor).toEqual([321]);
   });
 
-  test("the fsmonitor exemption needs git holding this repository's own socket", async () => {
+  test("the daemon as lsof really shows it, holding the folder it watches, is exempt too", async () => {
+    const dir = fx.repo("web");
+    await listen(join(dir, ".git", "fsmonitor--daemon.ipc"));
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([use({ pid: 322, command: "git", args: DAEMON, files: [dir], fileCount: 1 })]),
+    });
+    expect(report.findings).toEqual([]);
+    expect(report.fsmonitor).toEqual([322]);
+  });
+
+  test("the fsmonitor exemption needs git's daemon holding this repository's own socket", async () => {
     const dir = fx.repo("web");
     const socket = join(dir, ".git", "fsmonitor--daemon.ipc");
     const nested = join(dir, "vendor", "lib", ".git", "fsmonitor--daemon.ipc");
+    await listen(socket);
     const report = await run(dir, {
       processesUsing: async () =>
         ok([
-          use({ pid: 1, command: "node", files: [socket], fileCount: 1 }),
-          use({ pid: 2, command: "git", files: [nested], fileCount: 1 }),
+          use({ pid: 1, command: "node", args: DAEMON, files: [socket], fileCount: 1 }),
+          use({ pid: 2, command: "git", args: DAEMON, files: [nested], fileCount: 1 }),
+          use({ pid: 3, command: "git", args: `git hash-object ${socket}`, files: [socket], fileCount: 1 }),
+          use({ pid: 4, command: "git", files: [socket], fileCount: 1 }),
         ]),
     });
     expect(codes(report.findings)).toEqual(["block proc.open-files"]);
-    expect(report.findings[0]?.message).toContain("node (1)");
-    expect(report.findings[0]?.message).toContain("git (2)");
+    for (const p of ["node (1)", "git (2)", "git (3)", "git (4)"])
+      expect(report.findings[0]?.message).toContain(p);
+    expect(report.fsmonitor).toEqual([]);
+  });
+
+  test("a plain file at the socket's path is not the daemon's socket, whoever holds it", async () => {
+    const dir = fx.repo("web");
+    const file = fx.write(join(dir, ".git", "fsmonitor--daemon.ipc"), "not a socket");
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([use({ pid: 5, command: "git", args: DAEMON, files: [file], fileCount: 1 })]),
+    });
+    expect(codes(report.findings)).toEqual(["block proc.open-files"]);
     expect(report.fsmonitor).toEqual([]);
   });
 });
@@ -171,6 +201,7 @@ describe("preflight: what plainport cannot read", () => {
     });
     chmodSync(dir, 0o755);
     expect(codes(report.findings)).toEqual(["block fs.unreadable"]);
+    expect(report.findings[0]?.fix).toBe(`chmod u+rx ${dir}`);
     expect(asked).toBe(true);
   });
 
@@ -179,7 +210,9 @@ describe("preflight: what plainport cannot read", () => {
     const linked = join(fx.root, "web-feature");
     fx.git(dir, "worktree", "add", "-q", "-b", "feature", linked);
     chmodSync(join(linked, ".git"), 0o000);
-    expect(codes((await run(linked)).findings)).toEqual(["block fs.unreadable"]);
+    const [found] = (await run(linked)).findings;
+    expect(found?.code).toBe("fs.unreadable");
+    expect(found?.fix).toBe(`chmod u+r ${join(linked, ".git")}`);
   });
 });
 
@@ -293,6 +326,7 @@ describe("preflight: findings from the scan", () => {
     const found = await scanned(dir);
     expect(codes(found)).toEqual(["warn fs.link-outside"]);
     expect(found[0]?.paths).toEqual(["hosts"]);
+    expect(found[0]?.fix).toContain("copy");
   });
 
   test("git.unpushed warns with the branches and counts, as the plan shows it", async () => {
@@ -308,6 +342,20 @@ describe("preflight: findings from the scan", () => {
     expect(codes(found)).toEqual(["warn git.unpushed"]);
     expect(found[0]?.message).toBe("2 commits on feature/pricing are not on any remote");
     expect(found[0]?.fix).toBe("git push -u origin feature/pricing");
+  });
+
+  test("git.unpushed's fix pushes each branch to its own remote, even when another branch is checked out", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.git(dir, "switch", "-q", "-c", "feature");
+    fx.git(dir, "push", "-q", "-u", "origin", "feature");
+    fx.write(join(dir, "f.txt"), "f\n");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "f");
+    fx.git(dir, "switch", "-q", "main");
+    const found = await scanned(dir);
+    expect(found[0]?.message).toBe("1 commit on feature is not on any remote");
+    expect(found[0]?.fix).toBe("git push origin feature");
   });
 
   test("git.unpushed covers a local-only branch even when its commits are all pushed", async () => {

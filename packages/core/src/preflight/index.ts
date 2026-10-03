@@ -47,7 +47,7 @@ const gitChecks = async (
     try {
       pointer = (await host.fs.readText(join(dir, ".git"))).trim().replace(/^gitdir:\s*/, "");
     } catch (error) {
-      return unreadable(join(dir, ".git"), error);
+      return unreadable(join(dir, ".git"), error, { path: join(dir, ".git"), kind: "file" });
     }
     report.findings.push(
       finding("git.is-worktree", {
@@ -92,15 +92,22 @@ const gitChecks = async (
 const processFindings = (
   uses: readonly ProcessUse[],
   dir: string,
-  /** The repository's own fsmonitor socket, under each spelling of the folder. */
-  sockets: ReadonlySet<string>,
+  /**
+   * What this repository's fsmonitor daemon holds open inside the folder: the folder itself and the repository's
+   * socket, under each spelling. Empty when that socket is not there, so nothing is exempt.
+   */
+  daemonPaths: ReadonlySet<string>,
   report: PreflightReport,
 ): void => {
   const others: ProcessUse[] = [];
   for (const use of uses) {
-    // Exempt only git itself holding this repository's socket; anything else holding that path is an ordinary
-    // process with a file open.
-    if (use.command === "git" && use.files.some((path) => sockets.has(path))) report.fsmonitor.push(use.pid);
+    // Exempt only git's fsmonitor daemon (by its command line) for this repository: the repository's socket is a
+    // real socket, and the daemon holds nothing inside the folder but the folder itself (it watches it) and that
+    // socket. A daemon for a repository nested inside also holds the nested folder, so it is not exempt; anything
+    // else, git included, is an ordinary process with files open.
+    const daemon = use.command === "git" && /(^|\s)fsmonitor--daemon(\s|$)/.test(use.args ?? "");
+    if (daemon && daemonPaths.size > 0 && use.files.every((path) => daemonPaths.has(path)))
+      report.fsmonitor.push(use.pid);
     else others.push(use);
   }
   const holding = others.filter((p) => p.fileCount > 0);
@@ -164,8 +171,16 @@ export const preflight = async (
     } catch {
       // The spelling given is all there is.
     }
-    const sockets = new Set(spellings.map((s) => join(s, ".git", "fsmonitor--daemon.ipc")));
-    processFindings(processes.value, dir, sockets, report);
+    const daemonPaths = new Set<string>();
+    for (const spelling of spellings) {
+      const socket = join(spelling, ".git", "fsmonitor--daemon.ipc");
+      try {
+        if ((await host.fs.lstat(socket)).kind === "socket") daemonPaths.add(socket).add(spelling);
+      } catch {
+        // No socket there: nothing is exempt.
+      }
+    }
+    processFindings(processes.value, dir, daemonPaths, report);
   }
 
   const docker = await checks.dockerMounts(dir, ctx);
@@ -233,6 +248,7 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
           .map((l) => `${l.path} -> ${l.target}`)
           .join(", ")}`,
         paths: capped(tree.linksOutside.map((l) => l.path)),
+        fix: "nothing to do if the targets exist wherever the project lands; otherwise copy the targets into the project and point the links at the copies",
       }),
     );
   }
@@ -284,7 +300,9 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
         const localOnly = new Set(git.localOnly);
         const toTrack = [...unpushed.branches.map((b) => b.name).filter((n) => localOnly.has(n)), ...bare];
         const fixes = [
-          ...(unpushed.branches.some((b) => !localOnly.has(b.name)) ? ["git push"] : []),
+          ...unpushed.branches
+            .filter((b) => !localOnly.has(b.name) && b.remote !== undefined)
+            .map((b) => `git push ${shellWord(b.remote as string)} ${shellWord(b.name)}`),
           ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
           ...(unpushed.detachedHead > 0
             ? ["git switch -c <branch> to keep the detached commits, then push it"]

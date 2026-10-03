@@ -22,6 +22,8 @@ export interface ProcessUse {
   command: string;
   /** One of plainport's own ancestors: the shell or agent that started it. */
   ancestor: boolean;
+  /** Its whole command line, when the host read it: for git processes holding an fsmonitor socket. */
+  args?: string;
   /** Its working directory is the folder or inside it. */
   cwd: boolean;
   /** Paths inside the folder it holds open (files, mapped libraries, its executable), at most 50. */
