@@ -1,34 +1,16 @@
-// plainport ls and plainport status (DESIGN.md "CLI design", "Project lifecycle"): what this device knows of its
-// projects, from its registry and the catalog of every store it set up (core's projectViews). Both are read: the
-// catalog is read through the one read path, which only downloads into this device's mirror and never writes to a
-// store (D45); an unreachable store is read from the mirror, marked stale, or never synced.
-
-import { openEventMirror } from "@plainport/blob-fs";
-import {
-  type Finding,
-  FindingSchema,
-  fail,
-  finding,
-  ok,
-  ProjectStateSchema,
-  type Result,
-  shellWord,
-} from "@plainport/contract";
+import { type Finding, FindingSchema, ok, ProjectStateSchema, shellWord } from "@plainport/contract";
 import {
   ConfigLoader,
-  expandHome,
   findView,
   type PlainportPaths,
   type ProjectStatus,
   planOffload,
-  projectViews,
-  resolveProject,
   type Views,
 } from "@plainport/core";
 import { z } from "zod";
 import { type CommandContext, defineCommand } from "../registry.ts";
-import { thisDevice } from "./local.ts";
 import { formatBytes } from "./offload.ts";
+import { knownProjects, resolveKnown } from "./resolve.ts";
 
 export const ProjectStatusSchema = z
   .looseObject({
@@ -97,25 +79,6 @@ const StoreStatusSchema = z.looseObject({
   syncedAt: z.string().optional(),
   finding: z.looseObject({ code: z.string(), message: z.string() }).optional(),
 });
-
-/** The views, from this device's state and its stores' catalogs. */
-const views = async (ctx: CommandContext) => {
-  const local = await thisDevice(ctx);
-  if (!local.ok) return local;
-  const { paths, device } = local.value;
-  const read = await projectViews({
-    io: ctx.io,
-    paths,
-    env: ctx.env,
-    device,
-    loader: new ConfigLoader(ctx.io, paths),
-    opener: ctx.stores,
-    openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
-    now: () => ctx.clock.now(),
-  });
-  if (!read.ok) return read;
-  return ok({ ...local.value, views: read.value });
-};
 
 const stateText = (p: z.output<typeof ProjectStatusSchema>): string =>
   p.conditions.length === 0 ? p.state : `${p.state} (${p.conditions.join(", ")})`;
@@ -196,31 +159,6 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
   return lines.join("\n");
 };
 
-const EXPLICIT_PATH = /^(\.{1,2}(\/|$)|\/|~(\/|$))/;
-
-/**
- * What the resolver cannot name, matched against the views (DESIGN "Project arguments"): a path whose folder is gone
- * (the registry's folder for it, or its stub's path), and a unique suffix of an address the catalog alone knows.
- */
-const matchView = (views: Views, input: string, absolute: string): Result<ProjectStatus> | undefined => {
-  if (EXPLICIT_PATH.test(input)) {
-    const at = absolute.replace(/\/+$/, "");
-    const found = views.projects.find((p) => p.dir === at || `${p.dir}.plainport` === at);
-    return found === undefined ? undefined : ok(found);
-  }
-  const suffix = input.includes(":") ? undefined : input.replace(/^\/+|\/+$/g, "");
-  if (suffix === undefined || suffix === "") return undefined;
-  const matches = views.projects.filter((p) => p.path === suffix || p.path.endsWith(`/${suffix}`));
-  if (matches.length === 1) return ok(matches[0] as ProjectStatus);
-  if (matches.length === 0) return undefined;
-  return fail(
-    finding("project.ambiguous", {
-      message: `${input} names more than one project: ${matches.map((p) => p.address).join(", ")}`,
-      fix: `name it by its address, e.g. plainport status ${shellWord(matches[0]?.address ?? input)}`,
-    }),
-  );
-};
-
 /**
  * A project whose folder is here: its git warnings and what an offload would strip now, from a read-only scan (the
  * offload's own planning, as --dry-run makes it, without saving a plan). A scan that cannot run says why in the log.
@@ -273,22 +211,14 @@ export const status = defineCommand({
   ],
   human: renderStatus,
   handler: async (args, ctx) => {
-    const read = await views(ctx);
-    if (!read.ok) return read;
-    const { paths, device } = read.value;
-    const resolved = await resolveProject(ctx.io, paths, args.project ?? ".", {
-      cwd: ctx.cwd,
-      env: ctx.env,
-      device: device.name,
-    });
-    const input = args.project ?? ".";
-    const view = resolved.ok
-      ? findView(read.value.views, resolved.value)
-      : resolved.finding.code === "project.not-found" || resolved.finding.code === "root.none"
-        ? (matchView(read.value.views, input, expandHome(input, paths.home, ctx.cwd)) ?? resolved)
-        : resolved;
+    const known = await knownProjects(ctx);
+    if (!known.ok) return known;
+    const named = await resolveKnown(ctx, known.value, args.project ?? ".", "status");
+    if (!named.ok) return named;
+    const view =
+      named.value.view === undefined ? findView(known.value.views, named.value.ref) : ok(named.value.view);
     if (!view.ok) return view;
-    return ok({ ...view.value, ...(await localDetails(ctx, paths, view.value)) });
+    return ok({ ...view.value, ...(await localDetails(ctx, known.value.paths, view.value)) });
   },
 });
 
@@ -341,7 +271,7 @@ export const ls = defineCommand({
     ].join("\n");
   },
   handler: async (args, ctx) => {
-    const read = await views(ctx);
+    const read = await knownProjects(ctx);
     if (!read.ok) return read;
     const all: Views = read.value.views;
     let projects = all.projects.filter(

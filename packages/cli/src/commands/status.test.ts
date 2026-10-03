@@ -153,7 +153,10 @@ describe("ls: every project with its state", () => {
     ).toEqual(["work:web"]);
     expect(data("ls", (await cli(["ls", "--root", "nope", "--json"])).out).projects).toEqual([]);
     const bySize = data("ls", (await cli(["ls", "--sort", "size", "--json"])).out).projects;
-    expect(bySize[0].address).toBe("work:api");
+    // A never-offloaded project has its folder's size too (fix wave r2), so every row is sized, largest first.
+    const sizes = bySize.map((p: { bytes?: number }) => p.bytes ?? -1);
+    expect(sizes.every((b: number) => b > 0)).toBe(true);
+    expect(sizes).toEqual([...sizes].sort((a: number, b: number) => b - a));
   });
 
   test("the human list: one line per project, state and size", async () => {
@@ -364,5 +367,44 @@ describe("status and ls: fix wave r1", () => {
       ["work:api", "local"],
       ["work:web", "offloading"],
     ]);
+  });
+});
+
+describe("status and restore: fix wave r2 (one resolver)", () => {
+  /** work:a/web registered here, work:b/web only in the catalog. */
+  const twoWebs = async () => {
+    box.file("work/a/web/package.json", `${JSON.stringify({ name: "a" })}\n`);
+    box.file("work/b/web/package.json", `${JSON.stringify({ name: "b" })}\n`);
+    await cli(["root", "scan", "work"]);
+    expect((await cli(["offload", "work:b/web", "--yes"])).code).toBe(0);
+    await settle();
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    delete registry.projects[projectId("b/web") as string];
+    writeFileSync(box.paths.registryFile, JSON.stringify(registry));
+  };
+
+  test("a suffix that names a registered and a catalog-only project is ambiguous (2), listing both", async () => {
+    await twoWebs();
+    const run = await cli(["status", "web", "--json"]);
+    expect(run.code).toBe(2);
+    const env = envelope(run.out);
+    expect(env.error.finding.code).toBe("project.ambiguous");
+    expect(env.error.message).toContain("work:a/web");
+    expect(env.error.message).toContain("work:b/web");
+  });
+
+  test("restore names a catalog-only project by its unique suffix", async () => {
+    await twoWebs();
+    const run = await cli(["restore", "b/web", "--to", "~/old/b", "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("restore", run.out)).toMatchObject({ project: "work:b/web" });
+  });
+
+  test("restore names an offloaded project by the path of its folder that is gone (stub = false)", async () => {
+    writeFileSync(box.paths.configFile, "version = 1\n[offload]\nstub = false\n");
+    await offloaded();
+    const run = await cli(["restore", join(box.home, "work/api"), "--to", "~/old/api", "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("restore", run.out)).toMatchObject({ project: "work:api" });
   });
 });

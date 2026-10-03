@@ -11,13 +11,13 @@ import {
   expandHome,
   RECOVERY_OUTCOMES,
   recover as recoverJournals,
-  resolveProject,
   runRestore,
 } from "@plainport/core";
 import { z } from "zod";
 import { defineCommand } from "../registry.ts";
 import { thisDevice } from "./local.ts";
 import { formatBytes } from "./offload.ts";
+import { knownProjects, resolveKnown } from "./resolve.ts";
 
 const FindingDataSchema = z.looseObject({
   code: z.string(),
@@ -215,15 +215,11 @@ export const restore = defineCommand({
   human: (data) =>
     `restored snapshot ${data.snapshot} of ${data.project} into ${data.dir} (${data.files} file${data.files === 1 ? "" : "s"}, ${formatBytes(data.bytes)}); the project itself is unchanged`,
   handler: async (args, ctx) => {
-    const local = await thisDevice(ctx);
-    if (!local.ok) return local;
-    const { paths, device } = local.value;
-    const resolved = await resolveProject(ctx.io, paths, args.project, {
-      cwd: ctx.cwd,
-      env: ctx.env,
-      device: device.name,
-    });
-    if (!resolved.ok) return resolved;
+    const known = await knownProjects(ctx);
+    if (!known.ok) return known;
+    const { paths, device } = known.value;
+    const named = await resolveKnown(ctx, known.value, args.project, "restore");
+    if (!named.ok) return named;
     const release = ctx.holdSignal();
     try {
       const done = await runRestore(
@@ -241,7 +237,7 @@ export const restore = defineCommand({
           now: () => ctx.clock.now(),
         },
         {
-          project: resolved.value,
+          project: named.value.ref,
           to: expandHome(args.to, paths.home, ctx.cwd),
           ...(args.snapshot === undefined ? {} : { snapshot: args.snapshot }),
           ...(ctx.store === undefined ? {} : { store: ctx.store }),
