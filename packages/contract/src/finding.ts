@@ -460,6 +460,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "A read or write in the store failed (permissions, a full disk, an I/O error); the message names the key and the error",
   },
+  "store.identity-changed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
+  },
   "store.key-exists": {
     severity: "block",
     allowable: false,

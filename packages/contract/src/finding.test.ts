@@ -111,6 +111,12 @@ describe("findings", () => {
       "root.synced-folder": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
       "root.unbound": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.identity-changed": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "store.unreachable": { severity: "block", allowable: false, exitCode: 9, summary: expect.any(String) },
       "stub.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },

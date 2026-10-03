@@ -214,6 +214,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `root.unbound` | block | no | 6 | The root has no folder on this device; `fix` is `plainport root bind <root> <path>` |
 | `strip.kept` | info | no | 6 | Paths a plugin or `strip.extra` proposed stay in the snapshot; the message says why for each (git tracks it, `strip.keep` or `strip.never` matches, it holds a repository, dependencies are kept) |
 | `store.failed` | block | no | 1 | A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error |
+| `store.identity-changed` | block | no | 6 | The store at a configured path is not the one this device knows: its `meta/v1/store.json` names another id, or none. Nothing is synced, and nothing is written to either side |
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
 | `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder, such as a disk that is not mounted; nothing is created in its place |
 | `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
