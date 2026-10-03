@@ -187,7 +187,9 @@ export const init = defineCommand({
 
     if (ctx.input) {
       if (needRoots) {
-        const asked = await askRoots(ctx, await rootCandidates(ctx.io, home));
+        const scanned = await rootCandidates(ctx.io, home);
+        for (const note of scanned.notes) ctx.output.log("info", `skipped ${note.path}: ${note.reason}`);
+        const asked = await askRoots(ctx, scanned.candidates);
         if (asked === undefined) return cancelled();
         if (asked.length === 0) {
           return fail(
@@ -221,7 +223,8 @@ export const init = defineCommand({
         deviceName = asked;
       }
     } else if (needRoots || needStore) {
-      const suggested = needRoots ? await rootCandidates(ctx.io, home) : [];
+      const scanned = needRoots ? await rootCandidates(ctx.io, home) : { candidates: [], notes: [] };
+      const suggested = scanned.candidates;
       const rootFlags =
         roots.length > 0
           ? roots.map((r) => `--root ${word(`${r.key}=${r.path}`)}`)
@@ -241,7 +244,9 @@ export const init = defineCommand({
       const missing = [needRoots && "a root", needStore && "a store"].filter(Boolean).join(" and ");
       return fail(
         finding("usage.invalid", {
-          message: `init needs ${missing}, and without a terminal it never prompts`,
+          message: `init needs ${missing}, and without a terminal it never prompts${scanned.notes
+            .map((note) => `; skipped ${note.path}: ${note.reason}`)
+            .join("")}`,
           fix: (needStore ? fix : fix.filter((part) => !part.startsWith("--store-path"))).join(" "),
         }),
       );

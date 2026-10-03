@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import type { Prompter } from "../prompt.ts";
@@ -206,6 +206,15 @@ describe("init: no TTY", () => {
       "plainport init --root work=~/work --root projects=~/Projects --store-path <path> --yes",
     );
     expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+
+  test("a likely folder that is a file or a symlink loop is noted, not a crash", async () => {
+    box.file("code", "not a folder");
+    symlinkSync(join(box.home, "work"), join(box.home, "work"));
+    const run = await init(["--yes"]);
+    expect(run.code).toBe(2);
+    expect(run.err).toContain("usage.invalid");
+    expect(run.err).toContain(`skipped ${join(box.home, "code")}`);
   });
 
   test("with nothing to suggest, the fix shows the flag forms", async () => {
