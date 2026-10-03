@@ -41,7 +41,7 @@ const TAIL_LINES_IN_MESSAGE = 5;
 const TAIL_CHARS_IN_MESSAGE = 600;
 
 type Settings = Record<keyof typeof RUN_DEFAULTS, number>;
-type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "error";
+type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "incomplete" | "error";
 
 const positive = (name: string, value: number): number => {
   if (!Number.isFinite(value) || value <= 0)
@@ -198,11 +198,14 @@ class Collector {
   }
 }
 
-/** All of stdout, up to a hard cap; past it, the bytes are let go and the run fails (never a shortened ok). */
+/**
+ * All of stdout, up to a hard cap. Past it, the bytes are let go, the run fails (never a shortened ok), and bytes()
+ * throws, so no partial capture can reach a caller.
+ */
 class Capture {
   private chunks: Uint8Array[] = [];
   private size = 0;
-  private overflowed = false;
+  overflowed = false;
 
   constructor(
     private readonly maxBytes: number,
@@ -214,6 +217,7 @@ class Capture {
     if (this.size + chunk.length > this.maxBytes) {
       this.overflowed = true;
       this.chunks = [];
+      this.size = 0;
       this.onOverflow();
       return;
     }
@@ -222,6 +226,7 @@ class Capture {
   }
 
   bytes(): Uint8Array {
+    if (this.overflowed) throw new Error("runProcess: a capture that overflowed has no bytes to give");
     const out = new Uint8Array(this.size);
     let at = 0;
     for (const chunk of this.chunks) {
@@ -323,6 +328,13 @@ const stoppedFailure = (
       );
     case "cancelled":
       return fail(finding("process.cancelled", { message: `${label} was cancelled and stopped${said}` }));
+    case "incomplete":
+      return fail(
+        finding("process.output-incomplete", {
+          message: `${label} exited, but a process outside its group kept its stdout open, so its output could not be read to the end`,
+          fix: "find what the command left running in the background (a daemon, an ssh master), stop it, then run the command again",
+        }),
+      );
     case "too-large":
       return fail(
         finding("process.output-too-large", {
@@ -441,10 +453,16 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     if (exit === undefined) await within(exited, REAP_MS);
 
     // Once the group is gone its pipes close; a process that left the group may hold them, so bound the wait.
-    if (!(await within(pumps, DRAIN_MS))) {
+    const drained = await within(pumps, DRAIN_MS);
+    if (!drained) {
       for (const reader of readers) reader.cancel().catch(() => {});
       await pumps;
     }
+    // The leader may be reaped while its last writes are still in the pipe: those can cross the cap during the
+    // drain, after the stop reason was read, so the capture decides again here.
+    if (reason === undefined && capture?.overflowed) reason = "too-large";
+    // A capture is promised whole; with the pipe still held open when the drain was cut, that cannot be shown.
+    if (reason === undefined && capture !== undefined && !drained) reason = "incomplete";
     finished = true;
   } finally {
     clearTimeout(idleTimer);

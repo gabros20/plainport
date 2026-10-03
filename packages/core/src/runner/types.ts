@@ -41,7 +41,9 @@ export interface RunSpec {
   /**
    * Keep ALL of stdout, as bytes, in RunOutcome.captured: for output parsed as data (`git ls-files -z`, `restic
    * snapshots --json`), where a tail would silently lose entries. Past maxBytes the group is stopped and the run
-   * fails as process.output-too-large; it is never cut short and reported ok. The bounded tails and onLine work as
+   * fails as process.output-too-large, also when the cap is crossed by the last bytes read after the child exited;
+   * and when a process outside the group holds stdout open past the drain, it fails as process.output-incomplete.
+   * It is never cut short and reported ok. The bounded tails and onLine work as
    * without it. splitRecords splits the bytes at a separator.
    */
   capture?: { maxBytes: number };

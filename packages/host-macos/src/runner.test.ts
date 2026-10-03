@@ -248,6 +248,19 @@ describe("runner: capturing the whole stdout (host-macos)", () => {
     expect(result.value.stdout.droppedBytes).toBe(3_000_000 - 64 * 1024);
   });
 
+  test("a program that writes just past the cap and exits at once is process.output-too-large", async () => {
+    for (let i = 0; i < 5; i++) {
+      const result = await host.run({
+        command: "/usr/bin/head",
+        args: ["-c", "1010000", "/dev/zero"],
+        cwd: dir,
+        env,
+        capture: { maxBytes: 1_000_000 },
+      });
+      expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
+    }
+  });
+
   test("stdout past the cap is process.output-too-large, never a shortened ok", async () => {
     const result = await host.run(
       sh("yes plainport | head -c 5000000", { capture: { maxBytes: 1_000_000 } }),

@@ -56,6 +56,12 @@ class FakeChild implements ChildProcess {
 
   maybeClose(): void {
     if (this.leaderAlive || this.leftovers > 0 || this.closed) return;
+    this.closePipes();
+  }
+
+  /** The last holder of the pipes lets go (used when one outside the group held them). */
+  closePipes(): void {
+    if (this.closed) return;
     this.closed = true;
     this.out.close();
     this.err.close();
@@ -391,6 +397,42 @@ describe("runner (fake spawner): capturing the whole stdout", () => {
     expect(spawner.signals[0]).toBe("SIGTERM");
   });
 
+  test("output that crosses the cap after the leader was reaped still fails: never a shortened ok", async () => {
+    // The leader exits first; its last writes are still in the pipe (held open here) and arrive while draining.
+    const spawner = new FakeSpawner(async (child) => {
+      child.leftovers = 1;
+      child.exit(0);
+      child.leftovers = 0;
+      await ms(5);
+      child.write("stdout", "a".repeat(600));
+      child.write("stdout", "b".repeat(600));
+      child.closePipes();
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-too-large" } });
+  });
+
+  test("output that crosses the cap in the same tick as the exit fails too", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "a".repeat(600));
+      child.write("stdout", "b".repeat(600));
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
+  });
+
+  test("output of exactly the cap is kept whole", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "a".repeat(600));
+      child.write("stdout", "b".repeat(400));
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    if (!result.ok) throw new Error(result.finding.message);
+    expect(result.value.captured?.length).toBe(1000);
+  });
+
   test("a capture cap must be positive", async () => {
     await expect(runProcess(new FakeSpawner(), spec({ capture: { maxBytes: 0 } }))).rejects.toThrow(
       /maxBytes/,
@@ -406,6 +448,17 @@ describe("runner (fake spawner): capturing the whole stdout", () => {
 });
 
 describe("runner (fake spawner): pipes held by a process outside the group", () => {
+  test("in capture mode a drain cut short is process.output-incomplete: the capture cannot be proven whole", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.write("stdout", "partial\0");
+      child.leftovers = 1;
+      child.exit(0);
+      child.leftovers = 0;
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-incomplete" } });
+  });
+
   test("the run still returns soon after the group is gone, with what was read", async () => {
     const spawner = new FakeSpawner((child) => {
       child.write("stdout", "before the daemon\n");
