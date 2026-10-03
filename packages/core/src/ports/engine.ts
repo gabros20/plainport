@@ -1,12 +1,12 @@
 // The Engine port (DESIGN.md "Plugin interfaces → Engine"): what moves project data into and out of a store's
 // repository. @plainport/engine-restic implements it over the pinned restic binary.
 //
-// It differs from the DESIGN sketch in three ways, all from AGENTS.md: every call returns a Result (rule 7), an
-// engine is bound to one repository and its secret when it is made (so `init` takes neither), and `entries`
-// returns the whole listing at once, because the listing is captured whole or not at all (the runner's capture
-// mode). `stream`, `forget` and `prune` arrive with the milestones that need them.
+// As DESIGN.md's sketch says (run decision D27): every call returns a Result (AGENTS.md rule 7), and an engine is
+// bound to one repository and its secret when it is made, so `init` takes neither. `entries` streams: a listing
+// of hundreds of thousands of entries is handed over one by one, never held whole (fix r1 I3). `stream`, `forget`
+// and `prune` arrive in M5.
 
-import type { PlainportEvent, Result } from "@plainport/contract";
+import type { Failure, Ok, PlainportEvent, Result } from "@plainport/contract";
 
 export type ProgressEvent = Extract<PlainportEvent, { type: "progress" }>;
 export type EngineLogEvent = Extract<PlainportEvent, { type: "log" }>;
@@ -66,7 +66,8 @@ export interface EntryMeta {
   size?: number;
   /** POSIX permission bits, setuid, setgid and sticky included (mode & 0o7777). */
   mode: number;
-  /** RFC 3339. */
+  /** RFC 3339 as the engine stores it, with nanoseconds and the local offset
+   * (2026-10-03T03:36:47.319437918+02:00). Compare it as nanoseconds: a Date keeps only milliseconds. */
   mtime: string;
   /** Symlinks only. */
   linkTarget?: string;
@@ -101,15 +102,40 @@ export interface CheckReport {
   messages: string[];
 }
 
+/**
+ * A failed snapshot. `incomplete` names a snapshot the engine wrote anyway (restic exit 3, unreadable files): it is
+ * in the repository but must never be used, so the offload saga journals it and records it as discarded (run
+ * decision D28). Absent when the engine wrote none, or did not say which.
+ */
+export type SnapshotFailure = Failure & { incomplete?: { snapshot: string } };
+
+export interface EntriesResult {
+  /** The snapshot listed, as `list` describes it. */
+  snapshot: SnapshotInfo;
+  /** How many entries were handed to onEntry. */
+  count: number;
+}
+
 export interface Engine {
   readonly id: string;
   /** Creates the repository. */
   init(ctx?: RunContext): Promise<Result<{ id: string }>>;
-  snapshot(input: SnapshotInput, ctx: RunContext): Promise<Result<{ id: string; stats: SnapshotStats }>>;
+  snapshot(
+    input: SnapshotInput,
+    ctx: RunContext,
+  ): Promise<Ok<{ id: string; stats: SnapshotStats }> | SnapshotFailure>;
   /** Snapshots carrying every tag in the filter. */
   list(filter: { tags?: readonly string[] }, ctx?: RunContext): Promise<Result<SnapshotInfo[]>>;
-  /** Every entry of a snapshot below its root. */
-  entries(snapshot: string, ctx?: RunContext): Promise<Result<EntryMeta[]>>;
+  /**
+   * Hands every entry of a snapshot below its root to onEntry, one at a time (symlinks last, once their targets
+   * are known). What onEntry received counts only when the Result is ok: a listing that cannot be shown whole
+   * fails, after some entries may already have been handed over.
+   */
+  entries(
+    snapshot: string,
+    onEntry: (entry: EntryMeta) => void,
+    ctx?: RunContext,
+  ): Promise<Result<EntriesResult>>;
   /** Writes the snapshot's tree into target, which it creates if needed. */
   restore(
     snapshot: string,
