@@ -124,6 +124,9 @@ export const releaseOffload = async (
 ): Promise<Result<Released>> => {
   const { host: io, paths, saga } = rc;
   const journal = saga.journal;
+  // Only a committed offload is ever released: the live saga commits after its append, and recover after it found
+  // the event on the store or the journal past the commit (Task 12 quality r3).
+  if (!saga.committed) throw new Error(`releaseOffload: the offload ${journal.op} is not committed`);
   const { project, op } = journal;
   const policy = journal.release as NonNullable<OffloadJournal["release"]>;
   const folder = project.dir;
@@ -139,10 +142,21 @@ export const releaseOffload = async (
   let inTrash: boolean;
   let atDir: boolean;
   try {
-    inTrash = reached("offload.release.moved") || (await exists(rc, moved));
-    atDir = !inTrash && (await exists(rc, folder));
+    const seenInTrash = await exists(rc, moved);
+    inTrash = reached("offload.release.moved") || seenInTrash;
+    atDir = await exists(rc, folder);
   } catch (error) {
     return writeFailed(error, `looking for ${folder} and ${moved}`, true, folder);
+  }
+  // A folder at the project's place after it was moved aside is something else: never released, never stubbed over.
+  if (inTrash && atDir) {
+    return fail(
+      finding("path.occupied", {
+        message: `${folder} stands where ${project.address} was, but its offload ${op} already moved the project folder into ${trash}; the snapshot is committed, and neither folder was touched or stubbed`,
+        fix: `move ${shellWord(folder)} aside (it is not the offloaded copy), then run plainport recover`,
+        paths: [folder, trash],
+      }),
+    );
   }
   if (!inTrash && !atDir) {
     return fail(
