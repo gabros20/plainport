@@ -21,7 +21,7 @@
 // - ESM imports of node:fs snapshot its exports when first imported. This file therefore uses require() and
 //   must stay the first preload, so the patched functions are the ones every test file imports.
 
-import { afterEach } from "bun:test";
+import { afterAll, afterEach } from "bun:test";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -120,7 +120,11 @@ for (const [name, dir] of Object.entries(sandboxEnv)) {
 process.env.PLAINPORT_TEST_HOME = sandbox;
 process.env.PLAINPORT_TRIPWIRE_REAL_HOME = realHome;
 os.homedir = () => sandbox;
-process.on("exit", () => rmSync(sandbox, { recursive: true, force: true }));
+// bun test fires no process "exit" or "beforeExit" for a preload, but a global afterAll here runs once, after the
+// last test file, whether the run passed or failed. The exit listener stays for plain `bun` runs.
+const removeSandbox = () => rmSync(sandbox, { recursive: true, force: true });
+afterAll(removeSandbox);
+process.on("exit", removeSandbox);
 
 let violations: string[] = [];
 
