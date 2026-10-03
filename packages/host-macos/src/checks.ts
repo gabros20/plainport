@@ -81,8 +81,9 @@ export const lsofName = (path: string): string => {
   return out;
 };
 
-/** Undoes lsofName for the part of a name below a known folder. ^X is kept as written: it is also how a name with
- * a caret prints, and a caret is likelier than a control character. */
+/** Undoes lsofName for the part of a name below a known folder. lsof prints a caret as itself, so ^X (X from @ to
+ * _) is read as the control character it encodes: a name holding a literal caret before one of those characters
+ * comes back wrong, and only for messages, since matching is done on lsof's own spelling. */
 const fromLsofName = (name: string): string => {
   const bytes: number[] = [];
   const named: Readonly<Record<string, number>> = { b: 8, t: 9, n: 10, f: 12, r: 13, "\\": 0x5c };
@@ -94,6 +95,9 @@ const fromLsofName = (name: string): string => {
       i += 3;
     } else if (char === "\\" && next !== undefined && named[next] !== undefined) {
       bytes.push(named[next] as number);
+      i += 1;
+    } else if (char === "^" && next !== undefined && next >= "@" && next <= "_") {
+      bytes.push(next.charCodeAt(0) - 0x40);
       i += 1;
     } else bytes.push(...new TextEncoder().encode(char));
   }
@@ -176,7 +180,7 @@ const InspectSchema = z.array(
 export const daemonDown = (stderr: string): boolean =>
   /cannot connect to the docker daemon|failed to connect to the docker api/i.test(stderr) &&
   !/permission denied/i.test(stderr) &&
-  /is the docker daemon running\?|no such file or directory|connection refused/i.test(stderr);
+  /connect: no such file or directory|connect: connection refused/i.test(stderr);
 
 export const createMacosChecks = (host: HostPorts): HostChecks => {
   const capture = (command: string, args: string[], env: Record<string, string>, ctx: CheckContext) =>
@@ -225,7 +229,30 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         ),
       );
       if (!bytes.ok) return bytes;
-      return ok(parseLsof(decoder.decode(bytes.value), roots, host.proc.pid));
+      const uses = parseLsof(decoder.decode(bytes.value), roots, host.proc.pid);
+      // git's fsmonitor daemon is exempt from the blockers, and lsof names only its command (git): read the
+      // command line of each git using the folder, so preflight can tell the daemon from any other git. (lsof
+      // shows the daemon holding the folder it watches; its socket appears under a relative name.)
+      const candidates = uses.filter((p) => p.command === "git");
+      if (candidates.length > 0) {
+        const ps = await capture(
+          "/bin/ps",
+          ["-ww", "-o", "pid=,args=", "-p", candidates.map((p) => p.pid).join(",")],
+          { PATH: SYSTEM_PATH, LC_ALL: "C" },
+          ctx,
+        );
+        if (!ps.ok && ps.exitCode === 130) return ps;
+        // ps exits 1 when one of them has gone: it still lists the rest. Without a command line, a git process
+        // is not taken for the daemon, so a failure here can only block, never exempt.
+        if (ps.ok && ps.value.captured !== undefined) {
+          for (const line of decoder.decode(ps.value.captured).split("\n")) {
+            const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+            const use = match && candidates.find((p) => p.pid === Number(match[1]));
+            if (use && match) use.args = match[2] as string;
+          }
+        }
+      }
+      return ok(uses);
     },
 
     dataless: async (dir, ctx) => {
@@ -337,7 +364,15 @@ export const createMacosChecks = (host: HostPorts): HostChecks => {
         );
       }
       const described = decode(InspectSchema, json, "docker inspect's output");
-      if (!described.ok) return described;
+      if (!described.ok) {
+        return fail(
+          finding("env.docker-mount", {
+            message: `could not check which containers mount ${dir}: ${described.finding.message}`,
+            paths: [dir],
+            fix: "check that this docker CLI works (docker inspect on a running container), then re-run",
+          }),
+        );
+      }
 
       const roots = await spellings(host, dir);
       const mounts: { container: string; name: string; source: string }[] = [];

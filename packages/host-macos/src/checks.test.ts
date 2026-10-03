@@ -4,6 +4,7 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok } from "@plainport/contract";
 import { type HostPorts, preflight, type RunOutcome, type RunSpec } from "@plainport/core";
+import { makeGitFixture } from "../../core/src/testing/git-fixture.ts";
 import { createMacosChecks, parseLsof } from "./checks.ts";
 import { testHost } from "./testing.ts";
 
@@ -154,6 +155,48 @@ describe("macOS checks: processes using the folder (lsof)", () => {
       expect(result.value.find((p) => p.pid === children[1]?.pid)).toMatchObject({
         files: [join(odd, "f.txt")],
       });
+    }
+  });
+
+  test("a file below the folder whose name lsof escapes comes back with its real name", async () => {
+    const name = "f\u0001\t\u00e1\\.txt";
+    writeFileSync(join(dir, name), "f");
+    children.push(
+      Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(dir, name)], { cwd: "/" }),
+    );
+    await settle();
+    const result = await checks.processesUsing(dir, { env });
+    expect(result.ok && result.value.find((p) => p.pid === children[0]?.pid)?.files).toEqual([
+      join(dir, name),
+    ]);
+  });
+
+  test("git's fsmonitor daemon comes back with its command line, so preflight can tell it from other git", async () => {
+    const fx = makeGitFixture("plainport-fsmonitor-");
+    try {
+      const repo = fx.repo("web");
+      fx.git(repo, "fsmonitor--daemon", "start");
+      try {
+        await settle();
+        const result = await checks.processesUsing(repo, { env });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const daemon = result.value.find((p) => p.args?.includes("fsmonitor--daemon"));
+        expect(daemon?.command).toBe("git");
+        expect(daemon?.args).toContain("fsmonitor--daemon");
+        // fx.env's PATH, without folders under the real home, which the guarded host refuses to search for docker.
+        const PATH = (fx.env.PATH ?? "")
+          .split(":")
+          .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
+          .join(":");
+        const report = await preflight(host, checks, repo, { env: { ...fx.env, PATH } });
+        expect(report.ok && report.value.fsmonitor).toEqual([daemon?.pid as number]);
+        expect(report.ok && report.value.findings).toEqual([]);
+      } finally {
+        fx.gitStatus(repo, "fsmonitor--daemon", "stop");
+      }
+    } finally {
+      fx.cleanup();
     }
   });
 
@@ -338,10 +381,10 @@ describe("macOS checks: docker bind mounts", () => {
     });
   });
 
-  test("both wordings docker uses for an unreachable daemon count as not running", async () => {
+  test("docker is not running only when its socket is missing or refuses connections", async () => {
     for (const text of [
       "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
-      "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+      "failed to connect to the docker API at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: connection refused",
     ]) {
       const { host: fake } = scripted(outcome({ exitCode: 1, stderr: { text, droppedBytes: 0 } }));
       expect(await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() })).toEqual({
@@ -351,7 +394,7 @@ describe("macOS checks: docker bind mounts", () => {
     }
   });
 
-  test("docker's daemon not running is not a finding: it is unavailable", async () => {
+  test("'Is the docker daemon running?' alone proves nothing: docker may be running, so it blocks", async () => {
     const { host: fake } = scripted(
       outcome({
         exitCode: 1,
@@ -361,10 +404,18 @@ describe("macOS checks: docker bind mounts", () => {
         },
       }),
     );
-    expect(await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() })).toEqual({
-      ok: true,
-      value: { available: false, reason: "docker is not running" },
-    });
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(!result.ok && result.finding.code).toBe("env.docker-mount");
+  });
+
+  test("docker inspect output of an unexpected shape is env.docker-mount, with a fix", async () => {
+    const { host: fake } = scripted(outcome({ out: "abc123\n" }), outcome({ out: '[{"Id": 1}]' }));
+    const result = await createMacosChecks(fake).dockerMounts(dir, { env: fakeDocker() });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.finding.code).toBe("env.docker-mount");
+      expect(result.finding.fix).toBeDefined();
+    }
   });
 
   test("a container that stopped between listing and inspecting is skipped", async () => {
