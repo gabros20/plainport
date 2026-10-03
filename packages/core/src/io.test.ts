@@ -64,3 +64,17 @@ describe("io: nodeLocalIo's rmdir", () => {
     }
   });
 });
+
+describe("io: nodeLocalIo's mkdir", () => {
+  test("makes one folder, and refuses when anything is there (EEXIST)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-io-"));
+    try {
+      await nodeLocalIo.fs.mkdir(join(root, "one"));
+      expect(existsSync(join(root, "one"))).toBe(true);
+      await expect(nodeLocalIo.fs.mkdir(join(root, "one"))).rejects.toMatchObject({ code: "EEXIST" });
+      await expect(nodeLocalIo.fs.mkdir(join(root, "no/parent"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

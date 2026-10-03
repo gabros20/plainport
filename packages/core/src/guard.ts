@@ -171,6 +171,7 @@ const WRITES = [
   "mkdirp",
   "removeTree",
   "rmdir",
+  "mkdir",
   "chmod",
 ] as const;
 

@@ -57,6 +57,11 @@ export interface LocalFs {
    * operation shares, which then stays), ENOENT when nothing is there.
    */
   rmdir(path: string): Promise<void>;
+  /**
+   * Makes one folder, exclusively: rejects with EEXIST when anything is there already (so a landing path is never
+   * shared), ENOENT when its parent is missing.
+   */
+  mkdir(path: string): Promise<void>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";

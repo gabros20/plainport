@@ -203,6 +203,9 @@ export const nodeLocalIo: LocalIo = {
       await rm(path, { recursive: true, force: true });
     },
     rmdir: (path) => rmdir(path),
+    mkdir: async (path) => {
+      await mkdir(path);
+    },
   },
   proc: {
     pid: process.pid,
