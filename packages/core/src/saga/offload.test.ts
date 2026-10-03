@@ -2047,7 +2047,7 @@ describe("offload: fix wave q1 (D52)", () => {
   test("a fault point follows every side effect, with the journal still at the step before it", async () => {
     const after = saga.OFFLOAD_AFTER_EFFECT as Record<string, string>;
     const seen: { point: string; journal: string | undefined }[] = [];
-    const host = testHost({
+    const real = testHost({
       faults: {
         onStep: (step) => {
           capture(step);
@@ -2055,7 +2055,19 @@ describe("offload: fix wave q1 (D52)", () => {
         },
       },
     });
-    value(await runOffload(deps({}, host), { project: await ref() }));
+    // The real detached delete may finish (trash, claim, journal) before the seam reads the journal on a fast disk:
+    // it is held until the seam has been seen, then started for real, so the seam always reads the journal.
+    let detach: (() => Promise<unknown>) | undefined;
+    const host: HostPorts = {
+      ...real,
+      deleteTrashDetached: async (trash, journal, device) => {
+        detach = () => real.deleteTrashDetached(trash, journal, device);
+        return ok({ pid: process.pid });
+      },
+    };
+    const result = value(await runOffload(deps({}, host), { project: await ref() }));
+    value((await detach?.()) as Result<{ pid: number }>);
+    await waitGone(join(box.paths.journalDir, `${result.op}.json`));
     expect(seen).toEqual(
       [
         "offload.root-created",
