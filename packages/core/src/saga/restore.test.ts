@@ -3,17 +3,19 @@
 // project's head is conflicted or incomplete (D44).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fail, finding, type Result } from "@plainport/contract";
+import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { readJournals } from "../journal/index.ts";
+import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
+import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { readRegistry } from "../registry.ts";
+import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { setUpStore } from "../store.ts";
 import { quietChecks } from "../testing/checks.ts";
@@ -251,8 +253,11 @@ describe("restore: a snapshot side by side (D58)", () => {
         stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
       }),
     );
+    // D60: without --snapshot there is no head to take; usage.invalid names the candidates.
     const bare = await runRestore(deps(), { project: await ref(), to: join(box.home, "a") });
-    expect(bare.ok ? 0 : bare.finding.code).toBe("catalog.head-moved");
+    expect(bare.ok ? 0 : [bare.exitCode, bare.finding.code]).toEqual([2, "usage.invalid"]);
+    expect(bare.ok ? "" : bare.finding.message).toContain(mine.snapshot);
+    expect(bare.ok ? "" : bare.finding.message).toContain(s);
     expect(bare.ok ? "" : bare.finding.fix).toContain("--snapshot");
     value(
       await runRestore(deps(), { project: await ref(), snapshot: mine.snapshot, to: join(box.home, "b") }),
@@ -283,7 +288,8 @@ describe("restore: a snapshot side by side (D58)", () => {
       }),
     );
     const bare = await runRestore(deps(), { project: await ref(), to: join(box.home, "a") });
-    expect(bare.ok ? 0 : bare.finding.code).toBe("catalog.incomplete");
+    expect(bare.ok ? 0 : [bare.exitCode, bare.finding.code]).toEqual([2, "usage.invalid"]);
+    expect(bare.ok ? "" : bare.finding.message).toContain(mine.snapshot);
     value(
       await runRestore(deps(), { project: await ref(), snapshot: mine.snapshot, to: join(box.home, "b") }),
     );
@@ -354,5 +360,131 @@ describe("restore: where onload's refusals point (D44, D56)", () => {
     expect(refused.ok ? "" : refused.finding.fix).toContain(
       "plainport restore work:web --snapshot <id> --to <path>",
     );
+  });
+});
+
+describe("restore: fix wave r1", () => {
+  test("a held project lock refuses (project.locked, 11); so does an interrupted operation (journal.pending)", async () => {
+    await offload();
+    const id = Object.keys(value(await readRegistry(testHost(), box.paths)).projects)[0] as string;
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      const locked = await runRestore(deps(), { project: await ref(), to: join(box.home, "a") });
+      expect(locked.ok ? 0 : [locked.exitCode, locked.finding.code]).toEqual([11, "project.locked"]);
+    } finally {
+      await held.release();
+    }
+    await waitTrashGone();
+    const crash = testHost({ faults: { at: "onload.restored" } });
+    await expect(
+      runOnload(
+        {
+          host: crash,
+          plugins: [nodePlugin],
+          paths: box.paths,
+          device,
+          env: env(),
+          loader: new ConfigLoader(crash, box.paths),
+          opener,
+          openMirror: async () => ({ ok: true, value: mirror }),
+          emit: () => {},
+          log: () => {},
+        },
+        { project: await ref(), hydrate: false },
+      ),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const pending = await runRestore(deps(), { project: await ref(), to: join(box.home, "b") });
+    expect(pending.ok ? 0 : pending.finding.code).toBe("journal.pending");
+    expect(existsSync(join(box.home, "a"))).toBe(false);
+    expect(existsSync(join(box.home, "b"))).toBe(false);
+  });
+
+  test("the locks of registered projects nested with the target are taken too (D53)", async () => {
+    await offload();
+    const inner = ulid();
+    value(
+      await updateRegistry(testHost(), box.paths, (r) =>
+        ok({
+          ...r,
+          projects: {
+            ...r.projects,
+            [inner]: {
+              root: "work",
+              path: "inner",
+              override: join(box.home, "old/web/inner"),
+              registeredAt: "2026-10-01T00:00:00.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${inner}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      const result = await runRestore(deps(), { project: await ref(), to: join(box.home, "old/web") });
+      expect(result.ok ? 0 : result.finding.code).toBe("project.locked");
+    } finally {
+      await held.release();
+    }
+  });
+
+  test("another operation's staging in the shared holder survives this restore's cleanup", async () => {
+    await offload();
+    const holder = join(box.home, "old/.plainport-staging");
+    const other = join(holder, ulid());
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        // The other operation makes its staging folder right after this one looks at the holder.
+        readdir: async (path) => {
+          const names = await real.fs.readdir(path);
+          if (path === holder) mkdirSync(other, { recursive: true });
+          return names;
+        },
+        rmdir: async (path) => {
+          if (path === holder) mkdirSync(other, { recursive: true });
+          return real.fs.rmdir(path);
+        },
+      },
+    };
+    value(await runRestore(deps(host), { project: await ref(), to: join(box.home, "old/web") }));
+    expect(existsSync(other)).toBe(true);
+    expect(existsSync(join(box.home, "old/web/src/main.ts"))).toBe(true);
+  });
+
+  test("a rename that landed is a success, even when flushing its folder fails: a warning says so", async () => {
+    await offload();
+    const warnings: string[] = [];
+    const real = testHost();
+    const to = join(box.home, "old/web");
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        syncDir: async (path) => {
+          if (path === join(box.home, "old"))
+            throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+          return real.fs.syncDir(path);
+        },
+      },
+    };
+    const restored = await runRestore(
+      { ...deps(host), log: (_level, message) => warnings.push(message) },
+      { project: await ref(), to },
+    );
+    expect(restored.ok ? restored.value.dir : restored.finding.code).toBe(to);
+    expect(warnings.join("\n")).toContain(to);
+    expect(existsSync(join(to, "src/main.ts"))).toBe(true);
   });
 });

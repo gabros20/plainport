@@ -14,8 +14,9 @@
 // Only plainport's own trash and journals are deleted, and only for operations whose journal says committed and
 // released; nothing else is touched.
 
-import { join } from "node:path";
-import { type Failure, type Finding, failWith, ok, type Result } from "@plainport/contract";
+import { dirname, join } from "node:path";
+import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
+import { readDevice } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -28,9 +29,14 @@ import {
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { HostPorts } from "../ports/host.ts";
+import { readRegistry } from "../registry.ts";
+import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
+import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, withProjectLock } from "../saga/project-gate.ts";
-import { offloadTrashOf } from "../saga/release.ts";
+import { offloadTrashOf, rootFolderOf } from "../saga/release.ts";
+import { isUlid } from "../ulid.ts";
+import { readStagingRecords, removeHolderIfEmpty, removeStagingRecord } from "./staging.ts";
 
 export interface TrashDeps {
   host: HostPorts;
@@ -61,6 +67,8 @@ export type GcReport = {
   /** Not reached now: the finding says why (a lock a live process holds). */
   skipped: (TrashItem & { finding: Finding })[];
   freedBytes: number;
+  /** Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed. */
+  staging: string[];
 };
 
 const released = (journal: Journal): journal is OffloadJournal =>
@@ -143,6 +151,26 @@ const renamedBack = (journals: readonly Journal[]): Map<string, string> => {
   return out;
 };
 
+/**
+ * root.path-missing when the project's root folder is not there (a volume that is not mounted): its trash is then
+ * unavailable, not deleted, and its journal stays (D24).
+ */
+const rootAway = async (io: LocalIo, journal: OffloadJournal): Promise<Failure | undefined> => {
+  const root = rootFolderOf(journal.project.path, journal.project.dir);
+  try {
+    if ((await io.fs.lstat(root)).kind === "dir") return undefined;
+  } catch (error) {
+    systemErrorCode(error);
+  }
+  return fail(
+    finding("root.path-missing", {
+      message: `${root}, which holds the trash of ${journal.project.address}'s offload ${journal.op}, is not there (a volume that is not mounted?); the trash and its journal were left as they are`,
+      fix: "mount the volume, then run plainport gc",
+      paths: [root],
+    }),
+  );
+};
+
 /** plainport gc: deletes released offloads' trash past its deadline, or all of it with `early` (see above). */
 export const collectTrash = async (
   deps: TrashDeps,
@@ -157,13 +185,19 @@ export const collectTrash = async (
   } catch (error) {
     return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
   }
-  const report: GcReport = { deleted: [], kept: [], skipped: [], freedBytes: 0 };
+  const report: GcReport = { deleted: [], kept: [], skipped: [], freedBytes: 0, staging: [] };
   let problem: Failure | undefined;
   for (const journal of read.journals.filter(released)) {
     const item = itemOf(journal);
     const due = journal.keepUntil === undefined || Date.parse(journal.keepUntil) <= clock().getTime();
     if (!due && !options.early) {
       report.kept.push(item);
+      continue;
+    }
+    const away = await rootAway(io, journal);
+    if (away !== undefined) {
+      report.skipped.push({ ...item, finding: away.finding });
+      problem ??= away;
       continue;
     }
     const gate = { io, paths, clock, log: deps.log };
@@ -209,8 +243,98 @@ export const collectTrash = async (
       problem ??= done;
     }
   }
+  const swept = await sweepStaging(deps, clock);
+  if (!swept.ok) problem ??= swept;
+  else report.staging.push(...swept.value);
   if (problem !== undefined) return failWith(problem.finding, report, problem.exitCode);
   return ok(report);
+};
+
+/**
+ * Abandoned staging (D60): a restore's that its record names, once nobody holds its project's lock (a running
+ * restore holds it); and, in the staging holders of this device's roots and onload landing folders, an onload's whose
+ * journal is gone (a lost write, D24). The holders are listed before the journals and records are read: an operation
+ * writes its journal or record before it makes its staging folder, so a folder listed is owned by something read.
+ */
+const sweepStaging = async (deps: TrashDeps, clock: () => Date): Promise<Result<string[]>> => {
+  const { host, paths } = deps;
+  const io: LocalIo = host;
+  const removed: string[] = [];
+  const holders = new Set<string>();
+  const device = await readDevice(io, paths);
+  if (!device.ok) return device;
+  const roots = await listRoots(io, paths, {
+    env: deps.env,
+    ...(device.value === undefined ? {} : { device: device.value.name }),
+  });
+  if (roots.ok)
+    for (const r of roots.value.roots) if (r.path !== undefined) holders.add(join(r.path, STAGING_DIR));
+  const registry = await readRegistry(io, paths);
+  if (registry.ok)
+    for (const e of Object.values(registry.value.projects))
+      if (e.override !== undefined) holders.add(join(dirname(e.override), STAGING_DIR));
+  const listed: [string, string][] = [];
+  for (const holder of holders) {
+    let names: string[];
+    try {
+      names = await io.fs.readdir(holder);
+    } catch (error) {
+      const code = systemErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw error;
+    }
+    for (const name of names) if (isUlid(name)) listed.push([holder, name]);
+  }
+  let owners: Set<string>;
+  let records: Awaited<ReturnType<typeof readStagingRecords>>;
+  try {
+    owners = new Set((await readJournals(io, paths)).journals.map((j) => j.op));
+    records = await readStagingRecords(io, paths);
+  } catch (error) {
+    return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+  }
+  const recorded = new Set(records.map((r) => r.staging));
+  try {
+    for (const [holder, name] of listed) {
+      const staging = join(holder, name);
+      if (owners.has(name) || recorded.has(staging)) continue;
+      await io.fs.removeTree(staging);
+      await removeHolderIfEmpty(io, holder);
+      removed.push(staging);
+    }
+  } catch (error) {
+    return writeFailed(error, "removing an abandoned staging folder", false, paths.stateDir);
+  }
+  for (const record of records) {
+    // Its folder's volume away: the record stays for when it is back.
+    const parent = dirname(dirname(record.staging));
+    try {
+      if ((await io.fs.lstat(parent)).kind !== "dir") continue;
+    } catch (error) {
+      systemErrorCode(error);
+      continue;
+    }
+    const gate = { io, paths, clock, log: deps.log };
+    // A running restore holds the project's lock: a held lock means the folder is live, and it is left alone.
+    const done = await withProjectLock(
+      gate,
+      record.project,
+      async () => {
+        try {
+          await io.fs.removeTree(record.staging);
+          await removeHolderIfEmpty(io, dirname(record.staging));
+          await removeStagingRecord(io, paths, record.op);
+        } catch (error) {
+          return writeFailed(error, `removing ${record.staging}`, false, record.staging);
+        }
+        removed.push(record.staging);
+        return ok(undefined);
+      },
+      { resume: () => true },
+    );
+    if (!done.ok) deps.log("info", `${record.staging} is left: ${done.finding.message}`);
+  }
+  return ok(removed);
 };
 
 export type Housekept = {
@@ -256,6 +380,17 @@ export const housekeeping = async (deps: TrashDeps): Promise<Housekept> => {
       async () => {
         const now = await reread(io, paths, journal.op);
         if (now === undefined || !released(now) || now.keepUntil === undefined) return ok(undefined);
+        // An onload may have started renaming the trash back since the journals were first read.
+        let current: Journal[];
+        try {
+          current = (await readJournals(io, paths)).journals;
+        } catch (error) {
+          return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+        }
+        if (renamedBack(current).has(now.op)) return ok(undefined);
+        // A trash whose volume is away is not deleted: the detached delete would close the journal over nothing.
+        const away = await rootAway(io, now);
+        if (away !== undefined) return away;
         // Without a deadline the trash is no longer renamed back by an onload (it may be being deleted).
         const { keepUntil: _, ...rest } = now;
         try {

@@ -32,6 +32,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { removeHolderIfEmpty, removeStagingRecord, writeStagingRecord } from "../recover/staging.ts";
 import { readRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
@@ -39,7 +40,7 @@ import { readStub } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { writeFailed } from "./journaled.ts";
 import { STAGING_DIR } from "./onload.ts";
-import { nestedProjects, registeredFolders } from "./project-gate.ts";
+import { nestedProjects, registeredFolders, withProjectLock } from "./project-gate.ts";
 import { checkSnapshot, kindAt, restoreVerified, unreadable } from "./restore-tree.ts";
 
 export interface RestoreDeps {
@@ -174,6 +175,8 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       }),
     );
   }
+  // What is restored, fixed here where it is known to exist.
+  const chosen = { snapshot, stored, event: made.event };
   phase("resolve", "end");
 
   phase("preflight", "start");
@@ -196,9 +199,9 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
   // Not inside a registered project's folder, its own included: that project's offload would take the copy along.
   const folders = await registeredFolders(io, paths, deps.env);
   if (!folders.ok) return folders;
-  const related = await nestedProjects(io, paths, folders.value, { folder: to });
-  if (!related.ok) return related;
-  const holding = related.value.find((n) => !n.inside);
+  const nested = await nestedProjects(io, paths, folders.value, { folder: to });
+  if (!nested.ok) return nested;
+  const holding = nested.value.find((n) => !n.inside);
   if (holding !== undefined) {
     return fail(
       finding("project.nested", {
@@ -208,35 +211,71 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       }),
     );
   }
-  const parent = dirname(to);
-  const holder = join(parent, STAGING_DIR);
-  try {
-    await io.fs.mkdirp(holder);
-  } catch (error) {
-    return writeFailed(error, `making ${holder}`, false, holder);
+  const projectId = id as string;
+  // The project's lock, and those of the projects nested with the landing path (D53); an interrupted operation of the
+  // project refuses it (journal.pending), as every write command does (D59).
+  const gate = { io, paths, clock, log: deps.log };
+  return withProjectLock(gate, { id: projectId, address: ref.address }, () => restoreLocked(), {
+    related: nested.value.filter((n) => n.id !== projectId),
+  });
+
+  async function restoreLocked(): Promise<Result<RestoreOutcome>> {
+    const parent = dirname(to);
+    const holder = join(parent, STAGING_DIR);
+    const staging = join(holder, op);
+    // The record, before the folder: gc removes a crashed restore's staging once nobody holds this lock (D60).
+    try {
+      await writeStagingRecord(io, paths, {
+        v: 1,
+        op,
+        project: { id: projectId, address: ref.address },
+        staging,
+      });
+      await io.fs.mkdirp(holder);
+    } catch (error) {
+      return writeFailed(error, `making ${holder}`, false, holder);
+    }
+    const result = await restoreInto(parent, holder, staging);
+    // Only this restore's own folder goes, then the shared holder if, and only if, it is empty (rmdir).
+    try {
+      await io.fs.removeTree(staging);
+      await removeHolderIfEmpty(io, holder);
+      await removeStagingRecord(io, paths, op);
+    } catch (error) {
+      assertSystemError(error);
+      deps.log(
+        "warn",
+        `${staging} could not be removed; it holds only a partial copy, and plainport gc removes it`,
+      );
+    }
+    return result;
   }
-  const staging = join(holder, op);
-  const ctx = {
-    op,
-    ...(signal === undefined ? {} : { signal }),
-    emit: (
-      e: StreamEvent | { type: "log"; op: string; level: "debug" | "info" | "warn"; message: string },
-    ) => (e.type === "log" ? deps.log(e.level, e.message) : deps.emit(e)),
-  };
-  const result = await (async (): Promise<Result<RestoreOutcome>> => {
+
+  async function restoreInto(
+    parent: string,
+    holder: string,
+    staging: string,
+  ): Promise<Result<RestoreOutcome>> {
+    const ctx = {
+      op,
+      ...(signal === undefined ? {} : { signal }),
+      emit: (
+        e: StreamEvent | { type: "log"; op: string; level: "debug" | "info" | "warn"; message: string },
+      ) => (e.type === "log" ? deps.log(e.level, e.message) : deps.emit(e)),
+    };
     const listed = await checkSnapshot({
       io,
       engine: store.engine,
       store: store.blob,
-      stored,
-      event: made.event,
+      stored: chosen.stored,
+      event: chosen.event,
       ctx,
       op,
       nearest: parent,
       holder,
       resuming: false,
       address: ref.address,
-      elsewhere: command(snapshot),
+      elsewhere: command(chosen.snapshot),
     });
     if (!listed.ok) return signal?.aborted ? cancelled() : listed;
     phase("preflight", "end");
@@ -244,7 +283,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     const restored = await restoreVerified({
       io,
       engine: store.engine,
-      stored,
+      stored: chosen.stored,
       staging,
       ctx,
       phase,
@@ -259,16 +298,25 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       if ((await kindAt(io, to)) !== undefined) {
         return fail(
           finding("path.occupied", {
-            message: `${to} appeared while snapshot ${snapshot} was restored; it was left alone`,
-            fix: command(snapshot),
+            message: `${to} appeared while snapshot ${chosen.snapshot} was restored; it was left alone`,
+            fix: command(chosen.snapshot),
             paths: [to],
           }),
         );
       }
       await io.fs.rename(staging, to);
-      await io.fs.syncDir(parent);
     } catch (error) {
       return writeFailed(error, `moving ${staging} to ${to}`, false, to);
+    }
+    // The rename landed: the copy is there whatever the flush says.
+    try {
+      await io.fs.syncDir(parent);
+    } catch (error) {
+      assertSystemError(error);
+      deps.log(
+        "warn",
+        `${to} is restored, but its folder could not be flushed to disk (${(error as Error).message})`,
+      );
     }
     // The folder's own mode, which the snapshot does not hold (D55).
     if (listed.value.rootMode !== undefined) {
@@ -282,43 +330,29 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     return ok({
       op,
       project: ref.address,
-      snapshot,
+      snapshot: chosen.snapshot,
       store: store.name,
       dir: to,
       files: listed.value.files,
       bytes: listed.value.bytes,
     });
-  })();
-  // Whatever happened, no staging is left, nor the holder when nothing else uses it.
-  try {
-    await io.fs.removeTree(staging);
-    if ((await io.fs.readdir(holder)).length === 0) await io.fs.removeTree(holder);
-  } catch (error) {
-    assertSystemError(error);
-    deps.log("warn", `${staging} could not be removed; it holds only a partial copy and can be deleted`);
   }
-  return result;
 
-  /** The head, or why there is none: catalog.incomplete or catalog.head-moved, whose fix names --snapshot (D44). */
+  /** The head; without one (incomplete, conflicted) --snapshot is required: usage.invalid naming the candidates (D60). */
   function headOf(project: CatalogProject): string | Failure {
     const ids = Object.keys(project.snapshots).sort();
-    const pick = `name a snapshot (${ids.slice(-5).join(", ")}): ${command("<id>")}`;
-    if (project.missing.length > 0) {
-      return fail(
-        finding("catalog.incomplete", {
-          message: `the catalog names ${plural(project.missing.length, "snapshot")} of ${ref.address} it does not hold (${project.missing.join(", ")}), so its head is unknown; nothing was restored`,
-          fix: pick,
-        }),
-      );
-    }
-    if (project.conflicts.length > 0 || project.head === null) {
-      return fail(
-        finding("catalog.head-moved", {
-          message: `${ref.address} is conflicted in the catalog (${project.conflicts.map((c) => c.join(" and ")).join("; ")}), so it has no head; nothing was restored`,
-          fix: pick,
-        }),
-      );
-    }
-    return project.head;
+    const why =
+      project.missing.length > 0
+        ? `the catalog names ${plural(project.missing.length, "snapshot")} of ${ref.address} it does not hold (${project.missing.join(", ")}), so its head is unknown`
+        : project.conflicts.length > 0 || project.head === null
+          ? `${ref.address} is conflicted in the catalog (${project.conflicts.map((c) => c.join(" and ")).join("; ")}), so it has no head`
+          : undefined;
+    if (why === undefined) return project.head as string;
+    return fail(
+      finding("usage.invalid", {
+        message: `${why}; name the snapshot to restore with --snapshot, one of: ${ids.join(", ")}`,
+        fix: command(ids.at(-1) ?? "<id>"),
+      }),
+    );
   }
 };

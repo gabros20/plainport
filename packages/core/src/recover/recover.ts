@@ -22,7 +22,7 @@
 // What it cannot settle now (a store that does not answer, a lock a live process holds, a folder in the way) stays
 // pending, its journal kept, and the report says why; recover can run again at any time.
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -36,8 +36,10 @@ import {
 import { TEMP_SUFFIX } from "../atomic.ts";
 import { type CatalogEvent, OffloadedEventSchema } from "../catalog/events.ts";
 import { foldCatalog } from "../catalog/fold.ts";
+import { identityChanged, readStoreIdentity } from "../catalog/identity.ts";
 import {
   appendEvent,
+  eventAt,
   MIRROR_EVENTS_PREFIX,
   readEvents,
   STORE_EVENTS_PREFIX,
@@ -59,8 +61,8 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { openSaga, writeFailed } from "../saga/journaled.ts";
-import type { OffloadStep } from "../saga/offload.ts";
+import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
+import { OFFLOAD_STEPS, type OffloadStep } from "../saga/offload.ts";
 import { finishOnload, ONLOAD_STEPS, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
 import {
   nestedProjects,
@@ -68,7 +70,7 @@ import {
   registeredFolders,
   withProjectLock,
 } from "../saga/project-gate.ts";
-import { type OffloadConflict, offloadTrashOf, releaseOffload } from "../saga/release.ts";
+import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
@@ -293,10 +295,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     };
   }
 
-  function pending(journal: Journal, problem: Failure): Settled {
+  function pending(journal: Journal, problem: Failure, state?: ProjectState): Settled {
     return {
       op: {
-        ...entry(journal, "pending", journal.kind === "offload" ? "offloading" : "onloading"),
+        ...entry(journal, "pending", state ?? (journal.kind === "offload" ? "offloading" : "onloading")),
         finding: problem.finding,
       },
       problem,
@@ -315,24 +317,91 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       opener: deps.opener,
     });
     if (!opened.ok) return opened;
-    if (opened.value.id !== journal.store.id)
-      return fail(
-        finding("store.identity-changed", {
-          message: `store ${journal.store.name} is now ${opened.value.id}, but the ${journal.kind} ${journal.op} wrote to ${journal.store.id}; nothing was changed`,
-          fix: `point stores.${journal.store.name} back at the store the ${journal.kind} used, then run plainport recover`,
-        }),
+    // The store itself says who it is (meta/v1/store.json), not this device's record of it: a disk swapped or a path
+    // changed since is another store, which recover never writes to or reads a commit from.
+    const identity = await readStoreIdentity(opened.value.blob);
+    if (!identity.ok) return identity;
+    if (opened.value.id !== journal.store.id || identity.value !== journal.store.id) {
+      const changed = identityChanged(
+        journal.store.id,
+        identity.value === journal.store.id ? opened.value.id : identity.value,
+        "store",
       );
+      return withFix(
+        changed,
+        `connect the store the ${journal.kind} ${journal.op} wrote to (stores.${journal.store.name}), then run plainport recover`,
+      );
+    }
     return opened;
   }
 
-  /** Whether the store holds the event: a failure when it cannot say. */
-  async function held(store: BlobStore, event: string): Promise<Result<boolean>> {
-    const got = await store.stat(`${STORE_EVENTS_PREFIX}${event}.json`);
-    return got.ok ? ok(got.value !== null) : got;
+  /**
+   * What the store holds under an event id: "absent", "ours" only when the file parses, validates and is the event
+   * the journal names (`ours`), else the finding that says why it is not: a torn write (D42) or another event is never
+   * taken for a commit. A failure when the store cannot say.
+   */
+  async function eventState(
+    store: BlobStore,
+    id: string,
+    ours: (event: CatalogEvent) => boolean,
+  ): Promise<Result<"absent" | "ours" | Finding>> {
+    const found = await eventAt(storeEventLog(store), id);
+    if (!found.ok) return found;
+    if (found.value === null) return ok("absent");
+    if ("skipped" in found.value) return ok(found.value.skipped);
+    if (ours(found.value.event)) return ok("ours");
+    return ok(
+      finding("catalog.event-skipped", {
+        message: `${STORE_EVENTS_PREFIX}${id}.json is another operation's event, not the one this journal names; it is left as it is`,
+      }),
+    );
+  }
+
+  /** The project's root folder: when it is not there (an unmounted volume), nothing of the operation can be settled. */
+  function rootOf(journal: Journal): string {
+    if (journal.kind === "offload") return rootFolderOf(journal.project.path, journal.project.dir);
+    if (journal.staging !== undefined) return dirname(dirname(journal.staging));
+    if (journal.reuse !== undefined) return dirname(dirname(dirname(journal.reuse.folder)));
+    return dirname(journal.project.dir);
+  }
+
+  async function unavailable(journal: Journal): Promise<Settled | undefined> {
+    const root = rootOf(journal);
+    let kind: string | undefined;
+    try {
+      kind = await kindAt(io, root);
+    } catch (error) {
+      systemErrorCode(error);
+    }
+    if (kind === "dir") return undefined;
+    return pending(
+      journal,
+      fail(
+        finding("root.path-missing", {
+          message: `${root}, which holds ${journal.project.address}, is not there (a volume that is not mounted?), so the ${journal.kind} ${journal.op} was left as it is with its journal`,
+          fix: "mount the volume, then run plainport recover",
+          paths: [root],
+        }),
+      ),
+      "unavailable",
+    );
+  }
+
+  function unknownStep(journal: Journal): Settled {
+    return pending(
+      journal,
+      fail(
+        finding("journal.pending", {
+          message: `the ${journal.kind} ${journal.op} of ${journal.project.address} stopped at ${journal.step}, a step this version of plainport does not know; it was left as it is`,
+          fix: "run the plainport that wrote it (plainport recover)",
+          paths: [journalFile(paths, journal.op)],
+        }),
+      ),
+    );
   }
 
   /** Rolls back an operation that did not commit: only its staging folder and its journal go. */
-  async function rollBack(journal: Journal): Promise<Settled> {
+  async function rollBack(journal: Journal, note?: Finding): Promise<Settled> {
     try {
       if (journal.kind === "onload" && journal.staging !== undefined) await io.fs.removeTree(journal.staging);
       await removeJournal(io, paths, journal.op);
@@ -347,12 +416,23 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         ),
       );
     }
-    return { op: entry(journal, "rolled-back", journal.kind === "offload" ? "local" : "shelved") };
+    return {
+      op: {
+        ...entry(journal, "rolled-back", journal.kind === "offload" ? "local" : "shelved"),
+        ...(note === undefined ? {} : { finding: note }),
+      },
+    };
   }
 
   async function settleOffload(journal: OffloadJournal, lock: ProjectLock): Promise<Settled> {
     const step = journal.step;
+    if (!(OFFLOAD_STEPS as readonly string[]).includes(step)) return unknownStep(journal);
     if (BEFORE_SNAPSHOT.has(step)) return rollBack(journal);
+    // From here recover may touch the folder or its trash: never while their volume is away.
+    if (step !== "offload.snapshot.discarded") {
+      const away = await unavailable(journal);
+      if (away !== undefined) return away;
+    }
     if (step === "offload.release.delete") return deleteTrash(journal);
     if (RELEASING.has(step)) return release(journal, lock);
 
@@ -363,9 +443,15 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     if (step === "offload.snapshot.discarded") {
       const discarded = journal.discarded;
       if (discarded !== undefined) {
-        const there = await held(blob, discarded.event);
+        const there = await eventState(
+          blob,
+          discarded.event,
+          (e) => e.type === "snapshot-discarded" && e.op === journal.op && e.snapshot === journal.op,
+        );
         if (!there.ok) return pending(journal, there);
-        if (!there.value) {
+        // A torn or foreign file under its id stays as it is: the snapshot no event names is never a head (D28).
+        if (typeof there.value === "object") return rollBack(journal, there.value);
+        if (there.value === "absent") {
           const written = await appendEvent(storeEventLog(blob), {
             v: 1,
             id: discarded.event,
@@ -388,10 +474,24 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     if (step === "offload.diverged") return keepFork(journal, store.value);
 
     if (step === "offload.commit.start") {
-      const there = journal.event === undefined ? ok(false) : await held(blob, journal.event);
+      const there =
+        journal.event === undefined
+          ? ok("absent" as const)
+          : await eventState(
+              blob,
+              journal.event,
+              (e) =>
+                e.type === "offloaded" &&
+                e.op === journal.op &&
+                e.snapshot === journal.op &&
+                e.project === journal.project.id &&
+                (journal.verified === undefined || e.stored[journal.store.name] === journal.verified),
+            );
       if (!there.ok) return pending(journal, there);
       // Never appended: nothing was committed, and the folder was never touched (D24).
-      if (!there.value) return rollBack(journal);
+      if (there.value === "absent") return rollBack(journal);
+      // A torn or foreign file is no commit (D41, D42): the folder stays, and the report says why.
+      if (there.value !== "ours") return rollBack(journal, there.value);
       return committed(journal, lock, {});
     }
 
@@ -506,9 +606,18 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const id = journal.event;
     const verified = journal.verified;
     if (id !== undefined && verified !== undefined) {
-      const there = await held(store.blob, id);
+      const there = await eventState(
+        store.blob,
+        id,
+        (e) => e.type === "offloaded" && e.op === journal.op && e.snapshot === journal.op,
+      );
       if (!there.ok) return pending(journal, there);
-      if (!there.value) {
+      if (typeof there.value === "object") {
+        // A torn fork event: the catalog skips it, so nothing records the fork; the folder stays local.
+        const closed = await close(journal);
+        return closed ?? { op: { ...entry(journal, "rolled-back", "local"), finding: there.value } };
+      }
+      if (there.value === "absent") {
         // The journal does not hold the event's totals: they are read again from the snapshot's listing. What was
         // stripped is not known any more, so the event records none.
         let files = 0;
@@ -591,6 +700,9 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   async function settleOnload(journal: OnloadJournal): Promise<Settled> {
+    if (!(ONLOAD_STEPS as readonly string[]).includes(journal.step)) return unknownStep(journal);
+    const away = await unavailable(journal);
+    if (away !== undefined) return away;
     if (ONLOAD_BEFORE_SWAP.has(journal.step)) return rollBack(journal);
     if (journal.step === "onload.swap.start") {
       let swapped: boolean;

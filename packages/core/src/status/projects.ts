@@ -20,7 +20,7 @@
 // and never-synced (the store did not answer).
 
 import { join } from "node:path";
-import type { Finding, ProjectState, Result } from "@plainport/contract";
+import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok } from "@plainport/contract";
 import { OffloadedEventSchema } from "../catalog/events.ts";
 import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
@@ -61,6 +61,7 @@ export const PROJECT_CONDITIONS = [
   "folder-missing",
   "stale",
   "never-synced",
+  "catalog-unreadable",
 ] as const;
 
 export type ProjectStatus = {
@@ -139,6 +140,16 @@ const newest = (times: (string | undefined)[]): string | undefined =>
     .sort()
     .at(-1);
 
+/** A store whose every call fails as `failure` did: the mirror that could not be opened, for loadCatalog. */
+const failingStore = (failure: Failure): BlobStore => ({
+  capabilities: () => ({ createIfAbsent: false, replaceIfMatch: false }),
+  get: async () => failure,
+  put: async () => failure,
+  list: async () => failure,
+  stat: async () => failure,
+  delete: async () => failure,
+});
+
 /** Every project this device knows, each with its state and conditions (see the file comment). */
 export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
   const { io, paths, device } = deps;
@@ -169,13 +180,18 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
     // The catalog needs no password; the engine, which does, is never used here.
     const password = await resolveSecret(io, deps.env, paths.home, name, secretRefOf(store));
     const opened = await deps.opener.open(name, store, password.ok ? password.value : "");
-    const mirror = await deps.openMirror(id);
-    if (!opened.ok || !mirror.ok) {
-      const why = !opened.ok ? opened.finding : (mirror as { finding: Finding }).finding;
-      stores.push({ name, id, stale: true, finding: why });
+    if (!opened.ok) {
+      stores.push({ name, id, stale: true, finding: opened.finding });
       continue;
     }
-    const read = await loadCatalog({ store: opened.value.blob, mirror: mirror.value, storeId: id, now });
+    // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45).
+    const mirror = await deps.openMirror(id);
+    const read = await loadCatalog({
+      store: opened.value.blob,
+      mirror: mirror.ok ? mirror.value : failingStore(mirror),
+      storeId: id,
+      now,
+    });
     if (!read.ok) {
       stores.push({ name, id, stale: true, finding: read.finding });
       continue;
@@ -193,9 +209,15 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
       stale: read.value.stale,
       ...(read.value.syncedAt === undefined ? {} : { syncedAt: read.value.syncedAt }),
       state: read.value.state,
-      mirror: mirror.value,
+      ...(mirror.ok ? { mirror: mirror.value } : {}),
     });
   }
+
+  const failedStores = new Set(
+    stores.filter((st) => !reads.some((r) => r.store === st.name)).map((st) => st.name),
+  );
+  const storeOfRoot = (entry: RegistryEntry | undefined): string | undefined =>
+    entry === undefined ? undefined : (config.roots[entry.root]?.store ?? config.defaultStore);
 
   // Root ULID → this device's key for it, else the catalog's.
   const keyOf = new Map<string, string>();
@@ -279,6 +301,9 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
     }
     if (catalog !== undefined && catalog.missing.length > 0) conditions.push("incomplete");
     if (read?.stale === true) conditions.push(read.syncedAt === undefined ? "never-synced" : "stale");
+    // Its store's catalog could not be read at all, from the store or the mirror: nothing here is current.
+    const unread = read === undefined && failedStores.has(storeOfRoot(entry) ?? "");
+    if (unread) conditions.push("catalog-unreadable");
 
     // The head's size, from the mirror's copy of the event that made it.
     let bytes: number | undefined;
@@ -325,7 +350,7 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
       ...(bytes === undefined ? {} : { bytes }),
       ...(strippedBytes === undefined ? {} : { strippedBytes }),
       ...(lastActivity === undefined ? {} : { lastActivity }),
-      stale: read?.stale ?? false,
+      stale: read?.stale ?? unread,
       ...(read?.syncedAt === undefined ? {} : { syncedAt: read.syncedAt }),
       ...(journal === undefined
         ? {}

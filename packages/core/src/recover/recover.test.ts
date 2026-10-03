@@ -10,6 +10,8 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -44,6 +46,7 @@ import {
 } from "../saga/offload.ts";
 import { ONLOAD_AFTER_EFFECT, ONLOAD_STEPS, type OnloadDeps, runOnload } from "../saga/onload.ts";
 import { releaseOffload } from "../saga/release.ts";
+import { runRestore } from "../saga/restore.ts";
 import { projectViews, type ViewDeps } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
@@ -1202,5 +1205,315 @@ describe("recover: what the smoke found", () => {
     expect(existsSync(temp)).toBe(false);
     expect(readdirSync(box.paths.journalDir)).toEqual([]);
     await expectInvariants();
+  });
+});
+
+describe("fix wave r1: an event counts only when it validates (Critical)", () => {
+  const tornAt = async (journal: OffloadJournal, bytes: string) =>
+    value(await store.put(`meta/v1/events/${journal.event}.json`, new TextEncoder().encode(bytes)));
+
+  test("a torn event at commit.start is no commit: the folder stays, recover rolls back and says why", async () => {
+    await crashOffloadAt("offload.commit.start");
+    const journal = onlyJournal<OffloadJournal>();
+    await tornAt(journal, `{"v":1,"id":"${journal.event}","type":"offl`);
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state, op?.finding?.code]).toEqual([
+      "rolled-back",
+      "local",
+      "catalog.event-skipped",
+    ]);
+    await expectLocalUntouched();
+    await expectInvariants();
+  });
+
+  test("with stub = false too: a torn event never releases the folder", async () => {
+    config("[offload]\nstub = false");
+    await crashOffloadAt("offload.commit.start");
+    const journal = onlyJournal<OffloadJournal>();
+    await tornAt(journal, `{"v":1,"id":"${journal.event}"`);
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect(op?.outcome).toBe("rolled-back");
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+  });
+
+  test("a whole event under the journal's id that is another operation's is no commit either", async () => {
+    await crashOffloadAt("offload.commit.start");
+    const journal = onlyJournal<OffloadJournal>();
+    const other = ulid();
+    await tornAt(
+      journal,
+      `${JSON.stringify({
+        v: 1,
+        id: journal.event,
+        type: "offloaded",
+        device: device.id,
+        at: "2026-10-02T00:00:00.000Z",
+        op: other,
+        project: journal.project.id,
+        root: journal.project.rootId,
+        path: "web",
+        snapshot: other,
+        stored: { ssd: "e".repeat(64) },
+        stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+      })}\n`,
+    );
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect(op?.outcome).toBe("rolled-back");
+    await expectLocalUntouched();
+  });
+});
+
+describe("fix wave r1: the store's own identity (D45)", () => {
+  test("a store whose meta/v1/store.json names another id is not the journal's: pending, nothing touched", async () => {
+    await crashOffloadAt("offload.commit.appended");
+    value(
+      await store.put(
+        "meta/v1/store.json",
+        new TextEncoder().encode(`${JSON.stringify({ v: 1, id: ulid() })}\n`),
+      ),
+    );
+    const result = await recover(recoverDeps());
+    expect(result.ok ? 0 : result.finding.code).toBe("store.identity-changed");
+    expect(reportOf(result).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(await journals()).toHaveLength(1);
+  });
+});
+
+describe("fix wave r1: a missing root is unavailable, never deleted (unmounted volume)", () => {
+  const away = () => join(box.home, "work.away");
+
+  test("recover keeps a released offload's journal while its root is gone, and deletes the trash once it is back", async () => {
+    await crashOffloadAt("offload.release.delete");
+    renameSync(join(box.home, "work"), away());
+    const result = await recover(recoverDeps());
+    expect(reportOf(result).operations.map((o) => [o.outcome, o.state])).toEqual([
+      ["pending", "unavailable"],
+    ]);
+    expect(result.ok ? 0 : result.finding.code).toBe("root.path-missing");
+    expect(await journals()).toHaveLength(1);
+    const gc = await collectTrash(
+      { host: testHost(), paths: box.paths, env: env(), log: () => {} },
+      { early: true },
+    );
+    expect(gc.ok ? gc.value.deleted : gc.finding.code).toBe("root.path-missing");
+    expect(await journals()).toHaveLength(1);
+    renameSync(away(), join(box.home, "work"));
+    expect(reportOf(await recover(recoverDeps())).operations.map((o) => o.outcome)).toEqual([
+      "trash-deleted",
+    ]);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("an onload's journal stays while its root is gone", async () => {
+    value(await offloadNow());
+    for (let i = 0; i < 400 && (await journals()).length > 0; i++) await Bun.sleep(25);
+    const host = testHost({ faults: { at: "onload.swap.start" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    renameSync(join(box.home, "work"), away());
+    const report = reportOf(await recover(recoverDeps()));
+    expect(report.operations.map((o) => [o.outcome, o.state])).toEqual([["pending", "unavailable"]]);
+    expect(await journals()).toHaveLength(1);
+    renameSync(away(), join(box.home, "work"));
+    expect(reportOf(await recover(recoverDeps())).operations.map((o) => o.outcome)).toEqual(["rolled-back"]);
+    await expectShelved();
+    await expectInvariants();
+  });
+});
+
+describe("fix wave r1: a step this version does not know is never replayed", () => {
+  test("an onload journal at an unknown step stays pending (journal.pending); the stub stays", async () => {
+    value(await offloadNow());
+    for (let i = 0; i < 400 && (await journals()).length > 0; i++) await Bun.sleep(25);
+    const host = testHost({ faults: { at: "onload.verified" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    await rewrite({ ...onlyJournal<OnloadJournal>(), step: "onload.future-step" });
+    const result = await recover(recoverDeps());
+    expect(result.ok ? 0 : result.finding.code).toBe("journal.pending");
+    expect(reportOf(result).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toEqual([]);
+  });
+
+  test("an offload journal at an unknown step stays pending too", async () => {
+    await crashOffloadAt("offload.committed");
+    await rewrite({ ...onlyJournal<OffloadJournal>(), step: "offload.future-step" });
+    const result = await recover(recoverDeps());
+    expect(result.ok ? 0 : result.finding.code).toBe("journal.pending");
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+  });
+});
+
+describe("fix wave r1: gc removes abandoned staging (D60)", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const stagings = (holder = join(box.home, "work/.plainport-staging")): string[] =>
+    existsSync(holder) ? readdirSync(holder).filter((n) => !n.startsWith(".")) : [];
+
+  test("an onload's staging whose journal is gone (a lost write) is removed", async () => {
+    value(await offloadNow());
+    for (let i = 0; i < 400 && (await journals()).length > 0; i++) await Bun.sleep(25);
+    const host = testHost({ faults: { at: "onload.restored" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    expect(stagings()).toHaveLength(1);
+    const kept = value(await collectTrash(trashDeps(), { early: false }));
+    expect(kept.staging).toEqual([]);
+    expect(stagings()).toHaveLength(1);
+    rmSync(journalFile(box.paths, onlyJournal<OnloadJournal>().op));
+    const done = value(await collectTrash(trashDeps(), { early: false }));
+    expect(done.staging).toHaveLength(1);
+    expect(stagings()).toEqual([]);
+  });
+
+  const crashedRestore = async () => {
+    value(await offloadNow());
+    engine.hooks.duringRestore = () => {
+      throw new InjectedFault("restore");
+    };
+    await expect(
+      runRestore(
+        {
+          host: testHost(),
+          paths: box.paths,
+          device,
+          env: env(),
+          loader: new ConfigLoader(testHost(), box.paths),
+          opener,
+          openMirror: async () => ({ ok: true, value: mirror }),
+          emit: () => {},
+          log: () => {},
+        },
+        { project: await ref(), to: join(box.home, "old/web") },
+      ),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    engine.hooks.duringRestore = undefined;
+  };
+
+  test("a crashed restore's staging is removed once no live operation owns it", async () => {
+    await crashedRestore();
+    const holder = join(box.home, "old/.plainport-staging");
+    expect(stagings(holder)).toHaveLength(1);
+    const done = value(await collectTrash(trashDeps(), { early: false }));
+    expect(done.staging).toHaveLength(1);
+    expect(existsSync(holder)).toBe(false);
+    expect(existsSync(join(box.home, "old/web"))).toBe(false);
+  });
+
+  test("while the project's lock is held (a restore running), its staging stays", async () => {
+    await crashedRestore();
+    const id = (await projectId()) as string;
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      await collectTrash(trashDeps(), { early: false });
+      expect(stagings(join(box.home, "old/.plainport-staging"))).toHaveLength(1);
+    } finally {
+      await held.release();
+    }
+  });
+});
+
+describe("fix wave r1: housekeeping checks the reused trash under the lock", () => {
+  test("an onload that starts renaming the trash back after the first read keeps it", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [offload] = (await journals()) as OffloadJournal[];
+    const reuseJournal: OnloadJournal = {
+      v: 1,
+      op: ulid(),
+      kind: "onload",
+      step: "onload.begin",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      pid: 99_999_999,
+      host: "elsewhere",
+      project: { ...(offload as OffloadJournal).project },
+      store: (offload as OffloadJournal).store,
+      snapshot: (offload as OffloadJournal).op,
+      stored: (offload as OffloadJournal).verified as string,
+      over: (offload as OffloadJournal).op,
+      reuse: { op: (offload as OffloadJournal).op, folder: join(trashes()[0] ?? "", "web") },
+      history: [],
+    };
+    const real = testHost();
+    let first = true;
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        readdir: async (path) => {
+          const names = await real.fs.readdir(path);
+          if (first && path === box.paths.journalDir) {
+            first = false;
+            await writeJournal(real, box.paths, reuseJournal);
+          }
+          return names;
+        },
+      },
+    };
+    const later = new Date(Date.parse((offload as OffloadJournal).keepUntil as string) + 1000);
+    const done = await housekeeping({ host, paths: box.paths, env: env(), log: () => {}, now: () => later });
+    expect(done.started).toEqual([]);
+    expect(trashes()).toHaveLength(1);
+  });
+});
+
+describe("fix wave r1: views with a broken mirror read the store (D45)", () => {
+  const broken = async () => fail(finding("store.failed", { message: "the mirror folder is broken" }));
+  const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
+    io: testHost(),
+    paths: box.paths,
+    env: env(),
+    device,
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: broken,
+    ...over,
+  });
+
+  test("a catalog-only project is still listed, read from the store directly, not stale", async () => {
+    value(await offloadNow());
+    const id = (await projectId()) as string;
+    const registry = value(await readRegistry(testHost(), box.paths));
+    const { [id]: _, ...rest } = registry.projects;
+    writeFileSync(box.paths.registryFile, JSON.stringify({ ...registry, projects: rest }));
+    const views = value(await projectViews(viewDeps()));
+    expect(views.projects.map((p) => [p.address, p.state, p.stale])).toEqual([
+      ["work:web", "shelved", false],
+    ]);
+  });
+
+  test("an unreachable store and a broken mirror: the project's catalog is unread, never reported synced", async () => {
+    value(await offloadNow());
+    const gone: StoreOpener = {
+      open: async () => {
+        const failure = fail(finding("store.unreachable", { message: "the disk is not mounted" }));
+        return {
+          ok: true,
+          value: {
+            blob: {
+              ...store,
+              get: async () => failure,
+              stat: async () => failure,
+              list: async () => failure,
+            },
+            engine,
+          },
+        };
+      },
+    };
+    const views = value(await projectViews(viewDeps({ opener: gone })));
+    const [web] = views.projects;
+    expect([web?.stale, web?.conditions]).toEqual([true, ["catalog-unreadable"]]);
   });
 });

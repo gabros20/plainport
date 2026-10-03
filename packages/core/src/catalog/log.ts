@@ -174,6 +174,22 @@ const listEvents = async (log: EventLog): Promise<Result<Listed>> => {
   return ok({ entries: listing.value, ids });
 };
 
+/**
+ * The event stored under one id: null when there is none, or the catalog.event-skipped finding when the bytes there
+ * are no whole event (a torn write on a store without hard links, D42, or a damaged file).
+ */
+export const eventAt = async (
+  log: EventLog,
+  id: string,
+): Promise<Result<{ event: CatalogEvent } | { skipped: Finding } | null>> => {
+  const key = keyOf(log, id);
+  const bytes = await log.store.get(key);
+  if (!bytes.ok) return bytes;
+  if (bytes.value === null) return ok(null);
+  const parsed = parseEvent(key, id, bytes.value);
+  return ok("finding" in parsed ? { skipped: parsed.finding } : { event: parsed });
+};
+
 export interface EventsRead {
   /** Every usable event, sorted by id. */
   events: CatalogEvent[];
