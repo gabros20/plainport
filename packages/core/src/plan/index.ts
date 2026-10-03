@@ -4,6 +4,7 @@ export { compilePatterns, type PatternSet } from "./patterns.ts";
 export {
   OFFLOAD_PHASES,
   type OffloadPlanRequest,
+  type PlanBoundary,
   type PreparedOffload,
   planOffload,
   prepareOffload,
@@ -18,6 +19,7 @@ export {
   type Plan,
   type PlanFile,
   PlanFileSchema,
+  type PlanOptions,
   PlanSchema,
   type ProjectView,
   ProjectViewSchema,

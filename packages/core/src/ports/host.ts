@@ -13,16 +13,6 @@ export interface Clock {
   sleep(ms: number): Promise<void>;
 }
 
-/** A program started to outlive the command (HostPorts.detach). */
-export interface DetachSpec {
-  /** An absolute path, or a name looked up on the env's PATH. */
-  command: string;
-  args: readonly string[];
-  cwd: string;
-  /** The child's whole environment; nothing is inherited. */
-  env: Readonly<Record<string, string>>;
-}
-
 export interface HostPorts extends LocalIo {
   clock: Clock;
   /** Runs a child process through the one runner (AGENTS.md rule 6). */
@@ -35,12 +25,13 @@ export interface HostPorts extends LocalIo {
    */
   faultAt(step: string): void;
   /**
-   * Starts a program that outlives this command: a session and process group of its own, stdin, stdout and stderr
-   * on /dev/null, never waited for. Only for work that must finish after the command has returned and that recovery
-   * repeats if it never ran, such as deleting an offload's trash (DESIGN.md "Offload process" step 8). Resolves with
-   * its pid once it has started; one that cannot start is process.spawn-failed.
+   * Deletes an offload's trash folder, then its journal, from a detached process that outlives this command (DESIGN.md
+   * "Offload process" step 8). The one sanctioned exception to the one process runner (D47): the command is fixed
+   * and internal, it has no output to bound, and only a journaled trash path is accepted (`.../.plainport-trash/<op>`,
+   * with its `journal/<op>.json`). If it dies or never starts, recover and gc finish the trash. Resolves once it has
+   * started; one that cannot start is process.spawn-failed.
    */
-  detach(spec: DetachSpec): Promise<Result<{ pid: number }>>;
+  deleteTrashDetached(trash: string, journal: string): Promise<Result<{ pid: number }>>;
 }
 
 /** Dotted lower-case words, at least two: offload.release, onload.swap.rename. */

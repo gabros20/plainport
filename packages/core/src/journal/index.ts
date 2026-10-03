@@ -51,6 +51,10 @@ export const OffloadJournalSchema = z
     /** The root-created event this operation wrote, when the root had no ULID yet. */
     rootCreated: UlidSchema.optional(),
     plan: z.strictObject({ id: UlidSchema, fingerprint: z.string().min(1) }).optional(),
+    /** How release goes, decided with the plan, so recovery repeats it whatever the config says by then. */
+    release: z.strictObject({ keepLocalFor: z.string(), stub: z.boolean() }).optional(),
+    /** The head moved under this copy: the event (`event`) keeps the snapshot as a fork, and nothing is released. */
+    diverged: z.literal(true).optional(),
     /** Every snapshot restic wrote for this operation, in order: a retry after an edit makes a second. */
     attempts: z.array(ResticIdSchema),
     /** The snapshot restic wrote although it failed (exit 3, D28), and the snapshot-discarded event naming it. */

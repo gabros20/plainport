@@ -29,7 +29,6 @@ export type * from "./ports/ecosystem.ts";
 export type * from "./ports/engine.ts";
 export {
   type Clock,
-  type DetachSpec,
   type FaultPlan,
   faultSeam,
   type HostPorts,
@@ -42,7 +41,7 @@ export * from "./roots/index.ts";
 export * from "./runner/index.ts";
 export * from "./saga/offload.ts";
 export * from "./scan/index.ts";
-export { posixDetach, posixSpawner } from "./spawner.ts";
+export { posixDeleteTrash, posixSpawner } from "./spawner.ts";
 export * from "./store.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";

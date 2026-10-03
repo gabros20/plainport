@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { finding, type Result, type StreamEvent } from "@plainport/contract";
+import { fail, finding, type Result, type StreamEvent } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
@@ -26,12 +26,13 @@ import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
+import { posixDeleteTrash } from "../spawner.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { testHost } from "../testing/host.ts";
-import { invariantViolations } from "../testing/invariants.ts";
+import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { isUlid, ulid } from "../ulid.ts";
@@ -48,6 +49,12 @@ let dir: string;
 let events: StreamEvent[];
 let logs: string[];
 let steps: string[];
+/** The folder as it stood when release began: what invariant 1 checks the committed snapshot against. */
+let released: TreeCapture | undefined;
+/** Records the folder at the release step; every test host calls it from onStep. */
+const capture = (step: string) => {
+  if (step === "offload.release.trash") released = captureTree(dir);
+};
 
 const opener: StoreOpener = {
   open: async () => ({ ok: true, value: { blob: store, engine } }),
@@ -101,6 +108,7 @@ beforeEach(async () => {
   events = [];
   logs = [];
   steps = [];
+  released = undefined;
 });
 
 afterEach(() => {
@@ -115,7 +123,14 @@ afterEach(() => {
 
 const deps = (
   over: Partial<OffloadDeps> = {},
-  host: HostPorts = testHost({ faults: { onStep: (s) => steps.push(s) } }),
+  host: HostPorts = testHost({
+    faults: {
+      onStep: (s) => {
+        steps.push(s);
+        capture(s);
+      },
+    },
+  }),
 ): OffloadDeps => ({
   host,
   checks: quietChecks,
@@ -163,6 +178,8 @@ const expectInvariants = async (settleMs?: number) => {
     project: { id: await projectId(), dir },
     roots: [join(box.home, "work")],
     store: { name: "ssd", blob: store, engine },
+    ...(released === undefined ? {} : { released }),
+    stripped: ["node_modules"],
     ...(settleMs === undefined ? {} : { settleMs }),
   });
   expect(violations).toEqual([]);
@@ -282,7 +299,9 @@ describe("offload: the happy path", () => {
       "release",
     ]);
     expect(phases.every((e) => e.op === result.op)).toBe(true);
-    expect(steps).toEqual(OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded"));
+    expect(steps).toEqual(
+      OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
+    );
     await expectInvariants();
   });
 
@@ -291,6 +310,7 @@ describe("offload: the happy path", () => {
     const host = testHost({
       faults: {
         onStep: (step) => {
+          capture(step);
           const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
           const text =
             names.length === 1 ? readFileSync(join(box.paths.journalDir, names[0] as string), "utf8") : "";
@@ -302,7 +322,9 @@ describe("offload: the happy path", () => {
       },
     });
     value(await runOffload(deps({}, host), { project: await ref() }));
-    expect(seen.map((s) => s.step)).toEqual(OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded"));
+    expect(seen.map((s) => s.step)).toEqual(
+      OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
+    );
     for (const { step, journal } of seen) expect(journal).toBe(step);
     await expectInvariants();
   });
@@ -374,8 +396,10 @@ describe("offload: the happy path", () => {
     expect(engine.calls[0]?.parent).toBe(r1);
     const offloaded = (await storeEvents()).find((e) => e.type === "offloaded" && e.op === result.op);
     expect(offloaded).toMatchObject({ base: s1, root: rootId });
-    // The root already had its ULID: no second root-created event.
-    expect((await storeEvents()).filter((e) => e.type === "root-created")).toEqual([]);
+    // The root keeps the ULID the registry recorded; the catalog lacked its root-created event, so it is written.
+    expect((await storeEvents()).filter((e) => e.type === "root-created")).toEqual([
+      expect.objectContaining({ root: rootId, key: "work" }),
+    ]);
     expect(foldCatalog(await storeEvents()).projects[id]).toMatchObject({
       status: "shelved",
       head: result.op,
@@ -720,7 +744,7 @@ describe("offload: stopping", () => {
   });
 
   test("a crash is never caught: the injected fault propagates and the journal stays at its step", async () => {
-    const host = testHost({ faults: { at: "offload.release.moved" } });
+    const host = testHost({ faults: { at: "offload.release.moved", onStep: capture } });
     const run = runOffload(deps({}, host), { project: await ref() });
     await expect(run).rejects.toBeInstanceOf(InjectedFault);
     const [journal] = (await readJournals(testHost(), box.paths)).journals;
@@ -735,6 +759,8 @@ describe("offload: stopping", () => {
       project: { id: await projectId(), dir },
       roots: [join(box.home, "work")],
       store: { name: "ssd", blob: store, engine },
+      ...(released === undefined ? {} : { released }),
+      stripped: ["node_modules"],
       settleMs: 0,
     });
     expect(violations.filter((v) => v.startsWith("invariant 1"))).toEqual([]);
@@ -752,5 +778,399 @@ describe("offload: what is not here", () => {
     expect(again.ok ? "" : again.finding.fix).toBe("it is shelved: plainport onload work:web brings it back");
     expect(engine.calls).toHaveLength(1);
     await expectInvariants();
+  });
+});
+
+describe("offload: fix wave r1", () => {
+  const gitInit = () => {
+    const git = Bun.spawnSync(["git", "init", "-q", dir], {
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(git.exitCode).toBe(0);
+  };
+  const journalNow = () => {
+    const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    return OffloadJournalSchema.parse(
+      JSON.parse(readFileSync(join(box.paths.journalDir, names[0] as string), "utf8")),
+    );
+  };
+
+  test("the steps, in order: every preparation boundary is journaled, and a fork has a branch of its own", () => {
+    expect([...OFFLOAD_STEPS]).toEqual([
+      "offload.begin",
+      "offload.preflight.done",
+      "offload.scan.done",
+      "offload.strip.done",
+      "offload.planned",
+      "offload.snapshot.start",
+      "offload.snapshot.discarded",
+      "offload.snapshot.done",
+      "offload.verified",
+      "offload.diverged",
+      "offload.commit.start",
+      "offload.committed",
+      "offload.release.trash",
+      "offload.release.moved",
+      "offload.release.stub",
+      "offload.release.delete",
+    ]);
+  });
+
+  test("phase events stream as the preparation runs: preflight is over before the scan starts", async () => {
+    const seen: string[] = [];
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.preflight.done")
+            seen.push(...events.filter((e) => e.type === "phase").map((e) => `${e.phase}.${e.status}`));
+        },
+      },
+    });
+    value(await runOffload(deps({}, host), { project: await ref() }));
+    expect(seen).toEqual(["resolve.start", "resolve.end", "preflight.start", "preflight.end"]);
+    await expectInvariants();
+  });
+
+  test("a retry plans again: a path that stops being regenerable during the upload is kept", async () => {
+    engine.hooks.duringSnapshot = (_input, attempt) => {
+      if (attempt === 1) box.file("work/web/.plainport.toml", '[strip]\nkeep = ["node_modules"]\n');
+    };
+    value(await offload());
+    expect(engine.calls.map((c) => c.excludes)).toEqual([["node_modules"], []]);
+    const committed = engine.repository.snapshots[1];
+    expect(committed?.entries.some((e) => e.path === "node_modules/dep/index.js")).toBe(true);
+    await expectInvariants();
+  });
+
+  test("a retry runs preflight again: a blocker that appears during the upload stops it, nothing deleted", async () => {
+    gitInit();
+    engine.hooks.duringSnapshot = (_input, attempt) => {
+      if (attempt === 1) box.file("work/web/.git/index.lock");
+    };
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "git.locked"]);
+    expect(engine.calls).toHaveLength(1);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("an edit after the plan and before the snapshot is caught right before restic runs", async () => {
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "offload.planned") writeFileSync(join(dir, "src/main.ts"), "late edit\n");
+        },
+      },
+    });
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "plan.stale"]);
+    expect(engine.calls).toHaveLength(0);
+    expect(result.ok ? undefined : result.data).toMatchObject({
+      kind: "offload",
+      fingerprint: expect.any(String),
+    });
+    await expectInvariants();
+  });
+
+  test("something else at <project>.plainport blocks in preflight (D47); the file is never touched", async () => {
+    writeFileSync(`${dir}.plainport`, "my own notes\n");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "path.stub-occupied"]);
+    expect(engine.calls).toHaveLength(0);
+    expect(readFileSync(`${dir}.plainport`, "utf8")).toBe("my own notes\n");
+    const planned = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(),
+      }),
+    );
+    expect(planned.plan.findings.map((f) => f.code)).toContain("path.stub-occupied");
+  });
+
+  test("a plan approved with --keep-deps runs only with --keep-deps; otherwise a fresh plan is the error's data", async () => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(),
+        store: "ssd",
+        keepDeps: true,
+      }),
+    );
+    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    const without = await offload({ plan: prepared.plan.id });
+    expect(without.ok ? 0 : [without.exitCode, without.finding.code]).toEqual([6, "plan.stale"]);
+    expect(without.ok ? undefined : without.data).toMatchObject({
+      kind: "offload",
+      strip: [expect.objectContaining({ path: "node_modules" })],
+      options: { keepDeps: false },
+    });
+    expect(engine.calls).toHaveLength(0);
+    const withAllow = await offload({ plan: prepared.plan.id, keepDeps: true, allow: ["git.locked"] });
+    expect(withAllow.ok ? 0 : withAllow.finding.code).toBe("plan.stale");
+    value(await offload({ plan: prepared.plan.id, keepDeps: true }));
+    expect(engine.calls[0]?.excludes).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("a config change since the plan (strip.extra) refuses the approved plan", async () => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(),
+        store: "ssd",
+      }),
+    );
+    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    config('[strip]\nextra = ["src"]');
+    const result = await offload({ plan: prepared.plan.id });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  const forkDuringUpload = async () => {
+    const id = ulid();
+    const rootId = ulid();
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          roots: { work: rootId },
+          projects: { [id]: { root: "work", path: "web", registeredAt: "2026-10-01T00:00:00.000Z" } },
+        },
+      })),
+    );
+    engine.hooks.duringSnapshot = async () => {
+      const s = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: s,
+          op: s,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: s,
+          stored: { ssd: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+  };
+
+  test("a fork takes its own journaled branch, never committed, and exit 8 carries the kept snapshot (D14)", async () => {
+    await forkDuringUpload();
+    const result = await offload();
+    expect(steps).toContain("offload.diverged");
+    expect(steps).not.toContain("offload.committed");
+    expect(steps).not.toContain("offload.commit.start");
+    expect(result.ok ? 0 : result.exitCode).toBe(8);
+    const kept = engine.repository.snapshots[0]?.info.id;
+    expect(result.ok ? undefined : result.data).toMatchObject({
+      exitCode: 8,
+      project: "work:web",
+      store: "ssd",
+      stored: kept,
+    });
+    await expectInvariants();
+  });
+
+  test("a crash on the fork branch leaves a journal that says so", async () => {
+    await forkDuringUpload();
+    const host = testHost({ faults: { at: "offload.diverged" } });
+    await expect(runOffload(deps({}, host), { project: await ref() })).rejects.toBeInstanceOf(InjectedFault);
+    expect(journalNow()).toMatchObject({
+      step: "offload.diverged",
+      diverged: true,
+      event: expect.any(String),
+    });
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("keepLocalFor and the stub policy are in the journal from the plan on, before anything is released", async () => {
+    config('[offload]\nkeepLocalFor = "24h"');
+    let atCommit: unknown;
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.committed") atCommit = journalNow();
+        },
+      },
+    });
+    const result = value(await runOffload(deps({}, host), { project: await ref() }));
+    expect(atCommit).toMatchObject({ release: { keepLocalFor: "24h", stub: true } });
+    expect(result.freedBytes).toBe(0);
+    await expectInvariants(0);
+  });
+
+  test("a detached delete that cannot start loses nothing: the trash waits for recover, nothing is reported freed", async () => {
+    const real = testHost({ faults: { onStep: capture } });
+    const host: HostPorts = {
+      ...real,
+      deleteTrashDetached: async () => fail(finding("process.spawn-failed", { message: "no sh today" })),
+    };
+    const result = value(await runOffload(deps({}, host), { project: await ref() }));
+    expect(result.freedBytes).toBe(0);
+    expect(existsSync(join(result.trash, "web/src/main.ts"))).toBe(true);
+    expect(journalNow().step).toBe("offload.release.delete");
+    expect(logs.join("\n")).toContain("plainport recover");
+  });
+
+  test("an I/O error in release is a coded failure, never an exception; the journal stays for recover", async () => {
+    const real = testHost({ faults: { onStep: capture } });
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        rename: async (from, to) => {
+          if (from === dir) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          return real.fs.rename(from, to);
+        },
+      },
+    };
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
+    expect(result.ok ? "" : result.finding.fix).toContain("plainport recover");
+    expect(journalNow().step).toBe("offload.release.trash");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("a journal that cannot be written before the commit fails coded, with nothing changed", async () => {
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        writeTextDurable: async (path, text) => {
+          if (path.startsWith(box.paths.journalDir))
+            throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+          return real.fs.writeTextDurable(path, text);
+        },
+      },
+    };
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
+    expect(engine.calls).toHaveLength(0);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("first offloads of two projects in one root at once agree on the root's ULID", async () => {
+    box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    const [a, b] = await Promise.all([
+      offload(),
+      ref("work:api").then((r) => runOffload(deps(), { project: r })),
+    ]);
+    expect(a.ok && b.ok).toBe(true);
+    const offloads = (await storeEvents()).filter((e) => e.type === "offloaded");
+    expect(new Set(offloads.map((e) => e.root)).size).toBe(1);
+    const registry = value(await readRegistry(testHost(), box.paths));
+    expect(registry.roots?.work).toBe(offloads[0]?.root);
+  });
+
+  test("a root ULID the catalog already holds is recorded in registry.json", async () => {
+    const rootId = ulid();
+    value(
+      await appendEvent(storeEventLog(store), {
+        v: 1,
+        id: ulid(),
+        op: ulid(),
+        type: "root-created",
+        device: ulid(),
+        at: "2026-10-01T00:00:00.000Z",
+        root: rootId,
+        key: "work",
+      }),
+    );
+    value(await offload());
+    expect(value(await readRegistry(testHost(), box.paths)).roots?.work).toBe(rootId);
+    expect((await storeEvents()).filter((e) => e.type === "root-created")).toHaveLength(1);
+  });
+});
+
+describe("invariants helper", () => {
+  test("invariant 1 needs the deleted copy's own snapshot: a stub naming an uncommitted one fails it", async () => {
+    value(await offload());
+    const stub = JSON.parse(readFileSync(`${dir}.plainport`, "utf8"));
+    writeFileSync(`${dir}.plainport`, JSON.stringify({ ...stub, snapshot: ulid() }));
+    const violations = await invariantViolations({
+      paths: box.paths,
+      device: device.id,
+      project: { id: await projectId(), dir },
+      roots: [join(box.home, "work")],
+      store: { name: "ssd", blob: store, engine },
+      ...(released === undefined ? {} : { released }),
+      stripped: ["node_modules"],
+    });
+    expect(violations.some((v) => v.startsWith("invariant 1"))).toBe(true);
+  });
+
+  test("invariant 1 compares the committed snapshot with the folder as it was released", async () => {
+    value(await offload());
+    const violations = await invariantViolations({
+      paths: box.paths,
+      device: device.id,
+      project: { id: await projectId(), dir },
+      roots: [join(box.home, "work")],
+      store: { name: "ssd", blob: store, engine },
+      released: new Map([
+        ...(released ?? new Map()),
+        ["missing.txt", { type: "file", size: 1, mode: 0o644 }],
+      ]),
+      stripped: ["node_modules"],
+    });
+    expect(violations.some((v) => v.startsWith("invariant 1") && v.includes("missing.txt"))).toBe(true);
+  });
+
+  test("invariant 3 reads each journal: a released operation's trash past its deadline is a leftover", async () => {
+    config('[offload]\nkeepLocalFor = "24h"');
+    const result = value(await offload());
+    const subject = async (now?: Date) =>
+      invariantViolations({
+        paths: box.paths,
+        device: device.id,
+        project: { id: await projectId(), dir },
+        roots: [join(box.home, "work")],
+        store: { name: "ssd", blob: store, engine },
+        ...(released === undefined ? {} : { released }),
+        stripped: ["node_modules"],
+        settleMs: 0,
+        ...(now === undefined ? {} : { now }),
+      });
+    expect(await subject()).toEqual([]);
+    const later = new Date(Date.parse(result.keepUntil as string) + 1000);
+    expect((await subject(later)).some((v) => v.startsWith("invariant 3"))).toBe(true);
+  });
+});
+
+describe("the detached trash delete (D47)", () => {
+  test("starts only for an offload's own trash and journal; anything else is a bug and refused", async () => {
+    const op = ulid();
+    await expect(posixDeleteTrash("/tmp/somewhere", `/x/journal/${op}.json`)).rejects.toThrow(
+      "not an offload's",
+    );
+    await expect(
+      posixDeleteTrash(`/r/.plainport-trash/${op}`, `/x/journal/${ulid()}.json`),
+    ).rejects.toThrow();
+    const trash = box.dir(`work/.plainport-trash/${op}`);
+    box.file(`work/.plainport-trash/${op}/web/a.txt`, "a");
+    const journal = box.file(`.local/state/plainport/journal/${op}.json`, "{}");
+    value(await posixDeleteTrash(trash, journal));
+    await waitGone(journal);
+    expect([existsSync(trash), existsSync(journal)]).toEqual([false, false]);
   });
 });

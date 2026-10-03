@@ -76,6 +76,18 @@ export const PlanSchema = outputObject({
   arrival: z.array(ArrivalItemSchema).optional().meta({
     description: "What each part becomes where the project lands; for an offload, how it comes back",
   }),
+  options: outputObject({
+    keepDeps: z.boolean(),
+    allow: z.array(z.string()).meta({ description: "--allow codes, sorted" }),
+    store: z.string().min(1).optional(),
+    keepLocalFor: z.string(),
+    stub: z.boolean(),
+  })
+    .optional()
+    .meta({
+      description:
+        "What the plan was made with: options and the release settings. An approved plan runs only with the same",
+    }),
   estimate: outputObject({
     uploadBytes: bytes.optional(),
     downloadBytes: bytes.optional(),
@@ -84,6 +96,7 @@ export const PlanSchema = outputObject({
   expiresAt: z.iso.datetime().meta({ description: "After this, --plan <id> no longer runs it" }),
 }).meta({ title: "Plan" });
 export type Plan = z.infer<typeof PlanSchema>;
+export type PlanOptions = NonNullable<Plan["options"]>;
 
 /** plans/<id>.json: a versioned wrapper around the plan (DESIGN.md "Versioned documents"). */
 export const PlanFileSchema = z.strictObject({ v: z.literal(1), plan: PlanSchema });

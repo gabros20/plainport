@@ -6,9 +6,10 @@
 // scanned, so there is no plan, and the planner fails with the first blocker after reporting every finding.
 
 import { join } from "node:path";
-import { type Finding, fail, finding, ok, type Result } from "@plainport/contract";
+import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { ConfigLoader } from "../config/load.ts";
 import type { ResolvedConfig } from "../config/schema.ts";
+import { systemErrorCode } from "../io.ts";
 import type { Env } from "../paths.ts";
 import type { CheckContext, HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin, HydrateStep } from "../ports/ecosystem.ts";
@@ -18,6 +19,7 @@ import { gitTracked } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
 import type { TreeScan } from "../scan/walk.ts";
+import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { type ArrivalItem, PLAN_TTL_MS, type Plan } from "./schema.ts";
 import { type ProposedStrip, resolveStripSet } from "./strip.ts";
@@ -46,12 +48,56 @@ export interface OffloadPlanRequest {
   store?: string;
   /** --keep-deps: installed dependencies travel in the snapshot. */
   keepDeps?: boolean;
+  /** --allow: recorded in the plan's options, so an approval holds only for the same overrides. */
+  allow?: readonly string[];
+  /** Told each boundary as it is crossed, in order, so a saga streams phases and journals them (ADR-0008). */
+  boundary?(at: PlanBoundary): void | Promise<void>;
   signal?: AbortSignal;
   /** Told each finding when no plan can be made, before the failure returns. */
   onFinding?(finding: Finding): void;
 }
 
+/** Where the preparation stands: preflight done, the scan done, the strip set chosen, the plan made. */
+export type PlanBoundary =
+  | "preflight.start"
+  | "preflight.end"
+  | "scan.start"
+  | "scan.end"
+  | "plan.start"
+  | "strip.end"
+  | "plan.end";
+
 const LARGEST = 10;
+
+/**
+ * path.stub-occupied (D47): the stub goes to `<dir>.plainport`, and only an absent path or this project's own stub may
+ * be there. A stub names its project by ULID, or by root and path when this device has no ULID for it yet.
+ */
+const stubOccupied = async (
+  host: HostPorts,
+  dir: string,
+  project: OffloadPlanRequest["project"],
+): Promise<Finding | undefined> => {
+  const path = `${dir}${STUB_SUFFIX}`;
+  try {
+    await host.fs.lstat(path);
+  } catch (error) {
+    if (systemErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  const stub = await readStub(host, path);
+  const ours =
+    stub.ok &&
+    (project.id === undefined
+      ? stub.value.root === project.root && stub.value.path === project.path
+      : stub.value.project === project.id);
+  if (ours) return undefined;
+  return finding("path.stub-occupied", {
+    message: `${path} is already there and is not this project's stub; the offload would put its stub there`,
+    fix: `move ${shellWord(path)} somewhere else, then re-run`,
+    paths: [path],
+  });
+};
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /** Folders holding a repository of their own (a .git folder or pointer), relative; "" is the project folder. */
@@ -117,9 +163,12 @@ export const prepareOffload = async (
   req: OffloadPlanRequest,
 ): Promise<Result<PreparedOffload>> => {
   const ctx: CheckContext = { env: req.env, ...(req.signal === undefined ? {} : { signal: req.signal }) };
+  await req.boundary?.("preflight.start");
   const checked = await preflight(host, checks, req.dir, ctx);
   if (!checked.ok) return checked;
   const report = checked.value;
+  const occupied = await stubOccupied(host, req.dir, req.project);
+  if (occupied !== undefined) report.findings.push(occupied);
   if (!report.safeToRead) {
     for (const f of report.findings) req.onFinding?.(f);
     const blocker = report.findings.find((f) => f.severity === "block");
@@ -136,8 +185,12 @@ export const prepareOffload = async (
   if (!loaded.ok) return loaded;
   const { config } = loaded.value;
 
+  await req.boundary?.("preflight.end");
+  await req.boundary?.("scan.start");
   const scanned = await scanProject(host, req.dir, ctx, report);
   if (!scanned.ok) return scanned;
+  await req.boundary?.("scan.end");
+  await req.boundary?.("plan.start");
   const { tree } = scanned.value;
   const { manifest } = tree;
 
@@ -172,6 +225,7 @@ export const prepareOffload = async (
     tracked: (repo, paths) => gitTracked(host, repo === "" ? req.dir : join(req.dir, repo), ctx, paths),
   });
   if (!strip.ok) return strip;
+  await req.boundary?.("strip.end");
   // Candidates kept for a reason a person may want to change: why 612 MB stayed is part of the plan.
   // A kept candidate inside a stripped path leaves with it, so it is not reported as staying.
   const gone = new Set(strip.value.entries.map((e) => e.path));
@@ -255,8 +309,16 @@ export const prepareOffload = async (
     findings,
     phases: [...OFFLOAD_PHASES],
     ...(arrival.length === 0 ? {} : { arrival }),
+    options: {
+      keepDeps,
+      allow: [...new Set(req.allow ?? [])].sort(),
+      ...(store === undefined ? {} : { store }),
+      keepLocalFor: config.offload.keepLocalFor,
+      stub: config.offload.stub,
+    },
     estimate: { uploadBytes: bytes },
     expiresAt: new Date(req.now.getTime() + PLAN_TTL_MS).toISOString(),
   };
+  await req.boundary?.("plan.end");
   return ok({ plan, tree, config, ecosystems, fsmonitor: report.fsmonitor });
 };

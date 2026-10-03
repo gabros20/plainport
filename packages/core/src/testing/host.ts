@@ -9,7 +9,7 @@ import { type GuardPolicy, guardedFs, PathGuard } from "../guard.ts";
 import { nodeLocalIo } from "../node-io.ts";
 import { type FaultPlan, faultSeam, type HostPorts } from "../ports/host.ts";
 import { runProcess } from "../runner/runner.ts";
-import { posixDetach, posixSpawner } from "../spawner.ts";
+import { posixDeleteTrash, posixSpawner } from "../spawner.ts";
 
 const checkout = resolve(import.meta.dir, "../../../..");
 
@@ -33,9 +33,9 @@ export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
       return runProcess(posixSpawner, spec);
     },
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
-    detach: async (spec) => {
-      await guard.checkRun(spec);
-      return posixDetach(spec);
+    deleteTrashDetached: async (trash, journal) => {
+      await guard.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
+      return posixDeleteTrash(trash, journal);
     },
   };
 };
