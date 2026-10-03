@@ -83,7 +83,8 @@ const leftovers = (subject: InvariantSubject, now: Date): string[] => {
         const journal = readJournal(subject.paths, name);
         const open =
           journal !== undefined &&
-          (journal.step !== "offload.release.delete" ||
+          (journal.kind !== "offload" ||
+            journal.step !== "offload.release.delete" ||
             (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > now.getTime()));
         if (!open) found.push(join(dir, name));
       }
@@ -103,7 +104,7 @@ const deletedOp = (subject: InvariantSubject): string | undefined => {
   } catch {}
   // The newest of the project's journals: an older one may be a kept trash (keepLocalFor) of an earlier offload.
   const journal = projectJournals(subject)
-    .filter((j) => j.project.dir === subject.project.dir)
+    .filter((j) => j.kind === "offload" && j.project.dir === subject.project.dir)
     .sort((a, b) => (a.op < b.op ? -1 : 1))
     .at(-1);
   if (journal !== undefined) return journal.op;
@@ -136,7 +137,9 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
     const stored = event?.type === "offloaded" ? event.stored[subject.store.name] : undefined;
     const listed = await subject.store.engine.list({ tags: ["plainport"] });
     const held = new Set(listed.ok ? listed.value.map((s) => s.id) : []);
-    const fork = projectJournals(subject).some((j) => j.op === op && j.diverged === true);
+    const fork = projectJournals(subject).some(
+      (j) => j.op === op && j.kind === "offload" && j.diverged === true,
+    );
     if (op === undefined)
       problems.push(`invariant 1: ${dir} is gone, and nothing names the snapshot it became`);
     else if (event === undefined || stored === undefined)

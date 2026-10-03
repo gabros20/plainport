@@ -596,6 +596,62 @@ export const FINDINGS = Object.freeze({
     exitCode: 2,
     summary: "The arguments or options do not match the command's declared arguments",
   },
+  "fs.case-collision": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The snapshot holds names that differ only by case (Foo.ts, foo.ts) and the landing volume ignores case, so one would overwrite the other; onload to a case-sensitive volume with --to",
+  },
+  "fs.no-space": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The landing volume has less free space than the snapshot, the dependencies recorded at offload and a 10% margin need; nothing was restored",
+  },
+  "hydrate.failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 10,
+    summary:
+      "The files are restored but installing the dependencies failed (restored-unhydrated); the error's data names the project and snapshot, and plainport hydrate retries",
+  },
+  "lease.held": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "Another device holds the project's lease (it is onloaded there); a warning, or a refusal with exit 8 when onload.leases is strict",
+  },
+  "path.occupied": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Something already stands where onload would put the project; onload never merges into it, and fix names --to <path>",
+  },
+  "project.nested": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The folder holds another registered project that is on this device; offload the inner project first, or unregister it (D53)",
+  },
+  "snapshot.not-found": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary:
+      "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport history lists its snapshots",
+  },
+  "toolchain.mismatch": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The project asks for a tool version (.nvmrc, engines, packageManager) that is not active and no version manager (mise, fnm, Volta) can activate; the install runs with what is there",
+  },
   "strip.kept": {
     severity: "info",
     allowable: false,
@@ -615,7 +671,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 7,
     summary:
-      "The snapshot's listing does not match the scan of the folder (entries, types, sizes, modes or link targets); nothing local was deleted",
+      "The snapshot's listing does not match the folder: at offload the scan of the project (nothing local was deleted), at onload the restored staging folder (it is removed, and the stub stays); entries, types, sizes, modes or link targets",
   },
   "tool.missing": {
     severity: "block",

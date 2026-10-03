@@ -56,12 +56,30 @@ export interface HydrateResult {
   steps: HydrateStep[];
 }
 
+/**
+ * A tool version the project asks for (DESIGN.md "Onload process" step 7): read from .nvmrc, .node-version,
+ * .tool-versions, mise.toml, package.json's engines or packageManager. The core decides how to meet it: through a
+ * version manager that is installed (mise, fnm, Volta), else by comparing the active version and warning.
+ */
+export interface ToolRequirement {
+  /** The tool, as its version manager and its own --version name it: node, pnpm, yarn, bun, npm. */
+  tool: string;
+  /** As the file writes it: an exact version (20.11.0), a partial one (20), a semver range (>=18), or an alias. */
+  version: string;
+  /** Where it was read, for messages: ".nvmrc", "package.json engines.node". */
+  source: string;
+  /** Pinned by a version file a manager reads (.nvmrc, .node-version, .tool-versions, mise.toml): one to activate. */
+  pinned: boolean;
+}
+
 export interface EcosystemPlugin {
   id: string;
   detect(dir: ProjectDir): Promise<Detection | null>;
   /** Proposals only: the path and why it is regenerable. */
   strip(ctx: PluginContext): Promise<StripCandidate[]>;
   preflight?(ctx: PluginContext): Promise<Finding[]>;
+  /** The tool versions the project asks for, read from its files; runs nothing. */
+  toolchain?(ctx: PluginContext): Promise<ToolRequirement[]>;
   /** The install commands that bring the stripped dependencies back, in order. Names them; runs nothing. */
   hydrate(ctx: PluginContext): Promise<HydrateResult>;
 }

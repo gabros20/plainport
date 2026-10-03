@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   type Stats,
   symlinkSync,
   utimesSync,
@@ -56,8 +57,24 @@ export interface FakeEngineHooks {
   duringListing?(snapshot: string): void | Promise<void>;
   /** Rewrites the entries a listing hands out, to fake a snapshot that does not match the folder. */
   listing?(entries: EntryMeta[]): EntryMeta[];
-  /** The next call of this method returns the failure instead of running. */
-  failNext?: Partial<Record<"snapshot" | "list" | "entries" | "init", Failure>>;
+  /** Runs while a restore writes, after the folders and files are in place and before modes and times: a test edits
+   * or damages the restored tree here. */
+  duringRestore?(target: string): void | Promise<void>;
+  /**
+   * The next call of this method returns the failure instead of running. A restore writes its folders and the first
+   * of its files before it fails, as an interrupted one leaves them.
+   */
+  failNext?: Partial<Record<"snapshot" | "list" | "entries" | "init" | "restore", Failure>>;
+}
+
+/** What each restore was asked, in order. */
+export interface RestoreCall {
+  snapshot: string;
+  target: string;
+  overwrite: string;
+  /** Files written and files left as they were (an existing file of the same size, with overwrite if-changed). */
+  written: number;
+  skipped: number;
 }
 
 export interface FakeEngine extends Engine {
@@ -65,6 +82,7 @@ export interface FakeEngine extends Engine {
   readonly hooks: FakeEngineHooks;
   /** Snapshot calls made, in order. */
   readonly calls: SnapshotInput[];
+  readonly restores: RestoreCall[];
 }
 
 const hex64 = (): string =>
@@ -146,6 +164,7 @@ export const fakeEngine = (
   hooks: FakeEngineHooks = {},
 ): FakeEngine => {
   const calls: SnapshotInput[] = [];
+  const restores: RestoreCall[] = [];
   const missing = (): Failure =>
     fail(finding("restic.repo-missing", { message: "the fake repository was never initialised" }));
   const find = (id: string) => repository.snapshots.find((s) => s.info.id === id);
@@ -156,6 +175,7 @@ export const fakeEngine = (
     repository,
     hooks,
     calls,
+    restores,
     init: async () => {
       const failure = taken(hooks, "init");
       if (failure !== undefined) return failure;
@@ -235,35 +255,65 @@ export const fakeEngine = (
       for (const entry of listed) onEntry({ ...entry });
       return ok({ snapshot: snapshot.info, count: listed.length });
     },
-    restore: async (id, target) => {
+    restore: async (id, target, _ctx, options = {}) => {
       if (!repository.initialized) return missing();
       const snapshot = find(id);
       if (snapshot === undefined) return notFound(id);
+      const failure = taken(hooks, "restore");
+      const overwrite = options.overwrite ?? "always";
+      const call: RestoreCall = { snapshot: id, target, overwrite, written: 0, skipped: 0 };
+      restores.push(call);
       mkdirSync(target, { recursive: true });
+      const existing = (path: string) => {
+        try {
+          return lstatSync(path);
+        } catch {
+          return undefined;
+        }
+      };
       let bytes = 0;
+      let files = 0;
       for (const entry of snapshot.entries) {
         const path = join(target, entry.path);
+        const there = existing(path);
         if (entry.type === "dir") mkdirSync(path, { recursive: true });
-        else if (entry.type === "symlink") symlinkSync(entry.linkTarget ?? "", path);
-        else if (entry.type === "file") {
+        else if (entry.type === "symlink") {
+          if (there !== undefined && overwrite !== "always") continue;
+          if (there !== undefined) rmSync(path, { force: true });
+          symlinkSync(entry.linkTarget ?? "", path);
+        } else if (entry.type === "file") {
+          if (failure !== undefined && files >= 1) continue;
           const data = snapshot.data.get(entry.path) ?? new Uint8Array();
+          files++;
+          if (
+            there !== undefined &&
+            (overwrite === "never" || (overwrite === "if-changed" && there.size === data.length))
+          ) {
+            call.skipped++;
+            continue;
+          }
+          if (there !== undefined) chmodSync(path, 0o600);
           writeFileSync(path, data);
+          call.written++;
           bytes += data.length;
         }
       }
+      if (failure !== undefined) return failure;
+      await hooks.duringRestore?.(target);
       // Modes and times after the contents, deepest first, so a read-only folder is filled before it is closed.
       for (const entry of [...snapshot.entries].reverse()) {
         if (entry.type === "symlink") continue;
         const path = join(target, entry.path);
+        if (existing(path) === undefined) continue;
         chmodSync(path, entry.mode);
         const seconds = Date.parse(entry.mtime) / 1000;
         utimesSync(path, seconds, seconds);
       }
-      const files = snapshot.entries.filter((e) => e.type === "file").length;
+      const total = snapshot.entries.filter((e) => e.type === "file").length;
       return ok({
-        totalFiles: files,
-        filesRestored: files,
-        filesSkipped: 0,
+        totalFiles: total,
+        filesRestored: call.written,
+        filesSkipped: call.skipped,
         filesDeleted: 0,
         totalBytes: bytes,
         bytesRestored: bytes,

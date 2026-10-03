@@ -34,6 +34,11 @@ export const RegistryEntrySchema = z.strictObject({
   override: z.string().min(1).optional(),
   base: UlidSchema.optional(),
   onloadedAt: z.iso.datetime().optional(),
+  /**
+   * restored-unhydrated: the files are back but the dependencies are not installed (the install failed, or onload
+   * ran with --no-hydrate); plainport hydrate clears it.
+   */
+  unhydrated: z.literal(true).optional(),
   registeredAt: z.iso.datetime(),
 });
 export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;
@@ -149,4 +154,32 @@ export const updateRegistry = async (
     },
     update,
   );
+};
+
+/**
+ * The project's ULID on this device, recorded under the registry's lock so two runs agree on it: the one given (a
+ * stub's), else the registry's for its root and path, else a new one (`mint`) registered now.
+ */
+export const ensureRegistered = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  project: { id?: string; root: string; path: string },
+  mint: () => string,
+  registeredAt: string,
+): Promise<Result<{ id: string; registry: ProjectRegistry }>> => {
+  let id = project.id ?? "";
+  const registered = await updateRegistry(io, paths, (registry) => {
+    if (id === "")
+      id =
+        Object.entries(registry.projects).find(
+          ([, e]) => e.root === project.root && e.path === project.path,
+        )?.[0] ?? "";
+    if (id !== "" && registry.projects[id] !== undefined) return ok(registry);
+    if (id === "") id = mint();
+    return ok({
+      ...registry,
+      projects: { ...registry.projects, [id]: { root: project.root, path: project.path, registeredAt } },
+    });
+  });
+  return registered.ok ? ok({ id, registry: registered.value }) : registered;
 };

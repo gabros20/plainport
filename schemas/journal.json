@@ -256,6 +256,205 @@
       "additionalProperties": false,
       "title": "OffloadJournal",
       "description": "journal/<op>.json: an offload's progress, for recover"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "op": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "kind": {
+          "type": "string",
+          "const": "onload"
+        },
+        "step": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        "pid": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "address": {
+              "type": "string",
+              "minLength": 1
+            },
+            "root": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "rootId": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^(?!\\.\\.?(?:\\/|$))[^/]+(?:\\/(?!\\.\\.?(?:\\/|$))[^/]+)*$"
+            },
+            "dir": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "address",
+            "root",
+            "rootId",
+            "path",
+            "dir"
+          ],
+          "additionalProperties": false
+        },
+        "store": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            }
+          },
+          "required": [
+            "name",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "snapshot": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "stored": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "over": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "staging": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reuse": {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+              "title": "Ulid",
+              "description": "A ULID: 26 upper-case Crockford base32 characters"
+            },
+            "folder": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "op",
+            "folder"
+          ],
+          "additionalProperties": false
+        },
+        "override": {
+          "type": "boolean",
+          "const": true
+        },
+        "stub": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              }
+            },
+            "required": [
+              "step",
+              "at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "v",
+        "op",
+        "kind",
+        "step",
+        "startedAt",
+        "updatedAt",
+        "pid",
+        "host",
+        "project",
+        "store",
+        "snapshot",
+        "stored",
+        "over",
+        "history"
+      ],
+      "additionalProperties": false,
+      "title": "OnloadJournal",
+      "description": "journal/<op>.json: an onload's progress, for recover"
     }
   ],
   "title": "Journal",

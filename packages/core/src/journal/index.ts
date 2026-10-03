@@ -85,8 +85,52 @@ export const OffloadJournalSchema = z
   .meta({ title: "OffloadJournal", description: "journal/<op>.json: an offload's progress, for recover" });
 export type OffloadJournal = z.infer<typeof OffloadJournalSchema>;
 
+export const OnloadJournalSchema = z
+  .strictObject({
+    v: z.literal(1),
+    op: UlidSchema,
+    kind: z.literal("onload"),
+    /** The last step reached, one of the saga's ONLOAD_STEPS. */
+    step: StepSchema,
+    startedAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+    pid: z.int().positive(),
+    host: z.string().min(1),
+    project: z.strictObject({
+      id: UlidSchema,
+      address: z.string().min(1),
+      root: RootKeySchema,
+      rootId: UlidSchema,
+      path: RelativePathSchema,
+      /** The landing folder, absolute: the root's folder plus the path, or --to's. */
+      dir: z.string().min(1),
+    }),
+    store: z.strictObject({ name: z.string().min(1), id: UlidSchema }),
+    /** The plainport snapshot restored, and this store's restic id for it. */
+    snapshot: UlidSchema,
+    stored: ResticIdSchema,
+    /** The catalog's head when the onload began (D43): the onloaded event's `over`, and the copy's next base. */
+    over: UlidSchema,
+    /** `<root>/.plainport-staging/<op>`: where the snapshot is restored and verified before the swap. */
+    staging: z.string().min(1).optional(),
+    /**
+     * The same head's folder still waits in an offload's trash (keepLocalFor): it is renamed back instead of restored.
+     * `op` is that offload, whose journal is removed once the folder is back; `folder` is where it waits.
+     */
+    reuse: z.strictObject({ op: UlidSchema, folder: z.string().min(1) }).optional(),
+    /** --to: the landing folder is not the root's place for the project (registry.json records it as override). */
+    override: z.literal(true).optional(),
+    /** The project's stub, removed after the swap when it is this project's. */
+    stub: z.string().min(1).optional(),
+    /** The onloaded event's id, journaled before it is appended: recovery looks for it on the store. */
+    event: UlidSchema.optional(),
+    history: z.array(z.strictObject({ step: StepSchema, at: z.iso.datetime() })),
+  })
+  .meta({ title: "OnloadJournal", description: "journal/<op>.json: an onload's progress, for recover" });
+export type OnloadJournal = z.infer<typeof OnloadJournalSchema>;
+
 export const JournalSchema = z
-  .discriminatedUnion("kind", [OffloadJournalSchema])
+  .discriminatedUnion("kind", [OffloadJournalSchema, OnloadJournalSchema])
   .meta({ title: "Journal", description: "journal/<op>.json: a running or interrupted operation" });
 export type Journal = z.infer<typeof JournalSchema>;
 

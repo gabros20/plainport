@@ -93,14 +93,14 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { updateRegistry } from "../registry.ts";
+import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
-import { withProjectLock } from "./project-gate.ts";
+import { nestedProjects, type ProjectLock, withProjectLock } from "./project-gate.ts";
 import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
@@ -436,25 +436,39 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const store: ConfiguredStore = opened.value;
 
   // The project's ULID: the registry's, or a new one recorded there, under its lock, so two runs agree on it.
-  let projectId = ref.id ?? "";
-  const registered = await updateRegistry(io, paths, (registry) => {
-    if (projectId === "")
-      projectId =
-        Object.entries(registry.projects).find(([, e]) => e.root === ref.root && e.path === ref.path)?.[0] ??
-        "";
-    if (projectId !== "" && registry.projects[projectId] !== undefined) return ok(registry);
-    if (projectId === "") projectId = ulid(clock().getTime());
-    const registeredAt = clock().toISOString();
-    return ok({
-      ...registry,
-      projects: { ...registry.projects, [projectId]: { root: ref.root, path: ref.path, registeredAt } },
-    });
-  });
+  const registered = await ensureRegistered(
+    io,
+    paths,
+    { ...(ref.id === undefined ? {} : { id: ref.id }), root: ref.root, path: ref.path },
+    () => ulid(clock().getTime()),
+    clock().toISOString(),
+  );
   if (!registered.ok) return registered;
-  const base = registered.value.projects[projectId]?.base;
+  const projectId = registered.value.id;
+  const base = registered.value.registry.projects[projectId]?.base;
 
   const gate = { io, paths, clock, log: deps.log };
-  return withProjectLock(gate, { id: projectId, address: ref.address }, async (lock) => {
+  const nested = nestedProjects(registered.value.registry, { id: projectId, root: ref.root, path: ref.path });
+  return withProjectLock(gate, { id: projectId, address: ref.address }, (lock) => offloadLocked(lock), {
+    related: nested,
+  });
+
+  async function offloadLocked(lock: ProjectLock): Promise<Result<OffloadOutcome>> {
+    // A registered project inside the folder that is here would be offloaded inside this one (D53).
+    const inside = await nestedHere(io, folder, ref.path, nested);
+    if (!inside.ok) return inside;
+    const [first] = inside.value;
+    if (first !== undefined) {
+      return fail(
+        finding("project.nested", {
+          message: `${ref.address} holds ${inside.value.map((n) => n.address).join(", ")}, ${
+            inside.value.length === 1 ? "a registered project" : "registered projects"
+          } of its own, so it was not offloaded; nothing was uploaded`,
+          fix: `offload the inner project first (plainport offload ${shellWord(first.address)} --yes), or unregister it`,
+          paths: inside.value.map((n) => n.dir),
+        }),
+      );
+    }
     const mirror = await deps.openMirror(store.id);
     if (!mirror.ok) return mirror;
     const catalog = catalogReader({
@@ -847,5 +861,33 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (signal?.aborted) return cancelled();
       return commitAndRelease(verified.value);
     });
-  });
+  }
+};
+
+/** The registered projects inside `folder` (D53) whose own folder is here. */
+const nestedHere = async (
+  io: LocalIo,
+  folder: string,
+  path: string,
+  nested: ReturnType<typeof nestedProjects>,
+): Promise<Result<{ address: string; dir: string }[]>> => {
+  const found: { address: string; dir: string }[] = [];
+  for (const n of nested) {
+    if (!n.inside) continue;
+    const dir = n.override ?? join(folder, ...n.path.slice(path.length + 1).split("/"));
+    try {
+      if ((await io.fs.lstat(dir)).kind === "dir") found.push({ address: n.address, dir });
+    } catch (error) {
+      const code = systemErrorCode(error);
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      return fail(
+        finding("fs.unreadable", {
+          message: `${dir} cannot be inspected (${code}), so whether ${n.address} is here is unknown; nothing was offloaded`,
+          fix: `check that you can read ${shellWord(dir)}, then re-run`,
+          paths: [dir],
+        }),
+      );
+    }
+  }
+  return ok(found);
 };

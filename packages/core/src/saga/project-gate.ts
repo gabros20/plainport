@@ -13,9 +13,11 @@ import { assertSystemError, type LocalIo } from "../io.ts";
 import { type Journal, journalFile, readJournals } from "../journal/index.ts";
 import { acquireLock, type LockHolder } from "../lock.ts";
 import type { PlainportPaths } from "../paths.ts";
+import type { ProjectRegistry } from "../registry.ts";
 import { writeFailed } from "./journaled.ts";
 
-/** Steps after which an operation is finished but for deleting its trash: they hold no project back. */
+/** Steps after which an operation is finished but for deleting its trash: they hold no project back. An onload
+ * closes its journal once it is committed and registered, so every onload step holds it back. */
 const RELEASED: ReadonlySet<string> = new Set(["offload.release.delete"]);
 
 /** Whether an interrupted operation still holds its project back from a new one. */
@@ -44,28 +46,78 @@ export interface GateContext {
   log(level: "warn", message: string): void;
 }
 
-/** Runs `body` holding the project's lock, once no interrupted operation of the project is open. */
 export interface ProjectLock {
   /** Whether this run still holds the project's lock. */
   stillHeld(): Promise<boolean>;
 }
 
+export interface GateOptions {
+  /**
+   * The registered projects nested with this one (inside it, or holding it, D53): their locks are taken too, so no
+   * operation on one runs while this one changes the folder that holds or contains it.
+   */
+  related?: readonly { id: string; address: string }[];
+  /** An interrupted operation of this project the caller takes over instead of refusing (onload's staging). */
+  resume?(journal: Journal): boolean;
+}
+
+/** The registered projects whose folders hold, or lie inside, this project's (D53), by address. */
+export const nestedProjects = (
+  registry: ProjectRegistry,
+  project: { id?: string; root: string; path: string },
+): { id: string; address: string; path: string; inside: boolean; override?: string }[] =>
+  Object.entries(registry.projects)
+    .filter(
+      ([id, e]) =>
+        id !== project.id &&
+        e.root === project.root &&
+        e.path !== project.path &&
+        (e.path.startsWith(`${project.path}/`) || project.path.startsWith(`${e.path}/`)),
+    )
+    .map(([id, e]) => ({
+      id,
+      address: `${e.root}:${e.path}`,
+      path: e.path,
+      inside: e.path.startsWith(`${project.path}/`),
+      ...(e.override === undefined ? {} : { override: e.override }),
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+
+/**
+ * Runs `body` holding the project's lock and its nested projects' (options.related), once no interrupted operation
+ * of the project is open; an open one `options.resume` accepts is handed to the body instead.
+ */
 export const withProjectLock = async <T>(
   ctx: GateContext,
   project: { id: string; address: string },
-  body: (lock: ProjectLock) => Promise<Result<T>>,
+  body: (lock: ProjectLock, resumed?: Journal) => Promise<Result<T>>,
+  options: GateOptions = {},
 ): Promise<Result<T>> => {
   const { io, paths } = ctx;
-  const lockFile = join(paths.locksDir, `${project.id}.lock`);
-  let lock: Awaited<ReturnType<typeof acquireLock>>;
+  const held: { path: string; release(): Promise<void>; stillHeld(): Promise<boolean> }[] = [];
   try {
-    lock = await acquireLock(io, lockFile, { timeoutMs: 0, held: lockHeld(project.address), now: ctx.clock });
-  } catch (error) {
-    return writeFailed(error, `taking the lock ${lockFile}`, false, lockFile);
-  }
-  if (!lock.ok) return lock;
-  const held = lock.value;
-  try {
+    // The project's own lock first, then each nested one's (D53), all without waiting: a held one refuses at once.
+    for (const each of [project, ...(options.related ?? [])]) {
+      const lockFile = join(paths.locksDir, `${each.id}.lock`);
+      let lock: Awaited<ReturnType<typeof acquireLock>>;
+      try {
+        lock = await acquireLock(io, lockFile, {
+          timeoutMs: 0,
+          held: lockHeld(each.address),
+          now: ctx.clock,
+        });
+      } catch (error) {
+        return writeFailed(error, `taking the lock ${lockFile}`, false, lockFile);
+      }
+      if (!lock.ok) {
+        if (each === project) return lock;
+        return fail({
+          ...lock.finding,
+          message: `${lock.finding.message}; ${each.address} is nested with ${project.address} (D53), so nothing was started`,
+        });
+      }
+      held.push({ path: lockFile, release: lock.value.release, stillHeld: lock.value.stillHeld });
+    }
     let journals: Awaited<ReturnType<typeof readJournals>>;
     try {
       journals = await readJournals(io, paths);
@@ -82,26 +134,30 @@ export const withProjectLock = async <T>(
         }),
       );
     }
-    const open = journals.journals.find((j) => j.project.id === project.id && holdsProjectBack(j));
-    if (open !== undefined) {
+    const open = journals.journals.filter((j) => j.project.id === project.id && holdsProjectBack(j));
+    const [blocking] = open.filter((j) => options.resume?.(j) !== true);
+    if (blocking !== undefined) {
       return fail(
         finding("journal.pending", {
-          message: `an ${open.kind} of ${project.address} (${open.op}) was interrupted at ${open.step}; nothing new was started`,
+          message: `an ${blocking.kind} of ${project.address} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
           fix: "plainport recover finishes or rolls it back, then re-run",
-          paths: [journalFile(paths, open.op)],
+          paths: [journalFile(paths, blocking.op)],
         }),
       );
     }
-    return await body({ stillHeld: () => held.stillHeld() });
+    const own = held[0] as (typeof held)[number];
+    return await body({ stillHeld: () => own.stillHeld() }, open[0]);
   } finally {
-    try {
-      await held.release();
-    } catch (error) {
-      assertSystemError(error);
-      ctx.log(
-        "warn",
-        `the lock ${lockFile} could not be removed; a later run breaks it once this process is gone`,
-      );
+    for (const lock of held.reverse()) {
+      try {
+        await lock.release();
+      } catch (error) {
+        assertSystemError(error);
+        ctx.log(
+          "warn",
+          `the lock ${lock.path} could not be removed; a later run breaks it once this process is gone`,
+        );
+      }
     }
   }
 };

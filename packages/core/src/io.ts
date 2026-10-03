@@ -43,6 +43,13 @@ export interface LocalFs {
   /** Whether this process may read the path (access(2) with R_OK, so ACLs count); false when missing. Opens
    * nothing, so a placeholder file is not downloaded. */
   readable(path: string): Promise<boolean>;
+  /** Bytes this process may still write on the volume holding the path (statfs: available blocks × block size). */
+  freeBytes(path: string): Promise<number>;
+  /**
+   * Removes the path and everything below it, making read-only folders writable first; symlinks are removed, never
+   * followed. Nothing there is fine. Only for plainport's own folders (staging) and what a plugin proves regenerable.
+   */
+  removeTree(path: string): Promise<void>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";

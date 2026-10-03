@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -14,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { fail, finding, ok, type Result, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
@@ -773,7 +775,7 @@ describe("offload: stopping", () => {
     const host = testHost({ faults: { at: "offload.release.moved", onStep: capture } });
     const run = runOffload(deps({}, host), { project: await ref() });
     await expect(run).rejects.toBeInstanceOf(InjectedFault);
-    const [journal] = (await readJournals(testHost(), box.paths)).journals;
+    const [journal] = (await readJournals(testHost(), box.paths)).journals as OffloadJournal[];
     expect(journal?.step).toBe("offload.release.moved");
     expect(existsSync(dir)).toBe(false);
     expect(existsSync(join(journal?.trash ?? "", "web/src/main.ts"))).toBe(true);
@@ -804,6 +806,75 @@ describe("offload: what is not here", () => {
     expect(again.ok ? "" : again.finding.fix).toBe("it is shelved: plainport onload work:web brings it back");
     expect(engine.calls).toHaveLength(1);
     await expectInvariants();
+  });
+});
+
+describe("offload: nested registered projects (D53)", () => {
+  const registerInner = async (path: string): Promise<string> => {
+    const id = ulid();
+    await updateRegistry(testHost(), box.paths, (r) =>
+      ok({
+        ...r,
+        projects: { ...r.projects, [id]: { root: "work", path, registeredAt: new Date().toISOString() } },
+      }),
+    );
+    return id;
+  };
+  const holdLock = (id: string) => {
+    mkdirSync(box.paths.locksDir, { recursive: true });
+    writeFileSync(
+      join(box.paths.locksDir, `${id}.lock`),
+      `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date().toISOString(), token: "held" })}\n`,
+    );
+  };
+
+  test("a folder holding a registered project that is here is blocked with project.nested; nothing is uploaded", async () => {
+    box.file("work/web/packages/inner/package.json", "{}\n");
+    await registerInner("web/packages/inner");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "project.nested"]);
+    expect(result.ok ? "" : result.finding.message).toContain("work:web/packages/inner");
+    expect(result.ok ? "" : result.finding.fix).toContain("plainport offload work:web/packages/inner");
+    expect(engine.calls).toEqual([]);
+    await expectUntouched();
+  });
+
+  test("a registered inner project that is shelved (no folder here) does not block", async () => {
+    await registerInner("web/gone");
+    value(await offload());
+    await expectInvariants();
+  });
+
+  test("the lock of a registered project inside the folder is taken too: held, the offload exits 11", async () => {
+    const inner = await registerInner("web/gone");
+    holdLock(inner);
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([11, "project.locked"]);
+    expect(result.ok ? "" : result.finding.message).toContain("work:web/gone");
+    await expectUntouched();
+    rmSync(join(box.paths.locksDir, `${inner}.lock`));
+  });
+
+  test("the lock of the registered project holding this one is taken too: held, the inner offload exits 11", async () => {
+    box.file("work/web/packages/inner/package.json", "{}\n");
+    await registerInner("web/packages/inner");
+    value(await updateRegistry(testHost(), box.paths, (r) => ok(r)));
+    // web registers itself on its first offload; register it here so its lock is known.
+    const outer = ulid();
+    await updateRegistry(testHost(), box.paths, (r) =>
+      ok({
+        ...r,
+        projects: {
+          ...r.projects,
+          [outer]: { root: "work", path: "web", registeredAt: new Date().toISOString() },
+        },
+      }),
+    );
+    holdLock(outer);
+    const result = await runOffload(deps(), { project: await ref("work:web/packages/inner") });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([11, "project.locked"]);
+    expect(result.ok ? "" : result.finding.message).toContain("work:web");
+    rmSync(join(box.paths.locksDir, `${outer}.lock`));
   });
 });
 
