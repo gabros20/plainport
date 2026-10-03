@@ -31,9 +31,13 @@ afterEach(async () => {
   if (left.length > 0) throw new Error(`process groups left behind: ${left.join(", ")}`);
 });
 
-/** A plainport-like process: the macOS host, stopOnSignals, and one long child whose group id it prints. */
+/**
+ * A plainport-like process: the macOS host and stopOnSignals around `done`, an expression over `host` and `run`
+ * (a long child whose group id it prints first). Its first stdout line is returned: a group id, or "ready".
+ */
 const startParent = async (
   script: string,
+  done = "run.then((result) => (result.ok ? 0 : result.exitCode))",
 ): Promise<{ parent: Bun.Subprocess<"ignore", "pipe", "pipe">; pgid: number }> => {
   const fixture = join(dir, "parent.ts");
   writeFileSync(
@@ -41,9 +45,10 @@ const startParent = async (
     `import { createMacosHost } from ${JSON.stringify(join(import.meta.dir, "../../host-macos/src/index.ts"))};\n` +
       `import { stopOnSignals } from ${JSON.stringify(join(import.meta.dir, "interrupt.ts"))};\n` +
       "const host = createMacosHost();\n" +
-      `const done = host.run({ command: "/bin/sh", args: ["-c", ${JSON.stringify(script)}], cwd: ${JSON.stringify(dir)},\n` +
-      `  env: { PATH: "/usr/bin:/bin" }, killGraceMs: 300, onLine: (line) => console.log(line.text) })\n` +
-      "  .then((result) => (result.ok ? 0 : result.exitCode));\n" +
+      `const run = ${JSON.stringify(script)} === "" ? (console.log("ready"), new Promise(() => {})) :\n` +
+      `  host.run({ command: "/bin/sh", args: ["-c", ${JSON.stringify(script)}], cwd: ${JSON.stringify(dir)},\n` +
+      `  env: { PATH: "/usr/bin:/bin" }, killGraceMs: 300, onLine: (line) => console.log(line.text) });\n` +
+      `const done = ${done};\n` +
       "stopOnSignals(host, done, { stderr: (text) => process.stderr.write(text) });\n" +
       "process.exitCode = await done;\n",
   );
@@ -63,7 +68,7 @@ const startParent = async (
   }
   reader.releaseLock();
   const pgid = Number(text.split("\n")[0]);
-  groups.push(pgid);
+  if (pgid > 1) groups.push(pgid);
   return { parent, pgid };
 };
 
@@ -82,5 +87,27 @@ describe("interrupt: signals to plainport stop its children", () => {
     parent.kill("SIGTERM");
     expect(await parent.exited).toBe(130);
     expect(members(pgid)).toEqual([]);
+  });
+
+  test("SIGHUP (a closed terminal or SSH session) stops the children too, then plainport exits 130", async () => {
+    const { parent, pgid } = await startParent("echo $$; sleep 60");
+    parent.kill("SIGHUP");
+    expect(await parent.exited).toBe(130);
+    expect(members(pgid)).toEqual([]);
+  });
+
+  test("a command that finishes after its children were stopped keeps its own exit code", async () => {
+    const { parent, pgid } = await startParent("echo $$; sleep 60", "run.then(() => 0)");
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(0);
+    expect(members(pgid)).toEqual([]);
+  });
+
+  test("with no child running, Ctrl-C exits 130 at once, without waiting", async () => {
+    const { parent } = await startParent("", "run");
+    const started = performance.now();
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(130);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
