@@ -1300,6 +1300,76 @@
       "summary": "registry.json exists but plainport may not read it; the file is left as it is"
     },
     {
+      "code": "restic.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "restic exited with a fatal error (exit code 1, or one plainport does not map); the message is restic's"
+    },
+    {
+      "code": "restic.interrupted",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "restic was interrupted (exit code 130) before it finished"
+    },
+    {
+      "code": "restic.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another restic process holds a lock on the store's repository (restic exit code 11)"
+    },
+    {
+      "code": "restic.output-invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "restic's JSON output did not match what this restic version is known to print"
+    },
+    {
+      "code": "restic.repo-exists",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A restic repository already exists where a new one was to be created"
+    },
+    {
+      "code": "restic.repo-missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No restic repository exists at the store's location (restic exit code 10)"
+    },
+    {
+      "code": "restic.snapshot-not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The store's repository has no snapshot with this id"
+    },
+    {
+      "code": "restic.unreadable-files",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "restic could not read some files (restic exit code 3); the snapshot is incomplete and counts as failed, never as a partial success"
+    },
+    {
+      "code": "restic.version-mismatch",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The restic binary found is not the version this plainport pins and was tested with"
+    },
+    {
+      "code": "restic.wrong-password",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 5,
+      "summary": "The store's password does not open its restic repository (restic exit code 12)"
+    },
+    {
       "code": "risk.needs-yes",
       "severity": "block",
       "allowable": false,
