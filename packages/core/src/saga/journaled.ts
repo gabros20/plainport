@@ -38,7 +38,7 @@ export const withFix = (failure: Failure, fix: string): Failure => ({
 });
 
 export interface SagaContext {
-  /** Which saga: what a failure after the commit says is safe, and which one recover finishes. Default offload. */
+  /** Which saga: what a failure after the commit says is safe, and which one recover finishes. Default: the journal's. */
   kind?: "offload" | "onload";
   io: LocalIo;
   paths: PlainportPaths;
@@ -90,7 +90,7 @@ export const openSaga = <J extends Journal, S extends string = string>(
           `writing the journal at ${name}`,
           committed,
           journalFile(ctx.paths, journal.op),
-          ctx.kind,
+          ctx.kind ?? journal.kind,
         );
       }
       ctx.faultAt(name);

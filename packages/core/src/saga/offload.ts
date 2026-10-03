@@ -100,7 +100,7 @@ import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
-import { nestedProjects, type ProjectLock, withProjectLock } from "./project-gate.ts";
+import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
 import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
@@ -448,14 +448,17 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const base = registered.value.registry.projects[projectId]?.base;
 
   const gate = { io, paths, clock, log: deps.log };
-  const nested = nestedProjects(registered.value.registry, { id: projectId, root: ref.root, path: ref.path });
+  // Nesting by effective folders (D53 revised): a project placed inside this folder with --to counts.
+  const folders = await registeredFolders(io, paths, deps.env);
+  if (!folders.ok) return folders;
+  const nested = nestedProjects(folders.value, { id: projectId, folder });
   return withProjectLock(gate, { id: projectId, address: ref.address }, (lock) => offloadLocked(lock), {
     related: nested,
   });
 
   async function offloadLocked(lock: ProjectLock): Promise<Result<OffloadOutcome>> {
     // A registered project inside the folder that is here would be offloaded inside this one (D53).
-    const inside = await nestedHere(io, folder, ref.path, nested);
+    const inside = await nestedHere(io, nested);
     if (!inside.ok) return inside;
     const [first] = inside.value;
     if (first !== undefined) {
@@ -879,16 +882,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 /** The registered projects inside `folder` (D53) whose own folder is here. */
 const nestedHere = async (
   io: LocalIo,
-  folder: string,
-  path: string,
   nested: ReturnType<typeof nestedProjects>,
 ): Promise<Result<{ address: string; dir: string }[]>> => {
   const found: { address: string; dir: string }[] = [];
   for (const n of nested) {
     if (!n.inside) continue;
-    // Where it physically is: its override when it has one (inside only if that lies in the folder), else its place.
-    if (n.override !== undefined && !n.override.startsWith(`${folder}/`)) continue;
-    const dir = n.override ?? join(folder, ...n.path.slice(path.length + 1).split("/"));
+    const dir = n.folder;
     try {
       if ((await io.fs.lstat(dir)).kind === "dir") found.push({ address: n.address, dir });
     } catch (error) {

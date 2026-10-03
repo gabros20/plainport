@@ -78,7 +78,7 @@ import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
-import { nestedProjects, type ProjectLock, withProjectLock } from "./project-gate.ts";
+import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
 import { offloadTrashOf, rootFolderOf } from "./release.ts";
 import { verifyListing } from "./verify.ts";
 
@@ -356,7 +356,21 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     }
   }
   const id = projectId;
-  const nested = nestedProjects(registered.value, { id, root: ref.root, path: ref.path });
+  // Nesting by effective folders (D53 revised), from where this copy lands.
+  const folders = await registeredFolders(io, paths, deps.env);
+  if (!folders.ok) return folders;
+  const nested = nestedProjects(folders.value, { id, folder: landing });
+  // --to into another registered project's folder would put this copy inside that project's snapshot (D53 revised).
+  const holding = req.to === undefined ? undefined : nested.find((n) => !n.inside);
+  if (holding !== undefined) {
+    return fail(
+      finding("project.nested", {
+        message: `${landing} lies inside ${holding.address}'s folder (${holding.folder}), so ${ref.address} was not onloaded there: an offload of ${holding.address} would take it along`,
+        fix: `onload it outside every registered project's folder: plainport onload ${shellWord(ref.address)} --to <path>`,
+        paths: [landing],
+      }),
+    );
+  }
   const gate = { io, paths, clock, log: deps.log };
   return withProjectLock(gate, { id, address: ref.address }, (lock, resumed) => onloadLocked(lock, resumed), {
     related: nested,
@@ -909,10 +923,19 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         ),
       );
     // The head, read again right before the commit (D43, D44): the onload is never written over a stale one.
+    // A store that cannot answer now, or a catalog it holds only part of, never throws away a finished restore: the
+    // journal and staging stay, and the next onload takes them over (N3).
     const fresh = await catalog();
-    if (!fresh.ok) return abandon(saga, fresh);
+    if (!fresh.ok)
+      return saga.keep(
+        withFix(
+          fresh,
+          `re-run plainport onload ${shellWord(ref.address)} once the store answers; it takes over the restored copy`,
+        ),
+      );
     const project = fresh.value.projects[id];
     const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
+    if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);
     if (!head.ok) return abandon(saga, head);
     let over = journal.over;
     if (head.value !== journal.over) {

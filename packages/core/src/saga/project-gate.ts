@@ -7,13 +7,15 @@
 // what it checks is recover breaking a dead holder's lock. The body gets stillHeld(), to re-check the lock before an
 // irreversible step (lock.ts's known limit). Offload uses it now; onload and recover take the same lock.
 
-import { join } from "node:path";
-import { fail, finding, type Result } from "@plainport/contract";
+import { join, resolve } from "node:path";
+import { fail, finding, ok, type Result } from "@plainport/contract";
+import { readDevice } from "../device.ts";
 import { assertSystemError, type LocalIo } from "../io.ts";
 import { type Journal, journalFile, readJournals } from "../journal/index.ts";
 import { acquireLock, type LockHolder } from "../lock.ts";
-import type { PlainportPaths } from "../paths.ts";
-import type { ProjectRegistry } from "../registry.ts";
+import type { Env, PlainportPaths } from "../paths.ts";
+import { readRegistry } from "../registry.ts";
+import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "./journaled.ts";
 
 /** Steps after which an operation is finished but for deleting its trash: they hold no project back. An onload
@@ -61,27 +63,56 @@ export interface GateOptions {
   resume?(journal: Journal): boolean;
 }
 
-/** The registered projects whose folders hold, or lie inside, this project's (D53), by address. */
+/** A registered project and its effective folder on this device: its override, else its root's place for it. */
+export interface RegisteredFolder {
+  id: string;
+  address: string;
+  folder: string;
+}
+
+/**
+ * Every registered project's effective folder on this device (D53 revised): `override ?? place`, where the place is
+ * the root's binding here plus the path. A project whose root is not bound here, and has no override, has none.
+ */
+export const registeredFolders = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  env: Env,
+): Promise<Result<RegisteredFolder[]>> => {
+  const registry = await readRegistry(io, paths);
+  if (!registry.ok) return registry;
+  const device = await readDevice(io, paths);
+  if (!device.ok) return device;
+  const listed = await listRoots(io, paths, {
+    env,
+    ...(device.value === undefined ? {} : { device: device.value.name }),
+  });
+  if (!listed.ok) return listed;
+  const rootFolder = new Map(listed.value.roots.map((r) => [r.key, r.path]));
+  const folders: RegisteredFolder[] = [];
+  for (const [id, e] of Object.entries(registry.value.projects)) {
+    const root = rootFolder.get(e.root);
+    const folder = e.override ?? (root === undefined ? undefined : join(root, ...e.path.split("/")));
+    if (folder !== undefined) folders.push({ id, address: `${e.root}:${e.path}`, folder: resolve(folder) });
+  }
+  return ok(folders);
+};
+
+/**
+ * The registered projects nested with a folder (D53 revised), decided by effective folders, never by logical
+ * paths: `inside`, those whose folder lies inside it; otherwise those whose folder holds it.
+ */
 export const nestedProjects = (
-  registry: ProjectRegistry,
-  project: { id?: string; root: string; path: string },
-): { id: string; address: string; path: string; inside: boolean; override?: string }[] =>
-  Object.entries(registry.projects)
-    .filter(
-      ([id, e]) =>
-        id !== project.id &&
-        e.root === project.root &&
-        e.path !== project.path &&
-        (e.path.startsWith(`${project.path}/`) || project.path.startsWith(`${e.path}/`)),
-    )
-    .map(([id, e]) => ({
-      id,
-      address: `${e.root}:${e.path}`,
-      path: e.path,
-      inside: e.path.startsWith(`${project.path}/`),
-      ...(e.override === undefined ? {} : { override: e.override }),
-    }))
-    .sort((a, b) => (a.id < b.id ? -1 : 1));
+  folders: readonly RegisteredFolder[],
+  project: { id?: string; folder: string },
+): (RegisteredFolder & { inside: boolean })[] => {
+  const folder = resolve(project.folder);
+  return folders
+    .filter((f) => f.id !== project.id && f.folder !== folder)
+    .filter((f) => f.folder.startsWith(`${folder}/`) || folder.startsWith(`${f.folder}/`))
+    .map((f) => ({ ...f, inside: f.folder.startsWith(`${folder}/`) }))
+    .sort((x, y) => (x.id < y.id ? -1 : 1));
+};
 
 /**
  * Runs `body` holding the project's lock and its nested projects' (options.related), once no interrupted operation

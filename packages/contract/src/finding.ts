@@ -643,7 +643,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The folder holds another registered project that is on this device; offload the inner project first, or unregister it (D53)",
+      "The folder holds another registered project's effective folder (its --to override, else its root's place) on this device: offload the inner project first, or unregister it; onload --to refuses a landing folder inside another registered project's folder (D53)",
   },
   "snapshot.not-found": {
     severity: "block",

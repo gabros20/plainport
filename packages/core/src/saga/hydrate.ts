@@ -18,7 +18,7 @@
 // and `plainport hydrate` (runHydrate) retries. `plainport dehydrate` (runDehydrate) is the way back: it removes the
 // installed dependencies a plugin claims and git does not track, nothing else.
 
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -43,7 +43,7 @@ import type { ProjectRef } from "../roots/address.ts";
 import { refreshIndex } from "../scan/git.ts";
 import { scanTree } from "../scan/walk.ts";
 import { ulid } from "../ulid.ts";
-import { nestedProjects, withProjectLock } from "./project-gate.ts";
+import { nestedProjects, registeredFolders, withProjectLock } from "./project-gate.ts";
 
 export type HydrateStepReport = {
   /** The install root, relative to the project; "" is the project folder. */
@@ -424,7 +424,9 @@ export const runHydrate = async (
   if (!registered.ok) return registered;
   const id = registered.value.id;
   // The registered projects nested with this one are locked too (D53, D56).
-  const nested = nestedProjects(registered.value.registry, { id, root: ref.root, path: ref.path });
+  const folders = await registeredFolders(host, paths, deps.env);
+  if (!folders.ok) return folders;
+  const nested = nestedProjects(folders.value, { id, folder: dir });
   const gate = { io: host, paths, clock, log: deps.log };
   return withProjectLock(
     gate,
@@ -488,7 +490,9 @@ export const runDehydrate = async (
   if (!registered.ok) return registered;
   const id = registered.value.id;
   // The registered projects nested with this one are locked too (D53, D56).
-  const nested = nestedProjects(registered.value.registry, { id, root: ref.root, path: ref.path });
+  const folders = await registeredFolders(host, paths, deps.env);
+  if (!folders.ok) return folders;
+  const nested = nestedProjects(folders.value, { id, folder: dir });
   const gate = { io: host, paths, clock, log: deps.log };
   return withProjectLock(
     gate,
@@ -517,24 +521,31 @@ export const runDehydrate = async (
       if (!set.ok) return set;
       const removed: DehydrateOutcome["removed"] = [];
       // A registered inner project's dependencies are its own to remove (D56): its subtree is left alone.
-      const inner = nested
-        .filter((n) => n.inside && n.override === undefined)
-        .map((n) => n.path.slice(ref.path.length + 1));
+      const inner = nested.filter((n) => n.inside).map((n) => relative(resolve(dir), n.folder));
       const within = (path: string) => inner.some((p) => path === p || path.startsWith(`${p}/`));
+      // Whatever was removed, the project is unhydrated from then on, however the run ends (N2).
+      const markUnhydrated = async () => {
+        const marked = await markHydrated(host, paths, id, false);
+        if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
+      };
       for (const entry of set.value.filter((e) => !within(e.path))) {
         // Ctrl-C between removals: what is gone is regenerable, and plainport hydrate puts it back.
-        if (deps.signal?.aborted)
+        if (deps.signal?.aborted) {
+          if (removed.length > 0) await markUnhydrated();
           return fail(
             finding("operation.cancelled", {
               message: `dehydrate of ${ref.address} was stopped after ${removed.length} of its dependency folders were removed`,
               fix: `plainport hydrate ${shellWord(ref.address)} puts them back, or re-run plainport dehydrate to finish`,
             }),
           );
+        }
         const path = join(dir, ...entry.path.split("/"));
         try {
           await host.fs.removeTree(path);
         } catch (error) {
           const code = systemErrorCode(error);
+          // Part of it may be gone already.
+          await markUnhydrated();
           return fail(
             finding("fs.write-failed", {
               message: `${path} could not be removed (${code}); what was removed before it is regenerable, and plainport hydrate puts it back`,
@@ -545,10 +556,7 @@ export const runDehydrate = async (
         }
         removed.push({ path: entry.path, bytes: entry.bytes });
       }
-      if (removed.length > 0) {
-        const marked = await markHydrated(host, paths, id, false);
-        if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
-      }
+      if (removed.length > 0) await markUnhydrated();
       return ok({
         op,
         project: ref.address,

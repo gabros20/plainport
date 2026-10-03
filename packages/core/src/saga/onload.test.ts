@@ -30,7 +30,7 @@ import { type Journal, type OnloadJournal, readJournals } from "../journal/index
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { readRegistry, updateRegistry } from "../registry.ts";
+import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { setUpStore } from "../store.ts";
@@ -647,6 +647,73 @@ describe("onload: finishing from the journal alone (finishOnload, for recover)",
     });
   }
 
+  for (const point of ["onload.swap.renamed", "onload.reuse.cleared"]) {
+    test(`a renamed-back onload stopped at ${point} is finished: the trash and its offload journal go (N5)`, async () => {
+      config('[offload]\nkeepLocalFor = "24h"');
+      const off = await offload();
+      await expect(onload({}, {}, testHost({ faults: { at: point } }))).rejects.toBeInstanceOf(InjectedFault);
+      const journal = ((await readJournals(testHost(), box.paths)).journals as OnloadJournal[]).find(
+        (j) => j.kind === "onload",
+      );
+      if (journal === undefined) throw new Error("no onload journal");
+      expect(journal.reuse?.op).toBe(off.op);
+      const saga = openSaga<OnloadJournal, OnloadStep>(
+        { io: testHost(), paths: box.paths, faultAt: () => {}, clock: () => new Date(), log: () => {} },
+        journal,
+      );
+      value(
+        await finishOnload({
+          host: testHost(),
+          paths: box.paths,
+          saga,
+          store,
+          device: device.id,
+          clock: () => new Date(),
+          log: () => {},
+        }),
+      );
+      expect(existsSync(join(box.home, "work/.plainport-trash", off.op))).toBe(false);
+      expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+      expect(existsSync(join(dir, "node_modules/dep/index.js"))).toBe(true);
+      await expectInvariants();
+    });
+  }
+
+  test("finishOnload's failures speak of the onload, whatever its saga was opened as (N4)", async () => {
+    await offload();
+    await expect(onload({}, {}, testHost({ faults: { at: "onload.swap.renamed" } }))).rejects.toBeInstanceOf(
+      InjectedFault,
+    );
+    const [journal] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+    const real = testHost();
+    const broken: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        writeTextDurable: async (path, text) => {
+          if (path.startsWith(box.paths.journalDir))
+            throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          return real.fs.writeTextDurable(path, text);
+        },
+      },
+    };
+    const saga = openSaga<OnloadJournal, OnloadStep>(
+      { io: broken, paths: box.paths, faultAt: () => {}, clock: () => new Date(), log: () => {} },
+      journal as OnloadJournal,
+    );
+    const failed = await finishOnload({
+      host: broken,
+      paths: box.paths,
+      saga,
+      store,
+      device: device.id,
+      clock: () => new Date(),
+      log: () => {},
+    });
+    expect(!failed.ok && failed.finding.message).toContain("the files are in place");
+    expect(!failed.ok && failed.finding.fix).toContain("finish the onload");
+  });
+
   test("before the rename, onloadSwapped says so: recover rolls back instead", async () => {
     await offload();
     await expect(onload({}, {}, testHost({ faults: { at: "onload.swap.start" } }))).rejects.toBeInstanceOf(
@@ -654,6 +721,129 @@ describe("onload: finishing from the journal alone (finishOnload, for recover)",
     );
     const [journal] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
     expect(await onloadSwapped(testHost(), journal as OnloadJournal)).toBe(false);
+  });
+});
+
+describe("onload: nesting by effective folder (D53 revised, N1)", () => {
+  /** A second project, work:api, offloaded, so it can be onloaded with --to. */
+  const shelvedApi = async () => {
+    box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    box.file("work/api/src/api.ts", "export const api = 1;\n");
+    return value(await runOffload(offloadDeps(), { project: await ref("work:api") }));
+  };
+
+  test("onload --to into another registered project's folder refuses with project.nested", async () => {
+    await shelvedApi();
+    // work:web is here (registered, onloaded).
+    await offload();
+    value(await onload());
+    const inside = join(dir, "vendor/api");
+    const result = await onload({ project: { address: "work:api" } as ProjectRef, to: inside });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "project.nested"]);
+    expect(!result.ok && result.finding.message).toContain("work:web");
+    expect(existsSync(inside)).toBe(false);
+  });
+
+  test("the reviewer's sequence: A's copy placed inside B (--to), work in A, offload B is blocked and A's copy stays", async () => {
+    await shelvedApi();
+    // A's copy inside B, as an earlier build allowed: the registry's override points into web.
+    const apiId = await projectId("api");
+    const inside = join(dir, "vendor/api");
+    box.file("work/web/vendor/api/src/api.ts", "export const api = 2; // edited in place\n");
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          projects: { ...r.projects, [apiId]: { ...(r.projects[apiId] as RegistryEntry), override: inside } },
+        },
+      })),
+    );
+    const blocked = await runOffload(offloadDeps(), { project: await ref("work:web") });
+    expect(!blocked.ok && [blocked.exitCode, blocked.finding.code]).toEqual([6, "project.nested"]);
+    expect(!blocked.ok && blocked.finding.message).toContain("work:api");
+    expect(readFileSync(join(inside, "src/api.ts"), "utf8")).toBe(
+      "export const api = 2; // edited in place\n",
+    );
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  test("a project whose copy lies inside another's folder is locked by it: dehydrate of the outer exits 11 and spares it", async () => {
+    const apiId = ulid();
+    const inside = join(dir, "vendor/api");
+    box.file("work/web/vendor/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    box.file("work/web/vendor/api/package-lock.json", `${JSON.stringify({ lockfileVersion: 3 })}\n`);
+    box.file("work/web/vendor/api/node_modules/x/index.js", "x\n");
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          projects: {
+            ...r.projects,
+            [apiId]: { root: "work", path: "api", override: inside, registeredAt: new Date().toISOString() },
+          },
+        },
+      })),
+    );
+    const commandDeps = {
+      host: testHost(),
+      checks: quietChecks,
+      plugins: [nodePlugin],
+      env: env(),
+      paths: box.paths,
+      loader: new ConfigLoader(testHost(), box.paths),
+      emit: () => {},
+      log: () => {},
+    };
+    holdLock(apiId);
+    const held = await runDehydrate(commandDeps, { project: await ref() });
+    expect(!held.ok && [held.exitCode, held.finding.code]).toEqual([11, "project.locked"]);
+    rmSync(join(box.paths.locksDir, `${apiId}.lock`));
+    const done = value(await runDehydrate(commandDeps, { project: await ref() }));
+    expect(done.removed.map((r) => r.path)).toEqual(["node_modules"]);
+    expect(existsSync(join(inside, "node_modules/x/index.js"))).toBe(true);
+  });
+});
+
+describe("onload: a store that blips before the swap (N3)", () => {
+  test("an unreachable store at the head re-read keeps the journal and staging; the next onload resumes", async () => {
+    await offload();
+    let blip = false;
+    const flaky = {
+      ...store,
+      list: async (prefix: string) =>
+        blip
+          ? {
+              ok: false as const,
+              exitCode: 9 as const,
+              finding: {
+                code: "store.unreachable",
+                severity: "block" as const,
+                message: "the disk went away",
+                allowable: false,
+              },
+            }
+          : store.list(prefix),
+    };
+    engine.hooks.duringRestore = () => {
+      blip = true;
+    };
+    const first = await onload(
+      {},
+      {
+        opener: { open: async () => ({ ok: true, value: { blob: flaky, engine } }) },
+        openMirror: async () => ({ ok: true, value: memoryBlobStore({ createIfAbsent: true }) }),
+      },
+    );
+    expect(!first.ok && first.exitCode).toBe(9);
+    const [journal] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+    expect(journal?.step).toBe("onload.verified");
+    expect(existsSync(join(journal?.staging ?? "", "src/main.ts"))).toBe(true);
+    engine.hooks.duringRestore = undefined;
+    const second = value(await onload());
+    expect(second.op).toBe(journal?.op as string);
+    await expectInvariants();
   });
 });
 
@@ -1231,6 +1421,42 @@ describe("onload: hydration", () => {
       true,
     );
     await expectInvariants();
+  });
+
+  test("a dehydrate stopped after a removal still marks the project unhydrated (N2)", async () => {
+    box.file("work/web/packages/a/package.json", `${JSON.stringify({ name: "a" })}\n`);
+    box.file("work/web/packages/a/package-lock.json", `${JSON.stringify({ lockfileVersion: 3 })}\n`);
+    box.file("work/web/packages/a/node_modules/y/index.js", "y\n");
+    const stop = new AbortController();
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        removeTree: async (path) => {
+          await real.fs.removeTree(path);
+          stop.abort();
+        },
+      },
+    };
+    const result = await runDehydrate(
+      {
+        host,
+        checks: quietChecks,
+        plugins: [nodePlugin],
+        env: env(),
+        paths: box.paths,
+        loader: new ConfigLoader(testHost(), box.paths),
+        emit: () => {},
+        log: () => {},
+        signal: stop.signal,
+      },
+      { project: await ref() },
+    );
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([130, "operation.cancelled"]);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[await projectId()]?.unhydrated).toBe(
+      true,
+    );
   });
 
   test("dehydrate never strips a registered inner project's dependencies, and takes its lock (D53, D56)", async () => {
