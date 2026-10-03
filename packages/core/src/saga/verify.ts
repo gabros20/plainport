@@ -3,12 +3,16 @@
 // and link targets. Content is restic's to authenticate; what this catches is a missing, extra or changed entry.
 // Every symlink's target is also read again from the folder itself, so a target the listing could only guess
 // (restic's ls output, Task 8) never passes on the listing's word alone.
+//
+// verifySnapshot is the whole of step 7's check: re-stat the folder, compare the listing, then re-stat once more, so an
+// edit made while the listing was read is caught too.
 
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { type LocalFs, systemErrorCode } from "../io.ts";
 import type { Engine, EntryMeta, RunContext } from "../ports/engine.ts";
 import type { Manifest, ManifestEntry } from "../scan/manifest.ts";
+import { scanTree } from "../scan/walk.ts";
 
 /** At most this many differences are named in the finding. */
 const SHOWN = 10;
@@ -101,4 +105,47 @@ export const verifyListing = async (options: {
       paths: [options.dir],
     }),
   );
+};
+
+/** Whether `dir` still has the fingerprint a scan gave it; a walk that fails ends the run. */
+export const unchanged = async (fs: LocalFs, dir: string, fingerprint: string): Promise<Result<boolean>> => {
+  const now = await scanTree(fs, dir);
+  if (!now.ok) return now;
+  return ok(now.value.fingerprint === fingerprint);
+};
+
+export type SnapshotCheck = { changed: true } | { changed: false; totals: VerifiedTotals };
+
+/**
+ * Verifies a snapshot against the scan it was made from: the folder unchanged, the listing the same as the manifest,
+ * the folder still unchanged. `changed` says the folder moved under it (plan and snapshot again); verify.mismatch, a
+ * listing that differs from an unchanged folder, is a failure.
+ */
+export const verifySnapshot = async (options: {
+  engine: Engine;
+  fs: LocalFs;
+  dir: string;
+  snapshot: string;
+  /** The scan the snapshot was made from. */
+  tree: { fingerprint: string; manifest: Manifest };
+  excluded: ReadonlySet<string>;
+  ctx: RunContext;
+}): Promise<Result<SnapshotCheck>> => {
+  const { fs, dir, tree } = options;
+  const before = await unchanged(fs, dir, tree.fingerprint);
+  if (!before.ok) return before;
+  if (!before.value) return ok({ changed: true });
+  const checked = await verifyListing({
+    engine: options.engine,
+    fs,
+    snapshot: options.snapshot,
+    dir,
+    manifest: tree.manifest,
+    excluded: options.excluded,
+    ctx: options.ctx,
+  });
+  if (!checked.ok) return checked;
+  const after = await unchanged(fs, dir, tree.fingerprint);
+  if (!after.ok) return after;
+  return ok(after.value ? { changed: false, totals: checked.value } : { changed: true });
 };

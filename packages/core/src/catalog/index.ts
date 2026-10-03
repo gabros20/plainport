@@ -8,6 +8,7 @@ import { RootClaimSchema } from "./root-claim.ts";
 
 export * from "./events.ts";
 export * from "./fold.ts";
+export * from "./head.ts";
 export * from "./identity.ts";
 export * from "./log.ts";
 export * from "./root-claim.ts";
