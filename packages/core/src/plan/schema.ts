@@ -4,7 +4,7 @@
 //
 // A plan is output, so its schema stays open (D16); the plan file wrapping it is plainport's own and strict.
 
-import { FindingSchema, outputObject, PhaseSchema, shellWord } from "@plainport/contract";
+import { type Finding, FindingSchema, outputObject, PhaseSchema, shellWord } from "@plainport/contract";
 import { z } from "zod";
 import { UlidSchema } from "../ulid.ts";
 
@@ -101,6 +101,15 @@ export const PlanSchema = outputObject({
 }).meta({ title: "Plan" });
 export type Plan = z.infer<typeof PlanSchema>;
 export type PlanOptions = NonNullable<Plan["options"]>;
+
+/**
+ * The block finding that stops this plan: the first one its own --allow list (options.allow) does not override, as
+ * an allowable blocker named there is overridden (D50). A plan with one is refused and never approvable (D38).
+ */
+export const planBlocker = (plan: Plan): Finding | undefined => {
+  const allow = new Set(plan.options?.allow ?? []);
+  return plan.findings.find((f) => f.severity === "block" && !(f.allowable && allow.has(f.code)));
+};
 
 /** The exact command that runs this plan: `--plan <id>` with the options it was made with (D36, D38). */
 export const planCommand = (plan: Plan): string => {

@@ -156,6 +156,33 @@ describe("offload: dry run", () => {
     expect(env.data.findings.map((f: { code: string }) => f.code)).toContain("git.locked");
   });
 
+  test("--allow applies to a dry run (D50): an allowed blocker leaves an approvable plan the same --allow runs", async () => {
+    lockedRepo();
+    const human = await cli(["offload", "work:web", "--dry-run", "--allow", "git.locked"]);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain("  allowed   git.locked  ");
+    expect(human.out).toMatch(/--plan [0-9A-Z]{26} --allow git\.locked\n$/);
+    const planned = await cli(["offload", "work:web", "--dry-run", "--allow", "git.locked", "--json"]);
+    expect(planned.code).toBe(0);
+    const plan = envelope(planned.out).data;
+    expect(plan.options).toMatchObject({ allow: ["git.locked"] });
+    const fresh = await preloadPlans(ports().io, ports().env, NOW);
+    const without = await cli(["offload", "work:web", "--plan", plan.id, "--json"], { plans: fresh });
+    expect(without.code).toBe(6);
+    expect(envelope(without.out).error.finding.code).toBe("plan.stale");
+    const run = await cli(["offload", "work:web", "--plan", plan.id, "--allow", "git.locked", "--json"], {
+      plans: fresh,
+    });
+    expect(run.code).toBe(0);
+  });
+
+  test("offload.verify = full is refused with usage.invalid until M5 (D50)", async () => {
+    box.file(box.paths.configFile.slice(box.home.length + 1), 'version = 1\n[offload]\nverify = "full"\n');
+    const run = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(2);
+    expect(envelope(run.out).error.finding.code).toBe("usage.invalid");
+  });
+
   test("a blocked plan's id never stands in for --yes (D38)", async () => {
     lockedRepo();
     const planned = await cli(["offload", "work:web", "--dry-run", "--json"]);

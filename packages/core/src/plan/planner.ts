@@ -193,6 +193,15 @@ export const prepareOffload = async (
   const loaded = await req.loader.load({ env: req.env, projectDir: req.dir, root: req.project.root });
   if (!loaded.ok) return loaded;
   const { config } = loaded.value;
+  if (config.offload.verify === "full") {
+    // DESIGN promises --verify full (M5); until it is built the value is refused, never silently downgraded (D50).
+    return fail(
+      finding("usage.invalid", {
+        message: 'offload.verify = "full" arrives in M5; this build verifies against the manifest only',
+        fix: 'set offload.verify = "manifest" (or remove it) in config.toml, then re-run',
+      }),
+    );
+  }
 
   await req.boundary?.("preflight.end");
   await req.boundary?.("scan.start");

@@ -8,19 +8,32 @@
 // `plainport recover` (Task 14) when the process dies there:
 //
 //   offload.begin .. offload.planned       nothing is uploaded yet: roll back (remove the journal). A root-created
-//                                          event the journal names (rootCreated) may or may not be on the store;
-//                                          either is harmless
-//   offload.snapshot.start                 restic may have written a snapshot nothing names: roll back
+//                                          event the journal names (rootCreated) may or may not be on the store,
+//                                          and the store's root claim (meta/v1/root.json) names this root; both are
+//                                          harmless and stay
+//   offload.snapshot.start                 restic may have written a snapshot nothing names (tagged
+//                                          plainport:op=<op>): roll back
 //   offload.snapshot.discarded             restic's incomplete snapshot (exit 3) is journaled: write its
 //                                          snapshot-discarded event if the store lacks it, then roll back (D28)
-//   offload.snapshot.done, offload.verified  a snapshot nothing names yet: roll back
+//   offload.snapshot.done, offload.verified  the next step's write (commit.start or diverged) may be the one a power
+//                                          loss dropped after its event reached the store (D24, D50), so first
+//                                          search the store for an offloaded event of this op (every event carries
+//                                          `op`) that names a snapshot in `attempts`. None: roll back. One that the
+//                                          catalog folds as the project's head (snapshot = op): it was committed,
+//                                          so finish release as from offload.committed. One that is not the head
+//                                          (the project forked): handle it as offload.diverged
 //   offload.diverged                       the head moved: the event (`event`, `diverged`) keeps the snapshot as a
 //                                          fork. Append it if the store lacks it, never release, remove the journal
 //   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, finish
 //                                          release; if not, roll back (a lost write never deletes a folder, D24)
 //   offload.committed .. release.stub      committed: finish release as the journal's `release` says (rename,
-//                                          stub, registry, delete)
+//                                          stub, registry, delete). The trash is `trash`; when the release.trash
+//                                          write was lost (the journal says committed and has none), it is
+//                                          offloadTrashOf(journal), and the folder may already be in it: look in
+//                                          both places. The stub's offloadedAt and bytes are the event's
 //   offload.release.delete                 released: delete the trash once keepUntil (if any) has passed
+//
+// RECOVERY_NEEDS lists, step by step, the journal fields those rules read; the saga's tests check each is there.
 //
 // A saga that ends on its own, success or expected failure, leaves nothing open: on a failure before the commit
 // nothing local has changed, so it removes its journal; on success the detached delete removes the trash and then
@@ -46,6 +59,7 @@ import {
 import type { CatalogEvent } from "../catalog/events.ts";
 import type { CatalogState } from "../catalog/fold.ts";
 import { appendEvent, loadCatalog, storeEventLog } from "../catalog/log.ts";
+import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
@@ -61,7 +75,7 @@ import { acquireLock, type LockHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { type PlanBoundary, type PreparedOffload, prepareOffload } from "../plan/planner.ts";
 import type { Plan } from "../plan/schema.ts";
-import { planCommand } from "../plan/schema.ts";
+import { planBlocker, planCommand } from "../plan/schema.ts";
 import { readPlan, savePlan } from "../plan/store.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostChecks } from "../ports/checks.ts";
@@ -102,6 +116,42 @@ export const OFFLOAD_STEPS = [
   "offload.release.delete",
 ] as const;
 export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
+
+/** What every journal names: the operation, the project and its folder, the store. */
+const IDENTITY = [
+  "op",
+  "project.id",
+  "project.dir",
+  "project.path",
+  "project.rootId",
+  "store.name",
+  "store.id",
+];
+/** Decided with the plan: how release goes, whatever the config says by the time recover runs. */
+const POLICY = [...IDENTITY, "plan.id", "release.keepLocalFor", "release.stub"];
+
+/**
+ * The journal fields (dotted paths) recovery reads at each step, by the table in the file comment: a journal at that
+ * step always holds them. Task 14's recover reads nothing else.
+ */
+export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = {
+  "offload.begin": IDENTITY,
+  "offload.preflight.done": IDENTITY,
+  "offload.scan.done": IDENTITY,
+  "offload.strip.done": IDENTITY,
+  "offload.planned": POLICY,
+  "offload.snapshot.start": POLICY,
+  "offload.snapshot.discarded": [...POLICY, "discarded.snapshot", "discarded.event"],
+  "offload.snapshot.done": [...POLICY, "attempts.0"],
+  "offload.verified": [...POLICY, "attempts.0", "verified"],
+  "offload.diverged": [...POLICY, "verified", "event", "diverged"],
+  "offload.commit.start": [...POLICY, "verified", "event"],
+  "offload.committed": [...POLICY, "verified", "event"],
+  "offload.release.trash": [...POLICY, "verified", "event", "trash"],
+  "offload.release.moved": [...POLICY, "verified", "event", "trash"],
+  "offload.release.stub": [...POLICY, "verified", "event", "trash"],
+  "offload.release.delete": [...POLICY, "verified", "event", "trash"],
+};
 
 /** Steps after which the operation is finished but for deleting its trash: they hold no project back. */
 const RELEASED: ReadonlySet<string> = new Set<OffloadStep>(["offload.release.delete"]);
@@ -184,6 +234,12 @@ export const durationMs = (duration: string): number => {
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
+/** The same failure with another fix: the one that is true where it happened. */
+const withFix = (failure: Failure, fix: string): Failure => ({
+  ...failure,
+  finding: { ...failure.finding, fix },
+});
+
 const cancelled = (): Failure =>
   fail(
     finding("operation.cancelled", {
@@ -223,8 +279,12 @@ const lockHeld = (address: string) => (holder: LockHolder | undefined, path: str
   });
 
 /** Where the project's root holds its trash: the root's folder, or the folder's parent for a one-off location. */
-const rootFolderOf = (ref: ProjectRef, dir: string): string =>
-  dir.endsWith(`/${ref.path}`) ? dir.slice(0, -(ref.path.length + 1)) : dirname(dir);
+const rootFolderOf = (path: string, dir: string): string =>
+  dir.endsWith(`/${path}`) ? dir.slice(0, -(path.length + 1)) : dirname(dir);
+
+/** `<root>/.plainport-trash/<op>`: where release moves the folder, derived from the journal alone (D50). */
+export const offloadTrashOf = (journal: Pick<OffloadJournal, "op" | "project">): string =>
+  join(rootFolderOf(journal.project.path, journal.project.dir), TRASH_DIR, journal.op);
 
 /** The catalog's view of the head this working copy should offload on top of; a refusal when it is not that. */
 const headCheck = (
@@ -447,8 +507,16 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     if (!before.ok) return before;
     const early = headCheck(before.value, projectId, base, ref.address);
     if (early.kind !== "ok") return fail(early.finding);
+    const ctx: RunContext = {
+      op,
+      ...(signal === undefined ? {} : { signal }),
+      emit: (e) => (e.type === "log" ? deps.log(e.level, e.message) : deps.emit(e)),
+    };
+    // Preflight's "the credentials work" (DESIGN "Offload process" step 2): the password opens the repository.
+    const opens = await store.engine.list({ tags: ["plainport", `plainport:project=${projectId}`] }, ctx);
+    if (!opens.ok) return signal?.aborted ? cancelled() : opens;
 
-    const rootFolder = rootFolderOf(ref, folder);
+    const rootFolder = rootFolderOf(ref.path, folder);
     let here: { dev: number };
     let beside: { dev: number };
     try {
@@ -487,6 +555,14 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     if (!rooted.ok) return rooted;
     const shared = otherRoot(before.value, rootId);
     if (shared !== undefined) return fail(rootMismatch(store.name, ref.root, shared));
+    // The store is claimed for this root before anything else is written to it, so of two roots' first offloads at
+    // once exactly one goes on (D50).
+    const claim = await claimStoreRoot(store.blob, rootId);
+    if (!claim.ok) return claim;
+    if (claim.value.root !== rootId)
+      return fail(
+        rootMismatch(store.name, ref.root, before.value.roots[claim.value.root]?.key ?? claim.value.root),
+      );
     const needsRootEvent = (before.value.roots[rootId]?.created ?? null) === null;
 
     const startedAt = clock().toISOString();
@@ -562,7 +638,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       const read = await readPlan(io, paths, req.plan, clock());
       if (!read.ok) return abandon(read);
       approved = read.value;
-      const blocked = approved.findings.find((f) => f.severity === "block");
+      const blocked = planBlocker(approved);
       if (blocked !== undefined) return abandon(fail(blocked));
     }
 
@@ -607,8 +683,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     const stale = async (message: string, uploaded = false): Promise<Failure> => {
       const fresh = await plan(false);
       if (!fresh.ok) return abandon(fresh);
-      const blocked = fresh.value.plan.findings.some((f) => f.severity === "block");
-      let saved = !blocked;
+      let saved = planBlocker(fresh.value.plan) === undefined;
       if (saved) {
         try {
           await savePlan(io, paths, fresh.value.plan, clock());
@@ -637,11 +712,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     };
 
     const allow = new Set(req.allow ?? []);
-    const ctx: RunContext = {
-      op,
-      ...(signal === undefined ? {} : { signal }),
-      emit: (e) => (e.type === "log" ? deps.log(e.level, e.message) : deps.emit(e)),
-    };
+    /** Findings streamed so far: a retry streams only what is new in its plan. */
+    const reported = new Set<string>();
     let previous =
       base === undefined ? undefined : before.value.projects[projectId]?.snapshots[base]?.stored[store.name];
     let prepared: PreparedOffload | undefined;
@@ -652,7 +724,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (!planned.ok) return abandon(signal?.aborted ? cancelled() : planned);
       prepared = planned.value;
       const current = prepared.plan;
-      if (attempt === 1) for (const f of current.findings) report(f);
+      for (const f of current.findings) {
+        const key = JSON.stringify(f);
+        if (reported.has(key)) continue;
+        reported.add(key);
+        report(f);
+      }
       if (approved !== undefined && approvalKey(approved) !== approvalKey(current)) {
         return stale(
           attempt === 1
@@ -666,9 +743,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         if (attempt === 1 && f !== undefined && f.severity === "block" && !f.allowable)
           deps.log("warn", `--allow ${code} has no effect: ${code} cannot be allowed`);
       }
-      const blocker = current.findings.find(
-        (f) => f.severity === "block" && !(f.allowable && allow.has(f.code)),
-      );
+      // The plan records --allow (options.allow), so its blocker is the one that list leaves (D50).
+      const blocker = planBlocker(current);
       if (blocker !== undefined) return abandon(fail(blocker));
       const settled = await step("offload.planned", {
         plan: { id: current.id, fingerprint: current.fingerprint },
@@ -680,15 +756,33 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (!settled.ok) return abandon(settled);
       if (signal?.aborted) return abandon(cancelled());
 
+      // git runs in the folder's real path and may not look above it (D33), nor read the system config (D34).
+      let real: string | undefined;
+      if (prepared.fsmonitor.length > 0) {
+        try {
+          real = await io.fs.realpath(folder);
+        } catch (error) {
+          systemErrorCode(error);
+        }
+      }
+      const ceiling = real === undefined ? undefined : dirname(real);
       for (const pid of prepared.fsmonitor) {
-        const stopped = await host.run({
-          command: "git",
-          args: ["fsmonitor--daemon", "stop"],
-          cwd: folder,
-          env: { PATH: deps.env.PATH ?? "/usr/bin:/bin", HOME: deps.env.HOME ?? paths.home },
-          timeoutMs: 30_000,
-        });
-        const done = stopped.ok && stopped.value.exitCode === 0;
+        const stopped =
+          real === undefined || ceiling === undefined || ceiling.includes(":")
+            ? undefined
+            : await host.run({
+                command: "git",
+                args: ["fsmonitor--daemon", "stop"],
+                cwd: real,
+                env: {
+                  PATH: deps.env.PATH ?? "/usr/bin:/bin",
+                  HOME: deps.env.HOME ?? paths.home,
+                  GIT_CEILING_DIRECTORIES: ceiling,
+                  GIT_CONFIG_NOSYSTEM: "1",
+                },
+                timeoutMs: 30_000,
+              });
+        const done = stopped?.ok === true && stopped.value.exitCode === 0;
         deps.log(
           done ? "info" : "warn",
           `git fsmonitor daemon ${pid}: ${done ? "stopped" : "could not be stopped"}`,
@@ -730,7 +824,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
             attempts: [...journal.attempts, discarded.snapshot],
             discarded,
           });
-          if (!noted.ok) return noted;
+          // The journal stays at snapshot.start, naming nothing restic wrote: recover closes it, not a re-run.
+          if (!noted.ok)
+            return withFix(
+              noted,
+              "fix what the message names (permissions, free space), then run plainport recover: it closes this offload, which changed nothing local, so a new one can start",
+            );
           const written = await appendEvent(events, {
             v: 1,
             id: discarded.event,
@@ -747,7 +846,10 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           // Unwritten, it stays journaled for recover to write.
           if (!written.ok) {
             deps.log("warn", `the discarded snapshot could not be recorded yet: ${written.finding.message}`);
-            return made;
+            return withFix(
+              made,
+              `run plainport recover once the store accepts writes (${written.finding.code}): it records the incomplete snapshot restic wrote and closes this offload, which changed nothing local; then make the files restic could not read readable and re-run`,
+            );
           }
         }
         return abandon(signal?.aborted ? cancelled() : made);
@@ -821,6 +923,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     // Commit: the head must still be what this copy came from; the offloaded event closes the lease.
     phase("commit", "start");
     const current = await catalog();
+    // Ctrl-C during the reload is honoured like any other pre-commit safe point, whatever the reload returned.
+    if (signal?.aborted) return abandon(cancelled());
     if (!current.ok) return abandon(current);
     // Two roots' first offloads to one store at once both pass the early check; the later one stops here (D48).
     const sharedNow = otherRoot(current.value, rootId);

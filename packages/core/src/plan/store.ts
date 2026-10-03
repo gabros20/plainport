@@ -9,14 +9,13 @@ import { writeAtomic } from "../atomic.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import type { PlainportPaths } from "../paths.ts";
 import { isUlid } from "../ulid.ts";
-import { type OperationKind, PLAN_TTL_MS, type Plan, PlanFileSchema } from "./schema.ts";
+import { type OperationKind, PLAN_TTL_MS, type Plan, PlanFileSchema, planBlocker } from "./schema.ts";
 
 const SUFFIX = ".json";
 const fileOf = (paths: PlainportPaths, id: string): string => join(paths.plansDir, `${id}${SUFFIX}`);
 const expired = (plan: Plan, now: Date): boolean => Date.parse(plan.expiresAt) <= now.getTime();
-/** Fresh and free of blockers: a plan its own dry run refused is never approved (D38). */
-const approvable = (plan: Plan, now: Date): boolean =>
-  !expired(plan, now) && !plan.findings.some((f) => f.severity === "block");
+/** Fresh and free of blockers its --allow list does not override: a plan its own dry run refused is never approved (D38, D50). */
+const approvable = (plan: Plan, now: Date): boolean => !expired(plan, now) && planBlocker(plan) === undefined;
 
 const notFound = (id: string) =>
   fail(
@@ -110,7 +109,7 @@ export const readPlan = async (
   return ok(plan);
 };
 
-/** The plans `--plan <id>` may approve: fresh, with no block finding (D38). Files that are not plans are passed over. */
+/** The plans `--plan <id>` may approve: fresh, with no block finding left by its --allow list (D38, D50). Files that are not plans are passed over. */
 export const listPlans = async (
   io: LocalIo,
   paths: PlainportPaths,

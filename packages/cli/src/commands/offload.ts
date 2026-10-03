@@ -1,18 +1,20 @@
 // plainport offload (DESIGN.md "Offload process", "CLI design"). offload is confirm-class: it sends the project off
 // this machine and deletes the local copy, so it runs with --yes or an approved --plan <id> (D36). --dry-run (always
 // read, D18) plans the offload, prints the plan as DESIGN.md shows it, and saves it under plans/ so `--plan <id>` can
-// approve it; a plan with blockers exits 6 with the plan as the error's data (D14, D38). A real run is core's offload
+// approve it; a plan with blockers exits 6 with the plan as the error's data (D14, D38), and --allow applies there as in
+// a real run, so a plan whose allowable blockers it names is approvable (D50). A real run is core's offload
 // saga: it plans afresh (with --plan, the folder must still match the approved plan), stops on blockers that
 // --allow does not override, snapshots, verifies, commits and releases. The argument is variadic in the contract;
 // M1 takes one project (D38).
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { type Finding, fail, failWith, finding, ok, shellWord } from "@plainport/contract";
+import { fail, failWith, finding, ok } from "@plainport/contract";
 import {
   ConfigLoader,
   PLAN_TTL_MS,
   type Plan,
   PlanSchema,
+  planBlocker,
   planCommand,
   planOffload,
   readRegistry,
@@ -61,12 +63,16 @@ export const renderPlan = (plan: Plan): string => {
     const largest = plan.include.largest.slice(0, SHOWN_LARGEST);
     lines.push(row("largest", largest.map((l) => `${l.path} ${formatBytes(l.bytes)}`).join(" · ")));
   }
+  const blocker = planBlocker(plan);
+  const allowed = new Set(plan.options?.allow ?? []);
   for (const f of plan.findings) {
-    lines.push(row(f.severity, `${f.code}  ${f.message}`));
-    if (f.severity === "block" && f.fix !== undefined)
+    // A blocker the plan's --allow overrides (D50) is shown as allowed, without a fix to apply.
+    const overridden = f.severity === "block" && f.allowable && allowed.has(f.code);
+    lines.push(row(overridden ? "allowed" : f.severity, `${f.code}  ${f.message}`));
+    if (f.severity === "block" && !overridden && f.fix !== undefined)
       lines.push(`${" ".repeat(2 + LABEL + 2)}fix: ${f.fix}`);
   }
-  const blocked = plan.findings.some((f: Finding) => f.severity === "block");
+  const blocked = blocker !== undefined;
   const hours = PLAN_TTL_MS / 3_600_000;
   lines.push(
     row(
@@ -242,8 +248,9 @@ export const offload = defineCommand({
         `the plan could not be saved under ${paths.plansDir} (${systemErrorCode(error)}), so --plan ${planned.value.id} will not find it; use --yes instead`,
       );
     }
-    // A plan with blockers is a refusal that still shows the plan (D38): exit 6, the plan as data (D14).
-    const blocker = planned.value.findings.find((f) => f.severity === "block");
+    // A plan with blockers its --allow leaves (D50) is a refusal that still shows the plan (D38): exit 6, the plan as
+    // data (D14).
+    const blocker = planBlocker(planned.value);
     return blocker === undefined ? ok(planned.value) : failWith(blocker, planned.value, 6);
   },
 });
