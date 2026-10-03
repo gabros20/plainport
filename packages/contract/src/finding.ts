@@ -180,6 +180,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The project folder is on another volume than the folder it would be moved aside into, so release could not rename it in one step",
   },
+  "fs.write-failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary:
+      "A file or folder an operation writes (its journal, the trash, the stub) could not be written or moved: permissions, a full disk, an I/O error",
+  },
   "git.failed": {
     severity: "block",
     allowable: false,
@@ -244,6 +251,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back",
+  },
+  "path.stub-occupied": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Something other than this project's stub is at <project>.plainport, where the stub would go; plainport never overwrites it",
   },
   "plan.expired": {
     severity: "block",

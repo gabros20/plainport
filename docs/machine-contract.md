@@ -170,7 +170,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
 | `catalog.event-skipped` | warn | no | 6 | A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed |
-| `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork. Nothing local is deleted |
+| `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's `data` names it (D14). Nothing local is deleted |
 | `catalog.incomplete` | block | no | 6 | The catalog names a snapshot of the project it does not hold, so its head is unknown; nothing is uploaded or committed |
 | `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
@@ -188,6 +188,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; `fix` suggests `--keep-deps` |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
 | `fs.cross-volume` | block | no | 6 | The project folder is on another volume than its root, so release could not move it aside in one rename |
+| `fs.write-failed` | block | no | 1 | A file or folder an operation writes (its journal, the trash, the stub) could not be written or moved; after a commit, `fix` is `plainport recover` |
 | `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own `.git` included; `paths` lists them |
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
@@ -195,7 +196,8 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
-| `plan.stale` | block | no | 6 | The folder changed since the approved plan was made, or the plan is for another project; a fresh plan is saved and `fix` names its id |
+| `path.stub-occupied` | block | no | 6 | Something other than this project's stub is at `<project>.plainport`, where the stub would go; plainport never overwrites it (D47) |
+| `plan.stale` | block | no | 6 | The folder, the options or the config changed since the approved plan was made, or the plan is for another project; a fresh plan is saved, `fix` names its id and the error's `data` is that plan (D14) |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
 | `process.output-incomplete` | block | no | 1 | A child process exited, but output plainport parses as data cannot be taken as whole: something outside its process group kept its stdout open, reading it failed, or processes it left in its group were stopped |
