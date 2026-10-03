@@ -13,22 +13,52 @@ import { join } from "node:path";
 import {
   appendEvent,
   type CatalogEvent,
+  guardedFs,
+  type LocalIo,
   loadCatalogState,
   mirrorEventLog,
+  PATH_REFUSED,
+  PathGuard,
   readEvents,
+  resolvePaths,
   storeEventLog,
   syncMirror,
   ulid,
 } from "@plainport/core";
 import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
-import { fsBlobStore } from "./index.ts";
+import { testHost } from "../../core/src/testing/host.ts";
+import { fsBlobStore, openEventMirror } from "./index.ts";
 
 const temp = () => mkdtempSync(join(tmpdir(), "plainport-blob-fs-"));
+// Every test goes through the guarded test host, as production goes through the host port.
+const io = testHost();
+
+/** The io of a file system without hard links (exFAT, FAT32, some SMB mounts): link() fails with `code`. */
+const withoutLinks = (code: string): LocalIo => ({
+  ...io,
+  fs: {
+    ...io.fs,
+    link: async () => {
+      throw Object.assign(new Error(`${code}: operation not supported, link`), { code });
+    },
+  },
+});
 
 blobStoreContract("blob-fs", () => {
   const dir = temp();
-  return { store: fsBlobStore(dir), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { store: fsBlobStore(io, dir), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 });
+
+// D41: where link() is refused, create-only falls back to an exclusive open, keeping exactly one winner.
+for (const code of ["EPERM", "ENOTSUP", "EOPNOTSUPP"]) {
+  blobStoreContract(`blob-fs without hard links (${code})`, () => {
+    const dir = temp();
+    return {
+      store: fsBlobStore(withoutLinks(code), dir),
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  });
+}
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 
@@ -40,12 +70,12 @@ describe("blob-fs on disk", () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("reports create-if-absent, and no replace-if-match", () => {
-    expect(fsBlobStore(dir).capabilities()).toEqual({ createIfAbsent: true, replaceIfMatch: false });
-    expect(() => fsBlobStore(dir).put("a", bytes("x"), { ifMatch: "etag" })).toThrow();
+    expect(fsBlobStore(io, dir).capabilities()).toEqual({ createIfAbsent: true, replaceIfMatch: false });
+    expect(() => fsBlobStore(io, dir).put("a", bytes("x"), { ifMatch: "etag" })).toThrow();
   });
 
   test("keys are paths under the store root, and writes leave no temporary files behind", async () => {
-    const store = fsBlobStore(dir);
+    const store = fsBlobStore(io, dir);
     expect((await store.put("meta/v1/events/01.json", bytes("one"), { ifNotExists: true })).ok).toBe(true);
     expect((await store.put("meta/v1/events/01.json", bytes("two"), { ifNotExists: true })).ok).toBe(false);
     expect((await store.put("meta/v1/state.json", bytes("s1"))).ok).toBe(true);
@@ -56,17 +86,20 @@ describe("blob-fs on disk", () => {
     expect(readdirSync(join(dir, "meta/v1")).sort()).toEqual(["events", "state.json"]);
   });
 
-  test("a temporary file a crashed writer left is not listed as a key", async () => {
+  test("a temporary file a crashed writer left, and macOS metadata files, are not listed as keys", async () => {
     mkdirSync(join(dir, "meta/v1/events"), { recursive: true });
     writeFileSync(join(dir, "meta/v1/events/01.json.4242.abcdef012345.tmp"), "half");
+    // What macOS leaves on exFAT/FAT/SMB volumes (seen on the exFAT image in the T1 suite), and Finder's file.
+    writeFileSync(join(dir, "meta/v1/events/._02.json"), "appledouble");
+    writeFileSync(join(dir, "meta/v1/.DS_Store"), "finder");
     writeFileSync(join(dir, "meta/v1/events/02.json"), "whole");
-    const listed = await fsBlobStore(dir).list("meta/v1/events/");
+    const listed = await fsBlobStore(io, dir).list("meta/v1/events/");
     expect(listed.ok && listed.value.map((e) => e.key)).toEqual(["meta/v1/events/02.json"]);
   });
 
   test("an unmounted store is store.unreachable, and a write never creates its root", async () => {
     const gone = join(dir, "Volumes", "Archive", "plainport");
-    const store = fsBlobStore(gone);
+    const store = fsBlobStore(io, gone);
     for (const result of [
       await store.put("meta/v1/events/01.json", bytes("x"), { ifNotExists: true }),
       await store.put("meta/v1/state.json", bytes("x")),
@@ -82,17 +115,34 @@ describe("blob-fs on disk", () => {
 
   test("a store root that is a file is store.unreachable too", async () => {
     writeFileSync(join(dir, "file"), "x");
-    expect(await fsBlobStore(join(dir, "file")).list("")).toMatchObject({
+    expect(await fsBlobStore(io, join(dir, "file")).list("")).toMatchObject({
       ok: false,
       finding: { code: "store.unreachable" },
     });
   });
 
   test("a key whose parent is a file is store.failed, with the path", async () => {
-    const store = fsBlobStore(dir);
+    const store = fsBlobStore(io, dir);
     await store.put("a", bytes("file"));
     const result = await store.put("a/b", bytes("x"));
     expect(result).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+  });
+
+  test("without hard links a create-only write leaves no temporary file and still refuses an existing key", async () => {
+    const store = fsBlobStore(withoutLinks("ENOTSUP"), dir);
+    expect((await store.put("meta/v1/events/01.json", bytes("one"), { ifNotExists: true })).ok).toBe(true);
+    const again = await store.put("meta/v1/events/01.json", bytes("two"), { ifNotExists: true });
+    expect(again).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
+    expect(readdirSync(join(dir, "meta/v1/events"))).toEqual(["01.json"]);
+    expect(readFileSync(join(dir, "meta/v1/events/01.json"), "utf8")).toBe("one");
+  });
+
+  test("every read and write goes through the io it was given, so the host guard sees it", async () => {
+    const guarded: LocalIo = { ...io, fs: guardedFs(io.fs, new PathGuard({ refuse: [dir], readOnly: [] })) };
+    const store = fsBlobStore(guarded, join(dir, "store"));
+    await expect(store.put("a", bytes("x"))).rejects.toMatchObject({ code: PATH_REFUSED });
+    await expect(store.list("")).rejects.toMatchObject({ code: PATH_REFUSED });
+    expect(existsSync(join(dir, "store"))).toBe(false);
   });
 
   test("a symlink inside the store is not followed out of it by list", async () => {
@@ -101,11 +151,41 @@ describe("blob-fs on disk", () => {
       writeFileSync(join(outside, "secret.json"), "{}");
       mkdirSync(join(dir, "meta/v1/events"), { recursive: true });
       require("node:fs").symlinkSync(outside, join(dir, "meta/v1/events/link"));
-      const listed = await fsBlobStore(dir).list("");
+      const listed = await fsBlobStore(io, dir).list("");
       expect(listed.ok && listed.value).toEqual([]);
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("blob-fs event mirror", () => {
+  let home: string;
+  beforeEach(() => {
+    home = temp();
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  test("openEventMirror creates <cache>/plainport/<store> through the io and returns a store on it", async () => {
+    const paths = resolvePaths({ HOME: home });
+    if (!paths.ok) throw new Error(paths.finding.message);
+    const mirror = await openEventMirror(io, paths.value, "ssd");
+    if (!mirror.ok) throw new Error(mirror.finding.message);
+    expect(existsSync(join(home, ".cache/plainport/ssd"))).toBe(true);
+    expect((await mirror.value.put("events/x.json", bytes("{}"))).ok).toBe(true);
+    expect(readFileSync(join(home, ".cache/plainport/ssd/events/x.json"), "utf8")).toBe("{}");
+    // Opening it again is fine.
+    expect((await openEventMirror(io, paths.value, "ssd")).ok).toBe(true);
+  });
+
+  test("a cache folder that cannot be made is store.failed naming the cache, never 'mount the disk'", async () => {
+    writeFileSync(join(home, ".cache"), "a file where the folder should be");
+    const paths = resolvePaths({ HOME: home });
+    if (!paths.ok) throw new Error(paths.finding.message);
+    const mirror = await openEventMirror(io, paths.value, "ssd");
+    expect(mirror).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+    expect(mirror.ok || mirror.finding.message).toContain(".cache/plainport/ssd");
+    expect(mirror.ok || mirror.finding.fix).not.toContain("mount");
   });
 });
 
@@ -136,7 +216,7 @@ describe("blob-fs carries the catalog", () => {
   test("events land at <store>/meta/v1/events/<ulid>.json, fold to state, and mirror to the cache", async () => {
     const storeRoot = join(dir, "ssd");
     mkdirSync(storeRoot);
-    const store = fsBlobStore(storeRoot);
+    const store = fsBlobStore(io, storeRoot);
     for (const n of [1, 2]) expect((await appendEvent(storeEventLog(store), event(n))).ok).toBe(true);
     expect(readdirSync(join(storeRoot, "meta/v1/events")).sort()).toEqual([
       `${event(1).id}.json`,
@@ -148,9 +228,12 @@ describe("blob-fs carries the catalog", () => {
     expect(state.value.state.projects[idAt(1)]).toMatchObject({ status: "shelved", head: idAt(502) });
     expect(existsSync(join(storeRoot, "meta/v1/state.json"))).toBe(true);
 
-    const mirrorRoot = join(dir, "cache", "plainport", "ssd");
-    mkdirSync(mirrorRoot, { recursive: true });
-    const mirror = fsBlobStore(mirrorRoot);
+    const paths = resolvePaths({ HOME: dir });
+    if (!paths.ok) throw new Error(paths.finding.message);
+    const opened = await openEventMirror(io, paths.value, "ssd");
+    if (!opened.ok) throw new Error(opened.finding.message);
+    const mirror = opened.value;
+    const mirrorRoot = join(dir, ".cache", "plainport", "ssd");
     const synced = await syncMirror(storeEventLog(store), mirrorEventLog(mirror));
     expect(synced.ok && synced.value.copied).toBe(2);
     expect(readdirSync(join(mirrorRoot, "events")).length).toBe(2);

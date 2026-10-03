@@ -1,16 +1,18 @@
-// The BlobStore port over node:fs (DESIGN.md "Plugin interfaces → BlobStore", "Store kinds": external SSD or local
-// disk). A key is a file under the store's root. Every write goes to a temporary file beside the target first and is
-// flushed; a create-only write then hard-links it into place, which fails if the key exists (exactly one of racing
-// writers wins), and a replacing write renames it over the target. Either way a reader sees the whole old value or the
-// whole new one.
+// The BlobStore port on a local file system (DESIGN.md "Plugin interfaces → BlobStore", "Store kinds": external SSD
+// or local disk). A key is a file under the store's root. Every call goes through the io port it is given, so the
+// composition root passes the host port and its path guard sees each read and write (D21).
+//
+// A replacing write goes to a temporary file beside the target, is flushed, and is renamed over it: a reader sees
+// the whole old value or the whole new one. A create-only write hard-links the flushed temporary file into place,
+// which fails if the key exists, so exactly one of racing writers wins. File systems without hard links (exFAT and
+// FAT32, the usual factory format of external SSDs, and some SMB mounts) refuse link(); there create-only falls back
+// to opening the key itself with O_CREAT|O_EXCL (D41), which keeps the one winner but can leave a torn file if the
+// process dies mid-write. Readers skip a torn event (catalog.event-skipped) and a retry of the same append completes
+// it (catalog/log.ts).
 //
 // The store's root must already exist: a disk that is not mounted is store.unreachable, and nothing is ever created
 // at its mount point (which would quietly fill the system disk). Folders below the root are made as needed.
-//
-// This adapter reads and writes the store's folder directly, as DESIGN.md says it does; that folder is the store,
-// configured by the person, and never the home folder's plainport state.
 
-import { link, lstat, mkdir, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import {
@@ -18,40 +20,29 @@ import {
   assertBlobPrefix,
   type BlobEntry,
   type BlobStore,
+  type LocalIo,
   type PutOptions,
   systemErrorCode,
+  TEMP_SUFFIX,
+  tempPathFor,
 } from "@plainport/core";
 
 /** `<name>.<pid>.<12 hex>.tmp`: what a write leaves behind if the process dies before its link or rename. */
-const TEMP_NAME = /\.\d+\.[0-9a-f]{12}\.tmp$/;
+const TEMP_NAME = new RegExp(`\\.\\d+\\.[0-9a-f]{12}\\${TEMP_SUFFIX}$`);
 
-const randomHex = (): string =>
-  Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, "0")).join("");
+/**
+ * Files macOS writes beside others: AppleDouble `._<name>` sidecars on volumes without extended attributes (exFAT,
+ * FAT, SMB) and Finder's `.DS_Store`. They are never plainport's keys, so a listing leaves them out.
+ */
+const MAC_METADATA = (name: string): boolean => name.startsWith("._") || name === ".DS_Store";
+
+/** What link() fails with where the file system has no hard links. */
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** Flushes a folder's entries after a link or rename; not every platform can, so it is best effort. */
-const syncDir = async (path: string): Promise<void> => {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(path, "r");
-    await handle.sync();
-  } catch {
-    // Opening or syncing a folder is refused on some platforms; the write itself has been flushed.
-  } finally {
-    await handle?.close();
-  }
-};
-
-const unlinkQuietly = async (path: string): Promise<void> => {
-  try {
-    await unlink(path);
-  } catch {
-    // Already gone; a leftover temporary file is never listed as a key.
-  }
-};
-
-export const fsBlobStore = (root: string): BlobStore => {
+export const fsBlobStore = (io: LocalIo, root: string): BlobStore => {
+  const { fs } = io;
   const pathOf = (key: string): string => join(root, ...key.split("/"));
 
   const unreachable = (detail: string): Failure =>
@@ -70,11 +61,18 @@ export const fsBlobStore = (root: string): BlobStore => {
         paths: [pathOf(key)],
       }),
     );
+  const exists = (key: string): Failure =>
+    fail(
+      finding("store.key-exists", {
+        message: `${key} already exists in the store at ${root}; it was left as it was`,
+        paths: [pathOf(key)],
+      }),
+    );
 
   /** Undefined when the root is a folder; store.unreachable when it is missing or is not one. */
   const checkRoot = async (): Promise<Failure | undefined> => {
     try {
-      if ((await stat(root)).isDirectory()) return undefined;
+      if ((await fs.stat(root)).kind === "dir") return undefined;
       return unreachable("is not a folder");
     } catch (error) {
       const code = systemErrorCode(error);
@@ -91,7 +89,7 @@ export const fsBlobStore = (root: string): BlobStore => {
     try {
       return await body();
     } catch (error) {
-      systemErrorCode(error); // anything but a failed system call is a bug, and is thrown again
+      systemErrorCode(error); // anything but a failed system call (a guard's refusal included) is thrown again
       return failed(key, error);
     }
   };
@@ -101,72 +99,88 @@ export const fsBlobStore = (root: string): BlobStore => {
     return code === "ENOENT" || code === "ENOTDIR";
   };
 
+  const unlinkQuietly = async (path: string): Promise<void> => {
+    try {
+      await fs.unlink(path);
+    } catch (error) {
+      systemErrorCode(error); // already gone: a leftover temporary file is never listed as a key
+    }
+  };
+
   const get = async (key: string): Promise<Result<Uint8Array | null>> =>
     guarded(key, async () => {
       try {
-        return ok(new Uint8Array(await readFile(pathOf(key))));
+        return ok(await fs.readBytes(pathOf(key)));
       } catch (error) {
         if (absent(error)) return ok(null);
         throw error;
       }
     });
 
+  /** Creates the key with an exclusive open, where hard links are missing. */
+  const createDirectly = async (
+    key: string,
+    target: string,
+    data: Uint8Array,
+  ): Promise<Result<{ etag?: string }>> => {
+    try {
+      await fs.writeBytesDurable(target, data, { exclusive: true });
+    } catch (error) {
+      if (systemErrorCode(error) === "EEXIST") return exists(key);
+      throw error;
+    }
+    await fs.syncDir(dirname(target));
+    return ok({});
+  };
+
   const put = async (key: string, data: Uint8Array, opts: PutOptions): Promise<Result<{ etag?: string }>> =>
     guarded(key, async () => {
       const target = pathOf(key);
-      await mkdir(dirname(target), { recursive: true });
-      const temp = `${target}.${process.pid}.${randomHex()}.tmp`;
+      await fs.mkdirp(dirname(target));
+      const temp = tempPathFor(target, io);
+      let linkless = false;
       try {
-        const handle = await open(temp, "wx");
-        try {
-          await handle.writeFile(data);
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
+        await fs.writeBytesDurable(temp, data, { exclusive: true });
         if (opts.ifNotExists) {
           try {
-            await link(temp, target);
+            await fs.link(temp, target);
           } catch (error) {
-            if (systemErrorCode(error) !== "EEXIST") throw error;
-            return fail(
-              finding("store.key-exists", {
-                message: `${key} already exists in the store at ${root}; it was left as it was`,
-                paths: [target],
-              }),
-            );
+            const code = systemErrorCode(error);
+            if (code === "EEXIST") return exists(key);
+            if (!NO_HARD_LINKS.has(code)) throw error;
+            linkless = true;
           }
         } else {
-          await rename(temp, target);
+          await fs.rename(temp, target);
         }
       } finally {
         await unlinkQuietly(temp);
       }
-      await syncDir(dirname(target));
+      if (linkless) return createDirectly(key, target, data);
+      await fs.syncDir(dirname(target));
       return ok({});
     });
 
-  /** Files under `dir` (a key's folder, or the root), as keys; symlinks and temporary files are skipped. */
+  /** Files under `dir` (a key's folder, or the root), as keys; symlinks, temporary files and macOS metadata are skipped. */
   const walk = async (dir: string, keyPrefix: string, out: BlobEntry[]): Promise<void> => {
-    let names: string[];
+    let entries: Awaited<ReturnType<typeof fs.entries>>;
     try {
-      names = await readdir(dir);
+      entries = await fs.entries(dir);
     } catch (error) {
       if (absent(error)) return;
       throw error;
     }
-    for (const name of names) {
+    for (const { name, kind } of entries) {
       const path = join(dir, name);
       const key = `${keyPrefix}${name}`;
-      let info: Awaited<ReturnType<typeof lstat>>;
-      try {
-        info = await lstat(path);
-      } catch (error) {
-        if (absent(error)) continue; // removed while listing
-        throw error;
+      if (kind === "dir") await walk(path, `${key}/`, out);
+      else if (kind === "file" && !TEMP_NAME.test(name) && !MAC_METADATA(name)) {
+        try {
+          out.push({ key, size: (await fs.lstat(path)).size });
+        } catch (error) {
+          if (!absent(error)) throw error; // removed while listing
+        }
       }
-      if (info.isDirectory()) await walk(path, `${key}/`, out);
-      else if (info.isFile() && !TEMP_NAME.test(name)) out.push({ key, size: info.size });
     }
   };
 
@@ -186,8 +200,8 @@ export const fsBlobStore = (root: string): BlobStore => {
   const statKey = async (key: string): Promise<Result<{ size: number } | null>> =>
     guarded(key, async () => {
       try {
-        const info = await lstat(pathOf(key));
-        return ok(info.isFile() ? { size: info.size } : null);
+        const info = await fs.lstat(pathOf(key));
+        return ok(info.kind === "file" ? { size: info.size } : null);
       } catch (error) {
         if (absent(error)) return ok(null);
         throw error;
@@ -197,7 +211,7 @@ export const fsBlobStore = (root: string): BlobStore => {
   const remove = async (key: string): Promise<Result<void>> =>
     guarded(key, async () => {
       try {
-        await unlink(pathOf(key));
+        await fs.unlink(pathOf(key));
       } catch (error) {
         if (!absent(error)) throw error;
       }

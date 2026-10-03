@@ -1,6 +1,7 @@
 // @plainport/core — Domain, planner, sagas, journal, catalog fold and ports.
 
 export const packageName = "@plainport/core";
+export { TEMP_SUFFIX, tempPathFor } from "./atomic.ts";
 export * from "./catalog/index.ts";
 export * from "./config/index.ts";
 export * from "./device.ts";
