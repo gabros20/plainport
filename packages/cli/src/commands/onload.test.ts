@@ -3,16 +3,29 @@
 // reaches a registry (D13). Invariants 1–3 are checked after each run.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
 import { nodeLocalIo } from "@plainport/core";
+import { testHost as macosTestHost } from "@plainport/host-macos/testing";
+import { describeT1 } from "../../../../test/tiers.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../../../core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import { gate } from "../gate.ts";
 import type { Ports } from "../registry.ts";
+import { localStores } from "../stores.ts";
 import { capture, fakeRepositoryAt, STORE_PASSWORD, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
 
@@ -263,3 +276,96 @@ describe("dehydrate: the command", () => {
     }
   });
 });
+
+describeT1("onload with the real restic on a temp external-disk store", () => {
+  test("offload then onload is byte-identical minus stripped paths: contents, modes and links, verified by restic's own listing", async () => {
+    const host = macosTestHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "offload.release.trash") released = captureTree(dir());
+        },
+      },
+    });
+    const env = {
+      HOME: box.home,
+      PATH: `${bin}:${PATH}`,
+      PLAINPORT_STORE_PASSWORD: "t1-pw",
+      FAKE_PM_LOG: join(box.home, "pm.log"),
+    };
+    const real = (): Ports => ({
+      ...ports(),
+      env,
+      system: host,
+      io: host,
+      stores: localStores(host, env),
+    });
+    const run = (argv: string[]) => capture(argv, REGISTRY, { ports: real() });
+    expect((await run(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"])).code).toBe(
+      0,
+    );
+    box.file("work/web/bin/run.sh", "#!/bin/sh\necho hi\n");
+    chmodSync(join(dir(), "bin/run.sh"), 0o755);
+    box.file("work/web/docs/frozen.txt", "read only\n");
+    chmodSync(join(dir(), "docs/frozen.txt"), 0o444);
+    symlinkSync("src/main.ts", join(dir(), "link"));
+    symlinkSync("../outside/target", join(dir(), "dangling"));
+    const before = treeOf(dir());
+    const off = await run(["offload", "work:web", "--store", "t1", "--yes", "--json"]);
+    expect(off.code).toBe(0);
+    const op = envelope(off.out).data.op as string;
+    for (let i = 0; i < 200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+      await Bun.sleep(25);
+    expect(existsSync(dir())).toBe(false);
+
+    const back = await run(["onload", "work:web", "--store", "t1", "--json"]);
+    expect(back.err).toBe("");
+    expect(back.code).toBe(0);
+    expect(envelope(back.out).data).toMatchObject({
+      snapshot: op,
+      restored: "restore",
+      hydrate: { status: "installed" },
+    });
+    expect(treeOf(dir())).toEqual(before);
+    const opened = await localStores(host, env).open(
+      "t1",
+      { kind: "local", path: join(box.home, "t1-ssd") },
+      "t1-pw",
+    );
+    if (!opened.ok) throw new Error(opened.finding.message);
+    const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+    const id = Object.entries(registry.projects as Record<string, { path: string }>).find(
+      ([, e]) => e.path === "web",
+    )?.[0];
+    expect(
+      await invariantViolations({
+        paths: box.paths,
+        device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
+        project: { id, dir: dir() },
+        roots: [join(box.home, "work")],
+        store: { name: "t1", blob: fsBlobStore(host, join(box.home, "t1-ssd")), engine: opened.value.engine },
+        stripped: ["node_modules"],
+      }),
+    ).toEqual([]);
+  }, 120_000);
+});
+
+/** Every entry below a folder: type, mode, link target and content hash; node_modules left out. */
+const treeOf = (root: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const walk = (relative: string) => {
+    for (const name of readdirSync(relative === "" ? root : join(root, relative)).sort()) {
+      const path = relative === "" ? name : `${relative}/${name}`;
+      if (path === "node_modules") continue;
+      const full = join(root, path);
+      const stat = lstatSync(full);
+      const mode = (stat.mode & 0o7777).toString(8);
+      if (stat.isSymbolicLink()) out[path] = `link ${readlinkSync(full)}`;
+      else if (stat.isDirectory()) {
+        out[path] = `dir ${mode}`;
+        walk(path);
+      } else out[path] = `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+    }
+  };
+  walk("");
+  return out;
+};
