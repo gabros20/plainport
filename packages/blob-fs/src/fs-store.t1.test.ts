@@ -7,34 +7,32 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { link, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { attachImage, type DiskImage } from "../../../test/disk-image.ts";
 import { describeT1 } from "../../../test/tiers.ts";
 import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { fsBlobStore } from "./index.ts";
 
-const hdiutil = (...args: string[]): void => {
-  const run = Bun.spawnSync(["hdiutil", ...args], { stdout: "pipe", stderr: "pipe" });
-  if (run.exitCode !== 0) throw new Error(`hdiutil ${args.join(" ")}: ${run.stderr.toString()}`);
-};
-
 if (process.platform === "darwin") {
   describeT1("blob-fs on an exFAT disk image", () => {
     let work: string;
+    let image: DiskImage | undefined;
     let mount: string;
     let next = 0;
-    beforeAll(() => {
+    // hdiutil is slow on a loaded machine and shares diskarbitrationd with every other image: the shared helper
+    // serializes and retries it, and these hooks get time for that instead of the 5 s default.
+    beforeAll(async () => {
       work = mkdtempSync(join(tmpdir(), "plainport-exfat-"));
-      mount = join(work, "mnt");
-      hdiutil("create", "-size", "8m", "-fs", "ExFAT", "-volname", "PPEXFAT", join(work, "exfat.dmg"));
-      hdiutil("attach", "-nobrowse", "-mountpoint", mount, join(work, "exfat.dmg"));
-    });
-    afterAll(() => {
+      image = await attachImage(work, { size: "8m", fs: "ExFAT", volname: "PPEXFAT" });
+      mount = image.mount;
+    }, 180_000);
+    afterAll(async () => {
       try {
-        hdiutil("detach", mount, "-force");
+        await image?.remove();
       } finally {
         rmSync(work, { recursive: true, force: true });
       }
-    });
+    }, 180_000);
 
     test("the volume really has no hard links, so the fallback is what runs", async () => {
       await writeFile(join(mount, "probe"), "x");

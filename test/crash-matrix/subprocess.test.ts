@@ -39,6 +39,7 @@ import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandb
 import { hostTarget } from "../../packages/core/src/tools.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
+import { attachImage, type DiskImage } from "../disk-image.ts";
 import { onMac } from "../platform.ts";
 import { describeT1, tierEnabled } from "../tiers.ts";
 import {
@@ -99,23 +100,14 @@ let scratch: string;
 let binary: string;
 let tools: string;
 let template: ProjectTemplate;
-/** The case-sensitive volume's mount point (macOS), where each row's root lives. */
+/** The case-sensitive volume (macOS) and its mount point, where each row's root lives. */
+let image: DiskImage | undefined;
 let volume: string | undefined;
-
-const sh = (args: string[]) => {
-  const ran = Bun.spawnSync(args, {
-    env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (ran.exitCode !== 0) throw new Error(`${args.join(" ")}: ${ran.stderr.toString()}`);
-  return ran.stdout.toString();
-};
 
 /** Every row's run, so afterAll can stop what a row that never ended left running. */
 const runs = new Set<RowRun>();
 
-beforeAll(() => {
+beforeAll(async () => {
   if (!tierEnabled(1)) return;
   scratch = mkdtempSync(join(tmpdir(), "plainport-crash-sub-"));
   binary = join(scratch, "plainport");
@@ -142,38 +134,26 @@ beforeAll(() => {
   chmodSync(join(tools, "restic"), 0o755);
   template = makeProjectTemplate();
   if (onMac) {
-    const image = join(scratch, "case-sensitive.sparseimage");
-    volume = join(scratch, "volume");
-    mkdirSync(volume);
-    sh([
-      "hdiutil",
-      "create",
-      "-quiet",
-      "-size",
-      "256m",
-      "-fs",
-      "Case-sensitive APFS",
-      "-volname",
-      "pp-crash",
-      "-type",
-      "SPARSE",
-      image,
-    ]);
-    sh(["hdiutil", "attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint", volume, image]);
+    image = await attachImage(join(scratch, "image"), {
+      size: "256m",
+      fs: "Case-sensitive APFS",
+      volname: "pp-crash",
+      sparse: true,
+    });
+    volume = image.mount;
   }
-}, 120_000);
+}, 180_000);
 
-afterAll(() => {
+afterAll(async () => {
   if (!tierEnabled(1)) return;
   for (const r of runs) r.stop();
-  if (volume !== undefined) {
-    try {
-      sh(["hdiutil", "detach", "-quiet", "-force", volume]);
-    } catch {}
+  try {
+    await image?.remove();
+  } finally {
+    template?.cleanup();
+    removeTree(scratch);
   }
-  template?.cleanup();
-  removeTree(scratch);
-}, 120_000);
+}, 180_000);
 
 /** Files below a folder (restic's packs under repo/data). */
 const countFiles = (dir: string): number => {
