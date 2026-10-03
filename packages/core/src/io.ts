@@ -83,3 +83,14 @@ export interface LocalIo {
 /** The `code` of a Node error (ENOENT, EEXIST, …), if it has one. */
 export const errorCode = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+
+/**
+ * The errno code (ENOENT, EACCES, …) of a failed system call, for a catch site that turns expected failures into
+ * findings. Anything else, a TypeError, a guard's refusal (ERR_PLAINPORT_PATH_REFUSED), a plain string, is a bug and
+ * is thrown again, so a catch never swallows one (AGENTS.md rule 7: exceptions mean bugs).
+ */
+export const systemErrorCode = (error: unknown): string => {
+  const code = error instanceof Error ? errorCode(error) : undefined;
+  if (code !== undefined && /^E[A-Z0-9]+$/.test(code)) return code;
+  throw error;
+};

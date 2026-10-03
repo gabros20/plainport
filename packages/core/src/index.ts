@@ -3,6 +3,7 @@
 export const packageName = "@plainport/core";
 export * from "./config/index.ts";
 export * from "./device.ts";
+export { type GuardPolicy, guardedFs, PATH_REFUSED, PathGuard, PathRefused } from "./guard.ts";
 export {
   type DirEntry,
   errorCode,
@@ -12,6 +13,7 @@ export {
   type LocalFs,
   type LocalIo,
   type ProcessInfo,
+  systemErrorCode,
 } from "./io.ts";
 export { acquireLock, type HeldLock, type LockHolder, LockHolderSchema, type LockOptions } from "./lock.ts";
 // The real LocalIo, for the composition root (the CLI's main) only (run decision D21).
@@ -31,6 +33,7 @@ export * from "./registry.ts";
 export * from "./roots/index.ts";
 export * from "./runner/index.ts";
 export * from "./scan/index.ts";
+export { posixSpawner } from "./spawner.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";
 export * from "./ulid.ts";
