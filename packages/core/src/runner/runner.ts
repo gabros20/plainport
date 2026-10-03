@@ -42,6 +42,11 @@ const TAIL_CHARS_IN_MESSAGE = 600;
 
 type Settings = Record<keyof typeof RUN_DEFAULTS, number>;
 type Stop = "idle" | "timeout" | "cancelled" | "too-large" | "incomplete" | "error";
+/** Why a capture cannot be shown to be whole; each is process.output-incomplete with its own message. */
+type Incomplete =
+  | { why: "held-open" }
+  | { why: "leftovers" }
+  | { why: "read-error"; stream: OutputStream; error: unknown };
 
 const positive = (name: string, value: number): number => {
   if (!Number.isFinite(value) || value <= 0)
@@ -255,11 +260,15 @@ export const splitRecords = (bytes: Uint8Array, separator: number): Uint8Array[]
   return records;
 };
 
-/** Reads a stream to its end (or until cancelled) into the collector. */
+/**
+ * Reads a stream to its end (or until cancelled) into the collector. A read that fails ends the pump and is
+ * reported to onError: what was read is kept, but the stream is not known to be whole. It never rejects.
+ */
 const pump = async (
   stream: ReadableStream<Uint8Array>,
   collector: { push(chunk: Uint8Array): void; end(): void },
   onChunk: () => void,
+  onError: (error: unknown) => void,
   readers: { cancel(): Promise<void> }[],
 ): Promise<void> => {
   const reader = stream.getReader();
@@ -271,11 +280,17 @@ const pump = async (
       onChunk();
       collector.push(value);
     }
-  } catch {
-    // A cancelled or broken pipe: what was read is kept.
+  } catch (error) {
+    onError(error);
   } finally {
     collector.end();
   }
+};
+
+const describeError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = errorCode(error);
+  return code === undefined || message.includes(code) ? message : `${message} (${code})`;
 };
 
 /** The last few lines of output, for a failure message: stderr if it said anything, else stdout. */
@@ -303,8 +318,34 @@ const spawnFailed = (spec: RunSpec, error: unknown): Failure => {
   );
 };
 
+const incompleteFailure = (label: string, incomplete: Incomplete): Failure => {
+  switch (incomplete.why) {
+    case "held-open":
+      return fail(
+        finding("process.output-incomplete", {
+          message: `${label} exited, but a process outside its group kept its stdout open, so its output could not be read to the end`,
+          fix: "find what the command left running in the background (a daemon, an ssh master), stop it, then run the command again",
+        }),
+      );
+    case "leftovers":
+      return fail(
+        finding("process.output-incomplete", {
+          message: `${label} exited but left processes running in its group, which were stopped; one of them may still have been writing to its stdout, so its output cannot be taken as whole`,
+          fix: "find what the command starts in the background and does not wait for, stop or disable it, then run the command again",
+        }),
+      );
+    case "read-error":
+      return fail(
+        finding("process.output-incomplete", {
+          message: `${label}'s ${incomplete.stream} could not be read to the end: ${describeError(incomplete.error)}`,
+          fix: "run the command again; if it repeats, check the disk and the terminal plainport runs in",
+        }),
+      );
+  }
+};
+
 const stoppedFailure = (
-  stop: Exclude<Stop, "error">,
+  stop: Exclude<Stop, "error" | "incomplete">,
   label: string,
   settings: Settings & { captureMaxBytes?: number },
   stdout: OutputTail,
@@ -328,13 +369,6 @@ const stoppedFailure = (
       );
     case "cancelled":
       return fail(finding("process.cancelled", { message: `${label} was cancelled and stopped${said}` }));
-    case "incomplete":
-      return fail(
-        finding("process.output-incomplete", {
-          message: `${label} exited, but a process outside its group kept its stdout open, so its output could not be read to the end`,
-          fix: "find what the command left running in the background (a daemon, an ssh master), stop it, then run the command again",
-        }),
-      );
     case "too-large":
       return fail(
         finding("process.output-too-large", {
@@ -380,7 +414,11 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     wake = resolve;
   });
   const requestStop = (why: Stop, error?: unknown): void => {
-    if (why === "error" && stopError === undefined) stopError = error;
+    // A thrown undefined or null must still propagate: with nothing recorded, the stopped run would look ok.
+    if (why === "error" && stopError === undefined) {
+      stopError =
+        error ?? new Error(`runProcess: a callback threw a value that is not an Error: ${String(error)}`);
+    }
     if (stop !== undefined) return;
     stop = why;
     wake();
@@ -416,12 +454,33 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     end: (): void => stdout.end(),
   };
   const readers: { cancel(): Promise<void> }[] = [];
+  let readersCancelled = false;
   const touch = (): void => {
     lastActivity = performance.now();
   };
+  // A read that failed: the stream ended short of its end, through no exit of the child.
+  const readErrors: Partial<Record<OutputStream, unknown>> = {};
+  const onReadError = (stream: OutputStream) => (error: unknown) => {
+    // Our own cancel ends a read too; that case is already known (the drain was cut short).
+    if (readersCancelled || stream in readErrors) return;
+    readErrors[stream] = error;
+    try {
+      spec.log?.emit({
+        type: "log",
+        op: spec.log.op,
+        level: "warn",
+        message: `${label}: ${stream} could not be read to the end: ${describeError(error)}`.slice(
+          0,
+          LOG_MESSAGE_MAX,
+        ),
+      });
+    } catch (thrown) {
+      onError(thrown); // a log sink that throws is a bug, as for lines
+    }
+  };
   const pumps = Promise.all([
-    pump(child.stdout, stdoutSink, touch, readers),
-    pump(child.stderr, stderr, touch, readers),
+    pump(child.stdout, stdoutSink, touch, onReadError("stdout"), readers),
+    pump(child.stderr, stderr, touch, onReadError("stderr"), readers),
   ]);
 
   let exit: { code: number | null; signal: string | null } | undefined;
@@ -439,6 +498,7 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   };
 
   let reason: Stop | undefined;
+  let incomplete: Incomplete | undefined;
   let leftoversStopped = false;
   let finished = false;
   try {
@@ -455,14 +515,22 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     // Once the group is gone its pipes close; a process that left the group may hold them, so bound the wait.
     const drained = await within(pumps, DRAIN_MS);
     if (!drained) {
+      readersCancelled = true;
       for (const reader of readers) reader.cancel().catch(() => {});
       await pumps;
     }
     // The leader may be reaped while its last writes are still in the pipe: those can cross the cap during the
     // drain, after the stop reason was read, so the capture decides again here.
     if (reason === undefined && capture?.overflowed) reason = "too-large";
-    // A capture is promised whole; with the pipe still held open when the drain was cut, that cannot be shown.
-    if (reason === undefined && capture !== undefined && !drained) reason = "incomplete";
+    // A capture is promised whole. It cannot be shown to be when stdout was still held open as the drain was cut,
+    // when stdout failed to read before its end, or when the leader left writers in its group that were stopped.
+    if (reason === undefined && capture !== undefined) {
+      if (!drained) incomplete = { why: "held-open" };
+      else if ("stdout" in readErrors)
+        incomplete = { why: "read-error", stream: "stdout", error: readErrors.stdout };
+      else if (leftoversStopped) incomplete = { why: "leftovers" };
+      if (incomplete !== undefined) reason = "incomplete";
+    }
     finished = true;
   } finally {
     clearTimeout(idleTimer);
@@ -476,10 +544,11 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   }
 
   // A callback that threw is a bug, also when it threw while the last lines drained.
-  if (stopError !== undefined) throw stopError;
-  if (reason !== undefined && reason !== "error") {
-    return stoppedFailure(reason, label, settings, stdout.tail(), stderr.tail());
+  if (stopError !== undefined || reason === "error") {
+    throw stopError ?? new Error("runProcess: stopped for a callback error that was not recorded");
   }
+  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete);
+  if (reason !== undefined) return stoppedFailure(reason, label, settings, stdout.tail(), stderr.tail());
   return ok({
     exitCode: exit?.code ?? null,
     signal: exit?.signal ?? null,

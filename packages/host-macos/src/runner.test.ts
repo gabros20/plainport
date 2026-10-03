@@ -170,6 +170,16 @@ describe("runner: real process groups (host-macos)", () => {
     expect(performance.now() - started).toBeLessThan(5000);
   });
 
+  test("in capture mode, leftovers the leader did not wait for make the run process.output-incomplete", async () => {
+    const result = await host.run(
+      sh("(sleep 60; echo late) & echo early; exit 0", {
+        capture: { maxBytes: 1_000_000 },
+        killGraceMs: 300,
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-incomplete" } });
+  });
+
   test("the child's environment is exactly the env passed, never the parent's", async () => {
     process.env.PLAINPORT_RUNNER_LEAK = "leaked";
     try {

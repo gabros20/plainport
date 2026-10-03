@@ -136,7 +136,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary:
-      "A child process exited, but something outside its process group kept its stdout open, so output parsed as data could not be read to the end",
+      "A child process exited, but its stdout, parsed as data, cannot be taken as whole: something outside its process group kept it open, reading it failed, or processes it left in its group were stopped",
   },
   "process.output-too-large": {
     severity: "block",

@@ -41,10 +41,12 @@ export interface RunSpec {
   /**
    * Keep ALL of stdout, as bytes, in RunOutcome.captured: for output parsed as data (`git ls-files -z`, `restic
    * snapshots --json`), where a tail would silently lose entries. Past maxBytes the group is stopped and the run
-   * fails as process.output-too-large, also when the cap is crossed by the last bytes read after the child exited;
-   * and when a process outside the group holds stdout open past the drain, it fails as process.output-incomplete.
-   * It is never cut short and reported ok. The bounded tails and onLine work as
-   * without it. splitRecords splits the bytes at a separator.
+   * fails as process.output-too-large, also when the cap is crossed by the last bytes read after the child exited.
+   * When the capture cannot be shown to be whole, the run fails as process.output-incomplete: a process outside
+   * the group held stdout open past the drain, reading stdout failed before its end, or the leader left processes
+   * in its group (leftoversStopped) that may have been writing. It is never cut short and reported ok. The exit
+   * code still tells whether the child itself succeeded: check it before parsing. The bounded tails and onLine
+   * work as without it. splitRecords splits the bytes at a separator.
    */
   capture?: { maxBytes: number };
   /** Every complete line as it arrives (parsers, progress). A throw is a bug: the group is stopped, then it
@@ -77,7 +79,8 @@ export interface RunOutcome {
   stderr: OutputTail;
   /** All of stdout when RunSpec.capture was given; absent otherwise. */
   captured?: Uint8Array;
-  /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). */
+  /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). With capture,
+   * this is a process.output-incomplete failure instead, since a stopped process may have been writing. */
   leftoversStopped: boolean;
   durationMs: number;
 }

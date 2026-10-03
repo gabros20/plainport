@@ -63,8 +63,16 @@ class FakeChild implements ChildProcess {
   closePipes(): void {
     if (this.closed) return;
     this.closed = true;
-    this.out.close();
-    this.err.close();
+    if (!this.broken.has("stdout")) this.out.close();
+    if (!this.broken.has("stderr")) this.err.close();
+  }
+
+  private readonly broken = new Set<"stdout" | "stderr">();
+  /** The pipe itself fails (EIO from the kernel): reading it rejects from here on, instead of ending. */
+  breakPipe(stream: "stdout" | "stderr", error: Error): void {
+    if (this.closed || this.broken.has(stream)) return;
+    this.broken.add(stream);
+    (stream === "stdout" ? this.out : this.err).error(error);
   }
 }
 
@@ -444,6 +452,70 @@ describe("runner (fake spawner): capturing the whole stdout", () => {
     expect(records).toEqual(["a", "", "b"]);
     expect(splitRecords(encode("tail"), 10).map((r) => new TextDecoder().decode(r))).toEqual(["tail"]);
     expect(splitRecords(new Uint8Array(0), 0)).toEqual([]);
+  });
+});
+
+describe("runner (fake spawner): a capture is whole, or the run fails", () => {
+  test("a read error on stdout during a normal drain is process.output-incomplete, never a shortened ok", async () => {
+    // The child writes, the pipe then fails (EIO) while the drain is still in progress, and the child exits 0.
+    const spawner = new FakeSpawner(async (child) => {
+      child.write("stdout", "first\0second\0");
+      await ms(5);
+      child.breakPipe("stdout", Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }));
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-incomplete" } });
+    if (result.ok) return;
+    expect(result.finding.message).toContain("EIO");
+  });
+
+  test("without capture, a read error keeps what was read and is reported as a log event", async () => {
+    const spawner = new FakeSpawner(async (child) => {
+      child.write("stdout", "before\n");
+      await ms(5);
+      child.breakPipe("stdout", new Error("EIO: i/o error, read"));
+      child.exit(0);
+    });
+    const events: PlainportEvent[] = [];
+    const result = await runProcess(
+      spawner,
+      spec({ log: { op: "op", emit: (event) => events.push(event) } }),
+    );
+    expect(result).toMatchObject({ ok: true, value: { exitCode: 0, stdout: { text: "before\n" } } });
+    expect(events).toContainEqual({
+      type: "log",
+      op: "op",
+      level: "warn",
+      message: expect.stringMatching(/stdout.*EIO/),
+    });
+  });
+
+  test("leftovers stopped in capture mode are process.output-incomplete: one of them may have been writing", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.leftovers = 1;
+      child.write("stdout", "partial\0");
+      child.exit(0);
+    });
+    const result = await runProcess(spawner, spec({ capture: { maxBytes: 1000 } }));
+    expect(result).toMatchObject({ ok: false, exitCode: 1, finding: { code: "process.output-incomplete" } });
+    expect(spawner.signals).toEqual(["SIGTERM"]);
+  });
+
+  test("a callback that throws a non-Error value still propagates: the stopped group never comes back as ok", async () => {
+    const spawner = new FakeSpawner((child) => child.write("stdout", "boom\n"));
+    await expect(
+      runProcess(
+        spawner,
+        spec({
+          capture: { maxBytes: 1000 },
+          onLine: () => {
+            throw undefined;
+          },
+        }),
+      ),
+    ).rejects.toThrow(/not an Error/);
+    expect(spawner.signals[0]).toBe("SIGTERM");
   });
 });
 
