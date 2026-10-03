@@ -7,8 +7,20 @@ _plainport_names() {
   if (( $# == 0 )); then
     names=(
         'help:Show every command, or one command'\''s arguments, options and risk class'
+        'init:Name this device, set up its roots and record the store snapshots go to'
+        'root:root commands'
         'version:Print plainport'\''s version'
     )
+  elif (( $# == 1 )); then
+    case "$1" in
+    root)
+      names=(
+        'add:Add a root, optionally with this device'\''s folder for it; the global --store sets its store'
+        'bind:Point a root at its folder on this device'
+        'list:Show every root, its folder on each device and its state here'
+        'scan:Find every project under a root'\''s folder here and register the new ones'
+      ) ;;
+    esac
   fi
   (( ${#names} )) && _describe -t commands 'plainport command' names
 }
@@ -18,9 +30,15 @@ _plainport() {
   local -a typed opts
   typed=(${words[2,CURRENT-1]:#-*})
   local cmd='' used=0
-  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|version) cmd=${typed[1]}; used=1 ;; esac; fi
+  if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
+  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|version) cmd=${typed[1]}; used=1 ;; esac; fi
   case "$cmd" in
     'help') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'init') opts=(--root --store-path --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'root add') opts=(--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'root bind') opts=(--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'root list') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'root scan') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'version') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     *) opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help --version) ;;
   esac

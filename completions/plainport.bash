@@ -3,7 +3,12 @@
 
 # Candidates for the next word of a command name, given the name's words typed so far.
 _plainport_names() {
-  if [[ $# -eq 0 ]]; then echo 'help version'; return; fi
+  if [[ $# -eq 0 ]]; then echo 'help init root version'; return; fi
+  if [[ $# -eq 1 ]]; then
+    case "$1" in
+    root) echo 'add bind list scan' ;;
+    esac
+  fi
 }
 
 _plainport() {
@@ -14,12 +19,20 @@ _plainport() {
     [[ ${COMP_WORDS[i]} == -* ]] || typed+=("${COMP_WORDS[i]}")
   done
   local cmd="" used=0
+  if [[ ${#typed[@]} -ge 2 ]]; then
+    case "${typed[0]} ${typed[1]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[0]} ${typed[1]}"; used=2 ;; esac
+  fi
   if [[ -z $cmd && ${#typed[@]} -ge 1 ]]; then
-    case "${typed[0]}" in help|version) cmd="${typed[0]}"; used=1 ;; esac
+    case "${typed[0]}" in help|init|version) cmd="${typed[0]}"; used=1 ;; esac
   fi
   local opts=''
   if [[ -n $cmd ]]; then case "$cmd" in
     'help') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'init') opts='--root --store-path --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'root add') opts='--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'root bind') opts='--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'root list') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'root scan') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'version') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
   esac; fi
   if [[ $cur == -* ]]; then

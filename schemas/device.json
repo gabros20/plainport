@@ -12,6 +12,11 @@
       "title": "Ulid",
       "description": "A ULID: 26 upper-case Crockford base32 characters"
     },
+    "name": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
     "role": {
       "type": "string",
       "enum": [
@@ -29,6 +34,7 @@
   "required": [
     "v",
     "id",
+    "name",
     "role",
     "createdAt"
   ],
