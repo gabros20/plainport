@@ -200,6 +200,53 @@ describe("catalog: store identity (D45)", () => {
     expect(decode(store.data.get(STORE_IDENTITY_KEY))).toBe("{broken");
   });
 
+  test("m10: a half-written identity file (a crash at setup on exFAT) is completed by setup while the store holds no events", async () => {
+    const whole = `${JSON.stringify({ v: 1, id: STORE_ID })}\n`;
+    for (const torn of ["", "{", whole.slice(0, 12), whole.slice(0, 20), whole.slice(0, -3)]) {
+      const store = memoryBlobStore();
+      store.data.set(STORE_IDENTITY_KEY, encode(torn));
+      // A read refuses it, and says what to do: setup never finished, so run it again.
+      const read = await loadCatalog({ store, mirror: memoryBlobStore(), storeId: STORE_ID, now: NOW });
+      expect(read).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+      if (read.ok) throw new Error("unreachable");
+      expect(read.finding.fix).toContain("plainport init");
+      expect(read.finding.fix).not.toContain("backup");
+      expect(decode(store.data.get(STORE_IDENTITY_KEY))).toBe(torn);
+      // Setup completes it with a fresh id.
+      const fresh = idAt(902);
+      expect(await ensureStoreIdentity(store, () => fresh)).toEqual({
+        ok: true,
+        value: { id: fresh, created: true },
+      });
+      expect(JSON.parse(decode(store.data.get(STORE_IDENTITY_KEY)) as string)).toEqual({ v: 1, id: fresh });
+    }
+  });
+
+  test("m10: a half-written identity file on a store that already holds events is never replaced, and the fix names where the id is recorded", async () => {
+    const store = memoryBlobStore();
+    await appendEvent(storeEventLog(store), offloaded(1));
+    const torn = `${JSON.stringify({ v: 1, id: STORE_ID })}`.slice(0, 20);
+    store.data.set(STORE_IDENTITY_KEY, encode(torn));
+    for (const result of [
+      await ensureStoreIdentity(store, () => idAt(902)),
+      await loadCatalog({ store, mirror: memoryBlobStore(), storeId: STORE_ID, now: NOW }),
+    ]) {
+      expect(result).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+      if (result.ok) throw new Error("unreachable");
+      expect(result.finding.fix).toContain("registry.json");
+      expect(result.finding.fix).not.toContain("backup");
+    }
+    expect(decode(store.data.get(STORE_IDENTITY_KEY))).toBe(torn);
+    // Bytes that are no prefix of an identity file are someone else's: never replaced either, whatever the store holds.
+    const empty = memoryBlobStore();
+    empty.data.set(STORE_IDENTITY_KEY, encode('{"v":2,"id":"'));
+    expect(await ensureStoreIdentity(empty, () => idAt(902))).toMatchObject({
+      ok: false,
+      finding: { code: "store.failed" },
+    });
+    expect(decode(empty.data.get(STORE_IDENTITY_KEY))).toBe('{"v":2,"id":"');
+  });
+
   test("a store whose identity is not the one this device knows is refused: store.identity-changed", async () => {
     const other = memoryBlobStore();
     await ensureStoreIdentity(other, () => idAt(901));
