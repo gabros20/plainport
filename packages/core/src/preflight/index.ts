@@ -6,12 +6,11 @@
 // Nothing here changes anything: git's fsmonitor daemon, which DESIGN says is stopped rather than blocking, is only
 // reported (fsmonitor) for the offload saga to stop.
 
-import { join } from "node:path";
-import { type Failure, type Finding, finding, ok, type Result } from "@plainport/contract";
-import { errorCode } from "../io.ts";
+import { join, resolve } from "node:path";
+import { type Failure, type Finding, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { CheckContext, HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
-import { dotGit, gitWorktrees } from "../scan/git.ts";
+import { dotGit, exists, gitWorktrees, unreadable } from "../scan/git.ts";
 import type { ProjectScan } from "../scan/index.ts";
 
 export interface PreflightReport {
@@ -25,7 +24,6 @@ export interface PreflightReport {
 
 /** At most this many paths go into a finding; its message gives the full count. */
 const MAX_PATHS = 100;
-const FSMONITOR_IPC = "/.git/fsmonitor--daemon.ipc";
 
 const capped = (paths: readonly string[]): string[] => paths.slice(0, MAX_PATHS);
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
@@ -33,15 +31,7 @@ const andList = (items: readonly string[]): string =>
   items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 const named = (p: ProcessUse): string => `${p.command} (${p.pid})`;
 
-const exists = async (host: HostPorts, path: string): Promise<boolean> => {
-  try {
-    await host.fs.lstat(path);
-    return true;
-  } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return false;
-    throw error;
-  }
-};
+const words = (items: readonly string[]): string => items.map(shellWord).join(" ");
 
 const gitChecks = async (
   host: HostPorts,
@@ -50,9 +40,15 @@ const gitChecks = async (
   report: PreflightReport,
 ): Promise<Failure | undefined> => {
   const kind = await dotGit(host, dir);
-  if (kind === "none") return undefined;
-  if (kind === "file") {
-    const pointer = (await host.fs.readText(join(dir, ".git"))).trim().replace(/^gitdir:\s*/, "");
+  if (!kind.ok) return kind;
+  if (kind.value === "none") return undefined;
+  if (kind.value === "file") {
+    let pointer: string;
+    try {
+      pointer = (await host.fs.readText(join(dir, ".git"))).trim().replace(/^gitdir:\s*/, "");
+    } catch (error) {
+      return unreadable(join(dir, ".git"), error);
+    }
     report.findings.push(
       finding("git.is-worktree", {
         message: `${dir} is a linked git worktree or a submodule's checkout: its .git only points to ${pointer}, which stays behind`,
@@ -63,12 +59,14 @@ const gitChecks = async (
     return undefined;
   }
   const lock = join(dir, ".git", "index.lock");
-  if (await exists(host, lock)) {
+  const locked = await exists(host, lock);
+  if (!locked.ok) return locked;
+  if (locked.value) {
     report.findings.push(
       finding("git.locked", {
         message: `${lock} exists: a git command is running in the repository, or one crashed`,
         paths: [lock],
-        fix: `wait for the git command to finish; if none is running, remove the stale lock: rm ${lock}`,
+        fix: `wait for the git command to finish; if none is running, remove the stale lock: rm ${shellWord(lock)}`,
       }),
     );
   }
@@ -84,17 +82,25 @@ const gitChecks = async (
       finding("git.worktrees", {
         message: `${plural(outside.length, "linked worktree")} of this repository ${outside.length === 1 ? "lives" : "live"} outside the folder and would be orphaned: ${outside.join(", ")}`,
         paths: capped(outside),
-        fix: `commit and push their work, then remove them: ${outside.map((p) => `git worktree remove ${p}`).join(" && ")}`,
+        fix: `commit and push their work, then remove them: ${outside.map((p) => `git worktree remove ${shellWord(p)}`).join(" && ")}`,
       }),
     );
   }
   return undefined;
 };
 
-const processFindings = (uses: readonly ProcessUse[], dir: string, report: PreflightReport): void => {
+const processFindings = (
+  uses: readonly ProcessUse[],
+  dir: string,
+  /** The repository's own fsmonitor socket, under each spelling of the folder. */
+  sockets: ReadonlySet<string>,
+  report: PreflightReport,
+): void => {
   const others: ProcessUse[] = [];
   for (const use of uses) {
-    if (use.files.some((path) => path.endsWith(FSMONITOR_IPC))) report.fsmonitor.push(use.pid);
+    // Exempt only git itself holding this repository's socket; anything else holding that path is an ordinary
+    // process with a file open.
+    if (use.command === "git" && use.files.some((path) => sockets.has(path))) report.fsmonitor.push(use.pid);
     else others.push(use);
   }
   const holding = others.filter((p) => p.fileCount > 0);
@@ -151,7 +157,16 @@ export const preflight = async (
   const processes = await checks.processesUsing(dir, ctx);
   if (!processes.ok) {
     if (failed(processes)) return processes;
-  } else processFindings(processes.value, dir, report);
+  } else {
+    const spellings = [resolve(dir)];
+    try {
+      spellings.push(await host.fs.realpath(dir));
+    } catch {
+      // The spelling given is all there is.
+    }
+    const sockets = new Set(spellings.map((s) => join(s, ".git", "fsmonitor--daemon.ipc")));
+    processFindings(processes.value, dir, sockets, report);
+  }
 
   const docker = await checks.dockerMounts(dir, ctx);
   if (!docker.ok) {
@@ -165,7 +180,7 @@ export const preflight = async (
       finding("env.docker-mount", {
         message: `${plural(names.length, "running container")} bind-${names.length === 1 ? "mounts" : "mount"} ${dir}: ${mounts.map((m) => `${m.name} (${m.source})`).join(", ")}`,
         paths: capped([...new Set(mounts.map((m) => m.source))]),
-        fix: `stop ${names.length === 1 ? "it" : "them"} first: docker stop ${names.join(" ")}`,
+        fix: `stop ${names.length === 1 ? "it" : "them"} first: docker stop ${words(names)}`,
       }),
     );
   }
@@ -225,40 +240,61 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
   if (git !== undefined) {
     const { unpushed, stashes } = git;
     const stashText = plural(stashes, "stash", "stashes");
-    if (!git.remotes && (unpushed.commits > 0 || stashes > 0)) {
-      const what = [
-        ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
-        ...(stashes > 0 ? [stashText] : []),
-      ];
+    const what = [
+      ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
+      ...(stashes > 0 ? [stashText] : []),
+    ];
+    const remote = git.remotes[0] ?? "origin";
+    if (git.remotes.length === 0 && what.length > 0) {
       findings.push(
         finding("git.unpushed", {
           message: `the repository has no remote, so its ${andList(what)} exist only in this folder`,
           fix: "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
         }),
       );
-    } else if (unpushed.commits > 0 || stashes > 0) {
-      const parts: string[] = [];
-      if (unpushed.commits > 0) {
-        const onBranches = unpushed.branches.map((b) => `${plural(b.commits, "commit")} on ${b.name}`);
-        const counted = unpushed.branches.reduce((n, b) => n + b.commits, 0);
-        const lead =
-          onBranches.length > 0
-            ? andList(onBranches)
-            : `${plural(unpushed.commits, "commit")} on the detached HEAD`;
-        const shown = onBranches.length > 0 ? counted : unpushed.commits;
-        const single = onBranches.length <= 1 && shown === 1;
-        parts.push(`${lead} ${single ? "is" : "are"} not on any remote`);
-      }
-      if (stashes > 0) parts.push(`${stashText} ${stashes === 1 ? "exists" : "exist"} only in this folder`);
+    } else if (!git.remoteBranches && what.length > 0) {
       findings.push(
         finding("git.unpushed", {
-          message: parts.join("; "),
-          fix:
-            unpushed.commits > 0
-              ? "git push"
-              : "git stash list shows them; commit and push what you want to keep",
+          message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} are not known to be on a remote`,
+          fix: `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
         }),
       );
+    } else {
+      const counted = new Set(unpushed.branches.map((b) => b.name));
+      const bare = git.localOnly.filter((name) => !counted.has(name));
+      const parts: string[] = [];
+      const onCommits = [
+        ...unpushed.branches.map((b) => `${plural(b.commits, "commit")} on ${b.name}`),
+        ...(unpushed.detachedHead > 0
+          ? [`${plural(unpushed.detachedHead, "commit")} on the detached HEAD`]
+          : []),
+      ];
+      if (onCommits.length > 0) {
+        const shown = unpushed.branches.reduce((n, b) => n + b.commits, 0) + unpushed.detachedHead;
+        parts.push(
+          `${andList(onCommits)} ${onCommits.length === 1 && shown === 1 ? "is" : "are"} not on any remote`,
+        );
+      }
+      if (bare.length > 0)
+        parts.push(
+          `${bare.length === 1 ? "branch" : "branches"} ${andList(bare)} ${bare.length === 1 ? "is" : "are"} on no remote`,
+        );
+      if (stashes > 0) parts.push(`${stashText} ${stashes === 1 ? "exists" : "exist"} only in this folder`);
+      if (parts.length > 0) {
+        const localOnly = new Set(git.localOnly);
+        const toTrack = [...unpushed.branches.map((b) => b.name).filter((n) => localOnly.has(n)), ...bare];
+        const fixes = [
+          ...(unpushed.branches.some((b) => !localOnly.has(b.name)) ? ["git push"] : []),
+          ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
+          ...(unpushed.detachedHead > 0
+            ? ["git switch -c <branch> to keep the detached commits, then push it"]
+            : []),
+          ...(stashes > 0 && onCommits.length === 0 && bare.length === 0
+            ? ["git stash list shows them; commit and push what you want to keep"]
+            : []),
+        ];
+        findings.push(finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; ") }));
+      }
     }
 
     if (git.inProgress.length > 0) {

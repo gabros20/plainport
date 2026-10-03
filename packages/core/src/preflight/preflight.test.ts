@@ -139,6 +139,69 @@ describe("preflight: processes", () => {
     expect(report.findings).toEqual([]);
     expect(report.fsmonitor).toEqual([321]);
   });
+
+  test("the fsmonitor exemption needs git holding this repository's own socket", async () => {
+    const dir = fx.repo("web");
+    const socket = join(dir, ".git", "fsmonitor--daemon.ipc");
+    const nested = join(dir, "vendor", "lib", ".git", "fsmonitor--daemon.ipc");
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([
+          use({ pid: 1, command: "node", files: [socket], fileCount: 1 }),
+          use({ pid: 2, command: "git", files: [nested], fileCount: 1 }),
+        ]),
+    });
+    expect(codes(report.findings)).toEqual(["block proc.open-files"]);
+    expect(report.findings[0]?.message).toContain("node (1)");
+    expect(report.findings[0]?.message).toContain("git (2)");
+    expect(report.fsmonitor).toEqual([]);
+  });
+});
+
+describe("preflight: what plainport cannot read", () => {
+  test("a project folder plainport may not read is fs.unreadable, and the host checks still run", async () => {
+    const dir = fx.repo("web");
+    let asked = false;
+    chmodSync(dir, 0o000);
+    const report = await run(dir, {
+      dataless: async () => {
+        asked = true;
+        return ok([]);
+      },
+    });
+    chmodSync(dir, 0o755);
+    expect(codes(report.findings)).toEqual(["block fs.unreadable"]);
+    expect(asked).toBe(true);
+  });
+
+  test("an unreadable .git pointer file is fs.unreadable", async () => {
+    const dir = fx.repo("web");
+    const linked = join(fx.root, "web-feature");
+    fx.git(dir, "worktree", "add", "-q", "-b", "feature", linked);
+    chmodSync(join(linked, ".git"), 0o000);
+    expect(codes((await run(linked)).findings)).toEqual(["block fs.unreadable"]);
+  });
+});
+
+describe("preflight: fixes are commands that can be pasted", () => {
+  test("paths with spaces and quotes are shell-quoted in the fix", async () => {
+    const dir = fx.repo("my web's app");
+    const lock = fx.write(join(dir, ".git", "index.lock"));
+    const elsewhere = join(fx.root, "a tree; rm -rf x");
+    fx.git(dir, "worktree", "add", "-q", "-b", "feature", elsewhere);
+    const [locked, worktrees] = (await run(dir)).findings;
+    expect(locked?.fix).toContain(`rm '${lock.replaceAll("'", "'\\''")}'`);
+    expect(worktrees?.fix).toContain(`git worktree remove '${elsewhere}'`);
+  });
+
+  test("a container's name in the docker stop fix is quoted too", async () => {
+    const dir = fx.repo("web");
+    const report = await run(dir, {
+      dockerMounts: async () =>
+        ok({ available: true, mounts: [{ container: "c1", name: "odd name", source: dir }] }),
+    });
+    expect(report.findings[0]?.fix).toContain("docker stop 'odd name'");
+  });
 });
 
 describe("preflight: containers and placeholders", () => {
@@ -244,7 +307,42 @@ describe("preflight: findings from the scan", () => {
     const found = await scanned(dir);
     expect(codes(found)).toEqual(["warn git.unpushed"]);
     expect(found[0]?.message).toBe("2 commits on feature/pricing are not on any remote");
-    expect(found[0]?.fix).toBe("git push");
+    expect(found[0]?.fix).toBe("git push -u origin feature/pricing");
+  });
+
+  test("git.unpushed covers a local-only branch even when its commits are all pushed", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.git(dir, "branch", "--no-track", "release", "origin/main");
+    const found = await scanned(dir);
+    expect(codes(found)).toEqual(["warn git.unpushed"]);
+    expect(found[0]?.message).toBe("branch release is on no remote");
+    expect(found[0]?.fix).toBe("git push -u origin release");
+  });
+
+  test("git.unpushed names commits on a detached HEAD as well as on branches", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.write(join(dir, "m.txt"), "m\n");
+    fx.git(dir, "commit", "-q", "-am", "x", "--allow-empty");
+    fx.git(dir, "switch", "-q", "--detach", "origin/main");
+    fx.write(join(dir, "d.txt"), "d\n");
+    fx.git(dir, "add", "d.txt");
+    fx.git(dir, "commit", "-q", "-m", "detached");
+    const found = await scanned(dir);
+    expect(found[0]?.message).toBe(
+      "1 commit on main and 1 commit on the detached HEAD are not on any remote",
+    );
+  });
+
+  test("a remote that is configured but never fetched is not called missing", async () => {
+    const dir = fx.repo("web");
+    fx.git(dir, "remote", "add", "origin", join(fx.root, "nowhere.git"));
+    const found = await scanned(dir);
+    expect(codes(found)).toEqual(["warn git.unpushed"]);
+    expect(found[0]?.message).not.toContain("no remote");
+    expect(found[0]?.message).toContain("origin");
+    expect(found[0]?.fix).toContain("git fetch origin");
   });
 
   test("git.unpushed also covers stashes, and a repository with no remote at all", async () => {
