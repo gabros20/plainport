@@ -158,7 +158,22 @@ export interface JournalsRead {
   journals: Journal[];
   /** Files named `<ulid>.json` that are not a journal this version reads: never touched, reported by recover. */
   unreadable: string[];
+  /**
+   * The project of each unreadable journal whose `project.id` still reads as a ULID (a later version's journal), by
+   * path: only that project is held back. One missing here may be any project's.
+   */
+  owners: Record<string, { id: string; address?: string }>;
 }
+
+/** The project an unreadable journal still names, if any. */
+const ownerOf = (parsed: unknown): { id: string; address?: string } | undefined => {
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const project = (parsed as { project?: unknown }).project;
+  if (typeof project !== "object" || project === null) return undefined;
+  const { id, address } = project as { id?: unknown; address?: unknown };
+  if (typeof id !== "string" || !isUlid(id)) return undefined;
+  return typeof address === "string" && address.length > 0 ? { id, address } : { id };
+};
 
 /** Every journal on this device, oldest operation first. */
 export const readJournals = async (io: LocalIo, paths: PlainportPaths): Promise<JournalsRead> => {
@@ -166,11 +181,12 @@ export const readJournals = async (io: LocalIo, paths: PlainportPaths): Promise<
   try {
     names = await io.fs.readdir(paths.journalDir);
   } catch (error) {
-    if (systemErrorCode(error) === "ENOENT") return { journals: [], unreadable: [] };
+    if (systemErrorCode(error) === "ENOENT") return { journals: [], unreadable: [], owners: {} };
     throw error;
   }
   const journals: Journal[] = [];
   const unreadable: string[] = [];
+  const owners: JournalsRead["owners"] = {};
   for (const name of names.sort()) {
     if (!name.endsWith(".json") || !isUlid(name.slice(0, -".json".length))) continue;
     const path = join(paths.journalDir, name);
@@ -184,9 +200,13 @@ export const readJournals = async (io: LocalIo, paths: PlainportPaths): Promise<
     }
     const checked = JournalSchema.safeParse(parsed);
     if (checked.success && checked.data.op === name.slice(0, -".json".length)) journals.push(checked.data);
-    else unreadable.push(path);
+    else {
+      unreadable.push(path);
+      const owner = ownerOf(parsed);
+      if (owner !== undefined) owners[path] = owner;
+    }
   }
-  return { journals, unreadable };
+  return { journals, unreadable, owners };
 };
 
 /** JSON Schemas for the journal, published in schemas/ by `bun run contract`. */

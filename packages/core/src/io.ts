@@ -97,6 +97,8 @@ export interface ProcessInfo {
   hostname(): string;
   /** Whether a process with this pid exists on this host. */
   isAlive(pid: number): Promise<boolean>;
+  /** When this host last booted, in epoch milliseconds: a process recorded as started before it is gone. */
+  bootedAtMs(): number;
   sleep(ms: number): Promise<void>;
   /** Milliseconds on a clock that never goes backwards, for deadlines. */
   monotonicMs(): number;

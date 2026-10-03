@@ -416,3 +416,23 @@ describe("status and restore: fix wave r2 (one resolver)", () => {
     expect(data("restore", run.out)).toMatchObject({ project: "work:api" });
   });
 });
+
+describe("status and ls: fix wave r3 (unreadable journals)", () => {
+  test("a journal this version cannot read is named on stderr, in ls and in its project's status", async () => {
+    await offloaded("work:api");
+    const id = projectId("api") as string;
+    const path = join(box.paths.journalDir, "01JZZZZZZZZZZZZZZZZZZZZZZZ.json");
+    writeFileSync(path, JSON.stringify({ v: 2, project: { id, address: "work:api" } }));
+    const run = await cli(["ls", "--json"]);
+    expect(run.code).toBe(0);
+    expect(run.err).toContain(`${path} is a journal of work:api this version of plainport cannot read`);
+    const all = data("ls", run.out);
+    expect(all.unreadableJournals).toEqual([path]);
+    const api = all.projects.find((p: { address: string }) => p.address === "work:api");
+    expect([api.conditions, api.unreadableJournals]).toEqual([["journal-unreadable"], [path]]);
+    const human = await cli(["status", "work:api"]);
+    expect(human.out).toContain(`journal  ${path} cannot be read by this version of plainport`);
+    expect(human.out).toContain("next     plainport recover");
+    expect((await cli(["ls"])).out).toContain(`${path}: a journal this version of plainport cannot read`);
+  });
+});

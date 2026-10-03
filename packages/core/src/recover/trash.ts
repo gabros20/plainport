@@ -34,7 +34,7 @@ import { readRegistry } from "../registry.ts";
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
-import { holdsProjectBack, withProjectLock } from "../saga/project-gate.ts";
+import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf } from "../saga/release.ts";
 import { isUlid } from "../ulid.ts";
 import { readStagingRecords, removeHolderIfEmpty, removeStagingRecord } from "./staging.ts";
@@ -391,19 +391,28 @@ export const housekeeping = async (
   const io: LocalIo = host;
   const clock = (): Date => deps.now?.() ?? host.clock.now();
   const done: Housekept = { started: [], notices: [] };
-  let journals: Journal[];
+  let read: Awaited<ReturnType<typeof readJournals>>;
   try {
-    journals = (await readJournals(io, paths)).journals;
+    read = await readJournals(io, paths);
   } catch (error) {
     systemErrorCode(error);
     return done;
   }
+  // A journal this version cannot read holds its project back, or every project when none reads (project-gate.ts).
+  for (const path of read.unreadable) {
+    const owner = read.owners[path];
+    done.notices.push(
+      owner === undefined
+        ? `${path} is a journal this version of plainport cannot read and may be any project's, so no project can be offloaded or onloaded until it is settled; plainport recover reports it`
+        : `${path} is a journal of ${owner.address ?? owner.id} this version of plainport cannot read, so that project waits until it is settled; plainport recover reports it`,
+    );
+  }
+  const journals = read.journals;
   const reused = renamedBack(journals);
   for (const journal of journals) {
     if (holdsProjectBack(journal)) {
-      // One a live plainport on this host is still writing is running, not interrupted.
-      const running = journal.host === io.proc.hostname() && (await io.proc.isAlive(journal.pid));
-      if (!running)
+      // One a live plainport on this host is still running (it holds the project's lock) is not interrupted.
+      if (!(await operationRunning(io, paths, journal)))
         done.notices.push(
           `the ${journal.kind} ${journal.op} of ${journal.project.address} was interrupted at ${journal.step}; plainport recover finishes or rolls it back`,
         );

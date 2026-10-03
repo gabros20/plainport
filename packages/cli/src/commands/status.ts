@@ -24,7 +24,7 @@ export const ProjectStatusSchema = z
     }),
     conditions: z.array(z.string()).meta({
       description:
-        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced",
+        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)",
     }),
     dir: z.string().optional().meta({ description: "Its folder on this device" }),
     here: z.boolean().meta({ description: "The folder is on this device" }),
@@ -69,6 +69,10 @@ export const ProjectStatusSchema = z
       })
       .optional()
       .meta({ description: "Its open journal; when not running, plainport recover settles it" }),
+    unreadableJournals: z.array(z.string()).optional().meta({
+      description:
+        "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
+    }),
   })
   .meta({ description: "A project as this device sees it" });
 
@@ -97,7 +101,8 @@ const freshness = (p: {
 /** What to do next for a project in this state. */
 const nextStep = (p: z.output<typeof ProjectStatusSchema>): string | undefined => {
   const address = shellWord(p.address);
-  if (p.journal !== undefined && !p.journal.running) return "plainport recover";
+  if ((p.journal !== undefined && !p.journal.running) || p.unreadableJournals !== undefined)
+    return "plainport recover";
   if (p.conditions.includes("diverged-after-commit"))
     return `keep working in the folder; plainport offload ${address} --yes builds on snapshot ${p.head}`;
   if (p.conditions.includes("incomplete"))
@@ -154,6 +159,8 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
         `${p.journal.kind} ${p.journal.op} ${p.journal.running ? "running" : "interrupted"} at ${p.journal.step}`,
       ),
     );
+  for (const path of p.unreadableJournals ?? [])
+    lines.push(row("journal", `${path} cannot be read by this version of plainport`));
   const next = nextStep(p);
   if (next !== undefined) lines.push(row("next", next));
   return lines.join("\n");
@@ -251,6 +258,10 @@ export const ls = defineCommand({
       stores: z
         .array(StoreStatusSchema)
         .meta({ description: "Each store's catalog: stale when it did not answer" }),
+      unreadableJournals: z.array(z.string()).meta({
+        description:
+          "Every journal this version cannot read: each holds its project back, or every project when it names none",
+      }),
     })
     .meta({ description: "The projects, and how fresh each store's catalog is" }),
   examples: [
@@ -258,8 +269,13 @@ export const ls = defineCommand({
     { argv: ["ls", "--shelved", "--sort", "size"], summary: "Shelved projects, largest first" },
   ],
   human: (data) => {
+    const unreadable = data.unreadableJournals.map(
+      (path) => `${path}: a journal this version of plainport cannot read; plainport recover reports it`,
+    );
     if (data.projects.length === 0)
-      return "no projects yet: plainport root scan <root> registers a root's projects";
+      return ["no projects yet: plainport root scan <root> registers a root's projects", ...unreadable].join(
+        "\n",
+      );
     const width = Math.max(...data.projects.map((p) => p.address.length));
     const stale = data.stores.filter((s) => s.stale);
     return [
@@ -268,6 +284,7 @@ export const ls = defineCommand({
         (s) =>
           `store ${s.name}: ${s.syncedAt === undefined ? "not reached, never synced" : `not reached; stale, last synced ${s.syncedAt}`}`,
       ),
+      ...unreadable,
     ].join("\n");
   },
   handler: async (args, ctx) => {
@@ -284,6 +301,6 @@ export const ls = defineCommand({
     if (args.sort === "age")
       projects = [...projects].sort((a, b) => (a.lastActivity ?? "").localeCompare(b.lastActivity ?? ""));
     for (const f of all.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
-    return ok({ projects, stores: all.stores });
+    return ok({ projects, stores: all.stores, unreadableJournals: all.unreadableJournals });
   },
 });

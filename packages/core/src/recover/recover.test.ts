@@ -940,8 +940,20 @@ describe("housekeeping at the start of a command (D59)", () => {
     const crashed = onlyJournal<OffloadJournal>();
     await rewrite({ ...crashed, pid: 99_999_999 });
     expect((await housekeeping(trashDeps())).notices).toHaveLength(1);
+    // Running: this live process wrote it and holds the project's lock, taken before the journal's last write.
     await rewrite(crashed);
-    expect((await housekeeping(trashDeps())).notices).toEqual([]);
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${crashed.project.id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+        now: () => new Date(Date.parse(crashed.startedAt) - 1000),
+      }),
+    );
+    try {
+      expect((await housekeeping(trashDeps())).notices).toEqual([]);
+    } finally {
+      await held.release();
+    }
     await rewrite({ ...crashed, pid: 99_999_999 });
     const done = await housekeeping(trashDeps());
     expect(done.started).toEqual([]);
@@ -1767,4 +1779,102 @@ describe("fix wave r3: an incomplete catalog is no fork (D61)", () => {
       await expectInvariants();
     });
   }
+});
+
+describe("fix wave r3: unreadable journals and a reused pid", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const views = async () =>
+    value(
+      await projectViews({
+        io: testHost(),
+        paths: box.paths,
+        env: env(),
+        device,
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+      }),
+    );
+  const unreadable = (text: string): string => {
+    mkdirSync(box.paths.journalDir, { recursive: true });
+    const path = journalFile(box.paths, ulid());
+    writeFileSync(path, text);
+    return path;
+  };
+  /** A journal of a later version: its project still reads, the rest does not validate. */
+  const later = (id: string, address = "work:web") =>
+    unreadable(JSON.stringify({ v: 2, kind: "offload", project: { id, address }, future: true }));
+
+  test("an unreadable journal gets a notice, and shows in its project's view, or every project's when no project reads", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    const id = (await projectId()) as string;
+    const named = later(id);
+    const notices = (await housekeeping(trashDeps())).notices;
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(named);
+    expect(notices[0]).toContain("work:web");
+    expect(notices[0]).toContain("plainport recover");
+    const first = await views();
+    expect(first.unreadableJournals).toEqual([named]);
+    const web = first.projects.find((p) => p.id === id);
+    expect([web?.conditions, web?.unreadableJournals]).toEqual([["journal-unreadable"], [named]]);
+    // Another project's leaves this one alone; one whose project cannot be read may be any project's.
+    rmSync(named);
+    later(ulid(), "work:other");
+    expect((await views()).projects.find((p) => p.id === id)?.conditions).toEqual([]);
+    const anyone = unreadable("{ not json");
+    expect((await housekeeping(trashDeps())).notices.some((n) => n.includes(anyone))).toBe(true);
+    const third = (await views()).projects.find((p) => p.id === id);
+    expect([third?.conditions, third?.unreadableJournals]).toEqual([["journal-unreadable"], [anyone]]);
+  });
+
+  test("an unreadable journal of another project holds only that project; its own, or one of no project, holds this one", async () => {
+    await crashOffloadAt("offload.committed");
+    const journal = onlyJournal<OffloadJournal>();
+    const own = later(journal.project.id);
+    const result = await recover(recoverDeps());
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "journal.pending"]);
+    expect(reportOf(result).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    rmSync(own);
+    const anyone = unreadable("{ not json");
+    expect(reportOf(await recover(recoverDeps())).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    rmSync(anyone);
+    const other = later(ulid(), "work:other");
+    const settled = await recover(recoverDeps());
+    expect(settled.ok ? 0 : [settled.exitCode, settled.finding.code]).toEqual([6, "journal.pending"]);
+    expect(reportOf(settled).operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(reportOf(settled).unreadable).toEqual([other]);
+    rmSync(other);
+    await expectShelved();
+    await expectInvariants();
+  });
+
+  test("a reused pid does not make an interrupted operation look running: the lock it held decides", async () => {
+    await crashOffloadAt("offload.committed");
+    const crashed = onlyJournal<OffloadJournal>();
+    // pid 1 is alive and never a plainport: without the project's lock held by it, the operation was interrupted.
+    await rewrite({ ...crashed, pid: 1 });
+    expect((await housekeeping(trashDeps())).notices).toHaveLength(1);
+    const view = (await views()).projects.find((p) => p.id === crashed.project.id);
+    expect([view?.conditions, view?.journal?.running]).toEqual([["interrupted"], false]);
+    // This process's pid, its lock left from before this host booted: interrupted too.
+    await rewrite(crashed);
+    const stale = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${crashed.project.id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+        now: () => new Date(0),
+      }),
+    );
+    try {
+      expect((await housekeeping(trashDeps())).notices).toHaveLength(1);
+    } finally {
+      await stale.release();
+    }
+    expect(reportOf(await recover(recoverDeps())).operations.map((o) => o.outcome)).toEqual(["finished"]);
+    await expectInvariants();
+  });
 });

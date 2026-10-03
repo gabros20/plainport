@@ -568,7 +568,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced"
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
                 },
                 "dir": {
                   "description": "Its folder on this device",
@@ -734,6 +734,13 @@
                     "running"
                   ],
                   "additionalProperties": {}
+                },
+                "unreadableJournals": {
+                  "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               },
               "required": [
@@ -793,11 +800,19 @@
               "additionalProperties": {}
             },
             "description": "Each store's catalog: stale when it did not answer"
+          },
+          "unreadableJournals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every journal this version cannot read: each holds its project back, or every project when it names none"
           }
         },
         "required": [
           "projects",
-          "stores"
+          "stores",
+          "unreadableJournals"
         ],
         "additionalProperties": {},
         "description": "The projects, and how fresh each store's catalog is"
@@ -884,7 +899,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced"
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
           },
           "dir": {
             "description": "Its folder on this device",
@@ -1050,6 +1065,13 @@
               "running"
             ],
             "additionalProperties": {}
+          },
+          "unreadableJournals": {
+            "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [

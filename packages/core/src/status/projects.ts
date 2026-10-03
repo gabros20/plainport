@@ -16,8 +16,10 @@
 // Conditions (an open set; more may come): incomplete (the catalog names snapshots it does not hold, so there is no
 // head, D41), diverged-after-commit (committed and shelved in the catalog, but the folder stayed here with later edits
 // and no stub, D51), head-moved (the folder is here but another copy was offloaded since this one came), interrupted
-// or running (the open journal's process), folder-missing (this device should hold it but its folder is gone), stale
-// and never-synced (the store did not answer).
+// or running (the open journal's process: running only while it holds the project's lock, so a reused pid never
+// looks running), folder-missing (this device should hold it but its folder is gone), stale and never-synced (the
+// store did not answer), journal-unreadable (a journal this version cannot read names the project, or names none and
+// so may be any project's).
 
 import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
@@ -28,14 +30,14 @@ import { loadCatalog, MIRROR_EVENTS_PREFIX } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
-import { type Journal, readJournals } from "../journal/index.ts";
+import { type JournalsRead, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
-import { holdsProjectBack } from "../saga/project-gate.ts";
+import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { resolveSecret, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 
@@ -63,6 +65,7 @@ export const PROJECT_CONDITIONS = [
   "stale",
   "never-synced",
   "catalog-unreadable",
+  "journal-unreadable",
 ] as const;
 
 export type ProjectStatus = {
@@ -100,6 +103,8 @@ export type ProjectStatus = {
   syncedAt?: string;
   /** Its open journal: running, or interrupted (plainport recover). */
   journal?: { op: string; kind: "offload" | "onload"; step: string; running: boolean };
+  /** Journals this version cannot read that name it, or name no project (journal-unreadable). */
+  unreadableJournals?: string[];
 };
 
 export type StoreView = {
@@ -116,6 +121,8 @@ export type Views = {
   stores: StoreView[];
   /** Warnings from reading config, roots and catalogs. */
   findings: Finding[];
+  /** Every journal this version cannot read: each holds its project back, or every project when it names none. */
+  unreadableJournals: string[];
 };
 
 interface Read {
@@ -164,13 +171,14 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
   const listed = await listRoots(io, paths, { env: deps.env, device: device.name });
   if (!listed.ok) return listed;
   const roots = new Map<string, RootView>(listed.value.roots.map((r) => [r.key, r]));
-  let journals: Journal[];
+  let opened: JournalsRead;
   try {
-    journals = (await readJournals(io, paths)).journals;
+    opened = await readJournals(io, paths);
   } catch (error) {
     systemErrorCode(error);
-    journals = [];
+    opened = { journals: [], unreadable: [], owners: {} };
   }
+  const journals = opened.journals;
 
   // Every store this device has set up: its catalog, from the store or, stale, from the mirror.
   const stores: StoreView[] = [];
@@ -249,11 +257,12 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
         catalog,
         found,
         journals.filter((j) => j.project.id === id),
+        unreadableOf(opened, new Set([id])),
       ),
     );
   }
   projects.sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
-  return ok({ projects, stores, findings });
+  return ok({ projects, stores, findings, unreadableJournals: opened.unreadable });
 
   async function viewOf(
     id: string,
@@ -262,7 +271,8 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
     entry: RegistryEntry | undefined,
     catalog: CatalogProject | undefined,
     read: Read | undefined,
-    open: Journal[],
+    open: JournalsRead["journals"],
+    unreadable: string[],
   ): Promise<ProjectStatus> {
     const rootView = roots.get(root);
     const place = rootView?.path === undefined ? undefined : join(rootView.path, ...path.split("/"));
@@ -273,8 +283,7 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
         ? `${dir}${STUB_SUFFIX}`
         : undefined;
     const journal = open.filter(holdsProjectBack).at(-1);
-    const running =
-      journal !== undefined && journal.host === io.proc.hostname() && (await io.proc.isAlive(journal.pid));
+    const running = journal !== undefined && (await operationRunning(io, paths, journal));
     const head = catalog?.head ?? null;
     const lease = catalog?.lease ?? null;
     const conditions: string[] = [];
@@ -305,6 +314,7 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
     // Its store's catalog could not be read at all, from the store or the mirror: nothing here is current.
     const unread = read === undefined && failedStores.has(storeOfRoot(entry) ?? "");
     if (unread) conditions.push("catalog-unreadable");
+    if (unreadable.length > 0) conditions.push("journal-unreadable");
 
     // The head's size, from the mirror's copy of the event that made it.
     let bytes: number | undefined;
@@ -358,6 +368,7 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
       ...(journal === undefined
         ? {}
         : { journal: { op: journal.op, kind: journal.kind, step: journal.step, running } }),
+      ...(unreadable.length === 0 ? {} : { unreadableJournals: unreadable }),
     };
   }
 };
