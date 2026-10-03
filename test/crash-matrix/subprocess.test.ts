@@ -3,15 +3,17 @@
 // `plainport recover`, then the row's checks (checks.ts). A dead process leaves what an InjectedFault cannot: its
 // lock file naming a pid that is gone, a detached delete still running, nothing unwound.
 //
-// The binary is built for the matrix (`--define PLAINPORT_TEST_HOOKS=true`, packages/cli/src/test-hooks.ts) and kills
-// itself at the step (PLAINPORT_TEST_FAULT_AT): exact, and it reaches the after-effect seams, which write no journal
-// for a watcher to see. Branches that need the world to change mid-run pause the binary at offload.snapshot.start
-// (PLAINPORT_TEST_PAUSE_AT) while the test changes it, as the in-process variant's fake engine hooks do.
+// The binary is built for the matrix (`--define globalThis.PLAINPORT_TEST_HOOKS=true`, packages/cli/src/test-hooks.ts)
+// and kills itself at the step (PLAINPORT_TEST_FAULT_AT): exact, and it reaches the after-effect seams, which write no
+// journal for a watcher to see. Branches that need the world to change mid-run pause the binary just before restic
+// starts (PLAINPORT_TEST_PAUSE_AT) while the test changes it, as the in-process variant's fake engine hooks do.
 //
-// On macOS each row's root lives on a case-sensitive APFS sparse disk image (hdiutil, growing as written) and the project gains a case
-// pair; the image is detached and deleted afterwards. Elsewhere the root is in the row's sandbox. Rows are
-// independent (each has its own home, root and store), so they run a few at a time: restic derives its key on every
-// call, and one row makes some fifteen.
+// On macOS each row's root lives on a case-sensitive APFS sparse disk image (hdiutil, growing as written) and the
+// project gains a case pair; the image is detached and deleted afterwards. Elsewhere the root is in the row's sandbox.
+// Rows are independent (each has its own home, root and store), so they run a few at a time
+// (PLAINPORT_CRASH_PARALLEL; 6 locally, 3 on CI, never more than the cores): restic derives its key on every call,
+// and one row makes some fifteen. A row's deadline starts once it has its slot; whatever it started is killed, restic's
+// process groups included, when it ends, passed or failed.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
@@ -26,7 +28,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { localStores } from "../../packages/cli/src/stores.ts";
@@ -40,6 +42,10 @@ import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { onMac } from "../platform.ts";
 import { describeT1, tierEnabled } from "../tiers.ts";
 import {
+  crashCopyProblems,
+  crashedOperation,
+  DAMAGE_MODE,
+  damage,
   journalSteps,
   laterHeadProblems,
   rowProblems,
@@ -49,20 +55,24 @@ import {
 } from "./checks.ts";
 import {
   copyProject,
+  hashEntry,
   hashTree,
   makeProjectTemplate,
   type ProjectTemplate,
   removeTree,
   type TreeHash,
-  treeDiff,
 } from "./fixture.ts";
 import {
-  type BranchKind,
+  ALL_ROWS,
+  MATRIX_POINTS,
   type OFFLOAD_BRANCH_KINDS,
   OFFLOAD_ROWS,
   type ONLOAD_BRANCH_KINDS,
   ONLOAD_ROWS,
+  plainRowAt,
   type Row,
+  type Saga,
+  type ScenarioOf,
 } from "./matrix.ts";
 
 const checkout = resolve(import.meta.dir, "../..");
@@ -75,7 +85,15 @@ const PATH = (process.env.PATH ?? "/usr/bin:/bin")
   .filter((p) => REAL_HOME === "" || !(p === REAL_HOME || p.startsWith(`${REAL_HOME}/`)))
   .join(":");
 /** Rows at once. */
-const PARALLEL = 6;
+const PARALLEL = (() => {
+  const asked = Number(process.env.PLAINPORT_CRASH_PARALLEL);
+  if (Number.isInteger(asked) && asked > 0) return asked;
+  return Math.max(1, Math.min(process.env.CI ? 3 : 6, availableParallelism()));
+})();
+/** One row's time once it has its slot. */
+const ROW_MS = 240_000;
+/** A row's test timeout: its own time plus the longest wait for a slot. */
+const TEST_MS = ROW_MS * (Math.ceil((ALL_ROWS.length + 2) / PARALLEL) + 1);
 
 let scratch: string;
 let binary: string;
@@ -94,7 +112,13 @@ const sh = (args: string[]) => {
   return ran.stdout.toString();
 };
 
-const compile = (outfile: string, define: string[]) => {
+/** Every row's run, so afterAll can stop what a row that never ended left running. */
+const runs = new Set<RowRun>();
+
+beforeAll(() => {
+  if (!tierEnabled(1)) return;
+  scratch = mkdtempSync(join(tmpdir(), "plainport-crash-sub-"));
+  binary = join(scratch, "plainport");
   const build = Bun.spawnSync(
     [
       process.execPath,
@@ -102,19 +126,13 @@ const compile = (outfile: string, define: string[]) => {
       "--compile",
       join(checkout, "packages/cli/src/main.ts"),
       "--outfile",
-      outfile,
-      ...define,
+      binary,
+      "--define",
+      "globalThis.PLAINPORT_TEST_HOOKS=true",
     ],
     { cwd: checkout, stdout: "pipe", stderr: "pipe" },
   );
-  if (build.exitCode !== 0) throw new Error(`bun build: ${build.stderr.toString()}`);
-};
-
-beforeAll(() => {
-  if (!tierEnabled(1)) return;
-  scratch = mkdtempSync(join(tmpdir(), "plainport-crash-sub-"));
-  binary = join(scratch, "plainport");
-  compile(binary, ["--define", "PLAINPORT_TEST_HOOKS=true"]);
+  if (build.exitCode !== 0) throw new Error(`building the matrix binary: ${build.stderr.toString()}`);
   // The binary refuses every path under the real home (guardFromEnv), the checkout's .tools included: a copy.
   const target = hostTarget();
   if (target === undefined) throw new Error(`no tools for ${process.platform}-${process.arch}`);
@@ -143,10 +161,11 @@ beforeAll(() => {
     ]);
     sh(["hdiutil", "attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint", volume, image]);
   }
-});
+}, 120_000);
 
 afterAll(() => {
   if (!tierEnabled(1)) return;
+  for (const r of runs) r.stop();
   if (volume !== undefined) {
     try {
       sh(["hdiutil", "detach", "-quiet", "-force", volume]);
@@ -154,7 +173,7 @@ afterAll(() => {
   }
   template?.cleanup();
   removeTree(scratch);
-});
+}, 120_000);
 
 /** Files below a folder (restic's packs under repo/data). */
 const countFiles = (dir: string): number => {
@@ -168,9 +187,9 @@ const countFiles = (dir: string): number => {
   return n;
 };
 
-/** The restic processes a process started. */
-const resticChildren = (parent: number): number[] =>
-  Bun.spawnSync(["pgrep", "-P", String(parent), "-x", "restic"], {
+/** The processes a process started (named `name`, when given). */
+const childrenOf = (parent: number, name?: string): number[] =>
+  Bun.spawnSync(["pgrep", "-P", String(parent), ...(name === undefined ? [] : ["-x", name])], {
     env: { PATH: "/usr/bin:/bin" },
     stdout: "pipe",
   })
@@ -186,6 +205,12 @@ const alive = (pid: number): boolean => {
   } catch {
     return false;
   }
+};
+
+const signal = (pid: number, sig: NodeJS.Signals) => {
+  try {
+    process.kill(pid, sig);
+  } catch {}
 };
 
 /** A few rows at a time. */
@@ -208,7 +233,7 @@ const crashAt = (point: string, occurrence = 1) => ({
   PLAINPORT_TEST_FAULT_AT: point,
   PLAINPORT_TEST_FAULT_OCCURRENCE: String(occurrence),
 });
-const pauseAtUpload = { PLAINPORT_TEST_PAUSE_AT: "offload.snapshot.start" };
+const pauseAtUpload = { PLAINPORT_TEST_PAUSE_AT: MATRIX_POINTS.upload };
 const offloadArgs = ["offload", "work:web", "--yes", "--json"];
 const onloadArgs = ["onload", "work:web", "--no-hydrate", "--json"];
 
@@ -227,9 +252,14 @@ class RowRun {
   readonly area: string;
   readonly root: string;
   readonly dir: string;
-  /** The project as the test last saw it, and its capture for invariant 1. */
-  reference: TreeHash | undefined;
+  /** The project before the run, plus the scenario's own edits (noteEdit): what no crash may change. */
+  reference: TreeHash = new Map();
+  /** Invariant 1's capture: the folder before the run, then as the crash left it (in place or in the trash). */
   released: TreeCapture | undefined;
+  /** Every binary this row started; stop() kills those still running and every process group they started. */
+  private readonly children = new Set<Bun.Subprocess>();
+  /** restic process groups the test itself stopped, killed by stop() too. */
+  readonly groups = new Set<number>();
 
   constructor(id: number) {
     this.box = makeSandbox("plainport-crash-sub-");
@@ -238,14 +268,33 @@ class RowRun {
     this.dir = join(this.root, "web");
     mkdirSync(this.root, { recursive: true });
     copyProject(template, this.dir, { casePair: volume !== undefined });
+    this.reference = hashTree(this.dir);
+    this.released = captureTree(this.dir);
+    runs.add(this);
+  }
+
+  /** Kills whatever this row still runs: its binaries, their children's process groups (restic), stopped groups. */
+  stop() {
+    for (const child of this.children) {
+      if (child.exitCode !== null || child.signalCode !== null) continue;
+      for (const pid of childrenOf(child.pid)) signal(-pid, "SIGKILL");
+      signal(child.pid, "SIGKILL");
+    }
+    for (const pgid of this.groups) signal(-pgid, "SIGKILL");
   }
 
   cleanup() {
+    this.stop();
+    runs.delete(this);
     try {
       chmodSync(join(this.dir, "src/extra.ts"), 0o644);
     } catch {}
     this.box.cleanup();
     if (volume !== undefined) removeTree(this.area);
+  }
+
+  noteEdit(path: string) {
+    this.reference.set(path, hashEntry(this.dir, path));
   }
 
   /** The binary's environment: the row's sandbox named in full (the tripwire fills in what a child's env leaves out). */
@@ -266,12 +315,14 @@ class RowRun {
   }
 
   spawn(args: string[], extra: Record<string, string> = {}, executable = binary) {
-    return Bun.spawn([executable, ...args], {
+    const child = Bun.spawn([executable, ...args], {
       cwd: this.box.home,
       env: this.env(extra),
       stdout: "pipe",
       stderr: "pipe",
     });
+    this.children.add(child);
+    return child;
   }
 
   /** Runs a binary; `pause` is called while it waits at its pause step, if one was asked for. */
@@ -289,10 +340,16 @@ class RowRun {
     );
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
     if (pause !== undefined) {
-      const deadline = Date.now() + 60_000;
-      while (!existsSync(pauseFile) && child.exitCode === null && Date.now() < deadline) await Bun.sleep(10);
-      if (existsSync(pauseFile)) {
-        await pause();
+      try {
+        const deadline = Date.now() + 60_000;
+        while (!existsSync(pauseFile) && child.exitCode === null && Date.now() < deadline)
+          await Bun.sleep(10);
+        if (existsSync(pauseFile)) await pause();
+      } catch (error) {
+        // A pause that failed must not let the binary go on with a world the test never finished changing.
+        this.stop();
+        throw error;
+      } finally {
         removeTree(pauseFile);
       }
     }
@@ -355,18 +412,16 @@ class RowRun {
     await settleJournals(this.box.paths);
   }
 
-  look(at = this.dir) {
-    this.reference = hashTree(at);
-    this.released = captureTree(at);
-  }
-
-  /** The project as the crash left it: its folder, or the folder in its trash; else what the test last saw. */
-  lookAfterCrash() {
-    if (existsSync(this.dir)) return this.look();
+  /** Invariant 1's capture: the folder as the crash left it, in its place or in its trash. */
+  captureAfterCrash() {
+    if (existsSync(this.dir)) {
+      this.released = captureTree(this.dir);
+      return;
+    }
     const trash = join(this.root, ".plainport-trash");
     for (const op of existsSync(trash) ? readdirSync(trash) : []) {
       const moved = join(trash, op, "web");
-      if (existsSync(moved)) this.look(moved);
+      if (existsSync(moved)) this.released = captureTree(moved);
     }
   }
 
@@ -382,9 +437,6 @@ class RowRun {
   }
 }
 
-type ScenarioOf<K extends Record<string, BranchKind>> =
-  | "plain"
-  | { [B in keyof K]: K[B] extends "plain" ? never : B }[keyof K];
 type Scenario = (r: RowRun, row: Row) => Promise<void>;
 
 const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenario> = {
@@ -398,7 +450,7 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
   },
   diverged: async (r, row) => {
     // A first offload that dies before its upload registers the project and its root; recover rolls it back.
-    killed(await r.run(offloadArgs, crashAt("offload.planned")), "offload");
+    killed(await r.run(offloadArgs, crashAt(MATRIX_POINTS.register)), "offload");
     await r.recover();
     const ran = await r.run(offloadArgs, { ...crashAt(row.point), ...pauseAtUpload }, async () => {
       const s = ulid();
@@ -421,9 +473,10 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
     killed(ran, "offload");
   },
   retry: async (r, row) => {
-    const ran = await r.run(offloadArgs, { ...crashAt(row.point, row.occurrence), ...pauseAtUpload }, () =>
-      writeFileSync(join(r.dir, "notes/todo.txt"), "edited during the upload\n"),
-    );
+    const ran = await r.run(offloadArgs, { ...crashAt(row.point, row.occurrence), ...pauseAtUpload }, () => {
+      writeFileSync(join(r.dir, "notes/todo.txt"), "edited during the upload\n");
+      r.noteEdit("notes/todo.txt");
+    });
     killed(ran, "offload");
   },
 };
@@ -440,68 +493,99 @@ const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, Scenario>
   },
   resume: async (r, row) => {
     await r.shelve();
-    killed(await r.run(onloadArgs, crashAt("onload.verified")), "onload");
+    killed(await r.run(onloadArgs, crashAt(MATRIX_POINTS.resumeFrom)), "onload");
     killed(await r.run(onloadArgs, crashAt(row.point)), "onload");
   },
 };
 
-let rowsMade = 0;
+const SCENARIOS: { readonly [S in Saga]: Readonly<Record<string, Scenario>> } = {
+  offload: OFFLOAD_SCENARIOS,
+  onload: ONLOAD_SCENARIOS,
+};
 
-/** A crash of the row's own (instead of its scenario's), and what to check once the row's checks ran. */
-interface Custom {
-  crash: Scenario;
-  after(r: RowRun, crashedOp: string | undefined): Promise<string[]>;
+interface RowOptions {
+  /** A crash of the row's own, instead of its scenario's. */
+  crash?: Scenario;
+  /** Harm done after recover, which the row's checks must then report (the damage mode). */
+  damage?: (world: World) => void;
+  /** More checks, once the row's own ran. */
+  after?(r: RowRun, crashedOp: string | undefined): Promise<string[]>;
 }
 
-const runRow = (row: Row, custom?: Custom) =>
+let rowsMade = 0;
+
+/** Runs one row in a slot, within ROW_MS of getting it; whatever the row started is killed when it ends. */
+const runRow = (row: Row, options: RowOptions = {}) =>
   slot(async () => {
     const r = new RowRun(++rowsMade);
+    let timer: Timer | undefined;
+    const work = rowWork(r, row, options);
+    work.catch(() => {});
     try {
-      await r.init();
-      r.look();
-      const scenarios: Record<string, Scenario> =
-        row.saga === "offload" ? OFFLOAD_SCENARIOS : ONLOAD_SCENARIOS;
-      const crash = custom?.crash ?? scenarios[row.scenario];
-      if (crash === undefined) throw new Error(`no ${row.saga} scenario ${row.scenario}`);
-      const before = journalSteps(r.box.paths);
-      await crash(r, row);
-      const w = await r.world();
-      const seen = await snapshotIds(w.store.engine);
-      const steps = journalSteps(r.box.paths);
-      const ops = [...steps.keys()].sort();
-      const crashedOp = row.saga === "offload" ? ops.at(-1) : ops.filter((o) => !before.has(o)).at(-1);
-      const crashedStep = crashedOp === undefined ? undefined : steps.get(crashedOp);
-      // An onload's reference is the project it shelved; an offload's is the project as the crash left it.
-      if (row.saga === "offload") r.lookAfterCrash();
-      // The dead process's lock file is still there, naming a pid that is gone: recover takes it over (D63).
-      const id = r.projectId();
-      const stale = id !== undefined && existsSync(join(r.box.paths.locksDir, `${id}.lock`));
-      const report = await r.recover();
-      await settleJournals(r.box.paths);
-      const again = await r.recover();
-      const problems = stale ? [] : [`the killed ${row.saga} left no lock file for recover to take over`];
-      return problems.concat(
-        await rowProblems(row, w, {
-          crashedStep,
-          crashedOp,
-          report,
-          again,
-          reference: r.reference as TreeHash,
-          ...(r.released === undefined ? {} : { released: r.released }),
-          seen,
-          projectId: r.projectId(),
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`the row took longer than ${ROW_MS / 1000} s`)), ROW_MS);
         }),
-        custom === undefined ? [] : await custom.after(r, crashedOp),
-      );
+      ]);
     } finally {
+      clearTimeout(timer);
       r.cleanup();
     }
   });
 
+const rowWork = async (r: RowRun, row: Row, options: RowOptions): Promise<string[]> => {
+  await r.init();
+  const crash = options.crash ?? SCENARIOS[row.saga][row.scenario];
+  if (crash === undefined) throw new Error(`no ${row.saga} scenario ${row.scenario}`);
+  const before = journalSteps(r.box.paths);
+  await crash(r, row);
+  const w = await r.world();
+  const seen = await snapshotIds(w.store.engine);
+  const steps = journalSteps(r.box.paths);
+  const crashedOp = crashedOperation(before, steps);
+  const crashedStep = crashedOp === undefined ? undefined : steps.get(crashedOp);
+  const crashLeft = crashCopyProblems(row, w, r.reference);
+  if (row.saga === "offload") r.captureAfterCrash();
+  // The dead process's lock file is still there, naming a pid that is gone: recover takes it over (D63).
+  const id = r.projectId();
+  const stale = id !== undefined && existsSync(join(r.box.paths.locksDir, `${id}.lock`));
+  const report = await r.recover();
+  await settleJournals(r.box.paths);
+  const again = await r.recover();
+  options.damage?.(w);
+  const problems = stale ? [] : [`the killed ${row.saga} left no lock file for recover to take over`];
+  return problems.concat(
+    crashLeft,
+    await rowProblems(row, w, {
+      crashedStep,
+      crashedOp,
+      report,
+      again,
+      reference: r.reference,
+      ...(r.released === undefined ? {} : { released: r.released }),
+      seen,
+      projectId: r.projectId(),
+    }),
+    options.after === undefined ? [] : await options.after(r, crashedOp),
+  );
+};
+
+/** A row's test: green when its checks find nothing, or, in the damage mode, when they find the harm done. */
+const rowTest = (row: Row) => async () => {
+  const problems = await runRow(row, DAMAGE_MODE ? { damage } : {});
+  if (DAMAGE_MODE) expect(problems.length).toBeGreaterThan(0);
+  else expect(problems).toEqual([]);
+};
+
 describeT1("crash matrix, SIGKILL subprocess", () => {
-  test("a binary built without the matrix's define ignores the fault variables: the offload runs to its end", async () => {
+  test("a binary built by scripts/build.ts ignores the fault variables: the offload runs to its end", async () => {
     const release = join(scratch, "plainport-release");
-    compile(release, []);
+    const build = Bun.spawnSync(
+      [process.execPath, join(checkout, "scripts/build.ts"), "--outfile", release],
+      { cwd: checkout, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(build.exitCode).toBe(0);
     const r = new RowRun(++rowsMade);
     try {
       await r.init();
@@ -518,64 +602,70 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
     ["onload", ONLOAD_ROWS],
   ] as const)
     describe(`${saga} (${rows.length} rows)`, () => {
-      for (const row of rows)
-        test.concurrent(row.name, async () => expect(await runRow(row)).toEqual([]), 300_000);
+      for (const row of rows) test.concurrent(row.name, rowTest(row), TEST_MS);
     });
-  // A crash while restic uploads, not at a step: the binary and restic's whole process group are SIGKILLed once
-  // restic has written a pack of this upload but no snapshot yet, as a power cut or an OOM kill would leave it. The
-  // journal stays at offload.snapshot.start, so the row is that step's, with three more demands: recover rolled it
-  // back (its rule allows nothing else but pending, which the row refuses), the folder is untouched, and a later
-  // offload succeeds over the dead restic's lock and leftover packs and becomes the head, never a half-written
-  // snapshot of the crashed operation.
-  test.concurrent("offload.snapshot.start · mid-upload SIGKILL of plainport and restic's process group", async () => {
-    const row = OFFLOAD_ROWS.find(
-      (x) => x.point === "offload.snapshot.start" && x.scenario === "plain",
-    ) as Row;
-    let untouched: TreeHash = new Map();
-    let leftover = { packs: 0, locks: 0 };
-    const problems = await runRow(row, {
-      crash: async (r) => {
-        // Incompressible bytes, more than one 16 MiB pack: restic writes a pack while the upload still runs.
-        writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(24 * 1024 * 1024));
-        r.look();
-        untouched = r.reference as TreeHash;
-        const packs = join(r.box.home, "ssd/repo/data");
-        const child = r.spawn(offloadArgs);
-        const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-        const deadline = Date.now() + 120_000;
-        while (child.exitCode === null && countFiles(packs) === 0 && Date.now() < deadline)
-          await Bun.sleep(5);
-        const uploading = child.exitCode === null ? resticChildren(child.pid) : [];
-        if (uploading.length === 0) {
-          child.kill("SIGKILL");
+
+  // A crash while restic uploads, not at a step: once restic has written a pack of this upload, but no snapshot yet,
+  // the test freezes plainport and restic's whole process group (SIGSTOP, so the upload cannot finish in between),
+  // checks the upload is still unfinished, then SIGKILLs them, as a power cut or an OOM kill would leave it. The
+  // journal stays at the upload's step, so the row is that step's, with three more demands: recover rolled it back
+  // (its rule allows nothing else but pending, which the row refuses), the folder is untouched, and a later offload
+  // succeeds over the dead restic's lock and leftover packs and becomes the head, never a half-written snapshot of
+  // the crashed operation.
+  test.concurrent(
+    `${MATRIX_POINTS.upload} · mid-upload SIGKILL of plainport and restic's process group`,
+    async () => {
+      let leftover = { packs: 0, locks: 0, snapshots: -1 };
+      const problems = await runRow(plainRowAt(MATRIX_POINTS.upload), {
+        crash: async (r) => {
+          // Incompressible bytes, several 16 MiB packs: restic writes packs while the upload still runs.
+          writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(40 * 1024 * 1024));
+          r.noteEdit("data/blob.bin");
+          const repo = join(r.box.home, "ssd/repo");
+          const child = r.spawn(offloadArgs);
+          const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+          const deadline = Date.now() + 120_000;
+          while (child.exitCode === null && countFiles(join(repo, "data")) === 0 && Date.now() < deadline)
+            await Bun.sleep(2);
+          // Freeze first: plainport cannot start anything new, restic cannot finish its snapshot.
+          signal(child.pid, "SIGSTOP");
+          const uploading = childrenOf(child.pid, "restic");
+          for (const pid of uploading) {
+            r.groups.add(pid);
+            signal(-pid, "SIGSTOP");
+          }
+          leftover = {
+            packs: countFiles(join(repo, "data")),
+            locks: countFiles(join(repo, "locks")),
+            snapshots: countFiles(join(repo, "snapshots")),
+          };
+          // The runner gives each child its own process group (pgid = its pid): kill the group, as a crash would.
+          for (const pid of uploading) signal(-pid, "SIGKILL");
+          signal(child.pid, "SIGKILL");
+          await child.exited;
           const [out, err] = await output;
-          throw new Error(
-            `restic was not uploading when the kill was due (exit ${child.exitCode}): ${err}${out}`,
-          );
-        }
-        process.kill(child.pid, "SIGKILL");
-        // The runner gives each child its own process group (pgid = its pid): kill the group, as a crash would.
-        for (const pid of uploading) process.kill(-pid, "SIGKILL");
-        await child.exited;
-        const [out, err] = await output;
-        killed({ code: child.exitCode, signal: child.signalCode, out, err }, "offload");
-        while (resticChildren(child.pid).length > 0 || uploading.some(alive)) await Bun.sleep(10);
-        leftover = { packs: countFiles(packs), locks: countFiles(join(r.box.home, "ssd/repo/locks")) };
-      },
-      after: async (r, crashedOp) => {
-        const found: string[] = [];
-        const touched = treeDiff(untouched, hashTree(r.dir));
-        if (touched.length > 0) found.push(`recover changed the folder: ${touched.join(", ")}`);
-        const later = await r.run(offloadArgs);
-        if (later.code !== 0)
-          return [...found, `a later offload exited ${later.code}: ${later.err}${later.out}`];
-        await settleJournals(r.box.paths);
-        return found.concat(await laterHeadProblems(await r.world(), r.projectId(), crashedOp, untouched));
-      },
-    });
-    expect(problems).toEqual([]);
-    // The kill really landed mid-upload: packs written, and the dead restic's lock left in the repository.
-    expect(leftover.packs).toBeGreaterThan(0);
-    expect(leftover.locks).toBeGreaterThan(0);
-  }, 300_000);
+          if (uploading.length === 0)
+            throw new Error(
+              `restic was not uploading when the kill was due (exit ${child.exitCode}): ${err}${out}`,
+            );
+          killed({ code: child.exitCode, signal: child.signalCode, out, err }, "offload");
+          const gone = Date.now() + 10_000;
+          while (uploading.some(alive) && Date.now() < gone) await Bun.sleep(10);
+          if (uploading.some(alive)) throw new Error(`restic ${uploading.join(", ")} outlived its SIGKILL`);
+        },
+        after: async (r, crashedOp) => {
+          const later = await r.run(offloadArgs);
+          if (later.code !== 0) return [`a later offload exited ${later.code}: ${later.err}${later.out}`];
+          await settleJournals(r.box.paths);
+          return laterHeadProblems(await r.world(), r.projectId(), crashedOp, r.reference);
+        },
+      });
+      expect(problems).toEqual([]);
+      // The kill really landed mid-upload: packs written, the dead restic's lock left, no snapshot yet.
+      expect(leftover.packs).toBeGreaterThan(0);
+      expect(leftover.locks).toBeGreaterThan(0);
+      expect(leftover.snapshots).toBe(0);
+    },
+    TEST_MS,
+  );
 });

@@ -77,20 +77,24 @@ export const copyProject = (template: ProjectTemplate, to: string, options: { ca
 /** Every entry below a folder, with its bytes' hash (files), its target (links) and its mode: byte identity. */
 export type TreeHash = Map<string, string>;
 
+/** One entry's hash, as hashTree records it. */
+export const hashEntry = (dir: string, path: string): string => {
+  const full = join(dir, path);
+  const stat = lstatSync(full);
+  const mode = (stat.mode & 0o7777).toString(8);
+  if (stat.isSymbolicLink()) return `link ${readlinkSync(full)}`;
+  if (stat.isDirectory()) return `dir ${mode}`;
+  return `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+};
+
 export const hashTree = (dir: string, skip: readonly string[] = []): TreeHash => {
   const out: TreeHash = new Map();
   const walk = (relative: string) => {
     for (const name of readdirSync(relative === "" ? dir : join(dir, relative)).sort()) {
       const path = relative === "" ? name : `${relative}/${name}`;
       if (skip.some((s) => path === s || path.startsWith(`${s}/`))) continue;
-      const full = join(dir, path);
-      const stat = lstatSync(full);
-      const mode = (stat.mode & 0o7777).toString(8);
-      if (stat.isSymbolicLink()) out.set(path, `link ${readlinkSync(full)}`);
-      else if (stat.isDirectory()) {
-        out.set(path, `dir ${mode}`);
-        walk(path);
-      } else out.set(path, `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
+      out.set(path, hashEntry(dir, path));
+      if (lstatSync(join(dir, path)).isDirectory()) walk(path);
     }
   };
   walk("");

@@ -7,7 +7,7 @@
 // does (Task 12); the subprocess variant (subprocess.test.ts) crashes every row with a real SIGKILL for that.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fail, finding, type Result } from "../../packages/contract/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
@@ -30,6 +30,10 @@ import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandb
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { nodePlugin } from "../../packages/eco-node/src/index.ts";
 import {
+  crashCopyProblems,
+  crashedOperation,
+  DAMAGE_MODE,
+  damage,
   journalSteps,
   laterHeadProblems,
   rowProblems,
@@ -39,19 +43,22 @@ import {
 } from "./checks.ts";
 import {
   copyProject,
+  hashEntry,
   hashTree,
   makeProjectTemplate,
   type ProjectTemplate,
   type TreeHash,
-  treeDiff,
 } from "./fixture.ts";
 import {
-  type BranchKind,
+  MATRIX_POINTS,
   type OFFLOAD_BRANCH_KINDS,
   OFFLOAD_ROWS,
   type ONLOAD_BRANCH_KINDS,
   ONLOAD_ROWS,
+  plainRowAt,
   type Row,
+  type Saga,
+  type ScenarioOf,
 } from "./matrix.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
@@ -69,14 +76,13 @@ let mirror: MemoryBlobStore;
 let engine: FakeEngine;
 let dir: string;
 let released: TreeCapture | undefined;
-let releasedHash: TreeHash | undefined;
+/** The project before the run, plus the scenario's own edits (noteEdit): what no crash may change. */
+let reference: TreeHash;
+const noteEdit = (path: string) => reference.set(path, hashEntry(dir, path));
 
 /** At the start of release (live or resumed by recover), the folder as it stands: invariant 1's capture. */
 const capture = (step: string) => {
-  if (step === "offload.release.trash" && existsSync(dir)) {
-    released = captureTree(dir);
-    releasedHash = hashTree(dir);
-  }
+  if (step === "offload.release.trash" && existsSync(dir)) released = captureTree(dir);
 };
 
 const opener: StoreOpener = { open: async () => ({ ok: true, value: { blob: store, engine } }) };
@@ -119,7 +125,7 @@ beforeEach(async () => {
   dir = join(box.home, "work/web");
   copyProject(template, dir);
   released = undefined;
-  releasedHash = undefined;
+  reference = hashTree(dir);
 });
 
 afterEach(() => {
@@ -213,12 +219,7 @@ const crashOnload = async (point: string) => {
 const shelve = async () => {
   const done = await offload();
   if (!done.ok) throw new Error(`${done.finding.code}: ${done.finding.message}`);
-  const trash = join(box.home, "work/.plainport-trash");
-  for (let i = 0; i < 400; i++) {
-    const busy = (existsSync(trash) && readdirSync(trash).length > 0) || journalSteps(box.paths).size > 0;
-    if (!busy) break;
-    await Bun.sleep(25);
-  }
+  await settleJournals(box.paths);
 };
 
 /** Registers the project and its root with a first offload that fails, so another copy's event can name them. */
@@ -255,12 +256,10 @@ const otherCopyDuringUpload = async () => {
   };
 };
 
-type ScenarioOf<K extends Record<string, BranchKind>> =
-  | "plain"
-  | { [B in keyof K]: K[B] extends "plain" ? never : B }[keyof K];
+type Scenario = (row: Row) => Promise<void>;
 
 /** How each offload scenario crashes at a row; the project's own edits (a retry's) are part of what it must keep. */
-const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, (row: Row) => Promise<void>> = {
+const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenario> = {
   plain: crashOffload,
   discarded: async (row) => {
     engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/extra.ts"), 0o000);
@@ -277,13 +276,15 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, (row: R
   },
   retry: async (row) => {
     engine.hooks.duringSnapshot = (_input, attempt) => {
-      if (attempt === 1) writeFileSync(join(dir, "notes/todo.txt"), "edited during the upload\n");
+      if (attempt !== 1) return;
+      writeFileSync(join(dir, "notes/todo.txt"), "edited during the upload\n");
+      noteEdit("notes/todo.txt");
     };
     await crashOffload(row);
   },
 };
 
-const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, (row: Row) => Promise<void>> = {
+const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, Scenario> = {
   plain: async (row) => {
     await shelve();
     await crashOnload(row.point);
@@ -297,34 +298,41 @@ const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, (row: Row
   resume: async (row) => {
     await shelve();
     // The first onload stops before its swap; the second takes it over and crashes at the row's point.
-    await crashOnload("onload.verified");
+    await crashOnload(MATRIX_POINTS.resumeFrom);
     await crashOnload(row.point);
   },
 };
 
-/** Runs a row's crash (or `crash` instead of its scenario's), recover twice, and the row's checks. */
-const runRow = async (row: Row, crash?: (row: Row) => Promise<void>) => {
-  const scenarios: Record<string, (row: Row) => Promise<void>> =
-    row.saga === "offload" ? OFFLOAD_SCENARIOS : ONLOAD_SCENARIOS;
-  crash ??= scenarios[row.scenario];
+const SCENARIOS: { readonly [S in Saga]: Readonly<Record<string, Scenario>> } = {
+  offload: OFFLOAD_SCENARIOS,
+  onload: ONLOAD_SCENARIOS,
+};
+
+interface RowOptions {
+  /** A crash of the row's own, instead of its scenario's. */
+  crash?: Scenario;
+  /** Harm done after recover, which the row's checks must then report (the damage mode and its standing test). */
+  damage?: (world: World) => void;
+}
+
+/** Runs a row's crash, recover twice, and the row's checks. */
+const runRow = async (row: Row, options: RowOptions = {}) => {
+  const crash = options.crash ?? SCENARIOS[row.saga][row.scenario];
   if (crash === undefined) throw new Error(`no ${row.saga} scenario ${row.scenario}`);
   const seen = await snapshotIds(engine);
   const before = journalSteps(box.paths);
   await crash(row);
   for (const id of await snapshotIds(engine)) seen.add(id);
-  // The crashed operation: the newest journal (an onload's resume or reuse may leave an older one beside it).
   const steps = journalSteps(box.paths);
-  const ops = [...steps.keys()].sort();
-  const crashedOp = row.saga === "offload" ? ops.at(-1) : ops.filter((o) => !before.has(o)).at(-1);
+  const crashedOp = crashedOperation(before, steps);
   const crashedStep = crashedOp === undefined ? undefined : steps.get(crashedOp);
-  // The project as the crash left it: an onload's is the shelved project; an offload's folder, or its capture.
-  const reference =
-    row.saga === "offload" && existsSync(dir) ? hashTree(dir) : (releasedHash ?? hashTree(dir));
+  const crashLeft = crashCopyProblems(row, world(), reference);
   const report = reportOf(await recover(recoverDeps()));
   // A finished release hands its trash to a detached delete, which holds it (trash-kept) until it is done.
   await settleJournals(box.paths);
   const again = reportOf(await recover(recoverDeps()));
-  return rowProblems(row, world(), {
+  options.damage?.(world());
+  const problems = await rowProblems(row, world(), {
     crashedStep,
     crashedOp,
     report,
@@ -333,7 +341,15 @@ const runRow = async (row: Row, crash?: (row: Row) => Promise<void>) => {
     ...(released === undefined ? {} : { released }),
     seen,
     projectId: await projectId(),
-  }).then((problems) => ({ problems, crashedOp }));
+  });
+  return { problems: [...crashLeft, ...problems], crashedOp };
+};
+
+/** A row's test: green when its checks find nothing, or, in the damage mode, when they find the harm done. */
+const rowTest = (row: Row) => async () => {
+  const { problems } = await runRow(row, DAMAGE_MODE ? { damage } : {});
+  if (DAMAGE_MODE) expect(problems.length).toBeGreaterThan(0);
+  else expect(problems).toEqual([]);
 };
 
 const world = (): World => ({
@@ -345,13 +361,11 @@ const world = (): World => ({
 });
 
 describe(`crash matrix, in-process: offload (${OFFLOAD_ROWS.length} rows)`, () => {
-  for (const row of OFFLOAD_ROWS)
-    test(row.name, async () => expect((await runRow(row)).problems).toEqual([]), 30_000);
+  for (const row of OFFLOAD_ROWS) test(row.name, rowTest(row), 30_000);
 });
 
 describe(`crash matrix, in-process: onload (${ONLOAD_ROWS.length} rows)`, () => {
-  for (const row of ONLOAD_ROWS)
-    test(row.name, async () => expect((await runRow(row)).problems).toEqual([]), 30_000);
+  for (const row of ONLOAD_ROWS) test(row.name, rowTest(row), 30_000);
 });
 
 // A crash while the upload itself runs, not at a step: here the fake engine's snapshot dies part-way through its walk
@@ -359,21 +373,58 @@ describe(`crash matrix, in-process: onload (${ONLOAD_ROWS.length} rows)`, () => 
 // offload.snapshot.start, so the row is that step's, with its extra demands.
 describe("crash matrix, in-process: a crash while the upload runs", () => {
   test("offload.snapshot.start · mid-upload: recover rolls back, the folder is untouched, a later offload is the head", async () => {
-    const row = OFFLOAD_ROWS.find(
-      (r) => r.point === "offload.snapshot.start" && r.scenario === "plain",
-    ) as Row;
-    const untouched = hashTree(dir);
-    const { problems, crashedOp } = await runRow(row, async () => {
-      engine.hooks.duringSnapshot = () => {
-        throw new InjectedFault("offload.upload");
-      };
-      await expect(offload()).rejects.toBeInstanceOf(InjectedFault);
-      engine.hooks.duringSnapshot = undefined;
+    const row = plainRowAt(MATRIX_POINTS.upload);
+    const { problems, crashedOp } = await runRow(row, {
+      crash: async () => {
+        engine.hooks.duringSnapshot = () => {
+          throw new InjectedFault("offload.upload");
+        };
+        await expect(offload()).rejects.toBeInstanceOf(InjectedFault);
+        engine.hooks.duringSnapshot = undefined;
+      },
     });
     expect(problems).toEqual([]);
-    expect(treeDiff(untouched, hashTree(dir))).toEqual([]);
     const later = await offload();
     expect(later.ok ? later.value.op : later.finding.code).not.toBe(crashedOp);
-    expect(await laterHeadProblems(world(), await projectId(), crashedOp, untouched)).toEqual([]);
+    expect(await laterHeadProblems(world(), await projectId(), crashedOp, reference)).toEqual([]);
   }, 30_000);
+});
+
+// The standing proof that the row checks bite (the damage mode, PLAINPORT_CRASH_MATRIX_DAMAGE=1, runs it on every row
+// of both variants): harm done after recover, which a weakened check would let through.
+describe("crash matrix, in-process: the checks catch damage", () => {
+  const cases: [string, string, (w: World) => void, string][] = [
+    [
+      "offload.begin",
+      "a deleted .env",
+      (w) => rmSync(join(w.dir, ".env")),
+      "not the project as it stood before the run: .env",
+    ],
+    [
+      "offload.begin",
+      "an exec bit lost",
+      (w) => chmodSync(join(w.dir, "bin/run.sh"), 0o644),
+      "not the project as it stood before the run: bin/run.sh",
+    ],
+    [
+      "offload.begin",
+      "a symlink retargeted",
+      (w) => {
+        rmSync(join(w.dir, "main-link"));
+        symlinkSync("src/extra.ts", join(w.dir, "main-link"));
+      },
+      "not the project as it stood before the run: main-link",
+    ],
+    [
+      "offload.release.stub",
+      "a missing stub",
+      (w) => rmSync(`${w.dir}.plainport`),
+      "invariant 2: the stub is missing",
+    ],
+  ];
+  for (const [point, harm, done, expected] of cases)
+    test(`${point}: ${harm} is reported`, async () => {
+      const { problems } = await runRow(plainRowAt(point), { damage: done });
+      expect(problems.some((p) => p.includes(expected))).toBe(true);
+    });
 });

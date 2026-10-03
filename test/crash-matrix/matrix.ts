@@ -18,6 +18,7 @@ import {
   OFFLOAD_AFTER_EFFECT,
   OFFLOAD_BRANCHES,
   OFFLOAD_STEPS,
+  type OffloadAfterEffect,
   type OffloadStep,
 } from "../../packages/core/src/saga/offload.ts";
 import {
@@ -140,4 +141,41 @@ export const ONLOAD_ROWS: readonly Row[] = rowsOf({
   recovery: ONLOAD_RECOVERY satisfies Record<OnloadStep, string>,
 });
 
+/** The scenarios a variant must set up for a saga: plain, and each branch that is not plain. */
+export type ScenarioOf<K extends Record<string, BranchKind>> =
+  | "plain"
+  | { [B in keyof K]: K[B] extends "plain" ? never : B }[keyof K];
+
+/**
+ * What each saga's folder means to the checks, so a new saga is a compile error here until it is said:
+ * - crashLeavesTheProject: whatever the crash left in place or in the trash is the project as it was before the run;
+ * - folderKeepsStripped: a folder in place after recover still holds the strip set (an offload never strips the
+ *   user's folder; an onload restores without dependencies, --no-hydrate, or renames a trash back with them).
+ */
+export const SAGA_FOLDER: {
+  readonly [S in Saga]: { crashLeavesTheProject: boolean; folderKeepsStripped: boolean };
+} = {
+  offload: { crashLeavesTheProject: true, folderKeepsStripped: true },
+  onload: { crashLeavesTheProject: false, folderKeepsStripped: false },
+};
+
+/** The steps and seams the harness itself names, typed so a renamed one fails the typecheck. */
+export const MATRIX_POINTS = {
+  /** Where a run pauses, or dies part-way, while the test changes the world: just before restic starts. */
+  upload: "offload.snapshot.start" satisfies OffloadStep,
+  /** A first offload dies here to register the project and its root (the diverged branch's setup). */
+  register: "offload.planned" satisfies OffloadStep,
+  /** Where the first onload of the resume branch dies: the last step it says a resumed onload reaches again. */
+  resumeFrom: ONLOAD_BRANCHES.resume.reaches[ONLOAD_BRANCHES.resume.reaches.length - 1] as OnloadStep,
+  /** Past the detached delete's start: it races recover and may remove the journal first. */
+  raced: "offload.release.detached" satisfies OffloadAfterEffect,
+} as const;
+
 export const ALL_ROWS: readonly Row[] = [...OFFLOAD_ROWS, ...ONLOAD_ROWS];
+
+/** The plain row that crashes at a point the first time it is reached. */
+export const plainRowAt = (point: string): Row => {
+  const row = ALL_ROWS.find((r) => r.point === point && r.scenario === "plain" && r.occurrence === 1);
+  if (row === undefined) throw new Error(`no plain row at ${point}`);
+  return row;
+};

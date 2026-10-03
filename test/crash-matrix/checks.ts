@@ -3,13 +3,14 @@
 // - recover found the journal at the step the crash left (the row's step) and settled it with an outcome its rule
 //   allows (RECOVERY_RULE_OUTCOMES), never leaving it pending;
 // - invariants 1–3 on this device (invariantViolations) and 4–6 on the store (catalogInvariantViolations);
-// - no work is lost: a folder still in place is byte-identical to the project as the crash left it, and a folder that
-//   is gone is shelved, its head restoring byte-identical to it apart from the stripped paths;
+// - no work is lost: a folder still in place is byte-identical to the project as it stood before the run (plus the
+//   scenario's own edits), and a folder that is gone is shelved, its head restoring byte-identical to it apart from the
+//   stripped paths;
 // - recover is idempotent: running it again finds nothing to do.
 
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
@@ -24,7 +25,7 @@ import {
 } from "../../packages/core/src/testing/invariants.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { hashTree, removeTree, STRIPPED, type TreeHash, treeDiff } from "./fixture.ts";
-import type { Row } from "./matrix.ts";
+import { MATRIX_POINTS, type Row, SAGA_FOLDER } from "./matrix.ts";
 
 export interface World {
   paths: PlainportPaths;
@@ -62,10 +63,61 @@ export const journalSteps = (paths: PlainportPaths): Map<string, string> => {
   return out;
 };
 
-/** Waits up to `ms` for the detached deletes recover started to finish: no journal left. */
-export const settleJournals = async (paths: PlainportPaths, ms = 10_000) => {
+/** Waits up to `ms` for the detached deletes recover or an offload started to finish: no journal left. */
+export const settleJournals = async (paths: PlainportPaths, ms = 20_000) => {
   const deadline = Date.now() + ms;
   while (journalSteps(paths).size > 0 && Date.now() < deadline) await Bun.sleep(25);
+  const open = journalSteps(paths);
+  if (open.size > 0)
+    throw new Error(
+      `journals still open after ${ms} ms (a detached delete that never finished?): ${[...open].map(([op, step]) => `${op} ${step}`).join(", ")}`,
+    );
+};
+
+/** The operation a crash left: the newest journal that was not there before it ran. */
+export const crashedOperation = (
+  before: ReadonlyMap<string, string>,
+  after: ReadonlyMap<string, string>,
+): string | undefined =>
+  [...after.keys()]
+    .filter((op) => !before.has(op))
+    .sort()
+    .at(-1);
+
+/**
+ * An offload's crash must leave the project as it was: in its place, or moved whole into the trash. Problems when
+ * the copy the crash left differs from the reference (taken before the run, so the saga's own writes show up).
+ */
+export const crashCopyProblems = (row: Row, world: World, reference: TreeHash): string[] => {
+  if (!SAGA_FOLDER[row.saga].crashLeavesTheProject) return [];
+  const name = basename(world.dir);
+  const trash = join(world.root, ".plainport-trash");
+  // Past the detached delete's start, the trash copy is being deleted, as it should be: only the folder counts.
+  const trashed =
+    existsSync(trash) && row.point !== MATRIX_POINTS.raced
+      ? readdirSync(trash).map((op) => join(trash, op, name))
+      : [];
+  const copies = [world.dir, ...trashed].filter((p) => existsSync(p));
+  return copies.flatMap((copy) => {
+    const differ = treeDiff(reference, hashTree(copy));
+    return differ.length === 0
+      ? []
+      : [`the crash left ${copy} changed from before the run: ${differ.join(", ")}`];
+  });
+};
+
+/**
+ * The opt-in damage mode's harm (PLAINPORT_CRASH_MATRIX_DAMAGE=1), done after recover: a row must then report it,
+ * which proves its checks still bite. A folder in place loses its .env; a shelved project loses its stub.
+ */
+export const DAMAGE_MODE = process.env.PLAINPORT_CRASH_MATRIX_DAMAGE === "1";
+export const damage = (world: World): string => {
+  if (existsSync(world.dir)) {
+    rmSync(join(world.dir, ".env"));
+    return "deleted .env";
+  }
+  rmSync(`${world.dir}.plainport`);
+  return "deleted the stub";
 };
 
 export interface Settlement {
@@ -76,7 +128,7 @@ export interface Settlement {
   report: RecoveryReport;
   /** The report of a second recover run. */
   again: RecoveryReport;
-  /** The project as the crash left it (its folder in place, in the trash, or as release captured it). */
+  /** The project as it stood before the run, with the scenario's own edits. */
   reference: TreeHash;
   /** The folder as release began (invariant 1), once an offload got that far. */
   released?: TreeCapture;
@@ -92,7 +144,7 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
 
   // The step the crash left, and recover's outcome for it.
   // A crash after the detached delete started races it: the delete may finish, journal and all, before recover runs.
-  const raced = row.point === "offload.release.detached";
+  const raced = row.point === MATRIX_POINTS.raced;
   if (s.crashedStep === undefined) {
     if (!raced) problems.push(`the crash left no journal (expected one at ${row.step})`);
   } else if (s.crashedStep !== row.step) {
@@ -154,11 +206,12 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     present = false;
   }
   if (present) {
-    const now = hashTree(world.dir, row.saga === "onload" ? STRIPPED : []);
-    const was = row.saga === "onload" ? withoutStripped(s.reference) : s.reference;
+    const { folderKeepsStripped } = SAGA_FOLDER[row.saga];
+    const now = hashTree(world.dir, folderKeepsStripped ? [] : STRIPPED);
+    const was = folderKeepsStripped ? s.reference : withoutStripped(s.reference);
     const differ = treeDiff(was, now);
     if (differ.length > 0)
-      problems.push(`the folder is not the project as the crash left it: ${differ.join(", ")}`);
+      problems.push(`the folder is not the project as it stood before the run: ${differ.join(", ")}`);
   } else {
     const project = s.projectId === undefined ? undefined : foldCatalog(events).projects[s.projectId];
     let stub: string | undefined;
@@ -178,7 +231,9 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
         else {
           const differ = treeDiff(withoutStripped(s.reference), hashTree(join(target, "web")));
           if (differ.length > 0)
-            problems.push(`the head ${head} is not the project as the crash left it: ${differ.join(", ")}`);
+            problems.push(
+              `the head ${head} is not the project as it stood before the run: ${differ.join(", ")}`,
+            );
         }
       } finally {
         removeTree(target);
