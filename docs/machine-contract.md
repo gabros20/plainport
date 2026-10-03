@@ -39,9 +39,10 @@ The rules:
 
 - The keys are exactly `plainport_json`, `ok`, `verb`, and `data` (when `ok` is true) or `error` (when `ok` is
   false). This version prints no other top-level key; a later one may add keys (§7).
-- A failure carries `data` next to `error` only when the operation partly succeeded: exit 10 carries the restored
-  project and snapshot, exit 8 the kept snapshot. Otherwise a failure has no `data`. When present, `data` has the
-  command's declared output shape.
+- A failure carries `data` next to `error` only when it still has a useful result (D14): exit 10 carries the
+  restored project and snapshot, exit 8 the kept snapshot, and exit 6 from a `--dry-run` the plan its blockers
+  stopped (§6). Otherwise a failure has no `data`. When present, `data` has the command's declared output shape, or
+  its plan shape under `--dry-run`.
 - `plainport_json` is the envelope version, `1`. It changes only on a breaking change to the envelope (§7).
 - `verb` is the command as registered, such as `offload` or `root add`.
 - `data` is any JSON value; its shape is the command's declared output schema in `plainport.json`.
@@ -168,6 +169,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
+| `command.unavailable` | block | no | 1 | This build registers the command but cannot run it for real yet; its `--dry-run` preview works. Temporary: `offload` until the offload saga lands (D38) |
 | `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |
 | `config.invalid` | block | no | 6 | A config file does not parse or does not match its schema, and there is no last good copy to keep; `paths` names the file and the message the line or key |
@@ -180,8 +182,14 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `config.write-failed` | block | no | 1 | `managed.toml` or `device.json` could not be written; the old file is intact |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
 | `device.invalid` | block | no | 6 | `device.json`, this device's identity, is unreadable; plainport never replaces it |
+| `deps.ambiguous` | warn | yes | 6 | A package folder holds lockfiles of more than one package manager and no `packageManager` field; onload uses the first in DESIGN's table |
+| `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; `fix` suggests `--keep-deps` |
 | `device.none` | block | no | 6 | This device has no identity yet; `fix` points at `plainport init` |
+| `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own `.git` included; `paths` lists them |
+| `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
+| `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
+| `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |
 | `process.output-incomplete` | block | no | 1 | A child process exited, but output plainport parses as data cannot be taken as whole: something outside its process group kept its stdout open, reading it failed, or processes it left in its group were stopped |
@@ -203,6 +211,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `root.path-missing` | block | no | 6 | The root's folder on this device does not exist or is not a folder; `--create` makes it |
 | `root.synced-folder` | warn | yes | 6 | The root is inside an iCloud Drive or Dropbox folder |
 | `root.unbound` | block | no | 6 | The root has no folder on this device; `fix` is `plainport root bind <root> <path>` |
+| `strip.kept` | info | no | 6 | Paths a plugin or `strip.extra` proposed stay in the snapshot; the message says why for each (git tracks it, `strip.keep` or `strip.never` matches, it holds a repository, dependencies are kept) |
 | `stub.invalid` | block | no | 6 | A `.plainport` stub file does not match the stub schema |
 | `tool.missing` | block | no | 6 | A bundled binary (restic or rclone) was not found; `paths` lists every place searched |
 | `usage.dry-run-unsupported` | block | no | 2 | `--dry-run` was given to a command that has no preview; `fix` depends on the risk class (§4) |
@@ -216,7 +225,9 @@ A command that supports `--dry-run` treats it as a true preview: it builds and p
 writes nothing but its plan file: nothing in the project, its roots or any store changes, and the plan is saved to
 plainport's own state as `plans/<id>.json`, valid for an hour, so `plainport offload web --plan <id>` can run
 exactly that plan (run decision D36). A `--dry-run` run is always a `read`, so it needs no `--yes`:
-`plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A command that has no preview refuses
+`plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A plan that holds
+a `block` finding exits 6 (D38): its envelope is a failure whose `error.finding` is the first blocker and whose
+`data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy

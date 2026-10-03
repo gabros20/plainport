@@ -558,7 +558,7 @@ Every edge case resolves to one of three outcomes: handled silently, a warning i
 | Files changing during upload | Fingerprint check before, re-stat after. A mismatch retries once, then fails with nothing deleted. |
 | iCloud or Dropbox placeholders | Blocker `fs.dataless`: reading them triggers downloads or fails. `--materialize` downloads them first. |
 | Names differing only by case | Onload blocker `fs.case-collision` on case-insensitive volumes. Restore with `--to` onto a case-sensitive volume. |
-| Very large files (videos, database dumps) | Included; the ten largest paths appear in the plan so you can add strip patterns. |
+| Very large files (videos, database dumps) | Included; the ten largest paths appear in the plan so you can add strip patterns. A repository's own `.git` counts as one entry there, since its files are never strippable. |
 | Permissions, exec bits, extended attributes | Preserved by restic; ownership is restored as the current user. |
 | APFS clones | Restored as separate copies, so onload can need more space than the original used. |
 
@@ -668,7 +668,7 @@ Every edge case resolves to one of three outcomes: handled silently, a warning i
 
 ## Configuration
 
-Configuration is plain TOML in three places: `config.toml`, which you own and plainport never rewrites; `managed.toml` beside it, which `plainport init`, the CLI and the app write; and an optional per-project `.plainport.toml`. Precedence runs CLI flags, then environment variables (`PLAINPORT_STORE`, `PLAINPORT_CONFIG`, `PLAINPORT_JSON=1`), then the project file, then `config.toml`, then `managed.toml`, then built-in defaults.
+Configuration is plain TOML in three places: `config.toml`, which you own and plainport never rewrites; `managed.toml` beside it, which `plainport init`, the CLI and the app write; and an optional per-project `.plainport.toml`. Precedence runs CLI flags, then environment variables (`PLAINPORT_STORE`, `PLAINPORT_CONFIG`, `PLAINPORT_JSON=1`), then the project file, then the project's root's own `[roots.<r>.strip]` and `[roots.<r>.deps]` tables, then `config.toml`, then `managed.toml`, then built-in defaults.
 
 **Merging and writing.** Tables merge key by key and arrays replace. Every writer (the CLI, the app, a remote `root bind`) takes `managed.toml.lock` and writes atomically through a temporary file and a rename. A file that fails to parse on reload leaves the last good configuration in place and reports the error.
 
@@ -821,7 +821,7 @@ work:clients/acme/web → mini-work
   plan      01J9Z6KB (valid 1h) → plainport offload web --plan 01J9Z6KB
 ```
 
-**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. A failure carries `data` too only when the operation partly succeeded: exit 10 carries the restored project and snapshot, exit 8 the kept snapshot. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
+**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. A failure carries `data` too only when it still has a useful result: exit 10 carries the restored project and snapshot, exit 8 the kept snapshot, and exit 6 from a `--dry-run` the plan its blockers stopped. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
 
 ```
 {"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
