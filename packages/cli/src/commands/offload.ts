@@ -13,7 +13,9 @@ import {
   PLAN_TTL_MS,
   type Plan,
   PlanSchema,
+  planCommand,
   planOffload,
+  readRegistry,
   resolveProject,
   runOffload,
   savePlan,
@@ -71,7 +73,7 @@ export const renderPlan = (plan: Plan): string => {
       "plan",
       blocked
         ? `${plan.id} is blocked: fix the findings above, then plan again`
-        : `${plan.id} (valid ${hours}h) → plainport ${plan.kind} ${shellWord(address)} --plan ${plan.id}`,
+        : `${plan.id} (valid ${hours}h) → ${planCommand(plan)}`,
     ),
   );
   return lines.join("\n");
@@ -205,6 +207,14 @@ export const offload = defineCommand({
     }
     const now = ctx.clock.now();
     const op = ulid(now.getTime());
+    // The store's id this device recorded, so an approval binds that store (D48); none before it is set up.
+    const registry = await readRegistry(ctx.io, paths);
+    if (!registry.ok) return registry;
+    const loaded = await new ConfigLoader(ctx.io, paths).load({ env: ctx.env, root: ref.root });
+    if (!loaded.ok) return loaded;
+    const storeName =
+      ctx.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
+    const storeId = storeName === undefined ? undefined : registry.value.stores?.[storeName];
     const planned = await planOffload(ctx.system, ctx.checks, ctx.plugins, {
       dir: ref.dir,
       project: {
@@ -218,6 +228,8 @@ export const offload = defineCommand({
       now,
       ...(ctx.store === undefined ? {} : { store: ctx.store }),
       ...(args["keep-deps"] === true ? { keepDeps: true } : {}),
+      ...(args.allow === undefined ? {} : { allow: args.allow }),
+      ...(storeId === undefined ? {} : { storeId }),
       onFinding: (f) => ctx.output.emit({ type: "finding", op, finding: f }),
     });
     if (!planned.ok) return planned;

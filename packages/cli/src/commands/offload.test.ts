@@ -377,6 +377,21 @@ describe("offload: a real run", () => {
     expect(existsSync(join(dir(), "package.json"))).toBe(true);
   });
 
+  test("a dry run records --allow, so the same --allow runs its plan (and the plan line names it)", async () => {
+    const planned = await cli(["offload", "work:web", "--dry-run", "--allow", "git.locked", "--json"]);
+    expect(planned.code).toBe(0);
+    const plan = envelope(planned.out).data;
+    expect(plan.options).toMatchObject({ allow: ["git.locked"] });
+    const human = await cli(["offload", "work:web", "--dry-run", "--allow", "git.locked", "--keep-deps"]);
+    expect(human.out).toMatch(/--plan [0-9A-Z]{26} --keep-deps --allow git\.locked\n$/);
+    const fresh = await preloadPlans(ports().io, ports().env, NOW);
+    const run = await cli(["offload", "work:web", "--plan", plan.id, "--allow", "git.locked", "--json"], {
+      plans: fresh,
+    });
+    expect(run.code).toBe(0);
+    await expectInvariants();
+  });
+
   test("a store init never set up refuses with store.not-set-up", async () => {
     const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
     delete registry.stores;
