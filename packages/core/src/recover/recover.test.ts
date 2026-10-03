@@ -431,9 +431,12 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
 
   test("a crash at offload.release.detached (journal at offload.release.delete): the live detached delete keeps its claim and finishes (D64)", async () => {
     await crashOffloadAt("offload.release.detached");
-    // The detached delete outlives the crash: recover leaves its trash to it, or finds it done already.
+    // The detached delete outlives the crash: recover leaves its trash to it while it claims it, or finds it done
+    // (trash and claim gone, only the journal left, or nothing left at all).
     const ops = reportOf(await recover(recoverDeps())).operations;
-    expect(ops.every((o) => o.outcome === "trash-kept" && o.state === "shelved")).toBe(true);
+    expect(
+      ops.every((o) => ["trash-kept", "trash-deleted"].includes(o.outcome) && o.state === "shelved"),
+    ).toBe(true);
     await waitJournalsGone();
     expect(await journals()).toEqual([]);
     await expectShelved();
