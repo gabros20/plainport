@@ -115,4 +115,45 @@ describe("Node plugin: detection, findings and hydration", () => {
     const ctx = await ready();
     expect((await nodePlugin.strip(ctx)).map((c) => c.path)).toEqual([]);
   });
+
+  test("a folder named like an Object method is not a cache; only a real .vercel/output is", async () => {
+    pkg("package.json");
+    put("package-lock.json", "{}");
+    for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"])
+      put(`${name}/x`);
+    put("foo.vercel/output/x");
+    put(".vercel/output/config.json");
+    put("apps/site/.vercel/output/config.json");
+    const strip = await nodePlugin.strip(await ready());
+    expect(strip.map((c) => c.path)).toEqual([".vercel/output", "apps/site/.vercel/output"]);
+    for (const c of strip) expect(typeof c.reason).toBe("string");
+  });
+
+  test("a stray lockfile in a workspace member does not make a second install root", async () => {
+    pkg("package.json", { packageManager: "pnpm@9.12.0" });
+    put("pnpm-lock.yaml");
+    put("pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n  - \"packages/**\"\n");
+    pkg("apps/web/package.json");
+    put("apps/web/package-lock.json", "{}");
+    pkg("packages/ui/core/package.json");
+    put("packages/ui/core/yarn.lock");
+    // Not a workspace member: its own lockfile makes it its own install root.
+    pkg("tools/script/package.json");
+    put("tools/script/package-lock.json", "{}");
+    const steps = (await nodePlugin.hydrate(await ready())).steps;
+    expect(steps.map((s) => [s.path, s.command])).toEqual([
+      ["", "pnpm install --frozen-lockfile"],
+      ["tools/script", "npm ci"],
+    ]);
+  });
+
+  test("package.json workspaces (array or object form) name the members too", async () => {
+    pkg("package.json", { workspaces: ["apps/*"] });
+    put("package-lock.json", "{}");
+    pkg("apps/web/package.json");
+    put("apps/web/package-lock.json", "{}");
+    expect((await nodePlugin.hydrate(await ready())).steps.map((s) => s.path)).toEqual([""]);
+    pkg("package.json", { workspaces: { packages: ["apps/*"] } });
+    expect((await nodePlugin.hydrate(await ready())).steps.map((s) => s.path)).toEqual([""]);
+  });
 });
