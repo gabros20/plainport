@@ -375,6 +375,26 @@ describe("catalog: fold rules", () => {
     );
     expect(whole).toMatchObject({ head: S(4), missing: [] });
   });
+  test("m12: the fold stays near-linear on a large catalog whose onloads name an over on another fork", () => {
+    // Two chains of N snapshots forked from S0, and an onload per step of the left chain whose over sits on the
+    // right chain at the same depth: each over is known, descends from nothing the onload restored, and lies as far
+    // from the root as the chain is long. A device's offloads also follow each onload, so the lease scan is busy.
+    const N = 1500;
+    const events: CatalogEvent[] = [offloaded(E(0), A, S(0))];
+    for (let i = 1; i <= N; i++) {
+      events.push(offloaded(E(i), A, S(i), S(i - 1)));
+      events.push(offloaded(E(N + i), B, S(N + i), S(i === 1 ? 0 : N + i - 1)));
+      events.push(onloaded(E(2 * N + i), A, S(i), S(N + i)));
+    }
+    const started = performance.now();
+    const p = project(foldCatalog(events));
+    const took = performance.now() - started;
+    expect(p.status).toBe("conflicted");
+    expect(Object.keys(p.snapshots)).toHaveLength(2 * N + 1);
+    expect(p.lease).toMatchObject({ device: A, base: S(N) });
+    expect(took).toBeLessThan(1500); // measured well under 100 ms; the old walk per call takes minutes
+  });
+
   test("a cycle of bases still folds, whatever the order", () => {
     const cycle = foldCatalog([offloaded(E(1), A, S(1), S(2)), offloaded(E(2), A, S(2), S(1))]);
     expect(project(cycle).head).toBeNull(); // only a broken writer makes a cycle: no head is trusted

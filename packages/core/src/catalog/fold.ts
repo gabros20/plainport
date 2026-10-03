@@ -140,8 +140,45 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   }
   const depthOf = (snapshot: string | undefined): number =>
     snapshot === undefined ? 0 : (depth.get(snapshot) ?? 0);
+
+  // Ancestry in O(1) (m12): a depth-first numbering of the forest of kept snapshots, hung from their first bases
+  // (an unknown base is a node of its own, so it counts as an ancestor of what was made from it). `ancestor` is on
+  // `snapshot`'s chain exactly when its interval encloses `snapshot`'s. Snapshots a cycle cuts off from every root
+  // get no interval and fall back to a bounded walk, as only a broken writer makes one.
+  const children = new Map<string, string[]>();
+  const rootsOfForest: string[] = [];
+  for (const [snapshot, e] of made) {
+    if (e.base === undefined) rootsOfForest.push(snapshot);
+    else if (e.base !== snapshot) {
+      if (!made.has(e.base) && !children.has(e.base)) rootsOfForest.push(e.base);
+      children.set(e.base, [...(children.get(e.base) ?? []), snapshot]);
+    }
+  }
+  const enter = new Map<string, number>();
+  const exit = new Map<string, number>();
+  let clock = 0;
+  for (const root of rootsOfForest) {
+    const stack: { node: string; next: number }[] = [{ node: root, next: 0 }];
+    enter.set(root, clock++);
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1] as { node: string; next: number };
+      const below = children.get(top.node) ?? [];
+      if (top.next < below.length) {
+        const child = below[top.next++] as string;
+        enter.set(child, clock++);
+        stack.push({ node: child, next: 0 });
+      } else {
+        exit.set(top.node, clock++);
+        stack.pop();
+      }
+    }
+  }
   /** Whether `ancestor` is `snapshot` or one of the snapshots it was made from. */
   const descends = (snapshot: string, ancestor: string): boolean => {
+    const a = enter.get(snapshot);
+    const b = enter.get(ancestor);
+    if (a !== undefined && b !== undefined)
+      return b <= a && (exit.get(snapshot) as number) <= (exit.get(ancestor) as number);
     for (let at: string | undefined = snapshot, steps = 0; at !== undefined && steps <= made.size; steps++) {
       if (at === ancestor) return true;
       at = made.get(at)?.base;
@@ -151,8 +188,16 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   /** An onload's place: after `over` when over is a snapshot made from `base` (m2), else after `base`. */
   const anchorOf = (e: Extract<ProjectEvent, { type: "onloaded" }>): string =>
     e.over !== undefined && made.has(e.over) && descends(e.over, e.base) ? e.over : e.base;
-  const position = (e: ProjectEvent): number =>
-    e.type === "onloaded" ? 2 * depthOf(anchorOf(e)) + 1 : 2 * depthOf((e as Producer).snapshot);
+  // Each event's place on the chain, computed once (m12).
+  const positions = new Map<string, number>();
+  const position = (e: ProjectEvent): number => {
+    let at = positions.get(e.id);
+    if (at === undefined) {
+      at = e.type === "onloaded" ? 2 * depthOf(anchorOf(e)) + 1 : 2 * depthOf((e as Producer).snapshot);
+      positions.set(e.id, at);
+    }
+    return at;
+  };
 
   const offloads = producers.filter((e) => e.type === "offloaded");
   const onloads = events.filter((e) => e.type === "onloaded");
@@ -191,9 +236,13 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   ].sort(compare);
   const whole = conflicts.length === 0 && missing.length === 0 && !cyclic;
 
+  // Each device's offload furthest along the chain closes every onload of that device before it.
+  const furthestOffload = new Map<string, number>();
+  for (const e of offloads)
+    furthestOffload.set(e.device, Math.max(furthestOffload.get(e.device) ?? -1, position(e)));
   let lease: (typeof onloads)[number] | undefined;
   for (const o of onloads) {
-    const closed = offloads.some((e) => e.device === o.device && position(e) > position(o));
+    const closed = (furthestOffload.get(o.device) ?? -1) > position(o);
     if (closed) continue;
     if (
       lease === undefined ||
