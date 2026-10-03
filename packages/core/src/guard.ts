@@ -21,7 +21,8 @@
 
 import { lstat, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { LocalFs, RunSpec } from "@plainport/core";
+import type { LocalFs } from "./io.ts";
+import type { RunSpec } from "./runner/types.ts";
 
 export interface GuardPolicy {
   /** Folders whose contents must never be read or written. */

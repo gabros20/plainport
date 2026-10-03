@@ -3,7 +3,8 @@
 // only, so it serves Linux as well until host-linux exists.
 
 import { constants } from "node:os";
-import { errorCode, type Spawner } from "@plainport/core";
+import { errorCode } from "./io.ts";
+import type { Spawner } from "./runner/types.ts";
 
 // Bun 1.3.14 names a child's terminating signal from the Linux signal table on every platform, so on macOS a
 // SIGUSR1 (30) comes back as "SIGPWR" and a SIGBUS (10) as "SIGUSR1". Map the name back to its Linux number, then to
