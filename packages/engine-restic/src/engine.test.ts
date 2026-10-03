@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { fail, finding, type PlainportEvent, type Result } from "@plainport/contract";
-import type { RunContext } from "@plainport/core";
+import type { EntryMeta, RunContext } from "@plainport/core";
 import { type ResticEngineOptions, resticEngine } from "./engine.ts";
-import { parseLine, parseTree } from "./parse.ts";
+import { decodeTag, encodeTag, LongListingReader, parseLine, parseTree } from "./parse.ts";
 import {
   edited,
   FIXTURE_PASSWORD,
@@ -13,10 +13,16 @@ import {
   fixtureNames,
   PINNED_VERSION,
   replayHost,
+  snapshotIdOf,
+  stdoutLines,
+  summaryOf,
 } from "./testing.ts";
 
-const BACKUP_ID = "8aff9622c961bd542c9949c7c0f43446f0d96cf60fe4c9ae1819ffa635a405aa";
-const INCOMPLETE_ID = "1876e1ccd991635551c8806924f101656409c9132d92a7221f3a3d8d9799cf2c";
+// Ids and counts come from the fixtures, so re-recording them (a restic bump) changes no test.
+const BACKUP_ID = snapshotIdOf("backup");
+const INCOMPLETE_ID = snapshotIdOf("backup-unreadable");
+const backupSummary = summaryOf("backup");
+const restoreSummary = summaryOf("restore");
 const MISSING_ID = "0".repeat(64);
 const SRC = `${FIXTURE_ROOT}/src`;
 const REPO = `${FIXTURE_ROOT}/repo`;
@@ -62,7 +68,7 @@ describe("restic fixtures: every recorded JSON line parses", () => {
   for (const name of fixtureNames()) {
     test(name, () => {
       const recorded = fixture(name);
-      if (name === "cat-tree") {
+      if (name.startsWith("cat-tree")) {
         expect(parseTree(recorded.stdout).ok).toBe(true);
         return;
       }
@@ -136,7 +142,7 @@ describe("restic engine: init", () => {
   test("returns the new repository's id", async () => {
     const { engine } = setup([fixture("init")]);
     expect(value(await engine.init())).toEqual({
-      id: "74190c1f3b3d0bc398fbf63aeed41c97d35d993b301fe6cc069f24bd04921a37",
+      id: String(stdoutLines(fixture("init"))[0]?.id),
     });
   });
 
@@ -156,15 +162,15 @@ describe("restic engine: snapshot", () => {
     );
     expect(result.id).toBe(BACKUP_ID);
     expect(result.stats).toEqual({
-      filesNew: 2,
-      filesChanged: 0,
-      filesUnmodified: 0,
-      dirsNew: 1,
-      dirsChanged: 0,
-      dirsUnmodified: 0,
-      dataAdded: expect.any(Number),
-      totalFilesProcessed: 2,
-      totalBytesProcessed: 7,
+      filesNew: backupSummary.files_new,
+      filesChanged: backupSummary.files_changed,
+      filesUnmodified: backupSummary.files_unmodified,
+      dirsNew: backupSummary.dirs_new,
+      dirsChanged: backupSummary.dirs_changed,
+      dirsUnmodified: backupSummary.dirs_unmodified,
+      dataAdded: backupSummary.data_added,
+      totalFilesProcessed: backupSummary.total_files_processed,
+      totalBytesProcessed: backupSummary.total_bytes_processed,
     });
     const call = host.calls[1];
     expect(call?.cwd).toBe(SRC);
@@ -209,8 +215,8 @@ describe("restic engine: snapshot", () => {
       type: "progress",
       op: "op-1",
       phase: "snapshot",
-      bytesDone: 7,
-      bytesTotal: 7,
+      bytesDone: backupSummary.total_bytes_processed,
+      bytesTotal: backupSummary.total_bytes_processed,
     });
   });
 
@@ -220,8 +226,25 @@ describe("restic engine: snapshot", () => {
     expect(result.finding.code).toBe("restic.unreadable-files");
     expect(result.exitCode).toBe(6);
     expect(result.finding.paths).toEqual(["sub/b"]);
-    expect(result.finding.message).toContain(INCOMPLETE_ID);
     expect(result.finding.fix).toBeDefined();
+  });
+
+  test("exit 3 carries the incomplete snapshot's id as data, for the saga to journal as discarded (D28)", async () => {
+    const { engine, ctx } = setup([fixture("backup-unreadable")]);
+    const result = await engine.snapshot({ dir: SRC, excludes: [], tags: TAGS }, ctx);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.incomplete).toEqual({ snapshot: INCOMPLETE_ID });
+  });
+
+  test("exit 3 without a summary has no incomplete id: restic wrote no snapshot it named", async () => {
+    const recorded = fixture("backup-unreadable");
+    const { engine, ctx } = setup([edited(recorded, { stdout: "" })]);
+    const result = await engine.snapshot({ dir: SRC, excludes: [], tags: TAGS }, ctx);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.finding.code).toBe("restic.unreadable-files");
+    expect(result.incomplete).toBeUndefined();
   });
 
   test("exit 0 without a summary line is restic.output-invalid", async () => {
@@ -296,32 +319,166 @@ describe("restic engine: list", () => {
 });
 
 describe("restic engine: entries", () => {
-  test("lists entries relative to the snapshot root, with POSIX modes and symlink targets", async () => {
-    const { host, engine } = setup([fixture("ls"), fixture("cat-tree")]);
-    const entries = value(await engine.entries(BACKUP_ID));
-    expect(entries).toEqual([
+  const collect = () => {
+    const seen: EntryMeta[] = [];
+    return { seen, onEntry: (entry: EntryMeta) => seen.push(entry) };
+  };
+
+  test("streams entries relative to the snapshot root, with POSIX modes, and symlink targets from one ls -l", async () => {
+    const { host, engine } = setup([fixture("ls"), fixture("ls-long")]);
+    const { seen, onEntry } = collect();
+    const listed = value(await engine.entries(BACKUP_ID, onEntry));
+    expect(listed.snapshot.id).toBe(BACKUP_ID);
+    expect(listed.snapshot.paths).toEqual([SRC]);
+    expect(listed.count).toBe(5);
+    expect(seen).toEqual([
       { path: "a.txt", type: "file", size: 6, mode: 0o644, mtime: expect.any(String) },
-      { path: "link", type: "symlink", mode: 0o755, mtime: expect.any(String), linkTarget: "a.txt" },
       { path: "sub", type: "dir", mode: 0o755, mtime: expect.any(String) },
       { path: "sub/b", type: "file", size: 1, mode: 0o644, mtime: expect.any(String) },
+      // Symlinks come last, once their targets are known; " -> " in a name or target is no problem.
+      { path: "link", type: "symlink", mode: 0o755, mtime: expect.any(String), linkTarget: "a.txt" },
+      {
+        path: "sub/odd -> name",
+        type: "symlink",
+        mode: 0o755,
+        mtime: expect.any(String),
+        linkTarget: "x -> y",
+      },
     ]);
-    expect(host.calls[1]?.args?.slice(-3)).toEqual(["ls", "--json", BACKUP_ID]);
-    expect(host.calls[1]?.capture).toBeDefined();
-    expect(host.calls[2]?.args?.slice(-3)).toEqual(["cat", "tree", `${BACKUP_ID}:/`]);
-    expect(host.calls[2]?.capture).toBeDefined();
+    expect(host.calls.map((call) => call.args?.slice(4).join(" "))).toEqual([
+      "",
+      `ls --json ${BACKUP_ID}`,
+      `ls -l ${BACKUP_ID}`,
+    ]);
+    for (const call of host.calls.slice(1)) {
+      expect(call.wholeStdout).toBe(true);
+      expect(call.capture).toBeUndefined();
+    }
+  });
+
+  test("a snapshot without symlinks needs no ls -l", async () => {
+    const recorded = fixture("ls");
+    const stdout = recorded.stdout
+      .split("\n")
+      .filter((line) => !line.includes('"type":"symlink"'))
+      .join("\n");
+    const { host, engine } = setup([edited(recorded, { stdout })]);
+    expect(value(await engine.entries(BACKUP_ID, () => {})).count).toBe(3);
+    expect(host.calls).toHaveLength(2);
+  });
+
+  test("a symlink ls -l cannot place is read with one cat tree of its folder", async () => {
+    const long = fixture("ls-long");
+    const stdout = long.stdout
+      .split("\n")
+      .filter((line) => !line.includes("odd"))
+      .join("\n");
+    const { host, engine } = setup([fixture("ls"), edited(long, { stdout }), fixture("cat-tree-sub")]);
+    const { seen, onEntry } = collect();
+    value(await engine.entries(BACKUP_ID, onEntry));
+    expect(seen.find((entry) => entry.path === "sub/odd -> name")?.linkTarget).toBe("x -> y");
+    expect(host.calls.at(-1)?.args?.slice(-3)).toEqual(["cat", "tree", `${BACKUP_ID}:/sub`]);
+    expect(host.calls).toHaveLength(4);
+  });
+
+  test("two ls -l lines that give one symlink different targets fall back to cat tree", async () => {
+    const long = fixture("ls-long");
+    const forged = long.stdout.replace(
+      "/sub/odd -> name -> x -> y\n",
+      "/sub/odd -> name -> x -> y\nLrwxr-xr-x   501    20      0 2026-10-03 04:05:49 /sub/odd -> name -> other\n",
+    );
+    const { host, engine } = setup([
+      fixture("ls"),
+      edited(long, { stdout: forged }),
+      fixture("cat-tree-sub"),
+    ]);
+    const { seen, onEntry } = collect();
+    value(await engine.entries(BACKUP_ID, onEntry));
+    expect(seen.find((entry) => entry.path === "sub/odd -> name")?.linkTarget).toBe("x -> y");
+    expect(host.calls).toHaveLength(4);
+  });
+
+  test("symlink lookups are bounded: thousands of symlink folders cost two restic runs, not thousands", async () => {
+    const node = (path: string, type: string) =>
+      JSON.stringify({
+        name: path.split("/").at(-1),
+        type,
+        path,
+        mode: type === "symlink" ? 134218221 : 420,
+        mtime: "2026-10-03T04:05:49+02:00",
+        message_type: "node",
+        struct_type: "node",
+        ...(type === "file" ? { size: 1 } : {}),
+      });
+    const header = fixture("ls").stdout.split("\n")[0];
+    const json: string[] = [header ?? ""];
+    const long: string[] = ["snapshot x of [/] at … filtered by []:"];
+    for (let folder = 0; folder < 2000; folder++) {
+      json.push(node(`/d${folder}`, "dir"));
+      for (let file = 0; file < 50; file++) json.push(node(`/d${folder}/f${file}`, "file"));
+      json.push(node(`/d${folder}/.bin`, "symlink"));
+      long.push(`Lrwxr-xr-x   501    20      0 2026-10-03 04:05:49 /d${folder}/.bin -> ../t${folder}`);
+    }
+    const { host, engine } = setup([
+      edited(fixture("ls"), { stdout: `${json.join("\n")}\n` }),
+      edited(fixture("ls-long"), { stdout: `${long.join("\n")}\n` }),
+    ]);
+    let count = 0;
+    let links = 0;
+    const listed = value(
+      await engine.entries(BACKUP_ID, (entry) => {
+        count++;
+        if (entry.linkTarget !== undefined) links++;
+      }),
+    );
+    expect(listed.count).toBe(2000 * 52);
+    expect(count).toBe(2000 * 52);
+    expect(links).toBe(2000);
+    expect(host.calls).toHaveLength(3);
+  });
+
+  test("more unplaceable symlink folders than the budget fail before any cat tree runs", async () => {
+    const recorded = fixture("ls");
+    const header = recorded.stdout.split("\n")[0];
+    const lines = [header ?? ""];
+    for (let folder = 0; folder < 40; folder++)
+      lines.push(
+        JSON.stringify({
+          name: "l",
+          type: "symlink",
+          path: `/d${folder}/l`,
+          mode: 134218221,
+          mtime: "2026-10-03T04:05:49+02:00",
+          message_type: "node",
+          struct_type: "node",
+        }),
+      );
+    const { host, engine } = setup([
+      edited(recorded, { stdout: `${lines.join("\n")}\n` }),
+      edited(fixture("ls-long"), { stdout: "snapshot x:\n" }),
+    ]);
+    const result = failure(await engine.entries(BACKUP_ID, () => {}));
+    expect(result.finding.code).toBe("restic.output-invalid");
+    expect(host.calls).toHaveLength(3);
+  });
+
+  test("a listing line that is not restic's JSON fails the whole listing", async () => {
+    const recorded = fixture("ls");
+    const { engine } = setup([edited(recorded, { stdout: `${recorded.stdout}{"message_type":"node"}\n` })]);
+    expect(failure(await engine.entries(BACKUP_ID, () => {})).finding.code).toBe("restic.output-invalid");
   });
 
   test("an unknown snapshot is restic.snapshot-not-found", async () => {
     const { engine } = setup([fixture("ls-missing"), fixture("snapshots-missing")]);
-    const result = failure(await engine.entries(MISSING_ID));
+    const result = failure(await engine.entries(MISSING_ID, () => {}));
     expect(result.finding.code).toBe("restic.snapshot-not-found");
     expect(result.exitCode).toBe(4);
   });
 
   test("an id that is not a full snapshot id is refused", async () => {
     const { host, engine } = setup([]);
-    expect(failure(await engine.entries("latest")).finding.code).toBe("contract.invalid");
-    expect(failure(await engine.entries("--help")).finding.code).toBe("contract.invalid");
+    expect(failure(await engine.entries("latest", () => {})).finding.code).toBe("contract.invalid");
+    expect(failure(await engine.entries("--help", () => {})).finding.code).toBe("contract.invalid");
     expect(host.calls).toHaveLength(0);
   });
 });
@@ -337,13 +494,13 @@ describe("restic engine: restore", () => {
       }),
     );
     expect(stats).toEqual({
-      totalFiles: 4,
-      filesRestored: 4,
-      filesSkipped: 0,
-      filesDeleted: 0,
-      totalBytes: 7,
-      bytesRestored: 7,
-      bytesSkipped: 0,
+      totalFiles: restoreSummary.total_files,
+      filesRestored: restoreSummary.files_restored,
+      filesSkipped: restoreSummary.files_skipped ?? 0,
+      filesDeleted: restoreSummary.files_deleted ?? 0,
+      totalBytes: restoreSummary.total_bytes,
+      bytesRestored: restoreSummary.bytes_restored,
+      bytesSkipped: restoreSummary.bytes_skipped ?? 0,
     });
     expect(host.calls[1]?.args?.slice(4)).toEqual([
       "restore",
@@ -392,7 +549,7 @@ describe("restic engine: check", () => {
     const { host, engine } = setup([fixture("check-damaged")]);
     const report = value(await engine.check({ readDataSubset: "100%" }));
     expect(report.ok).toBe(false);
-    expect(report.errors).toBe(8);
+    expect(report.errors).toBe(Number(stdoutLines(fixture("check-damaged"))[0]?.num_errors));
     expect(report.messages.length).toBeGreaterThan(0);
     expect(report.messages[0]).toContain("unexpected file size");
     expect(host.calls[1]?.args?.slice(-3)).toEqual(["check", "--json", "--read-data-subset=100%"]);
@@ -527,5 +684,64 @@ describe("restic engine: the password never leaves in a message", () => {
     const { engine } = setup([edited(recorded, { stderr })]);
     const report = value(await engine.check());
     expect(JSON.stringify(report)).not.toContain(FIXTURE_PASSWORD);
+  });
+});
+
+describe("restic tags: the codec keeps every tag restic would change (D26, fix r1 I4)", () => {
+  test("restic trims leading and trailing whitespace, so it is percent-encoded at the ends only", () => {
+    expect(encodeTag(" clients/web ")).toBe("%20clients/web%20");
+    expect(encodeTag("a b")).toBe("a b");
+    expect(encodeTag("\u00a0x\u0085")).toBe("%C2%A0x%C2%85");
+    expect(encodeTag("   ")).toBe("%20%20%20");
+  });
+
+  test("control characters are encoded anywhere", () => {
+    expect(encodeTag("a\tb\nc\u007f")).toBe("a%09b%0Ac%7F");
+  });
+
+  test("D26's mappings are unchanged", () => {
+    expect(encodeTag("a,b 100%")).toBe("a%2Cb 100%25");
+  });
+
+  test.each([
+    " lead",
+    "trail\t",
+    "\u3000wide\u2028",
+    "plainport:path=clients/acme,web 100%",
+    "%20 literal",
+    "é ü",
+    "line\nbreak",
+    "",
+  ])("%j round-trips", (tag) => {
+    expect(decodeTag(encodeTag(tag))).toBe(tag);
+    expect(encodeTag(tag).trim()).toBe(encodeTag(tag));
+  });
+
+  test("a percent sequence that is not one the codec writes stays as it is", () => {
+    expect(decodeTag("x%41%2c%2525")).toBe("x%41,%25");
+    expect(decodeTag("bad%E2%28")).toBe("bad%E2%28");
+  });
+});
+
+describe("restic ls -l records", () => {
+  test("a plain file's line (type written as -) ends the symlink record before it", () => {
+    const reader = new LongListingReader(new Set(["/l", "/n\nl"]));
+    for (const line of [
+      "snapshot 0 of [/] filtered by []:",
+      "Lrwxr-xr-x   501    20      0 2026-10-03 04:08:59 /l -> ../README.md",
+      "-rw-r--r--   501    20     38 2026-10-03 04:08:59 /weird",
+      "Lrwxr-xr-x   501    20      0 2026-10-03 04:08:59 /n",
+      "l -> t",
+      "x ",
+      // Go writes setuid as a type letter (u), never as an s in the permission bits.
+      "urwxr-xr-x   501    20     38 2026-10-03 04:08:59 /setuid",
+    ])
+      reader.line(line);
+    expect(reader.end()).toEqual(
+      new Map([
+        ["/l", "../README.md"],
+        ["/n\nl", "t\nx "],
+      ]),
+    );
   });
 });

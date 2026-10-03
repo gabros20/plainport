@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Result } from "@plainport/contract";
-import { type Engine, toolPath } from "@plainport/core";
+import { type Engine, type EntryMeta, toolPath } from "@plainport/core";
 import { testHost } from "@plainport/host-macos/testing";
 import { describeT1 } from "../../../test/tiers.ts";
 import { resticEngine } from "./engine.ts";
@@ -84,6 +84,8 @@ describeT1("restic engine: the real restic on a temp repository", () => {
     writeFileSync(join(src, "weird"), "kept: only the exact path is excluded\n");
     symlinkSync("README.md", join(src, "readme-link"));
     symlinkSync("../README.md", join(src, "sub", "up-link"));
+    symlinkSync("c -> d", join(src, "sub", "a -> b"));
+    symlinkSync("tar\nget ", join(src, "sub", "new\nline"));
     const found = await toolPath(host, "restic", { env: {} });
     if (!found.ok) throw new Error(found.finding.message);
     resticPath = found.value.path;
@@ -129,10 +131,16 @@ describeT1("restic engine: the real restic on a temp repository", () => {
       for (const key of [...expected.keys()])
         if (excludes.some((path) => key === path || key.startsWith(`${path}/`))) expected.delete(key);
 
-      const entries = value(await engine.entries(snapshotId));
+      const entries: EntryMeta[] = [];
+      const listed2 = value(await engine.entries(snapshotId, (entry) => entries.push(entry)));
+      expect(listed2.count).toBe(entries.length);
+      expect(listed2.snapshot.id).toBe(snapshotId);
       expect(entries.map((entry) => entry.path).sort()).toEqual([...expected.keys()].sort());
       const link = entries.find((entry) => entry.path === "sub/up-link");
       expect(link?.linkTarget).toBe("../README.md");
+      // ls -l separates name and target with " -> " and prints newlines as they are: neither confuses it.
+      expect(entries.find((entry) => entry.path === "sub/a -> b")?.linkTarget).toBe("c -> d");
+      expect(entries.find((entry) => entry.path === "sub/new\nline")?.linkTarget).toBe("tar\nget ");
       expect(entries.find((entry) => entry.path === "run.sh")?.mode).toBe(0o755);
       expect(entries.find((entry) => entry.path === "sub/deeper/data.bin")?.size).toBe(6);
 
@@ -178,6 +186,10 @@ describeT1("restic engine: the real restic on a temp repository", () => {
           expect(result.finding.code).toBe("restic.unreadable-files");
           expect(result.exitCode).toBe(6);
           expect(result.finding.paths).toEqual(["sub/locked.txt"]);
+          // restic wrote the incomplete snapshot anyway; its id is data for the saga (D28).
+          expect(result.incomplete?.snapshot).toMatch(/^[0-9a-f]{64}$/);
+          const all = value(await engine.list({}));
+          expect(all.map((snapshot) => snapshot.id)).toContain(String(result.incomplete?.snapshot));
         }
       } finally {
         chmodSync(secret, 0o644);
@@ -198,6 +210,21 @@ describeT1("restic engine: the real restic on a temp repository", () => {
       expect(listed.map((snapshot) => snapshot.id)).toEqual([taken.id]);
       expect(listed[0]?.tags).toEqual(["plainport", tag]);
       expect(value(await engine.list({ tags: ["plainport:path=clients/acme"] }))).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "a tag with whitespace at its ends, a tab and a newline round-trips: restic would trim or split it (fix r1 I4)",
+    async () => {
+      const tag = "plainport:path= clients/web\tx\ny \u00a0";
+      const taken = value(
+        await engine.snapshot({ dir: src, excludes, parent: snapshotId, tags: ["plainport", tag] }, ctx),
+      );
+      const listed = value(await engine.list({ tags: [tag] }));
+      expect(listed.map((snapshot) => snapshot.id)).toEqual([taken.id]);
+      expect(listed[0]?.tags).toEqual(["plainport", tag]);
+      expect(value(await engine.list({ tags: ["plainport:path= clients/web\tx\ny"] }))).toEqual([]);
     },
     TIMEOUT,
   );
@@ -230,7 +257,7 @@ describeT1("restic engine: the real restic on a temp repository", () => {
   test(
     "an unknown snapshot is restic.snapshot-not-found",
     async () => {
-      const result = await engine.entries("0".repeat(64));
+      const result = await engine.entries("0".repeat(64), () => {});
       expect(result.ok ? undefined : result.finding.code).toBe("restic.snapshot-not-found");
     },
     TIMEOUT,

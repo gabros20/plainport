@@ -4,7 +4,7 @@
 // parses; a missing or mistyped field we rely on is restic.output-invalid. Recorded fixtures per restic version
 // (fixtures/restic/<version>/) pin what each version prints.
 
-import { fail, finding, ok, type Result } from "@plainport/contract";
+import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import type { EntryMeta, EntryType, SnapshotInfo } from "@plainport/core";
 import { z } from "zod";
 
@@ -134,13 +134,62 @@ export const posixMode = (goMode: number): number =>
   (goMode & GO_STICKY ? 0o1000 : 0);
 
 /**
- * Tag values as stored in restic (run decision D26): restic splits a --tag value at commas, so "," is written as
- * %2C, and "%" as %25 to keep that reversible. Reading decodes only those two sequences (either case of %2c), so a
- * tag another tool wrote keeps any other percent sign as it is.
+ * Tag values as stored in restic (run decision D26, extended in fix r1): restic changes a tag in two ways, so the
+ * codec percent-encodes (as UTF-8 bytes, upper-case hex) exactly what it would change:
+ * - it splits a --tag value at commas: "," is %2C anywhere, and "%" is %25 to keep that reversible;
+ * - it trims whitespace (Go's unicode.IsSpace) from both ends: whitespace at the start or end is encoded;
+ * - control characters are encoded anywhere, so no tag carries a newline or a tab into restic's output.
+ * Whitespace inside a tag is kept as it is. Reading decodes a percent sequence only when it stands for a character
+ * the codec encodes (a comma, a percent sign, whitespace or a control character), so a tag another tool wrote keeps
+ * any other percent sequence as it is.
  */
-export const encodeTag = (tag: string): string => tag.replaceAll("%", "%25").replaceAll(",", "%2C");
+// JavaScript's \s plus U+0085, which Go's unicode.IsSpace also counts.
+const SPACE = /[\s\u0085]/u;
+const CONTROL = /[\u0000-\u001f\u007f]/u;
+const ENCODED_BY_CODEC = (char: string): boolean =>
+  char === "%" || char === "," || SPACE.test(char) || CONTROL.test(char);
+
+const percent = (char: string): string =>
+  [...new TextEncoder().encode(char)]
+    .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+    .join("");
+
+export const encodeTag = (tag: string): string => {
+  const chars = [...tag];
+  let start = 0;
+  while (start < chars.length && SPACE.test(chars[start] as string)) start++;
+  let end = chars.length;
+  while (end > start && SPACE.test(chars[end - 1] as string)) end--;
+  return chars
+    .map((char, at) =>
+      char === "%" || char === "," || CONTROL.test(char) || at < start || at >= end ? percent(char) : char,
+    )
+    .join("");
+};
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
 export const decodeTag = (tag: string): string =>
-  tag.replace(/%(2[Cc]|25)/g, (sequence) => (sequence === "%25" ? "%" : ","));
+  tag.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    const bytes = new Uint8Array(run.length / 3);
+    for (let at = 0; at < bytes.length; at++)
+      bytes[at] = Number.parseInt(run.slice(at * 3 + 1, at * 3 + 3), 16);
+    let text: string;
+    try {
+      text = strictUtf8.decode(bytes);
+    } catch {
+      return run;
+    }
+    // Each character comes back only if the codec would have encoded it; any other keeps its own sequence.
+    let out = "";
+    let at = 0;
+    for (const char of text) {
+      const length = new TextEncoder().encode(char).length * 3;
+      out += ENCODED_BY_CODEC(char) ? char : run.slice(at, at + length);
+      at += length;
+    }
+    return out;
+  });
 
 export const snapshotInfo = (snapshot: z.infer<typeof SnapshotObject>): SnapshotInfo => ({
   id: snapshot.id,
@@ -157,28 +206,93 @@ export const parseSnapshots = (text: string): Result<SnapshotInfo[]> => {
   return parsed.ok ? ok(parsed.value.map(snapshotInfo)) : parsed;
 };
 
-/** `ls --json <id>`: the snapshot line, then one node line per entry. */
-export const parseListing = (text: string): Result<{ snapshot: SnapshotInfo; entries: EntryMeta[] }> => {
-  let snapshot: SnapshotInfo | undefined;
-  const entries: EntryMeta[] = [];
-  for (const raw of text.split("\n")) {
-    if (raw === "") continue;
+/**
+ * `ls --json <id>`, read line by line: the snapshot line, then one node line per entry. Each call takes one line;
+ * entries go to onEntry as they come. The first problem is kept and every later line is ignored.
+ */
+export class ListingReader {
+  snapshot: SnapshotInfo | undefined;
+  problem: Failure | undefined;
+
+  constructor(private readonly onEntry: (entry: EntryMeta) => void) {}
+
+  line(raw: string): void {
+    if (this.problem !== undefined || raw === "") return;
     const line = parseLine(raw);
-    if (!line.ok) return line;
+    if (!line.ok) {
+      this.problem = line;
+      return;
+    }
     const value = line.value;
-    if (value.message_type === "snapshot" && snapshot === undefined) snapshot = snapshotInfo(value);
-    else if (value.message_type === "node" && snapshot !== undefined) {
-      entries.push({
+    if (value.message_type === "snapshot" && this.snapshot === undefined) this.snapshot = snapshotInfo(value);
+    else if (value.message_type === "node" && this.snapshot !== undefined)
+      this.onEntry({
         path: value.path.slice(1),
         type: value.type satisfies EntryType,
         ...(value.type === "file" ? { size: value.size ?? 0 } : {}),
         mode: posixMode(value.mode),
         mtime: value.mtime,
       });
-    } else return invalid("listing", `unexpected ${value.message_type} line`);
+    else this.problem = invalid("listing", `unexpected ${value.message_type} line`);
   }
-  return snapshot === undefined ? invalid("listing", "no snapshot line") : ok({ snapshot, entries });
-};
+
+  /** The snapshot, once the listing ended; a failure if a line was wrong or the snapshot line never came. */
+  end(): Result<SnapshotInfo> {
+    if (this.problem !== undefined) return this.problem;
+    return this.snapshot === undefined ? invalid("listing", "no snapshot line") : ok(this.snapshot);
+  }
+}
+
+/**
+ * One entry line of `ls -l <id>` (restic's formatNode): Go's FileMode string, uid, gid, size, local time, then the
+ * path, and for a symlink " -> " and its target. Path and target are printed as they are, so either may hold
+ * " -> " or a newline: a record runs until the next line that starts like an entry line. Go writes "-" for the
+ * type when no type bit is set (a plain file).
+ */
+const LONG_ENTRY =
+  /^([dalTLDpSugct?]+|-)[-r][-w][-x][-r][-w][-x][-r][-w][-x] +\d+ +\d+ +\d+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d (\/.*)$/s;
+
+/**
+ * Reads `ls -l <id>` line by line and finds the targets of the wanted symlinks (paths with their leading "/").
+ * Every way a symlink record can split at " -> " that names a wanted path is a candidate; a path given two
+ * different targets is ambiguous, and ambiguous or missing paths are left for another way (cat tree).
+ */
+export class LongListingReader {
+  private record: string | undefined;
+  private readonly found = new Map<string, string | null>();
+
+  constructor(private readonly wanted: ReadonlySet<string>) {}
+
+  line(raw: string): void {
+    if (LONG_ENTRY.test(raw)) {
+      this.flush();
+      this.record = raw;
+    } else if (this.record !== undefined) this.record += `\n${raw}`;
+  }
+
+  /** The target of each wanted symlink that one record placed without doubt. */
+  end(): Map<string, string> {
+    this.flush();
+    const targets = new Map<string, string>();
+    for (const [path, target] of this.found) if (target !== null) targets.set(path, target);
+    return targets;
+  }
+
+  private flush(): void {
+    const record = this.record;
+    this.record = undefined;
+    const match = record === undefined ? null : LONG_ENTRY.exec(record);
+    if (match === null || !(match[1] ?? "").includes("L")) return;
+    const rest = match[2] ?? "";
+    for (let at = rest.indexOf(" -> "); at !== -1; at = rest.indexOf(" -> ", at + 1)) {
+      const path = rest.slice(0, at);
+      if (!this.wanted.has(path)) continue;
+      const target = rest.slice(at + 4);
+      const known = this.found.get(path);
+      this.found.set(path, known === undefined || known === target ? target : null);
+    }
+  }
+}
 
 /** `cat tree <id>:<dir>`: the folder's entries; here only names and symlink targets are needed. */
 export const parseTree = (text: string): Result<z.infer<typeof TreeObject>> =>

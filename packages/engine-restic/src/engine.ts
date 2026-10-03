@@ -25,7 +25,15 @@ import {
 } from "@plainport/core";
 import { z } from "zod";
 import lock from "../../../tools.lock.json" with { type: "json" };
-import { encodeTag, parseLine, parseListing, parseSnapshots, parseTree, type ResticLine } from "./parse.ts";
+import {
+  encodeTag,
+  ListingReader,
+  LongListingReader,
+  parseLine,
+  parseSnapshots,
+  parseTree,
+  type ResticLine,
+} from "./parse.ts";
 
 /** The restic version this plainport bundles and is tested with. */
 export const PINNED_RESTIC = lock.tools.restic.version;
@@ -110,6 +118,8 @@ export const redactor =
   };
 
 const MAX_MESSAGES = 100;
+/** At most this many folders are read with cat tree for symlinks that ls -l could not place. */
+const TREE_LOOKUPS = 16;
 
 /** The JSON lines of one stream of a finished run that parse; others are skipped. */
 const jsonLines = (text: string): ResticLine[] =>
@@ -235,7 +245,13 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
     command: string,
     args: readonly string[],
     ctx: RunContext | undefined,
-    how: { cwd?: string; capture?: boolean; onLine?: RunSpec["onLine"]; repo?: boolean } = {},
+    how: {
+      cwd?: string;
+      capture?: boolean;
+      wholeStdout?: boolean;
+      onLine?: RunSpec["onLine"];
+      repo?: boolean;
+    } = {},
   ): Promise<Result<RunOutcome>> => {
     const emit = ctx?.emit;
     const result = await host.run({
@@ -252,6 +268,7 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       ...(ctx?.signal === undefined ? {} : { signal: ctx.signal }),
       ...(options.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.idleTimeoutMs }),
       ...(how.capture ? { capture: { maxBytes: options.captureLimitBytes ?? 1024 ** 3 } } : {}),
+      ...(how.wholeStdout ? { wholeStdout: true } : {}),
       ...(how.onLine === undefined ? {} : { onLine: how.onLine }),
       ...(emit === undefined || ctx === undefined
         ? {}
@@ -340,6 +357,66 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
     return { onLine, invalid: () => invalid };
   };
 
+  /** Runs a data command whose stdout is read as whole line records (the runner's wholeStdout): every stdout line
+   * reaches onRecord, and the Result is ok only when all of them did and restic exited 0. */
+  const lines = async (
+    command: string,
+    args: readonly string[],
+    ctx: RunContext | undefined,
+    onRecord: (line: string) => void,
+  ): Promise<Result<void>> => {
+    const ran = await run(command, args, ctx, {
+      wholeStdout: true,
+      onLine: (line) => {
+        if (line.stream === "stdout") onRecord(line.text);
+      },
+    });
+    if (!ran.ok) return ran;
+    if (ran.value.exitCode !== 0 || ran.value.signal !== null) return exitFailure(ran.value, command);
+    return ok(undefined);
+  };
+
+  /**
+   * Symlink targets, keyed by entry path. One `ls -l` run places them all, however many folders hold symlinks
+   * (fix r1 I2); a symlink whose name or target makes its line ambiguous is read with `cat tree` of its folder,
+   * for at most TREE_LOOKUPS folders.
+   */
+  const linkTargets = async (
+    snapshot: string,
+    links: readonly EntryMeta[],
+    ctx: RunContext | undefined,
+  ): Promise<Result<Map<string, string>>> => {
+    const long = new LongListingReader(new Set(links.map((link) => `/${link.path}`)));
+    const listed = await lines("ls", ["-l", snapshot], ctx, (line) => long.line(line));
+    if (!listed.ok) return listed;
+    const targets = new Map<string, string>();
+    for (const [path, target] of long.end()) targets.set(path.slice(1), target);
+
+    const folders = new Map<string, EntryMeta[]>();
+    for (const link of links) {
+      if (targets.has(link.path)) continue;
+      const slash = link.path.lastIndexOf("/");
+      const folder = slash === -1 ? "" : link.path.slice(0, slash);
+      folders.set(folder, [...(folders.get(folder) ?? []), link]);
+    }
+    if (folders.size > TREE_LOOKUPS)
+      return outputInvalid(
+        `restic's ls -l left the targets of symlinks in ${folders.size} folders unclear, more than the ${TREE_LOOKUPS} folders plainport reads one by one`,
+      );
+    for (const [folder, inFolder] of folders) {
+      const read = await capture("cat", ["tree", `${snapshot}:/${folder}`], ctx);
+      if (!read.ok) return read;
+      const tree = parseTree(read.value);
+      if (!tree.ok) return tree;
+      const byName = new Map(tree.value.nodes.map((node) => [node.name, node.linktarget]));
+      for (const link of inFolder) {
+        const target = byName.get(link.path.slice(link.path.lastIndexOf("/") + 1));
+        if (target !== undefined) targets.set(link.path, target);
+      }
+    }
+    return ok(targets);
+  };
+
   const outputInvalid = (message: string): Failure =>
     fail(
       finding("restic.output-invalid", {
@@ -408,19 +485,21 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       if (!ran.ok) return ran;
       if (ran.value.exitCode === 3) {
         const { summary, unreadable, unreadableCount } = seen;
-        const incomplete =
-          summary?.snapshot_id === undefined
-            ? ""
-            : `; snapshot ${summary.snapshot_id} is incomplete and is not used`;
+        // restic wrote the snapshot anyway: its id is data, for the saga to journal as discarded (D28).
+        const written =
+          summary?.snapshot_id !== undefined && SNAPSHOT_ID.safeParse(summary.snapshot_id).success;
         const more =
           unreadableCount > unreadable.length ? ` (the first ${unreadable.length} are listed)` : "";
-        return fail(
+        const failed = fail(
           finding("restic.unreadable-files", {
-            message: `restic could not read ${unreadableCount || "some"} file(s) in ${dir}${more}${incomplete}`,
+            message: `restic could not read ${unreadableCount || "some"} file(s) in ${dir}${more}${written ? `; snapshot ${summary?.snapshot_id} is incomplete and is not used` : ""}`,
             fix: "make the listed files readable (chmod u+r), or move them out of the project, then re-run",
             paths: unreadable,
           }),
         );
+        return written && summary?.snapshot_id !== undefined
+          ? { ...failed, incomplete: { snapshot: summary.snapshot_id } }
+          : failed;
       }
       if (ran.value.exitCode !== 0 || ran.value.signal !== null) return exitFailure(ran.value, "backup");
       const invalid = stream.invalid();
@@ -456,39 +535,40 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       return parseSnapshots(listed.value);
     },
 
-    entries: async (snapshot, ctx) => {
+    entries: async (snapshot, onEntry, ctx) => {
       const id = decode(SNAPSHOT_ID, snapshot, "snapshot id");
       if (!id.ok) return id;
       const version = await ensureVersion(ctx);
       if (!version.ok) return version;
-      const listed = await capture("ls", ["--json", id.value], ctx);
-      if (!listed.ok) return missingOr(id.value, listed, ctx);
-      const listing = parseListing(listed.value);
-      if (!listing.ok) return listing;
-      const entries: EntryMeta[] = listing.value.entries;
 
-      // ls --json leaves out symlink targets; each folder holding a symlink is read once with cat tree.
-      const folders = new Map<string, EntryMeta[]>();
-      for (const entry of entries) {
-        if (entry.type !== "symlink") continue;
-        const slash = entry.path.lastIndexOf("/");
-        const folder = slash === -1 ? "" : entry.path.slice(0, slash);
-        folders.set(folder, [...(folders.get(folder) ?? []), entry]);
-      }
-      for (const [folder, links] of folders) {
-        const read = await capture("cat", ["tree", `${id.value}:/${folder}`], ctx);
-        if (!read.ok) return read;
-        const tree = parseTree(read.value);
-        if (!tree.ok) return tree;
-        const targets = new Map(tree.value.nodes.map((node) => [node.name, node.linktarget]));
+      // The listing streams: entries go to onEntry as restic prints them, except symlinks, whose targets
+      // ls --json leaves out; those wait (memory grows with the symlinks, not with the project).
+      const links: EntryMeta[] = [];
+      let count = 0;
+      const reader = new ListingReader((entry) => {
+        if (entry.type === "symlink") links.push(entry);
+        else {
+          count++;
+          onEntry(entry);
+        }
+      });
+      const listed = await lines("ls", ["--json", id.value], ctx, (line) => reader.line(line));
+      if (!listed.ok) return missingOr(id.value, listed, ctx);
+      const header = reader.end();
+      if (!header.ok) return header;
+
+      if (links.length > 0) {
+        const targets = await linkTargets(id.value, links, ctx);
+        if (!targets.ok) return targets;
         for (const link of links) {
-          const target = targets.get(link.path.slice(link.path.lastIndexOf("/") + 1));
+          const target = targets.value.get(link.path);
           if (target === undefined)
-            return outputInvalid(`restic's tree has no target for the symlink ${link.path}`);
-          link.linkTarget = target;
+            return outputInvalid(`restic gave no target for the symlink ${link.path}`);
+          count++;
+          onEntry({ ...link, linkTarget: target });
         }
       }
-      return ok(entries);
+      return ok({ snapshot: header.value, count });
     },
 
     restore: async (snapshot, target, ctx, restoreOptions = {}) => {

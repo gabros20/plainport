@@ -83,3 +83,39 @@ export const replayHost = (
 
 /** A fixture with some of its fields replaced. */
 export const edited = (base: Fixture, change: Partial<Fixture>): Fixture => ({ ...base, ...change });
+
+/** The JSON lines of a fixture's stdout. */
+export const stdoutLines = (recorded: Fixture): Record<string, unknown>[] =>
+  lines(recorded.stdout)
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+type SummaryCounter =
+  | "files_new"
+  | "files_changed"
+  | "files_unmodified"
+  | "dirs_new"
+  | "dirs_changed"
+  | "dirs_unmodified"
+  | "data_added"
+  | "total_files_processed"
+  | "total_bytes_processed"
+  | "total_files"
+  | "files_restored"
+  | "files_skipped"
+  | "files_deleted"
+  | "total_bytes"
+  | "bytes_restored"
+  | "bytes_skipped";
+
+/** The counters of the summary line of a recorded backup or restore (snapshot_id: use snapshotIdOf). restic
+ * leaves out a counter that is 0 in some summaries, so a counter read here may be undefined at run time. */
+export const summaryOf = (name: string): Record<SummaryCounter, number> => {
+  const summary = stdoutLines(fixture(name)).find((line) => line.message_type === "summary");
+  if (summary === undefined) throw new Error(`fixture ${name} has no summary line`);
+  return summary as Record<SummaryCounter, number>;
+};
+
+/** The snapshot id a recorded backup printed in its summary. */
+export const snapshotIdOf = (name: string): string =>
+  String(stdoutLines(fixture(name)).find((line) => line.message_type === "summary")?.snapshot_id);
