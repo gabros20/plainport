@@ -151,6 +151,7 @@ export class PathGuard {
 
 const READS = [
   "readText",
+  "readBytes",
   "readdir",
   "syncDir",
   "realpath",
@@ -162,7 +163,7 @@ const READS = [
   "readlink",
   "readable",
 ] as const;
-const WRITES = ["writeTextDurable", "unlink", "mkdirp"] as const;
+const WRITES = ["writeTextDurable", "writeBytesDurable", "unlink", "mkdirp"] as const;
 
 /** The file system, with every path checked by the guard first. */
 export const guardedFs = (fs: LocalFs, guard: PathGuard): LocalFs => {

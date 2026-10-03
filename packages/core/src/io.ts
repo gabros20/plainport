@@ -9,6 +9,14 @@ export interface LocalFs {
   readText(path: string): Promise<string>;
   /** Creates or truncates the file, writes the text and fsyncs it before resolving. */
   writeTextDurable(path: string, text: string): Promise<void>;
+  /** The file's bytes; rejects with ENOENT when it does not exist. */
+  readBytes(path: string): Promise<Uint8Array>;
+  /**
+   * Writes the bytes and fsyncs them before resolving. It creates or truncates the file; with `exclusive` it opens
+   * with O_CREAT|O_EXCL instead and rejects with EEXIST if anything is there (create-if-absent where hard links are
+   * missing, D41).
+   */
+  writeBytesDurable(path: string, data: Uint8Array, options?: { exclusive?: boolean }): Promise<void>;
   /** A hard link; rejects with EEXIST if `to` exists, which makes it an atomic create-if-absent. */
   link(from: string, to: string): Promise<void>;
   /** Atomically replaces `to`. */

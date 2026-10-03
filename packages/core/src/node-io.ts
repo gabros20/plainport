@@ -91,6 +91,16 @@ export const nodeLocalIo: LocalIo = {
         await handle.close();
       }
     },
+    readBytes: async (path) => new Uint8Array(await readFile(path)),
+    writeBytesDurable: async (path, data, options = {}) => {
+      const handle = await open(path, options.exclusive ? "wx" : "w", 0o644);
+      try {
+        await handle.writeFile(data);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
     link: (from, to) => link(from, to),
     rename: (from, to) => rename(from, to),
     unlink: (path) => unlink(path),
