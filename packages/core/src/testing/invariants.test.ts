@@ -91,6 +91,19 @@ describe("catalogInvariantViolations", () => {
     expect(check([offloaded(first), onloaded(first, { device: other })], [restic("a")])).toEqual([]);
   });
 
+  test("invariant 4: the same state with its keys in another order is the same state", () => {
+    const first = ulid();
+    const events = [offloaded(first), offloaded(ulid(), { base: first, stored: { ssd: restic("b") } })];
+    const reorder = (list: readonly CatalogEvent[]) => {
+      const state = foldCatalog(list);
+      // A fold that builds the same maps in event order: key order depends on the order of the events.
+      return list[0] === events[0] ? state : { roots: state.roots, projects: state.projects };
+    };
+    expect(
+      catalogInvariantViolations({ events, snapshotsBefore: [], snapshotsNow: [], fold: reorder }),
+    ).toEqual([]);
+  });
+
   test("invariant 4: a fold that depends on the order of its events is caught", () => {
     const first = ulid();
     const second = ulid();
@@ -122,6 +135,14 @@ describe("catalogInvariantViolations", () => {
     const first = ulid();
     expect(check([offloaded(first), discarded(first, restic("a"))], [restic("a")])).toEqual([
       `invariant 6: ${first} is discarded although an offloaded event names it`,
+    ]);
+  });
+
+  test("invariant 6: names the checkpointed event that names a discarded snapshot", () => {
+    const first = ulid();
+    const checkpoint = { ...offloaded(first), type: "checkpointed" } as CatalogEvent;
+    expect(check([checkpoint, discarded(first, restic("a"))], [restic("a")])).toEqual([
+      `invariant 6: ${first} is discarded although a checkpointed event names it`,
     ]);
   });
 

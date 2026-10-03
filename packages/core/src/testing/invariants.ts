@@ -278,13 +278,21 @@ const shuffled = <T>(list: readonly T[], seed: number): T[] => {
   return out;
 };
 
+/** JSON with every object's keys sorted: the same state reads the same whatever order its maps were built in. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+      : v,
+  );
+
 /** Every invariant 4–6 violation, as sentences; none means all hold. */
 export const catalogInvariantViolations = (subject: CatalogInvariantSubject): string[] => {
   const problems: string[] = [];
   const fold = subject.fold ?? foldCatalog;
   const { events } = subject;
   const state = fold(events);
-  const expected = JSON.stringify(state);
+  const expected = canonical(state);
 
   // 4
   const orders: [string, CatalogEvent[]][] = [
@@ -294,7 +302,7 @@ export const catalogInvariantViolations = (subject: CatalogInvariantSubject): st
   for (let seed = 1; seed <= (subject.shuffles ?? 6); seed++)
     orders.push([`shuffle ${seed}`, shuffled(events, seed)]);
   for (const [name, order] of orders)
-    if (JSON.stringify(fold(order)) !== expected)
+    if (canonical(fold(order)) !== expected)
       problems.push(`invariant 4: folding the events ${name} gives another state`);
 
   // 5: the fold's lease is one by its schema; what a crash could add is a second onloaded event for one onload.
@@ -311,17 +319,22 @@ export const catalogInvariantViolations = (subject: CatalogInvariantSubject): st
   const now = new Set(subject.snapshotsNow);
   for (const id of new Set(subject.snapshotsBefore))
     if (!now.has(id)) problems.push(`invariant 6: the repository no longer holds ${id}`);
-  const made = new Set<string>();
+  /** Snapshot ids and their stored restic ids, mapped to the type of the event that made them. */
+  const made = new Map<string, string>();
   for (const e of events)
     if (e.type === "offloaded" || e.type === "checkpointed") {
-      made.add(e.snapshot);
-      for (const stored of Object.values(e.stored)) made.add(stored);
+      made.set(e.snapshot, e.type);
+      for (const stored of Object.values(e.stored)) made.set(stored, e.type);
     }
-  for (const e of events)
-    if (
-      e.type === "snapshot-discarded" &&
-      (made.has(e.snapshot) || Object.values(e.stored).some((s) => made.has(s)))
-    )
-      problems.push(`invariant 6: ${e.snapshot} is discarded although an offloaded event names it`);
+  for (const e of events) {
+    if (e.type !== "snapshot-discarded") continue;
+    const by = [e.snapshot, ...Object.values(e.stored)]
+      .map((id) => made.get(id))
+      .find((t) => t !== undefined);
+    if (by !== undefined)
+      problems.push(
+        `invariant 6: ${e.snapshot} is discarded although ${by === "offloaded" ? "an" : "a"} ${by} event names it`,
+      );
+  }
   return problems;
 };
