@@ -497,7 +497,7 @@ Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `renamed`
 
 Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time.
 
-**If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas, so the engine writes `,` in a tag value as `%2C` and `%` as `%25`, and decodes both when it reads tags back; a project path with a comma still gets its `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
+**If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas and trims whitespace from its ends, so the engine percent-encodes (UTF-8 bytes) what restic would change: `,` as `%2C` and `%` as `%25` anywhere, control characters anywhere, and whitespace at the start or end; it decodes those when it reads tags back, so any project path keeps its exact `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
 
 **Local state per machine** uses XDG paths, so config can live in a dotfiles repo:
 
@@ -1013,9 +1013,14 @@ export interface Engine {
   snapshot(
     input: { dir: string; excludes: string[]; parent?: string; tags: string[] },
     ctx: RunContext,
-  ): Promise<Result<{ id: string; stats: SnapshotStats }>>;
+  ): Promise<Ok<{ id: string; stats: SnapshotStats }> | (Failure & { incomplete?: { snapshot: string } })>;
+  // incomplete: restic exit 3 wrote a snapshot anyway; the saga journals it as discarded
   list(filter: { tags?: string[] }, ctx?: RunContext): Promise<Result<SnapshotInfo[]>>;
-  entries(snapshot: string, ctx?: RunContext): Promise<Result<EntryMeta[]>>; // restic ls --json, whole or not at all
+  entries(                                               // restic ls --json, streamed; symlinks last
+    snapshot: string,
+    onEntry: (entry: EntryMeta) => void,                 // counts only if the Result is ok
+    ctx?: RunContext,
+  ): Promise<Result<{ snapshot: SnapshotInfo; count: number }>>;
   restore(snapshot: string, target: string, ctx: RunContext, opts?: RestoreOptions): Promise<Result<RestoreStats>>;
   check(opts?: { readDataSubset?: string }, ctx?: RunContext): Promise<Result<CheckReport>>;
   // M5: stream (restic dump, for full verify), forget and prune.
