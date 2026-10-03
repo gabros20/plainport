@@ -43,7 +43,7 @@ const CACHES: ReadonlyMap<string, string> = new Map([
 /** Yarn Berry's install artefacts, inside a Yarn Berry install root. */
 const BERRY = [".yarn/cache", ".yarn/unplugged", ".yarn/install-state.gz", ".pnp.cjs", ".pnp.loader.mjs"];
 
-/** Folders whose package.json files are not packages of the project: dependencies, caches, outputs. */
+/** Folders holding nothing of the project's own packages: dependencies, git, Yarn, caches and build output. */
 const NOT_PACKAGES = new Set([
   "node_modules",
   ".git",
@@ -52,9 +52,18 @@ const NOT_PACKAGES = new Set([
   ".nuxt",
   ".svelte-kit",
   ".turbo",
+  ".parcel-cache",
   "dist",
   "build",
 ]);
+
+/** Whether an entry (its path split at "/") lies inside one of those folders, or inside .vercel/output. */
+const inOwnOutput = (parts: readonly string[]): boolean =>
+  parts
+    .slice(0, -1)
+    .some(
+      (p, i) => NOT_PACKAGES.has(p) || (p === ".vercel" && parts[i + 1] === "output" && i + 2 < parts.length),
+    );
 
 interface Package {
   /** Its folder, relative; "" is the project folder. */
@@ -149,9 +158,9 @@ const buildIndex = async (project: ProjectDir): Promise<Index> => {
   const caches: Index["caches"] = [];
   for (const entry of manifest) {
     const parts = entry.path.split("/");
-    // Inside node_modules, .git or Yarn's own folder (.yarn/unplugged holds packages): nothing of the project's.
-    if (parts.slice(0, -1).some((p) => p === "node_modules" || p === ".yarn") || parts.includes(".git"))
-      continue;
+    // Inside dependencies, .git, Yarn's own folder or a build's output (.next/standalone, .vercel/output's
+    // functions, dist/): nothing there is the project's own; it leaves or stays with the folder holding it.
+    if (inOwnOutput(parts)) continue;
     const name = parts.at(-1) as string;
     if (entry.type === "dir" && name === "node_modules") nodeModules.push(entry.path);
     else if (entry.type === "dir" && CACHES.has(name)) caches.push({ path: entry.path, name });
@@ -160,12 +169,7 @@ const buildIndex = async (project: ProjectDir): Promise<Index> => {
       (entry.path === ".vercel/output" || entry.path.endsWith("/.vercel/output"))
     )
       caches.push({ path: entry.path, name: ".vercel/output" });
-    else if (
-      entry.type === "file" &&
-      name === "package.json" &&
-      !parts.slice(0, -1).some((p) => NOT_PACKAGES.has(p))
-    )
-      folders.push(parentOf(entry.path));
+    else if (entry.type === "file" && name === "package.json") folders.push(parentOf(entry.path));
   }
   const packages = await Promise.all(folders.sort().map((folder) => readPackage(project, folder)));
   const installRoots: InstallRoot[] = [];
@@ -286,7 +290,10 @@ export const nodePlugin: EcosystemPlugin = {
       if (choice.problem?.kind === "no-lockfile") {
         findings.push(
           finding("deps.no-lockfile", {
-            message: `${where(root.folder)} has no ${manager} lockfile, so onload would install fresh dependency versions (${choice.argv.join(" ")})`,
+            // Why this node_modules goes when a sub-package's without a lockfile stays: a project (or a package with
+            // a lockfile of another manager) is still installed, only unfrozen; a sub-package with no lockfile of
+            // its own is installed by nothing, so its node_modules is declined.
+            message: `${where(root.folder)} has no ${manager} lockfile, so onload reinstalls ${root.folder === "" ? "the project's" : "its"} dependencies fresh (${choice.argv.join(" ")}), not frozen, and may pick newer versions; packages below it with no lockfile keep their node_modules, since nothing would install them`,
             paths: [at(root.folder, "package.json")],
             fix: `run ${choice.argv.join(" ")} once${root.folder === "" ? "" : ` in ${root.folder}`} and commit the lockfile it writes, or keep the installed dependencies in the snapshot with --keep-deps`,
           }),

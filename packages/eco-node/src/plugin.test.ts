@@ -46,6 +46,9 @@ describe("Node plugin: detection, findings and hydration", () => {
     const [warning] = (await nodePlugin.preflight?.(ctx)) ?? [];
     expect(warning).toMatchObject({ code: "deps.no-lockfile", severity: "warn", paths: ["package.json"] });
     expect(warning?.fix).toContain("--keep-deps");
+    // The plan says why this node_modules is still stripped while a sub-package's without a lockfile stays.
+    expect(warning?.message).toContain("reinstalls the project's dependencies fresh");
+    expect(warning?.message).toContain("packages below it with no lockfile keep their node_modules");
     expect((await nodePlugin.hydrate(ctx)).steps).toEqual([
       { path: "", command: "npm install", argv: ["npm", "install"] },
     ]);
@@ -189,5 +192,22 @@ describe("Node plugin: detection, findings and hydration", () => {
       }),
     ]);
     expect(strip[0]?.declined).toBeUndefined();
+  });
+
+  test("node_modules inside the plugin's own output (.next standalone, Vercel functions) leaves with it", async () => {
+    pkg("package.json", { scripts: { build: "next build" } });
+    put("package-lock.json", "{}");
+    put("node_modules/next/index.js");
+    pkg(".next/standalone/package.json");
+    put(".next/standalone/node_modules/next/index.js");
+    pkg(".vercel/output/functions/index.func/package.json");
+    put(".vercel/output/functions/index.func/node_modules/x/index.js");
+    const strip = await nodePlugin.strip(await ready());
+    expect(strip.map((c) => [c.path, c.declined])).toEqual([
+      ["node_modules", undefined],
+      [".next", undefined],
+      [".vercel/output", undefined],
+    ]);
+    expect((await nodePlugin.hydrate(await ready())).steps.map((s) => s.path)).toEqual([""]);
   });
 });
