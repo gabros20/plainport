@@ -147,7 +147,10 @@ const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | 
     };
   }
   if (checked.data.id !== id) {
-    return { finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`), bytes: false };
+    return {
+      finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`),
+      bytes: false,
+    };
   }
   return checked.data;
 };
@@ -351,7 +354,10 @@ const download = async (
   }
   if (mine !== null && sameBytes(mine, bytes.value)) return ok(bytes.value.length);
   return ok({
-    finding: skipped(key, `the mirror holds other bytes under its name (${target}); both are kept as they are`),
+    finding: skipped(
+      key,
+      `the mirror holds other bytes under its name (${target}); both are kept as they are`,
+    ),
     bytes: false,
   });
 };
