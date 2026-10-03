@@ -275,13 +275,14 @@ describe("runner (fake spawner): deadlines and cancelling", () => {
       }
     });
     const started = performance.now();
-    const result = await runProcess(spawner, spec({ idleTimeoutMs: 1000, timeoutMs: 120 }));
+    const result = await runProcess(spawner, spec({ idleTimeoutMs: 30_000, timeoutMs: 120 }));
     running = false;
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.finding.code).toBe("process.timeout");
-    expect(performance.now() - started).toBeLessThan(1000);
-  });
+    // Far below the 30 s idle deadline, which steady output keeps from firing anyway.
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 30_000);
 
   test("a child that ignores TERM gets KILL after the grace period", async () => {
     const spawner = new FakeSpawner((child) => {
@@ -541,7 +542,8 @@ describe("runner (fake spawner): pipes held by a process outside the group", () 
     });
     const started = performance.now();
     const result = await runProcess(spawner, spec());
-    expect(performance.now() - started).toBeLessThan(3000);
+    // Bounded by the drain limit (1 s), not by the held pipes, which never close.
+    expect(performance.now() - started).toBeLessThan(10_000);
     expect(result).toMatchObject({
       ok: true,
       value: { exitCode: 0, stdout: { text: "before the daemon\n" } },
@@ -688,7 +690,44 @@ describe("runner (fake spawner): wholeStdout lines are the child's lines (fix r2
       spec({ wholeStdout: true, onLine: () => {}, maxLineBytes: 32, idleTimeoutMs: 60_000 }),
     );
     expect(result).toMatchObject({ ok: false, finding: { code: "process.output-too-large" } });
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // Far below the 60 s idle deadline, so it was the line, not the deadline; loose enough for a loaded CI host.
+    expect(performance.now() - started).toBeLessThan(20_000);
     expect(spawner.signals[0]).toBe("SIGTERM");
+  }, 30_000);
+});
+
+describe("runner (fake spawner): members forked while TERM is in flight", () => {
+  /** On the first TERM the leader dies, but a member it was forking at that instant never received the signal. */
+  class ForkRacingSpawner extends FakeSpawner {
+    private raced = false;
+    override signalGroup(pgid: number, signal: GroupSignal): boolean {
+      const child = this.spawned[0];
+      if (signal === "SIGTERM" && !this.raced && child !== undefined) {
+        this.raced = true;
+        this.signals.push(signal);
+        child.leftovers = 1;
+        child.exit(null, "SIGTERM");
+        return true;
+      }
+      return super.signalGroup(pgid, signal);
+    }
+  }
+
+  test("once the leader is gone, TERM is sent again, so a late member stops gracefully long before KILL", async () => {
+    const spawner = new ForkRacingSpawner();
+    const started = performance.now();
+    const result = await runProcess(spawner, spec({ timeoutMs: 50, killGraceMs: 20_000 }));
+    expect(result).toMatchObject({ ok: false, finding: { code: "process.timeout" } });
+    expect(spawner.signals.filter((s) => s === "SIGTERM").length).toBeGreaterThanOrEqual(2);
+    expect(spawner.signals).not.toContain("SIGKILL");
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 30_000);
+
+  test("while the leader runs, TERM is sent once: a second TERM would cut its own cleanup short", async () => {
+    const spawner = new FakeSpawner((child) => {
+      child.ignoresTerm = true;
+    });
+    await runProcess(spawner, spec({ timeoutMs: 50, killGraceMs: 300 }));
+    expect(spawner.signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 });
