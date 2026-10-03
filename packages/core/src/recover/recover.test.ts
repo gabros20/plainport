@@ -956,6 +956,20 @@ describe("housekeeping at the start of a command (D59)", () => {
   test("nothing open: nothing done, nothing said", async () => {
     expect(await housekeeping(trashDeps())).toEqual({ started: [], notices: [] });
   });
+
+  test("notices only (a read command or a dry run): a trash past its deadline is left, its journal unchanged (D61)", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const later = new Date(Date.parse(journal?.keepUntil as string) + 1000);
+    expect(await housekeeping(trashDeps({ now: () => later }), { deleteDue: false })).toEqual({
+      started: [],
+      notices: [],
+    });
+    await Bun.sleep(100);
+    expect(trashes()).toHaveLength(1);
+    expect(await journals()).toEqual([journal as OffloadJournal]);
+  });
 });
 
 describe("status and ls views: every end state the sagas leave", () => {

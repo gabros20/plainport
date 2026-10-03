@@ -21,5 +21,6 @@ a journal. The start of any other command does housekeeping instead: it deletes 
 (under the project's lock, by the detached delete) and names each interrupted operation on stderr with `plainport
 recover`. Read commands never write (D45), and an onload stopped before its swap is taken over by the next onload, so
 an automatic replay would break both; a write command on a project with an open journal refuses with `journal.pending`.
+Run decision D61 narrows the deletion to write commands: a read command or a `--dry-run` only prints the notices.
 
 **Design.** Project lifecycle; Offload process; Onload process; Testing → invariants.

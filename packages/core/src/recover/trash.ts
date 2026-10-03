@@ -5,8 +5,9 @@
 // - `plainport gc` (collectTrash): deletes, under the project's lock, every released trash whose deadline has passed
 //   (or that has none: its detached delete never ran); `--now` (early) deletes kept ones before their deadline too.
 //   A trash an interrupted onload is renaming back (its journal names it as `reuse`) is never deleted.
-// - housekeeping at the start of any command (D59): a trash whose deadline has passed gets the detached delete, under
-//   the project's lock, after its journal drops keepUntil, so an onload never renames back a folder being deleted.
+// - housekeeping at the start of any write command (D59): a trash whose deadline has passed gets the detached delete,
+//   under the project's lock, after its journal drops keepUntil, so an onload never renames back a folder being
+//   deleted. A read command or a --dry-run only gets the notices below, so it writes nothing (D61).
 //   It also says, on stderr, which operations were interrupted and that `plainport recover` settles them; it never
 //   replays a journal itself (read commands never write, D45; an onload stopped before its swap is taken over by the
 //   next onload).
@@ -379,9 +380,13 @@ export type Housekept = {
 
 /**
  * Housekeeping at the start of any command (D59; see above). It never fails the command: what it cannot do now
- * (a lock held, a journal it cannot rewrite) is left for gc or recover, with a warning in the log.
+ * (a lock held, a journal it cannot rewrite) is left for gc or recover, with a warning in the log. `deleteDue` false
+ * (a read command, or any --dry-run) only gathers the notices: nothing is written or deleted (D61).
  */
-export const housekeeping = async (deps: TrashDeps): Promise<Housekept> => {
+export const housekeeping = async (
+  deps: TrashDeps,
+  options: { deleteDue: boolean } = { deleteDue: true },
+): Promise<Housekept> => {
   const { host, paths } = deps;
   const io: LocalIo = host;
   const clock = (): Date => deps.now?.() ?? host.clock.now();
@@ -404,7 +409,7 @@ export const housekeeping = async (deps: TrashDeps): Promise<Housekept> => {
         );
       continue;
     }
-    if (!released(journal) || journal.keepUntil === undefined) continue;
+    if (!options.deleteDue || !released(journal) || journal.keepUntil === undefined) continue;
     if (Date.parse(journal.keepUntil) > clock().getTime() || reused.has(journal.op)) continue;
     const gate = { io, paths, clock, log: deps.log };
     const started = await withProjectLock(

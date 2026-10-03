@@ -256,7 +256,10 @@ Later milestones add codes such as `git.unpushed`, `git.locked` and `fs.dataless
 A command that supports `--dry-run` treats it as a true preview: it builds and prints the plan, then stops. It
 writes nothing but its plan file: nothing in the project, its roots or any store changes, and the plan is saved to
 plainport's own state as `plans/<id>.json`, valid for an hour, so `plainport offload web --plan <id>` can run
-exactly that plan (run decision D36). A `--dry-run` run is always a `read`, so it needs no `--yes`:
+exactly that plan (run decision D36). Start-of-command housekeeping (D59) runs as notices only under
+`--dry-run`, as it does for every read-class command: it prints on stderr which operations were interrupted, and
+deletes no trash whose `keepLocalFor` deadline has passed (D61); a write command, or `plainport gc`, does that.
+A `--dry-run` run is always a `read`, so it needs no `--yes`:
 `plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A plan that holds
 a `block` finding exits 6 (D38): its envelope is a failure whose `error.finding` is the first blocker and whose
 `data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. A command that has no preview refuses

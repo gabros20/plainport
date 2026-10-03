@@ -257,11 +257,19 @@ describe("housekeeping at the start of any command (D59)", () => {
     expect((await cli(["recover"])).err).not.toContain("interrupted");
   });
 
-  test("a kept trash past its deadline is deleted when any command starts", async () => {
+  test("a kept trash past its deadline is deleted when a write command starts; a read or a dry run leaves it (D61)", async () => {
     writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
     await cli(["offload", "work:api", "--yes"]);
     expect(readdirSync(join(box.home, "work/.plainport-trash"))).toHaveLength(1);
-    await cli(["ls"], {}, new Date(NOW.getTime() + 2 * 3_600_000));
+    const later = new Date(NOW.getTime() + 2 * 3_600_000);
+    const journal = readdirSync(box.paths.journalDir);
+    for (const argv of [["ls"], ["status", "work:api"], ["offload", "work:web", "--dry-run"]]) {
+      expect((await cli(argv, {}, later)).code).toBe(0);
+      await Bun.sleep(100);
+      expect(readdirSync(join(box.home, "work/.plainport-trash"))).toHaveLength(1);
+      expect(readdirSync(box.paths.journalDir)).toEqual(journal);
+    }
+    await cli(["root", "scan", "work"], {}, later);
     for (let i = 0; i < 400 && readdirSync(join(box.home, "work/.plainport-trash")).length > 0; i++)
       await Bun.sleep(25);
     expect(readdirSync(join(box.home, "work/.plainport-trash"))).toEqual([]);
