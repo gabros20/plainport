@@ -14,7 +14,7 @@ if (!paths.ok || name === undefined || barrier === undefined) {
   process.exit(2);
 }
 await awaitGo(barrier, name);
-const result = await ensureDevice(nodeLocalIo, paths.value, { role: "owner" });
+const result = await ensureDevice(nodeLocalIo, paths.value, { role: "owner", name: "mbp" });
 if (!result.ok) {
   console.error(`${result.finding.code}: ${result.finding.message}`);
   process.exit(result.exitCode);

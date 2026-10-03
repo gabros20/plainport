@@ -1,9 +1,24 @@
 // The real LocalIo, on node:fs and the running process. Only the composition root (the CLI's main, and tests)
 // imports it; core modules take a LocalIo as a parameter (run decision D21).
 
-import { link, mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  access,
+  link,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import { hostname } from "node:os";
-import { errorCode, type LocalIo } from "./io.ts";
+import { type DirEntry, errorCode, type FileKind, type LocalIo } from "./io.ts";
+
+const kindOf = (entry: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
+  entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other";
 
 export const nodeLocalIo: LocalIo = {
   fs: {
@@ -35,6 +50,25 @@ export const nodeLocalIo: LocalIo = {
         }
       } catch {
         // Some platforms and file systems cannot fsync a folder; the rename itself is still atomic.
+      }
+    },
+    // fs/promises' realpath is libuv's, so realpath(3): on macOS it also spells names as the volume stores them.
+    realpath: (path) => realpath(path),
+    stat: async (path) => {
+      const info = await stat(path);
+      const kind = kindOf(info);
+      return { kind: kind === "symlink" ? "other" : kind, dev: info.dev, ino: info.ino };
+    },
+    entries: async (path) =>
+      (await readdir(path, { withFileTypes: true })).map(
+        (entry): DirEntry => ({ name: entry.name, kind: kindOf(entry) }),
+      ),
+    writable: async (path) => {
+      try {
+        await access(path, constants.W_OK);
+        return true;
+      } catch {
+        return false;
       }
     },
   },

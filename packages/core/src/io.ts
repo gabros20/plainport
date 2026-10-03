@@ -18,6 +18,28 @@ export interface LocalFs {
   readdir(path: string): Promise<string[]>;
   /** Flushes a folder's entries (a rename or link in it); best effort where the platform cannot. */
   syncDir(path: string): Promise<void>;
+  /** The path with every symlink resolved, spelled as the file system stores it; rejects with ENOENT. */
+  realpath(path: string): Promise<string>;
+  /** What is at the path, following symlinks; rejects with ENOENT when nothing is. */
+  stat(path: string): Promise<FileStat>;
+  /** A folder's entries with their own kind; a symlink is reported as one, never followed. */
+  entries(path: string): Promise<DirEntry[]>;
+  /** Whether this process may create files in the folder. */
+  writable(path: string): Promise<boolean>;
+}
+
+export type FileKind = "file" | "dir" | "symlink" | "other";
+
+export interface FileStat {
+  kind: Exclude<FileKind, "symlink">;
+  /** Device and inode: two paths with equal ones are the same file. */
+  dev: number;
+  ino: number;
+}
+
+export interface DirEntry {
+  name: string;
+  kind: FileKind;
 }
 
 export interface ProcessInfo {
