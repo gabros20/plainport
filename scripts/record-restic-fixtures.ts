@@ -100,7 +100,8 @@ const holdLock = async () => {
     stderr: "pipe",
   });
   for (let i = 0; i < 100 && readdirSync(join(repo, "locks")).length === 0; i++) await Bun.sleep(50);
-  if (readdirSync(join(repo, "locks")).length === 0) throw new Error("the lock holder took no lock within 5 s");
+  if (readdirSync(join(repo, "locks")).length === 0)
+    throw new Error("the lock holder took no lock within 5 s");
   return child;
 };
 

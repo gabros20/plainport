@@ -145,9 +145,13 @@ export const posixMode = (goMode: number): number =>
  */
 // JavaScript's \s plus U+0085, which Go's unicode.IsSpace also counts.
 const SPACE = /[\s\u0085]/u;
-const CONTROL = /[\u0000-\u001f\u007f]/u;
+/** C0 controls and DEL. */
+const isControl = (char: string): boolean => {
+  const code = char.codePointAt(0) ?? 0;
+  return code < 0x20 || code === 0x7f;
+};
 const ENCODED_BY_CODEC = (char: string): boolean =>
-  char === "%" || char === "," || SPACE.test(char) || CONTROL.test(char);
+  char === "%" || char === "," || SPACE.test(char) || isControl(char);
 
 const percent = (char: string): string =>
   [...new TextEncoder().encode(char)]
@@ -162,7 +166,7 @@ export const encodeTag = (tag: string): string => {
   while (end > start && SPACE.test(chars[end - 1] as string)) end--;
   return chars
     .map((char, at) =>
-      char === "%" || char === "," || CONTROL.test(char) || at < start || at >= end ? percent(char) : char,
+      char === "%" || char === "," || isControl(char) || at < start || at >= end ? percent(char) : char,
     )
     .join("");
 };
