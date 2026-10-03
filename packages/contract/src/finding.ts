@@ -131,6 +131,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A child process printed nothing for its idle deadline; its whole process group was stopped",
   },
+  "process.output-incomplete": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary:
+      "A child process exited, but something outside its process group kept its stdout open, so output parsed as data could not be read to the end",
+  },
   "process.output-too-large": {
     severity: "block",
     allowable: false,
