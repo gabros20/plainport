@@ -16,6 +16,7 @@ export { acquireLock, type HeldLock, type LockHolder, LockHolderSchema, type Loc
 // The real LocalIo, for the composition root (the CLI's main) only (run decision D21).
 export { nodeLocalIo } from "./node-io.ts";
 export * from "./paths.ts";
+export type * from "./ports/engine.ts";
 export {
   type Clock,
   type FaultPlan,

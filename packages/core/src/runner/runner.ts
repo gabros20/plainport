@@ -261,6 +261,20 @@ export const splitRecords = (bytes: Uint8Array, separator: number): Uint8Array[]
 };
 
 /**
+ * The captured stdout of a run, but only when the child exited 0: any other end (a non-zero exit, a signal) is the
+ * caller's failure. A run that ended at all is an ok Result whatever its exit code, so parsing `captured` without
+ * this check would read an error's output as data. Calling it for a run started without capture is a bug.
+ */
+export const capturedOutput = (
+  outcome: RunOutcome,
+  failed: (outcome: RunOutcome) => Failure,
+): Result<Uint8Array> => {
+  if (outcome.exitCode !== 0 || outcome.signal !== null) return failed(outcome);
+  if (outcome.captured === undefined) throw new Error("capturedOutput: the run was not started with capture");
+  return ok(outcome.captured);
+};
+
+/**
  * Reads a stream to its end (or until cancelled) into the collector. A read that fails ends the pump and is
  * reported to onError: what was read is kept, but the stream is not known to be whole. It never rejects.
  */
