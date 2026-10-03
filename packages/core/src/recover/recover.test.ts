@@ -54,6 +54,7 @@ import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-st
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { ulid } from "../ulid.ts";
 import { type RecoverDeps, type RecoveryReport, recover } from "./recover.ts";
+import { collectTrash, housekeeping, type TrashDeps } from "./trash.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
 
@@ -818,5 +819,131 @@ describe("recover: an onload, at every journal step and after-effect seam", () =
     expect(reportOf(result).operations.map((o) => [o.outcome, o.state])).toEqual([["pending", "onloading"]]);
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
     expect((await journals()).map((j) => j.op)).toEqual([journal.op]);
+  });
+});
+
+describe("gc: kept trash (keepLocalFor)", () => {
+  const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({
+    host: testHost(),
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...over,
+  });
+  const keptOffload = async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    return journal as OffloadJournal;
+  };
+  const after = (journal: OffloadJournal) => new Date(Date.parse(journal.keepUntil as string) + 1000);
+
+  test("a trash past its deadline is deleted with its journal; one before it is kept", async () => {
+    const journal = await keptOffload();
+    const early = value(await collectTrash(trashDeps(), { early: false }));
+    expect(early.deleted).toEqual([]);
+    expect(early.kept.map((k) => [k.op, k.keepUntil])).toEqual([[journal.op, journal.keepUntil]]);
+    expect(trashes()).toHaveLength(1);
+    const late = value(await collectTrash(trashDeps({ now: () => after(journal) }), { early: false }));
+    expect(late.deleted.map((d) => d.op)).toEqual([journal.op]);
+    expect(late.freedBytes).toBeGreaterThan(400);
+    expect(trashes()).toEqual([]);
+    expect(await journals()).toEqual([]);
+    await expectShelved();
+    await expectInvariants();
+  });
+
+  test("--now (early) deletes a kept trash before its deadline", async () => {
+    await keptOffload();
+    const report = value(await collectTrash(trashDeps(), { early: true }));
+    expect(report.deleted).toHaveLength(1);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("gc takes the project's lock: a held one deletes nothing (project.locked, 11)", async () => {
+    const journal = await keptOffload();
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${journal.project.id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      const result = await collectTrash(trashDeps(), { early: true });
+      expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([11, "project.locked"]);
+      expect(trashes()).toHaveLength(1);
+    } finally {
+      await held.release();
+    }
+  });
+
+  test("a trash an interrupted onload is renaming back is never deleted", async () => {
+    await keptOffload();
+    const host = testHost({ faults: { at: "onload.begin" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const report = value(await collectTrash(trashDeps(), { early: true }));
+    expect(report.deleted).toEqual([]);
+    expect(report.kept[0]?.reason).toContain("onload");
+    expect(trashes()).toHaveLength(1);
+  });
+
+  test("a released trash with no deadline (its detached delete died) is deleted", async () => {
+    await crashOffloadAt("offload.release.delete");
+    const report = value(await collectTrash(trashDeps(), { early: false }));
+    expect(report.deleted).toHaveLength(1);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+});
+
+describe("housekeeping at the start of a command (D59)", () => {
+  const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({
+    host: testHost(),
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...over,
+  });
+
+  test("a trash past its deadline gets a detached delete; one before it is left alone", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    expect(await housekeeping(trashDeps())).toEqual({ started: [], notices: [] });
+    expect(trashes()).toHaveLength(1);
+    const later = new Date(Date.parse(journal?.keepUntil as string) + 1000);
+    const done = await housekeeping(trashDeps({ now: () => later }));
+    expect(done.started.map((s) => s.op)).toEqual([journal?.op as string]);
+    for (let i = 0; i < 400 && (trashes().length > 0 || (await journals()).length > 0); i++)
+      await Bun.sleep(25);
+    expect(trashes()).toEqual([]);
+    expect(await journals()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("an interrupted operation gets a notice naming plainport recover, and is left as it is", async () => {
+    await crashOffloadAt("offload.committed");
+    // A killed process: an injected fault leaves this live process's pid in the journal.
+    const crashed = onlyJournal<OffloadJournal>();
+    await rewrite({ ...crashed, pid: 99_999_999 });
+    expect((await housekeeping(trashDeps())).notices).toHaveLength(1);
+    await rewrite(crashed);
+    expect((await housekeeping(trashDeps())).notices).toEqual([]);
+    await rewrite({ ...crashed, pid: 99_999_999 });
+    const done = await housekeeping(trashDeps());
+    expect(done.started).toEqual([]);
+    expect(done.notices).toHaveLength(1);
+    expect(done.notices[0]).toContain("work:web");
+    expect(done.notices[0]).toContain("offload.committed");
+    expect(done.notices[0]).toContain("plainport recover");
+    expect(await journals()).toHaveLength(1);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("nothing open: nothing done, nothing said", async () => {
+    expect(await housekeeping(trashDeps())).toEqual({ started: [], notices: [] });
   });
 });

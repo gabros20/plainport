@@ -37,6 +37,7 @@ export {
 export type * from "./ports/store.ts";
 export * from "./preflight/index.ts";
 export * from "./recover/recover.ts";
+export * from "./recover/trash.ts";
 export * from "./registry.ts";
 export * from "./roots/index.ts";
 export * from "./runner/index.ts";
