@@ -198,7 +198,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
 | `lease.held` | warn | no | 8 | Another device holds the project's lease; a warning, or a refusal with exit 8 when `onload.leases = "strict"` |
 | `offload.diverged-after-commit` | block | no | 8 | Raised by `offload` (an edit between verification and the rename) and by `plainport recover` (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no `resolve` is needed. The error's `data` has `kind: "diverged-after-commit"`, where a fork (`catalog.head-moved`) has `kind: "fork"` (D51, D52) |
-| `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
+| `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for `onload` and `hydrate`, during the install after a good restore; the project is then restored-unhydrated and `fix` is `plainport hydrate <project>` (D56) |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
 | `path.stub-occupied` | block | no | 6 | Something other than this project's stub is at `<project>.plainport`, where the stub would go; plainport never overwrites it (D47) |
@@ -212,6 +212,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `process.timeout` | block | no | 1 | A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output |
 | `project.ambiguous` | block | no | 2 | A project name matches more than one project; the message lists every candidate address |
 | `project.locked` | block | no | 11 | Another plainport process holds the project's lock (`locks/<project>.lock`), or the lock of a registered project nested with it (D53); a lock left by a dead process is broken instead |
+| `project.already-local` | block | no | 6 | `onload --to` while the project's own onloaded copy is on this device: a device holds one working copy; `fix` names `plainport restore <project> --snapshot <id> --to <path>` for a side-by-side copy (D56) |
 | `project.nested` | block | no | 6 | The folder holds another registered project that is on this device; `fix` offloads the inner project first (D53) |
 | `project.not-found` | block | no | 4 | No project matches the name, address or path |
 | `registry.invalid` | block | no | 6 | `registry.json`, this device's project registry, is unreadable; plainport never overwrites it |
