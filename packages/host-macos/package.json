@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@plainport/contract": "workspace:*",
-    "@plainport/core": "workspace:*"
+    "@plainport/core": "workspace:*",
+    "zod": "4.6.5"
   }
 }
