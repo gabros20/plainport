@@ -366,6 +366,10 @@
             ],
             "additionalProperties": {}
           },
+          "changed": {
+            "type": "boolean",
+            "description": "This run wrote managed.toml or created device.json"
+          },
           "findings": {
             "type": "array",
             "items": {
@@ -420,6 +424,7 @@
           "device",
           "roots",
           "files",
+          "changed",
           "findings"
         ],
         "additionalProperties": {}
@@ -442,7 +447,7 @@
             "init",
             "--yes"
           ],
-          "summary": "Set up interactively, from a scan of likely folders"
+          "summary": "Re-check setup from the roots and store already configured (on a TTY, asks for what is missing)"
         }
       ]
     },
@@ -920,7 +925,7 @@
       "name": "root scan",
       "summary": "Find every project under a root's folder here and register the new ones",
       "usage": "plainport root scan <key>",
-      "risk": "read",
+      "risk": "safe_write",
       "dryRun": false,
       "positionals": [
         {
