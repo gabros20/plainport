@@ -6,15 +6,20 @@ describe("host port: the faultAt crash seam", () => {
     const faultAt = faultSeam(undefined, () => {
       throw new Error("must not kill");
     });
-    await faultAt("offload.snapshot");
-    await faultAt("offload.release.delete");
+    faultAt("offload.snapshot");
+    faultAt("offload.release.delete");
   });
 
-  test("a planned step throws InjectedFault there and nowhere else, and every step is reported", async () => {
+  test("a planned step throws InjectedFault there and nowhere else, and every step is reported", () => {
     const seen: string[] = [];
     const faultAt = faultSeam({ at: "offload.release", onStep: (step) => seen.push(step) }, () => {});
-    await faultAt("offload.snapshot");
-    const error = await faultAt("offload.release").catch((e: unknown) => e);
+    faultAt("offload.snapshot");
+    let error: unknown;
+    try {
+      faultAt("offload.release");
+    } catch (thrown) {
+      error = thrown;
+    }
     expect(error).toBeInstanceOf(InjectedFault);
     expect((error as InjectedFault).step).toBe("offload.release");
     expect(seen).toEqual(["offload.snapshot", "offload.release"]);
@@ -22,9 +27,9 @@ describe("host port: the faultAt crash seam", () => {
 
   test("occurrence picks the nth time a step is reached", async () => {
     const faultAt = faultSeam({ at: "hydrate.install", occurrence: 2 }, () => {});
-    await faultAt("hydrate.install");
-    await expect(faultAt("hydrate.install")).rejects.toBeInstanceOf(InjectedFault);
-    await faultAt("hydrate.install");
+    faultAt("hydrate.install");
+    expect(() => faultAt("hydrate.install")).toThrow(InjectedFault);
+    faultAt("hydrate.install");
   });
 
   test("the kill action calls the host's kill instead of throwing", async () => {
@@ -32,13 +37,26 @@ describe("host port: the faultAt crash seam", () => {
     const faultAt = faultSeam({ at: "onload.swap", action: "kill" }, () => {
       killed++;
     });
-    await faultAt("onload.swap");
+    faultAt("onload.swap");
     expect(killed).toBe(1);
   });
 
   test("a step name that is not dotted lower-case words is a bug", async () => {
     const faultAt = faultSeam(undefined, () => {});
-    await expect(faultAt("Offload Release")).rejects.toThrow(/step/);
+    expect(() => faultAt("Offload Release")).toThrow(/step/);
     expect(() => faultSeam({ at: "" }, () => {})).toThrow(/step/);
+  });
+});
+
+describe("host port: faultAt is synchronous", () => {
+  test("the fault is thrown at the call itself, so a saga cannot run past its step by forgetting an await", () => {
+    const faultAt = faultSeam({ at: "offload.release" }, () => {});
+    let ranPastTheStep = false;
+    const step = (): void => {
+      faultAt("offload.release");
+      ranPastTheStep = true;
+    };
+    expect(step).toThrow(InjectedFault);
+    expect(ranPastTheStep).toBe(false);
   });
 });

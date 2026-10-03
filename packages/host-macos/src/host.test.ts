@@ -84,15 +84,15 @@ describe("host: the macOS host port implements LocalIo", () => {
 });
 
 describe("host: faultAt", () => {
-  test("is a no-op unless a fault is planned", async () => {
-    await createMacosHost().faultAt("offload.release");
+  test("is a no-op unless a fault is planned", () => {
+    createMacosHost().faultAt("offload.release");
   });
 
-  test("a planned fault throws InjectedFault at its step", async () => {
+  test("a planned fault throws InjectedFault at its step", () => {
     const steps: string[] = [];
     const host = createMacosHost({ faults: { at: "offload.release", onStep: (step) => steps.push(step) } });
-    await host.faultAt("offload.commit");
-    await expect(host.faultAt("offload.release")).rejects.toBeInstanceOf(InjectedFault);
+    host.faultAt("offload.commit");
+    expect(() => host.faultAt("offload.release")).toThrow(InjectedFault);
     expect(steps).toEqual(["offload.commit", "offload.release"]);
   });
 
@@ -102,8 +102,8 @@ describe("host: faultAt", () => {
       script,
       `import { createMacosHost } from ${JSON.stringify(join(import.meta.dir, "index.ts"))};\n` +
         `const host = createMacosHost({ faults: { at: "offload.release", action: "kill" } });\n` +
-        `await host.faultAt("offload.commit");\nconsole.log("before");\n` +
-        `await host.faultAt("offload.release");\nconsole.log("after");\n`,
+        `host.faultAt("offload.commit");\nconsole.log("before");\n` +
+        `host.faultAt("offload.release");\nconsole.log("after");\n`,
     );
     const result = await createMacosHost().run({
       command: process.execPath,

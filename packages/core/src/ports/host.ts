@@ -20,8 +20,10 @@ export interface HostPorts extends LocalIo {
   /**
    * The crash seam: a saga calls it at every journal step, named `<saga>.<step>` (offload.release, …). It does
    * nothing unless a test planned a fault at that step; then it throws InjectedFault, or kills the process.
+   * Synchronous on purpose: the fault lands at the call itself, so a saga cannot run past its step by forgetting
+   * an await.
    */
-  faultAt(step: string): Promise<void>;
+  faultAt(step: string): void;
 }
 
 /** Dotted lower-case words, at least two: offload.release, onload.swap.rename. */
@@ -52,16 +54,13 @@ export interface FaultPlan {
 }
 
 /** A faultAt function for a plan; `kill` is the host's way to SIGKILL this process. */
-export const faultSeam = (
-  plan: FaultPlan | undefined,
-  kill: () => void,
-): ((step: string) => Promise<void>) => {
+export const faultSeam = (plan: FaultPlan | undefined, kill: () => void): ((step: string) => void) => {
   if (plan?.at !== undefined) checkStep(plan.at);
   const occurrence = plan?.occurrence ?? 1;
   if (!Number.isInteger(occurrence) || occurrence < 1)
     throw new Error("faultAt: occurrence must be 1 or more");
   let reached = 0;
-  return async (step) => {
+  return (step) => {
     checkStep(step);
     plan?.onStep?.(step);
     if (plan?.at !== step || ++reached !== occurrence) return;
