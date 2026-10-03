@@ -209,46 +209,59 @@ describe("hydrate: real frozen installs, offline", () => {
     ["yarn-classic", "yarn install --frozen-lockfile"],
     ["bun", "bun install --frozen-lockfile"],
   ] as const) {
-    test(`${name}: ${command} brings the vendored dependency back`, async () => {
-      const dir = project(name);
-      const done = await hydrate(dir);
-      expect(done.failure?.finding.message).toBeUndefined();
-      expect(done.report).toEqual({
-        status: "installed",
-        steps: [{ path: "", command, ok: true }],
-        untrusted: [],
-      });
-      // The vendored package's one file, byte for byte (the same bytes as the tarball's).
-      expect(readFileSync(join(dir, "node_modules/plainport-tiny/index.js"), "utf8")).toStartWith(
-        "module.exports = (s) => `tiny:",
-      );
-    }, 60_000);
+    // CI installs every manager and must never skip these (scripts/ci-workflow.test.ts pins the step); a laptop
+    // without one skips its test.
+    const manager = command.split(" ")[0] as string;
+    test.skipIf(!Bun.which(manager) && !process.env.CI)(
+      `${name}: ${command} brings the vendored dependency back`,
+      async () => {
+        expect(Bun.which(manager)).not.toBeNull();
+        const dir = project(name);
+        const done = await hydrate(dir);
+        expect(done.failure?.finding.message).toBeUndefined();
+        expect(done.report).toEqual({
+          status: "installed",
+          steps: [{ path: "", command, ok: true }],
+          untrusted: [],
+        });
+        // The vendored package's one file, byte for byte (the same bytes as the tarball's).
+        expect(readFileSync(join(dir, "node_modules/plainport-tiny/index.js"), "utf8")).toStartWith(
+          "module.exports = (s) => `tiny:",
+        );
+      },
+      60_000,
+    );
   }
 
-  test("npm: a lockfile that no longer fits fails frozen (hydrate.failed), and a retry succeeds once it fits", async () => {
-    const dir = project("npm");
-    // package.json now asks for a dependency the lockfile lacks: npm ci refuses before it fetches anything.
-    const manifest = readFileSync(join(dir, "package.json"), "utf8");
-    const pkg = JSON.parse(manifest);
-    writeFileSync(
-      join(dir, "package.json"),
-      JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, "left-pad": "1.3.0" } }),
-    );
-    const failed = await hydrate(dir);
-    expect(failed.report.status).toBe("failed");
-    expect(failed.report.steps).toEqual([
-      { path: "", command: "npm ci", ok: false, exitCode: expect.any(Number) },
-    ]);
-    expect(failed.failure?.exitCode).toBe(10);
-    expect(failed.failure?.finding).toMatchObject({
-      code: "hydrate.failed",
-      fix: "plainport hydrate work:web",
-    });
-    expect(existsSync(join(dir, "package.json"))).toBe(true);
-    writeFileSync(join(dir, "package.json"), manifest);
-    const retried = await hydrate(dir);
-    expect(retried.report.status).toBe("installed");
-  }, 60_000);
+  test.skipIf(!Bun.which("npm") && !process.env.CI)(
+    "npm: a lockfile that no longer fits fails frozen (hydrate.failed), and a retry succeeds once it fits",
+    async () => {
+      expect(Bun.which("npm")).not.toBeNull();
+      const dir = project("npm");
+      // package.json now asks for a dependency the lockfile lacks: npm ci refuses before it fetches anything.
+      const manifest = readFileSync(join(dir, "package.json"), "utf8");
+      const pkg = JSON.parse(manifest);
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, "left-pad": "1.3.0" } }),
+      );
+      const failed = await hydrate(dir);
+      expect(failed.report.status).toBe("failed");
+      expect(failed.report.steps).toEqual([
+        { path: "", command: "npm ci", ok: false, exitCode: expect.any(Number) },
+      ]);
+      expect(failed.failure?.exitCode).toBe(10);
+      expect(failed.failure?.finding).toMatchObject({
+        code: "hydrate.failed",
+        fix: "plainport hydrate work:web",
+      });
+      expect(existsSync(join(dir, "package.json"))).toBe(true);
+      writeFileSync(join(dir, "package.json"), manifest);
+      const retried = await hydrate(dir);
+      expect(retried.report.status).toBe("installed");
+    },
+    60_000,
+  );
 
   test("yarn-berry (faked: Yarn 4 needs a download): yarn install --immutable runs in the project", async () => {
     const dir = join(root, "work", "yarn-berry");
