@@ -29,13 +29,21 @@ import { type MemoryBlobStore, memoryBlobStore } from "../../packages/core/src/t
 import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandbox.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { nodePlugin } from "../../packages/eco-node/src/index.ts";
-import { journalSteps, rowProblems, settleJournals, snapshotIds } from "./checks.ts";
+import {
+  journalSteps,
+  laterHeadProblems,
+  rowProblems,
+  settleJournals,
+  snapshotIds,
+  type World,
+} from "./checks.ts";
 import {
   copyProject,
   hashTree,
   makeProjectTemplate,
   type ProjectTemplate,
   type TreeHash,
+  treeDiff,
 } from "./fixture.ts";
 import {
   type BranchKind,
@@ -294,10 +302,11 @@ const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, (row: Row
   },
 };
 
-const runRow = async (row: Row) => {
+/** Runs a row's crash (or `crash` instead of its scenario's), recover twice, and the row's checks. */
+const runRow = async (row: Row, crash?: (row: Row) => Promise<void>) => {
   const scenarios: Record<string, (row: Row) => Promise<void>> =
     row.saga === "offload" ? OFFLOAD_SCENARIOS : ONLOAD_SCENARIOS;
-  const crash = scenarios[row.scenario];
+  crash ??= scenarios[row.scenario];
   if (crash === undefined) throw new Error(`no ${row.saga} scenario ${row.scenario}`);
   const seen = await snapshotIds(engine);
   const before = journalSteps(box.paths);
@@ -315,32 +324,56 @@ const runRow = async (row: Row) => {
   // A finished release hands its trash to a detached delete, which holds it (trash-kept) until it is done.
   await settleJournals(box.paths);
   const again = reportOf(await recover(recoverDeps()));
-  return rowProblems(
-    row,
-    {
-      paths: box.paths,
-      device: device.id,
-      dir,
-      root: join(box.home, "work"),
-      store: { name: "ssd", blob: store, engine },
-    },
-    {
-      crashedStep,
-      crashedOp,
-      report,
-      again,
-      reference,
-      ...(released === undefined ? {} : { released }),
-      seen,
-      projectId: await projectId(),
-    },
-  );
+  return rowProblems(row, world(), {
+    crashedStep,
+    crashedOp,
+    report,
+    again,
+    reference,
+    ...(released === undefined ? {} : { released }),
+    seen,
+    projectId: await projectId(),
+  }).then((problems) => ({ problems, crashedOp }));
 };
 
+const world = (): World => ({
+  paths: box.paths,
+  device: device.id,
+  dir,
+  root: join(box.home, "work"),
+  store: { name: "ssd", blob: store, engine },
+});
+
 describe(`crash matrix, in-process: offload (${OFFLOAD_ROWS.length} rows)`, () => {
-  for (const row of OFFLOAD_ROWS) test(row.name, async () => expect(await runRow(row)).toEqual([]), 30_000);
+  for (const row of OFFLOAD_ROWS)
+    test(row.name, async () => expect((await runRow(row)).problems).toEqual([]), 30_000);
 });
 
 describe(`crash matrix, in-process: onload (${ONLOAD_ROWS.length} rows)`, () => {
-  for (const row of ONLOAD_ROWS) test(row.name, async () => expect(await runRow(row)).toEqual([]), 30_000);
+  for (const row of ONLOAD_ROWS)
+    test(row.name, async () => expect((await runRow(row)).problems).toEqual([]), 30_000);
+});
+
+// A crash while the upload itself runs, not at a step: here the fake engine's snapshot dies part-way through its walk
+// (in-process there is no restic process group to kill; the subprocess variant kills both). The journal stays at
+// offload.snapshot.start, so the row is that step's, with its extra demands.
+describe("crash matrix, in-process: a crash while the upload runs", () => {
+  test("offload.snapshot.start · mid-upload: recover rolls back, the folder is untouched, a later offload is the head", async () => {
+    const row = OFFLOAD_ROWS.find(
+      (r) => r.point === "offload.snapshot.start" && r.scenario === "plain",
+    ) as Row;
+    const untouched = hashTree(dir);
+    const { problems, crashedOp } = await runRow(row, async () => {
+      engine.hooks.duringSnapshot = () => {
+        throw new InjectedFault("offload.upload");
+      };
+      await expect(offload()).rejects.toBeInstanceOf(InjectedFault);
+      engine.hooks.duringSnapshot = undefined;
+    });
+    expect(problems).toEqual([]);
+    expect(treeDiff(untouched, hashTree(dir))).toEqual([]);
+    const later = await offload();
+    expect(later.ok ? later.value.op : later.finding.code).not.toBe(crashedOp);
+    expect(await laterHeadProblems(world(), await projectId(), crashedOp, untouched)).toEqual([]);
+  }, 30_000);
 });

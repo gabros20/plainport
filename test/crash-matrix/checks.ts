@@ -188,5 +188,50 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
   return problems;
 };
 
+/**
+ * After a crash mid-upload was rolled back and a later offload ran: the head is that later offload's snapshot, never the
+ * crashed operation's (restic wrote no snapshot for it, and nothing may name one), the repository holds it, and it
+ * restores byte-identical to the project apart from the stripped paths.
+ */
+export const laterHeadProblems = async (
+  world: World,
+  projectId: string | undefined,
+  crashedOp: string | undefined,
+  reference: TreeHash,
+): Promise<string[]> => {
+  const problems: string[] = [];
+  const read = await readEvents(storeEventLog(world.store.blob));
+  if (!read.ok) return [`the store's events cannot be read: ${read.finding.message}`];
+  const events = read.value.events;
+  for (const e of events)
+    if ("snapshot" in e && e.snapshot === crashedOp)
+      problems.push(`a ${e.type} event names the crashed operation's snapshot ${crashedOp}`);
+  const listed = await world.store.engine.list({});
+  if (!listed.ok) return [...problems, `listing snapshots: ${listed.finding.message}`];
+  for (const s of listed.value)
+    if (crashedOp !== undefined && s.tags.some((t) => t.includes(crashedOp)))
+      problems.push(`the repository holds a snapshot ${s.id} tagged with the crashed operation ${crashedOp}`);
+  const project = projectId === undefined ? undefined : foldCatalog(events).projects[projectId];
+  const head = project?.head ?? undefined;
+  const event = events.find((e) => e.type === "offloaded" && e.snapshot === head);
+  const stored = event?.type === "offloaded" ? event.stored[world.store.name] : undefined;
+  if (head === undefined || head === crashedOp || stored === undefined)
+    return [...problems, `the later offload is not the head (head ${head}, crashed ${crashedOp})`];
+  if (!listed.value.some((s) => s.id === stored))
+    problems.push(`the repository does not hold the head ${stored}`);
+  const target = mkdtempSync(join(world.scratch ?? tmpdir(), "plainport-crash-head-"));
+  try {
+    const restored = await world.store.engine.restore(stored, join(target, "web"), { op: ulid() });
+    if (!restored.ok) problems.push(`the head ${head} does not restore: ${restored.finding.message}`);
+    else {
+      const differ = treeDiff(withoutStripped(reference), hashTree(join(target, "web")));
+      if (differ.length > 0) problems.push(`the head ${head} is not the project: ${differ.join(", ")}`);
+    }
+  } finally {
+    removeTree(target);
+  }
+  return problems;
+};
+
 const withoutStripped = (tree: TreeHash): TreeHash =>
   new Map([...tree].filter(([p]) => !STRIPPED.some((s) => p === s || p.startsWith(`${s}/`))));

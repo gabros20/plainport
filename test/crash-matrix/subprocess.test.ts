@@ -8,12 +8,13 @@
 // for a watcher to see. Branches that need the world to change mid-run pause the binary at offload.snapshot.start
 // (PLAINPORT_TEST_PAUSE_AT) while the test changes it, as the in-process variant's fake engine hooks do.
 //
-// On macOS each row's root lives on a small case-sensitive APFS disk image (hdiutil) and the project gains a case
+// On macOS each row's root lives on a case-sensitive APFS sparse disk image (hdiutil, growing as written) and the project gains a case
 // pair; the image is detached and deleted afterwards. Elsewhere the root is in the row's sandbox. Rows are
 // independent (each has its own home, root and store), so they run a few at a time: restic derives its key on every
 // call, and one row makes some fifteen.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
@@ -38,7 +39,14 @@ import { ulid } from "../../packages/core/src/ulid.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { onMac } from "../platform.ts";
 import { describeT1, tierEnabled } from "../tiers.ts";
-import { journalSteps, rowProblems, settleJournals, snapshotIds, type World } from "./checks.ts";
+import {
+  journalSteps,
+  laterHeadProblems,
+  rowProblems,
+  settleJournals,
+  snapshotIds,
+  type World,
+} from "./checks.ts";
 import {
   copyProject,
   hashTree,
@@ -46,6 +54,7 @@ import {
   type ProjectTemplate,
   removeTree,
   type TreeHash,
+  treeDiff,
 } from "./fixture.ts";
 import {
   type BranchKind,
@@ -115,7 +124,7 @@ beforeAll(() => {
   chmodSync(join(tools, "restic"), 0o755);
   template = makeProjectTemplate();
   if (onMac) {
-    const image = join(scratch, "case-sensitive.dmg");
+    const image = join(scratch, "case-sensitive.sparseimage");
     volume = join(scratch, "volume");
     mkdirSync(volume);
     sh([
@@ -123,13 +132,13 @@ beforeAll(() => {
       "create",
       "-quiet",
       "-size",
-      "64m",
+      "256m",
       "-fs",
       "Case-sensitive APFS",
       "-volname",
       "pp-crash",
       "-type",
-      "UDIF",
+      "SPARSE",
       image,
     ]);
     sh(["hdiutil", "attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint", volume, image]);
@@ -146,6 +155,38 @@ afterAll(() => {
   template?.cleanup();
   removeTree(scratch);
 });
+
+/** Files below a folder (restic's packs under repo/data). */
+const countFiles = (dir: string): number => {
+  let n = 0;
+  const walk = (d: string) => {
+    for (const e of existsSync(d) ? readdirSync(d, { withFileTypes: true }) : [])
+      if (e.isDirectory()) walk(join(d, e.name));
+      else n++;
+  };
+  walk(dir);
+  return n;
+};
+
+/** The restic processes a process started. */
+const resticChildren = (parent: number): number[] =>
+  Bun.spawnSync(["pgrep", "-P", String(parent), "-x", "restic"], {
+    env: { PATH: "/usr/bin:/bin" },
+    stdout: "pipe",
+  })
+    .stdout.toString()
+    .split("\n")
+    .filter(Boolean)
+    .map(Number);
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** A few rows at a time. */
 let running = 0;
@@ -224,6 +265,15 @@ class RowRun {
     };
   }
 
+  spawn(args: string[], extra: Record<string, string> = {}, executable = binary) {
+    return Bun.spawn([executable, ...args], {
+      cwd: this.box.home,
+      env: this.env(extra),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  }
+
   /** Runs a binary; `pause` is called while it waits at its pause step, if one was asked for. */
   async run(
     args: string[],
@@ -232,12 +282,11 @@ class RowRun {
     executable = binary,
   ): Promise<Ran> {
     const pauseFile = join(this.box.home, "paused");
-    const child = Bun.spawn([executable, ...args], {
-      cwd: this.box.home,
-      env: this.env(pause === undefined ? extra : { ...extra, PLAINPORT_TEST_PAUSE_FILE: pauseFile }),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const child = this.spawn(
+      args,
+      pause === undefined ? extra : { ...extra, PLAINPORT_TEST_PAUSE_FILE: pauseFile },
+      executable,
+    );
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
     if (pause !== undefined) {
       const deadline = Date.now() + 60_000;
@@ -398,7 +447,13 @@ const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, Scenario>
 
 let rowsMade = 0;
 
-const runRow = (row: Row) =>
+/** A crash of the row's own (instead of its scenario's), and what to check once the row's checks ran. */
+interface Custom {
+  crash: Scenario;
+  after(r: RowRun, crashedOp: string | undefined): Promise<string[]>;
+}
+
+const runRow = (row: Row, custom?: Custom) =>
   slot(async () => {
     const r = new RowRun(++rowsMade);
     try {
@@ -406,7 +461,7 @@ const runRow = (row: Row) =>
       r.look();
       const scenarios: Record<string, Scenario> =
         row.saga === "offload" ? OFFLOAD_SCENARIOS : ONLOAD_SCENARIOS;
-      const crash = scenarios[row.scenario];
+      const crash = custom?.crash ?? scenarios[row.scenario];
       if (crash === undefined) throw new Error(`no ${row.saga} scenario ${row.scenario}`);
       const before = journalSteps(r.box.paths);
       await crash(r, row);
@@ -436,6 +491,7 @@ const runRow = (row: Row) =>
           seen,
           projectId: r.projectId(),
         }),
+        custom === undefined ? [] : await custom.after(r, crashedOp),
       );
     } finally {
       r.cleanup();
@@ -465,4 +521,61 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
       for (const row of rows)
         test.concurrent(row.name, async () => expect(await runRow(row)).toEqual([]), 300_000);
     });
+  // A crash while restic uploads, not at a step: the binary and restic's whole process group are SIGKILLed once
+  // restic has written a pack of this upload but no snapshot yet, as a power cut or an OOM kill would leave it. The
+  // journal stays at offload.snapshot.start, so the row is that step's, with three more demands: recover rolled it
+  // back (its rule allows nothing else but pending, which the row refuses), the folder is untouched, and a later
+  // offload succeeds over the dead restic's lock and leftover packs and becomes the head, never a half-written
+  // snapshot of the crashed operation.
+  test.concurrent("offload.snapshot.start · mid-upload SIGKILL of plainport and restic's process group", async () => {
+    const row = OFFLOAD_ROWS.find(
+      (x) => x.point === "offload.snapshot.start" && x.scenario === "plain",
+    ) as Row;
+    let untouched: TreeHash = new Map();
+    let leftover = { packs: 0, locks: 0 };
+    const problems = await runRow(row, {
+      crash: async (r) => {
+        // Incompressible bytes, more than one 16 MiB pack: restic writes a pack while the upload still runs.
+        writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(24 * 1024 * 1024));
+        r.look();
+        untouched = r.reference as TreeHash;
+        const packs = join(r.box.home, "ssd/repo/data");
+        const child = r.spawn(offloadArgs);
+        const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+        const deadline = Date.now() + 120_000;
+        while (child.exitCode === null && countFiles(packs) === 0 && Date.now() < deadline)
+          await Bun.sleep(5);
+        const uploading = child.exitCode === null ? resticChildren(child.pid) : [];
+        if (uploading.length === 0) {
+          child.kill("SIGKILL");
+          const [out, err] = await output;
+          throw new Error(
+            `restic was not uploading when the kill was due (exit ${child.exitCode}): ${err}${out}`,
+          );
+        }
+        process.kill(child.pid, "SIGKILL");
+        // The runner gives each child its own process group (pgid = its pid): kill the group, as a crash would.
+        for (const pid of uploading) process.kill(-pid, "SIGKILL");
+        await child.exited;
+        const [out, err] = await output;
+        killed({ code: child.exitCode, signal: child.signalCode, out, err }, "offload");
+        while (resticChildren(child.pid).length > 0 || uploading.some(alive)) await Bun.sleep(10);
+        leftover = { packs: countFiles(packs), locks: countFiles(join(r.box.home, "ssd/repo/locks")) };
+      },
+      after: async (r, crashedOp) => {
+        const found: string[] = [];
+        const touched = treeDiff(untouched, hashTree(r.dir));
+        if (touched.length > 0) found.push(`recover changed the folder: ${touched.join(", ")}`);
+        const later = await r.run(offloadArgs);
+        if (later.code !== 0)
+          return [...found, `a later offload exited ${later.code}: ${later.err}${later.out}`];
+        await settleJournals(r.box.paths);
+        return found.concat(await laterHeadProblems(await r.world(), r.projectId(), crashedOp, untouched));
+      },
+    });
+    expect(problems).toEqual([]);
+    // The kill really landed mid-upload: packs written, and the dead restic's lock left in the repository.
+    expect(leftover.packs).toBeGreaterThan(0);
+    expect(leftover.locks).toBeGreaterThan(0);
+  }, 300_000);
 });
