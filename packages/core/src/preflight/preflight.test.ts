@@ -3,12 +3,13 @@ import { chmodSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { type Finding, fail, finding, ok } from "@plainport/contract";
-import { testHost } from "../../../host-macos/src/testing.ts";
 import type { HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
+import type { GitFacts } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import { type GitFixture, makeGitFixture } from "../testing/git-fixture.ts";
-import { type PreflightReport, preflight, scanFindings } from "./index.ts";
+import { testHost } from "../testing/host.ts";
+import { type PreflightReport, preflight, scanFindings, unpushedFinding } from "./index.ts";
 
 const host = testHost();
 let fx: GitFixture;
@@ -694,4 +695,94 @@ describe("preflight: fails closed (r4)", () => {
     expect(codes(report.findings)).toEqual(["block proc.cwd"]);
     expect(report.fsmonitor).toEqual([14]);
   });
+});
+
+describe("preflight: exceptions mean bugs (q1)", () => {
+  test("a host whose realpath throws something other than a system error makes preflight throw", async () => {
+    const dir = fx.repo("web");
+    const broken: HostPorts = {
+      ...host,
+      fs: {
+        ...host.fs,
+        realpath: async () => {
+          throw new TypeError("a fake went wrong");
+        },
+      },
+    };
+    await expect(preflight(broken, quiet, dir, { env: fx.env })).rejects.toThrow(TypeError);
+  });
+});
+
+describe("preflight: the git.unpushed finding, by case (q1)", () => {
+  const facts = (over: Partial<GitFacts>): GitFacts => ({
+    gitDir: "/p/.git",
+    branch: "main",
+    detached: false,
+    dirty: 0,
+    untracked: 0,
+    changed: [],
+    unpushed: { commits: 0, branches: [], detachedHead: 0 },
+    localOnly: [],
+    stashes: 0,
+    inProgress: [],
+    remotes: ["origin"],
+    remoteBranches: true,
+    ...over,
+  });
+  const cases: [string, Partial<GitFacts>, string | undefined, string[]][] = [
+    ["nothing to report", {}, undefined, []],
+    [
+      "no remote",
+      {
+        remotes: [],
+        remoteBranches: false,
+        unpushed: { commits: 2, branches: [{ name: "main", commits: 2 }], detachedHead: 0 },
+        localOnly: ["main"],
+      },
+      "the repository has no remote, so its 2 commits exist only in this folder",
+      ["git remote add origin <url>"],
+    ],
+    [
+      "remote never fetched, with a stash",
+      {
+        remoteBranches: false,
+        stashes: 1,
+        unpushed: { commits: 1, branches: [{ name: "main", commits: 1 }], detachedHead: 0 },
+        localOnly: ["main"],
+      },
+      "none of the branches of origin have been fetched, so its 1 commit and 1 stash are not known to be on a remote",
+      ["git fetch origin", "git stash list"],
+    ],
+    [
+      "ahead of its upstream",
+      {
+        unpushed: {
+          commits: 1,
+          branches: [{ name: "feature", commits: 1, remote: "origin" }],
+          detachedHead: 0,
+        },
+      },
+      "1 commit on feature is not on any remote",
+      ["git push origin feature"],
+    ],
+    [
+      "local-only branch with pushed commits, plus a detached commit",
+      {
+        localOnly: ["release"],
+        unpushed: { commits: 1, branches: [], detachedHead: 1 },
+        branch: undefined,
+        detached: true,
+      },
+      "1 commit on the detached HEAD is not on any remote; branch release is on no remote",
+      ["git push -u origin release", "git switch -c <branch>"],
+    ],
+    ["only a stash", { stashes: 2 }, "2 stashes exist only in this folder", ["git stash list"]],
+  ];
+  for (const [name, over, message, fixes] of cases) {
+    test(name, () => {
+      const found = unpushedFinding(facts(over));
+      expect(found?.message).toBe(message);
+      for (const fix of fixes) expect(found?.fix).toContain(fix);
+    });
+  }
 });

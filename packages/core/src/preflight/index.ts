@@ -12,8 +12,10 @@
 
 import { join, resolve } from "node:path";
 import { type Failure, type Finding, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { systemErrorCode } from "../io.ts";
 import type { CheckContext, HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
+import type { GitFacts } from "../scan/git.ts";
 import { dotGit, exists, gitPointer, gitWorktrees } from "../scan/git.ts";
 import type { ProjectScan } from "../scan/index.ts";
 
@@ -207,15 +209,17 @@ export const preflight = async (
       const spellings = [resolve(dir)];
       try {
         spellings.push(await host.fs.realpath(dir));
-      } catch {
-        // The spelling given is all there is.
+      } catch (error) {
+        // The spelling given is all there is: fewer paths are exempt, never more.
+        systemErrorCode(error);
       }
       for (const spelling of spellings) {
         const socket = join(spelling, ".git", "fsmonitor--daemon.ipc");
         try {
           if ((await host.fs.lstat(socket)).kind === "socket") daemonPaths.add(socket).add(spelling);
-        } catch {
-          // No socket there: nothing is exempt.
+        } catch (error) {
+          // No socket there, or none that can be looked at: nothing is exempt.
+          systemErrorCode(error);
         }
       }
     }
@@ -259,6 +263,88 @@ const IN_PROGRESS_NAMES: Readonly<Record<string, string>> = {
   bisect: "a bisect",
 };
 
+/** The steps a push of the branches leaves undone: commits on a detached HEAD and stashes each need one of their own. */
+const unpushedBesides = (git: GitFacts): string[] => {
+  const { unpushed, stashes } = git;
+  return [
+    ...(unpushed.detachedHead > 0
+      ? [
+          `git switch -c <branch> to keep the ${plural(unpushed.detachedHead, "detached commit")}, then push it`,
+        ]
+      : []),
+    ...(stashes > 0
+      ? [
+          `git stash list shows the ${plural(stashes, "stash", "stashes")}; keep each as a branch (git stash branch <name> stash@{0}) and push it, or drop it`,
+        ]
+      : []),
+  ];
+};
+
+/**
+ * git.unpushed for a repository with work on no remote: with no remote at all, with a remote never fetched, or
+ * with commits, local-only branches or stashes a remote does not have. undefined when everything is on a remote.
+ * The fix covers each kind of work the message names.
+ */
+export const unpushedFinding = (git: GitFacts): Finding | undefined => {
+  const { unpushed, stashes } = git;
+  const stashText = plural(stashes, "stash", "stashes");
+  const what = [
+    ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
+    ...(stashes > 0 ? [stashText] : []),
+  ];
+  const remote = git.remotes[0] ?? "origin";
+  const besides = unpushedBesides(git);
+  if (git.remotes.length === 0) {
+    if (what.length === 0) return undefined;
+    return finding("git.unpushed", {
+      message: `the repository has no remote, so its ${andList(what)} exist only in this folder`,
+      fix: [
+        "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
+        ...besides,
+      ].join("; "),
+    });
+  }
+  if (!git.remoteBranches) {
+    if (what.length === 0) return undefined;
+    return finding("git.unpushed", {
+      message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} are not known to be on a remote`,
+      fix: [
+        `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
+        ...besides,
+      ].join("; "),
+    });
+  }
+  const counted = new Set(unpushed.branches.map((b) => b.name));
+  const bare = git.localOnly.filter((name) => !counted.has(name));
+  const onCommits = [
+    ...unpushed.branches.map((b) => `${plural(b.commits, "commit")} on ${b.name}`),
+    ...(unpushed.detachedHead > 0 ? [`${plural(unpushed.detachedHead, "commit")} on the detached HEAD`] : []),
+  ];
+  const parts: string[] = [];
+  if (onCommits.length > 0) {
+    const shown = unpushed.branches.reduce((n, b) => n + b.commits, 0) + unpushed.detachedHead;
+    parts.push(
+      `${andList(onCommits)} ${onCommits.length === 1 && shown === 1 ? "is" : "are"} not on any remote`,
+    );
+  }
+  if (bare.length > 0)
+    parts.push(
+      `${bare.length === 1 ? "branch" : "branches"} ${andList(bare)} ${bare.length === 1 ? "is" : "are"} on no remote`,
+    );
+  if (stashes > 0) parts.push(`${stashText} ${stashes === 1 ? "exists" : "exist"} only in this folder`);
+  if (parts.length === 0) return undefined;
+  const localOnly = new Set(git.localOnly);
+  const toTrack = [...unpushed.branches.map((b) => b.name).filter((n) => localOnly.has(n)), ...bare];
+  const fixes = [
+    ...unpushed.branches
+      .filter((b) => !localOnly.has(b.name) && b.remote !== undefined)
+      .map((b) => `git push ${shellWord(b.remote as string)} ${shellWord(b.name)}`),
+    ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
+    ...besides,
+  ];
+  return finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; ") });
+};
+
 /** Findings from the scan's results. */
 export const scanFindings = (scan: ProjectScan): Finding[] => {
   const findings: Finding[] = [];
@@ -288,81 +374,8 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
   }
 
   if (git !== undefined) {
-    const { unpushed, stashes } = git;
-    const stashText = plural(stashes, "stash", "stashes");
-    const what = [
-      ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
-      ...(stashes > 0 ? [stashText] : []),
-    ];
-    const remote = git.remotes[0] ?? "origin";
-    // What a push of the branches leaves behind: commits on a detached HEAD and stashes each need a step of their
-    // own, so every fix that reports them says so.
-    const besides = [
-      ...(unpushed.detachedHead > 0
-        ? [
-            `git switch -c <branch> to keep the ${plural(unpushed.detachedHead, "detached commit")}, then push it`,
-          ]
-        : []),
-      ...(stashes > 0
-        ? [
-            `git stash list shows the ${stashText}; keep each as a branch (git stash branch <name> stash@{0}) and push it, or drop it`,
-          ]
-        : []),
-    ];
-    if (git.remotes.length === 0 && what.length > 0) {
-      findings.push(
-        finding("git.unpushed", {
-          message: `the repository has no remote, so its ${andList(what)} exist only in this folder`,
-          fix: [
-            "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
-            ...besides,
-          ].join("; "),
-        }),
-      );
-    } else if (!git.remoteBranches && what.length > 0) {
-      findings.push(
-        finding("git.unpushed", {
-          message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} are not known to be on a remote`,
-          fix: [
-            `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
-            ...besides,
-          ].join("; "),
-        }),
-      );
-    } else {
-      const counted = new Set(unpushed.branches.map((b) => b.name));
-      const bare = git.localOnly.filter((name) => !counted.has(name));
-      const parts: string[] = [];
-      const onCommits = [
-        ...unpushed.branches.map((b) => `${plural(b.commits, "commit")} on ${b.name}`),
-        ...(unpushed.detachedHead > 0
-          ? [`${plural(unpushed.detachedHead, "commit")} on the detached HEAD`]
-          : []),
-      ];
-      if (onCommits.length > 0) {
-        const shown = unpushed.branches.reduce((n, b) => n + b.commits, 0) + unpushed.detachedHead;
-        parts.push(
-          `${andList(onCommits)} ${onCommits.length === 1 && shown === 1 ? "is" : "are"} not on any remote`,
-        );
-      }
-      if (bare.length > 0)
-        parts.push(
-          `${bare.length === 1 ? "branch" : "branches"} ${andList(bare)} ${bare.length === 1 ? "is" : "are"} on no remote`,
-        );
-      if (stashes > 0) parts.push(`${stashText} ${stashes === 1 ? "exists" : "exist"} only in this folder`);
-      if (parts.length > 0) {
-        const localOnly = new Set(git.localOnly);
-        const toTrack = [...unpushed.branches.map((b) => b.name).filter((n) => localOnly.has(n)), ...bare];
-        const fixes = [
-          ...unpushed.branches
-            .filter((b) => !localOnly.has(b.name) && b.remote !== undefined)
-            .map((b) => `git push ${shellWord(b.remote as string)} ${shellWord(b.name)}`),
-          ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
-          ...besides,
-        ];
-        findings.push(finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; ") }));
-      }
-    }
+    const unpushed = unpushedFinding(git);
+    if (unpushed !== undefined) findings.push(unpushed);
 
     if (git.inProgress.length > 0) {
       const ops = git.inProgress.map((op) => IN_PROGRESS_NAMES[op] ?? op);
