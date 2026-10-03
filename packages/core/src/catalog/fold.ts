@@ -11,15 +11,16 @@
 // - Each status event gets a position on that chain: an offloaded event sits at its snapshot's depth (2·d), and an
 //   onloaded event just after the head it was written over (`over`, D43), or the snapshot it restored when the event
 //   predates `over` (2·d + 1), so before anything made from that working copy. Onloading an older snapshot therefore
-//   comes after the head, not behind it. An `over` that is not the restored snapshot or made from it (unknown, older,
-//   on another fork) is ignored and the onload is ordered by what it restored.
+//   comes after the head, not behind it. An `over` the catalog holds but that is not the restored snapshot or made
+//   from it (older, on another fork, discarded) is ignored and the onload is ordered by what it restored.
 // - Status is the event furthest along the chain: offloaded → shelved, onloaded → local; local when there is none.
 // - A fork makes the project conflicted until a resolved event (M2) picks a side (D41): a kept snapshot with two or
 //   more kept children, offloaded or checkpointed alike. Two first offloads (no base) are a fork too. DESIGN's "two
 //   offloaded events with the same base" is the special case; a checkpoint on one side must not hide the other.
 // - Heads are the tips: kept snapshots nothing kept was made from. `head` is the one tip, and only when the chain is
-//   whole: it is null when the project is conflicted, when a base or an onloaded snapshot is missing from the events
-//   (`missing`: a partial mirror, D41; an older snapshot never becomes the head by default), or when bases loop.
+//   whole: it is null when the project is conflicted, when a base, an onloaded snapshot or an onload's `over` is
+//   missing from the events (`missing`: a partial mirror, D41; an older snapshot never becomes the head by default,
+//   and an `over` proves a newer snapshot exists), or when bases loop.
 // - The lease: an onloaded event with no offloaded event from the same device further along the chain. Of several
 //   such, the one furthest along wins, then the smallest event id, so there is at most one (invariant 5).
 //
@@ -86,7 +87,7 @@ export type CatalogState = z.infer<typeof CatalogStateSchema>;
  * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
  * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
  */
-export const FOLD_VERSION = 2;
+export const FOLD_VERSION = 3;
 
 export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -177,12 +178,15 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     producers.flatMap((e) => (e.base === undefined || e.base === e.snapshot ? [] : [e.base])),
   );
   const heads = [...made.keys()].filter((s) => !parents.has(s) && made.get(s)?.base !== s).sort(compare);
+  const held = (snapshot: string | undefined): boolean => snapshot === undefined || made.has(snapshot);
   const missing = [
     ...new Set(
-      [...producers, ...onloads].flatMap((e) =>
-        // An onload's `over` is only an ordering hint, checked above: an unknown one never makes the head missing.
-        e.base === undefined || made.has(e.base) ? [] : [e.base],
-      ),
+      [...producers, ...onloads].flatMap((e) => [
+        ...(held(e.base) ? [] : [e.base as string]),
+        // An onload's `over` proves that a snapshot newer than `base` exists (D43): one the catalog does not hold
+        // leaves the head incomplete (D41, m9), even though it is ignored for ordering above.
+        ...(e.type === "onloaded" && !held(e.over) ? [e.over as string] : []),
+      ]),
     ),
   ].sort(compare);
   const whole = conflicts.length === 0 && missing.length === 0 && !cyclic;

@@ -265,15 +265,54 @@ describe("catalog: fold rules", () => {
     });
   });
 
-  test("m2: an over the project does not hold, or one older than base, is ignored: the onload is ordered by base", () => {
+  test("m9: an over the catalog does not hold proves a newer snapshot exists: the head is incomplete (D41)", () => {
     const chain = [offloaded(E(1), A, S(1)), offloaded(E(2), A, S(2), S(1)), offloaded(E(3), A, S(3), S(2))];
-    // Unknown over (another project's id, or a bug): never a missing snapshot, never headless.
-    const unknown = project(foldCatalog([...chain, onloaded(E(4), B, S(3), S(9))]));
-    expect(unknown).toMatchObject({ status: "local", head: S(3), missing: [], lease: { device: B } });
+    // A mirror that has the onload but not the offload of S9 it was written over: S3 must not become the head.
+    const partial = project(foldCatalog([...chain, onloaded(E(4), B, S(3), S(9))]));
+    expect(partial).toMatchObject({
+      status: "local",
+      head: null,
+      missing: [S(9)],
+      lease: { device: B, event: E(4) },
+    });
+    // The onload is still ordered by what it restored, so the lease and the status stand.
+    expect(partial.heads).toEqual([S(3)]);
+    // Once S9's event arrives the head is whole again.
+    const whole = project(
+      foldCatalog([...chain, offloaded(E(5), A, S(9), S(3)), onloaded(E(4), B, S(3), S(9))]),
+    );
+    expect(whole).toMatchObject({ head: S(9), missing: [], lease: { device: B, event: E(4) } });
+  });
+
+  test("m2/m9: an over the catalog holds but that is older than base, or on another fork, is ignored: the onload is ordered by base", () => {
+    const chain = [offloaded(E(1), A, S(1)), offloaded(E(2), A, S(2), S(1))];
     // An over older than the snapshot restored: B's onload of S3 is not placed back at S1, behind B's own S3.
-    const older = [...chain.slice(0, 2), onloaded(E(4), B, S(2), S(2)), offloaded(E(5), B, S(3), S(2))];
+    const older = [...chain, onloaded(E(4), B, S(2), S(2)), offloaded(E(5), B, S(3), S(2))];
     const p = project(foldCatalog([...older, onloaded(E(6), B, S(3), S(1))]));
-    expect(p).toMatchObject({ status: "local", lease: { device: B, event: E(6) } });
+    expect(p).toMatchObject({ status: "local", head: S(3), missing: [], lease: { device: B, event: E(6) } });
+    // An over on another fork (known, not made from base) orders by base as well, and is not missing.
+    const fork = [...chain, offloaded(E(3), B, S(3), S(1)), onloaded(E(4), A, S(2), S(3))];
+    expect(project(foldCatalog(fork))).toMatchObject({
+      status: "conflicted",
+      missing: [],
+      lease: { device: A, event: E(4), base: S(2) },
+    });
+  });
+
+  test("sweep (pinned): a snapshot made from a discarded one leaves the head incomplete; only a broken writer makes one", () => {
+    // D43 makes the next offload from `over`, and a discarded snapshot is never a head, so no valid writer bases a
+    // snapshot or an onload on one. If one does, the catalog has no kept snapshot to hang the chain on: the head is
+    // incomplete, as for any base it does not hold. Nothing is hidden: restore --snapshot --to stays allowed (D44).
+    const events = [
+      offloaded(E(1), A, S(1)),
+      offloaded(E(2), A, S(2), S(1)),
+      discarded(E(3), A, S(2)),
+      onloaded(E(4), B, S(1), S(2)),
+      offloaded(E(5), B, S(3), S(2)),
+    ];
+    const p = project(foldCatalog(events));
+    expect(p).toMatchObject({ head: null, missing: [S(2)], discarded: [S(2)], conflicts: [] });
+    expect(Object.keys(p.snapshots).sort()).toEqual([S(1), S(3)]);
   });
 
   test("m1: an offload whose base is the restored snapshot instead of over forks it, and the lease stays (pinned)", () => {
@@ -336,7 +375,6 @@ describe("catalog: fold rules", () => {
     );
     expect(whole).toMatchObject({ head: S(4), missing: [] });
   });
-
   test("a cycle of bases still folds, whatever the order", () => {
     const cycle = foldCatalog([offloaded(E(1), A, S(1), S(2)), offloaded(E(2), A, S(2), S(1))]);
     expect(project(cycle).head).toBeNull(); // only a broken writer makes a cycle: no head is trusted
