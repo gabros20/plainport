@@ -432,3 +432,43 @@ describe("init: setting the store up (D45)", () => {
     expect(existsSync(box.paths.managedFile)).toBe(false);
   });
 });
+
+describe("init: secrets stay references (fix wave r1)", () => {
+  test("a --store-secret that is not a reference is never echoed back, in human or --json output", async () => {
+    box.dir("work");
+    for (const json of [[], ["--json"]]) {
+      const run = await init([
+        "--root",
+        "work=~/work",
+        "--store-path",
+        "~/ssd",
+        "--store-secret",
+        "hunter2",
+        "--yes",
+        ...json,
+      ]);
+      expect(run.code).toBe(2);
+      expect(`${run.out}${run.err}`).not.toContain("hunter2");
+    }
+  });
+
+  test("init --store-path again without --store-secret keeps the saved reference", async () => {
+    box.dir("work");
+    box.file("secrets/ssd.key", "from-a-file\n");
+    const first = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      "~/ssd",
+      "--store-secret",
+      "file:~/secrets/ssd.key",
+      "--device",
+      "mbp",
+      "--yes",
+    ]);
+    expect(first.code).toBe(0);
+    const again = await init(["--store-path", "~/ssd", "--yes"]);
+    expect(again.code).toBe(0);
+    expect(managed()).toMatchObject({ stores: { local: { secret: "file:~/secrets/ssd.key" } } });
+  });
+});

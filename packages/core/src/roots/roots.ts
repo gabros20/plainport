@@ -334,12 +334,14 @@ export const writeRoots = async (
             );
           }
         } else {
+          // A re-run without --store-secret keeps the reference already saved.
+          const secret = options.store.secret ?? working.stores?.[name]?.secret;
           next.stores = {
             ...next.stores,
             [name]: {
               kind: "local",
               path: displayPath(path, home),
-              ...(options.store.secret === undefined ? {} : { secret: options.store.secret }),
+              ...(secret === undefined ? {} : { secret }),
             },
           };
         }

@@ -297,7 +297,8 @@ export const init = defineCommand({
     if (secret !== undefined && !SecretRefSchema.safeParse(secret).success) {
       return fail(
         finding("usage.invalid", {
-          message: `--store-secret ${secret} is not a secret reference`,
+          message:
+            "--store-secret is not a secret reference (its value is not shown: it may be the password itself)",
           fix: "pass where the password is, never the password: --store-secret env:<VARIABLE> or file:<path>",
         }),
       );
