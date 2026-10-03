@@ -23,6 +23,7 @@
         "@clack/prompts": "1.8.1",
         "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
+        "@plainport/host-macos": "workspace:*",
         "zod": "4.6.5",
       },
     },
@@ -55,6 +56,7 @@
     "packages/host-macos": {
       "name": "@plainport/host-macos",
       "dependencies": {
+        "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
       },
     },
