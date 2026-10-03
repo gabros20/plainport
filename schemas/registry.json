@@ -53,6 +53,19 @@
         ],
         "additionalProperties": false
       }
+    },
+    "roots": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+        "title": "Ulid",
+        "description": "A ULID: 26 upper-case Crockford base32 characters"
+      }
     }
   },
   "required": [

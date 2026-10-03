@@ -1,6 +1,7 @@
 // @plainport/core — Domain, planner, sagas, journal, catalog fold and ports.
 
 export const packageName = "@plainport/core";
+export * from "./catalog/index.ts";
 export * from "./config/index.ts";
 export * from "./device.ts";
 export { type GuardPolicy, guardedFs, PATH_REFUSED, PathGuard, PathRefused } from "./guard.ts";
@@ -20,6 +21,7 @@ export { acquireLock, type HeldLock, type LockHolder, LockHolderSchema, type Loc
 export { nodeLocalIo } from "./node-io.ts";
 export * from "./paths.ts";
 export * from "./plan/index.ts";
+export * from "./ports/blob-store.ts";
 export type * from "./ports/checks.ts";
 export type * from "./ports/ecosystem.ts";
 export type * from "./ports/engine.ts";
