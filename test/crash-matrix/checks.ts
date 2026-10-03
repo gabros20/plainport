@@ -35,6 +35,8 @@ export interface World {
   /** The root's folder on this device. */
   root: string;
   store: { name: string; blob: BlobStore; engine: Engine };
+  /** Where to restore the head to compare it: on the project's own volume (a case pair needs a case-sensitive one). */
+  scratch?: string;
 }
 
 /** The engine ids of the snapshots the store's repository holds. */
@@ -169,7 +171,7 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     if (stub === undefined || head === undefined || stub !== head || stored === undefined)
       problems.push(`the folder is gone, but no stub names a stored head (stub ${stub}, head ${head})`);
     else {
-      const target = mkdtempSync(join(tmpdir(), "plainport-crash-head-"));
+      const target = mkdtempSync(join(world.scratch ?? tmpdir(), "plainport-crash-head-"));
       try {
         const restored = await world.store.engine.restore(stored, join(target, "web"), { op: ulid() });
         if (!restored.ok) problems.push(`the head ${head} does not restore: ${restored.finding.message}`);
