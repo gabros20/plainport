@@ -265,9 +265,40 @@ describe("catalog: fold rules", () => {
     });
   });
 
-  test("an onload written over a head the catalog lacks makes the head incomplete", () => {
-    const events = [offloaded(E(1), A, S(1)), onloaded(E(2), A, S(1), S(7))];
-    expect(project(foldCatalog(events))).toMatchObject({ head: null, missing: [S(7)] });
+  test("m2: an over the project does not hold, or one older than base, is ignored: the onload is ordered by base", () => {
+    const chain = [offloaded(E(1), A, S(1)), offloaded(E(2), A, S(2), S(1)), offloaded(E(3), A, S(3), S(2))];
+    // Unknown over (another project's id, or a bug): never a missing snapshot, never headless.
+    const unknown = project(foldCatalog([...chain, onloaded(E(4), B, S(3), S(9))]));
+    expect(unknown).toMatchObject({ status: "local", head: S(3), missing: [], lease: { device: B } });
+    // An over older than the snapshot restored: B's onload of S3 is not placed back at S1, behind B's own S3.
+    const older = [...chain.slice(0, 2), onloaded(E(4), B, S(2), S(2)), offloaded(E(5), B, S(3), S(2))];
+    const p = project(foldCatalog([...older, onloaded(E(6), B, S(3), S(1))]));
+    expect(p).toMatchObject({ status: "local", lease: { device: B, event: E(6) } });
+  });
+
+  test("m1: an offload whose base is the restored snapshot instead of over forks it, and the lease stays (pinned)", () => {
+    // D43 says the copy's next offload is made from over (S2). A writer that records the restored S1 instead gives
+    // S1 a second child: a conflict, and the onload is never closed. Task 12 must write base = over.
+    const events = [
+      offloaded(E(1), A, S(1)),
+      onloaded(E(2), A, S(1), S(1)),
+      offloaded(E(3), A, S(2), S(1)),
+      onloaded(E(4), A, S(1), S(2)),
+      offloaded(E(5), A, S(3), S(1)),
+    ];
+    expect(project(foldCatalog(events))).toMatchObject({
+      status: "conflicted",
+      conflicts: [[S(2), S(3)]],
+      lease: { device: A, event: E(4) },
+    });
+    // Written as D43 says, the same history is a step forward with no lease left.
+    const right = [...events.slice(0, 4), offloaded(E(5), A, S(3), S(2))];
+    expect(project(foldCatalog(right))).toMatchObject({
+      status: "shelved",
+      head: S(3),
+      conflicts: [],
+      lease: null,
+    });
   });
 
   test("a later onload along the chain takes the lease over an older open one", () => {
@@ -579,7 +610,9 @@ describe("catalog: fold properties (fast-check)", () => {
           const lease = p.lease;
           const opened = onloads.find((e) => e.id === lease.event);
           if (opened?.type !== "onloaded") throw new Error("the lease names no onloaded event");
-          const anchor = opened.over ?? opened.base;
+          // m2: over counts only when it is base or made from it; otherwise the onload is ordered by base.
+          const anchor =
+            opened.over !== undefined && descends(opened.over, opened.base) ? opened.over : opened.base;
           // An offload by the same device made from the onloaded copy (or anything after it) ends the lease.
           const closedBy = offloads.filter(
             (e) => e.device === lease.device && e.type === "offloaded" && descends(e.base, anchor),

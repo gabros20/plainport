@@ -11,7 +11,8 @@
 // - Each status event gets a position on that chain: an offloaded event sits at its snapshot's depth (2·d), and an
 //   onloaded event just after the head it was written over (`over`, D43), or the snapshot it restored when the event
 //   predates `over` (2·d + 1), so before anything made from that working copy. Onloading an older snapshot therefore
-//   comes after the head, not behind it.
+//   comes after the head, not behind it. An `over` that is not the restored snapshot or made from it (unknown, older,
+//   on another fork) is ignored and the onload is ordered by what it restored.
 // - Status is the event furthest along the chain: offloaded → shelved, onloaded → local; local when there is none.
 // - A fork makes the project conflicted until a resolved event (M2) picks a side (D41): a kept snapshot with two or
 //   more kept children, offloaded or checkpointed alike. Two first offloads (no base) are a fork too. DESIGN's "two
@@ -85,7 +86,7 @@ export type CatalogState = z.infer<typeof CatalogStateSchema>;
  * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
  * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
  */
-export const FOLD_VERSION = 1;
+export const FOLD_VERSION = 2;
 
 export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -138,8 +139,19 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   }
   const depthOf = (snapshot: string | undefined): number =>
     snapshot === undefined ? 0 : (depth.get(snapshot) ?? 0);
+  /** Whether `ancestor` is `snapshot` or one of the snapshots it was made from. */
+  const descends = (snapshot: string, ancestor: string): boolean => {
+    for (let at: string | undefined = snapshot, steps = 0; at !== undefined && steps <= made.size; steps++) {
+      if (at === ancestor) return true;
+      at = made.get(at)?.base;
+    }
+    return false;
+  };
+  /** An onload's place: after `over` when over is a snapshot made from `base` (m2), else after `base`. */
+  const anchorOf = (e: Extract<ProjectEvent, { type: "onloaded" }>): string =>
+    e.over !== undefined && made.has(e.over) && descends(e.over, e.base) ? e.over : e.base;
   const position = (e: ProjectEvent): number =>
-    e.type === "onloaded" ? 2 * depthOf(e.over ?? e.base) + 1 : 2 * depthOf((e as Producer).snapshot);
+    e.type === "onloaded" ? 2 * depthOf(anchorOf(e)) + 1 : 2 * depthOf((e as Producer).snapshot);
 
   const offloads = producers.filter((e) => e.type === "offloaded");
   const onloads = events.filter((e) => e.type === "onloaded");
@@ -168,9 +180,8 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   const missing = [
     ...new Set(
       [...producers, ...onloads].flatMap((e) =>
-        [e.base, e.type === "onloaded" ? e.over : undefined].filter(
-          (s): s is string => s !== undefined && !made.has(s),
-        ),
+        // An onload's `over` is only an ordering hint, checked above: an unknown one never makes the head missing.
+        e.base === undefined || made.has(e.base) ? [] : [e.base],
       ),
     ),
   ].sort(compare);

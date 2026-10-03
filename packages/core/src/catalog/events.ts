@@ -40,7 +40,10 @@ const storedSomewhere = stored
   .meta({ minProperties: 1 });
 
 const snapshotFields = {
-  /** The snapshot this one was made from: the working copy's onloaded or checkpointed snapshot. None on a first offload. */
+  /**
+   * The snapshot this one was made from: the working copy's latest checkpoint, else its onload's `over` (the head it
+   * was written over, D43), which is the restored snapshot unless an older one was restored. None on a first offload.
+   */
   base: UlidSchema.optional(),
   /** The plainport snapshot id: the ULID of the operation that made it. */
   snapshot: UlidSchema,
