@@ -36,6 +36,7 @@ import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf } from "../saga/release.ts";
+import { trashClaim, trashClaimFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
 import {
   notedStagingHolders,
@@ -129,27 +130,38 @@ export const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
 };
 
 /**
- * Removes a released trash folder, which its own detached delete may be removing at the same moment: a tree that
- * changes under the walk (ENOENT, ENOTEMPTY) is walked again, and a folder that is gone is done.
+ * Removes a released trash folder and any claim on it, once no live deleter claims it (D64: the caller checked, under
+ * the project's lock). A folder found gone under the walk (a deleter that finished just before) is done.
  */
 export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await io.fs.removeTree(trash);
-      return;
-    } catch (error) {
-      const code = systemErrorCode(error);
-      if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
-      try {
-        await io.fs.lstat(trash);
-      } catch (gone) {
-        if (systemErrorCode(gone) === "ENOENT") return;
-        throw gone;
-      }
-      if (attempt >= 5) throw error;
-      await io.proc.sleep(20 * attempt);
-    }
+  try {
+    await io.fs.removeTree(trash);
+  } catch (error) {
+    systemErrorCode(error);
+    if (await stillThere(io, trash)) throw error;
   }
+  try {
+    await io.fs.unlink(trashClaimFile(trash));
+  } catch (error) {
+    if (systemErrorCode(error) !== "ENOENT") throw error;
+  }
+};
+
+const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
+  try {
+    await io.fs.lstat(path);
+    return true;
+  } catch (error) {
+    if (systemErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+};
+
+/** Why a trash is left now: a live detached delete claims it (D64). */
+export const claimedReason = async (io: LocalIo, trash: string): Promise<string | undefined> => {
+  const claimed = await trashClaim(io, trash);
+  if (claimed.state !== "live") return undefined;
+  return `its detached delete (process ${claimed.claim?.pid} on ${claimed.claim?.host}, since ${claimed.claim?.startedAt}) is deleting it`;
 };
 
 /** The onload journals renaming a released offload's trash back, by that offload's op. */
@@ -238,6 +250,12 @@ export const collectTrash = async (
           return ok(undefined);
         }
         const trash = itemOf(now).trash;
+        // One deleter at a time (D64): a live detached delete's trash is its own.
+        const deleting = await claimedReason(io, trash);
+        if (deleting !== undefined) {
+          report.kept.push({ ...itemOf(now), reason: deleting });
+          return ok(undefined);
+        }
         const bytes = await treeBytes(io, trash);
         try {
           await removeTrash(io, trash);
@@ -472,6 +490,8 @@ export const housekeeping = async (
         // A trash whose volume is away is not deleted: the detached delete would close the journal over nothing.
         const away = await rootAway(io, now);
         if (away !== undefined) return away;
+        // A live deleter's already (D64); a dead one's is taken over by the new detached delete's claim.
+        if ((await claimedReason(io, itemOf(now).trash)) !== undefined) return ok(undefined);
         // Without a deadline the trash is no longer renamed back by an onload (it may be being deleted).
         const { keepUntil: _, ...rest } = now;
         try {

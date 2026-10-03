@@ -78,7 +78,7 @@ import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
-import { removeTrash } from "./trash.ts";
+import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
  * What recover did with one operation. rolled-back: it had not committed, and nothing local changed. finished: the
@@ -851,6 +851,12 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     }
     if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > clock().getTime()) {
       return { op: { ...entry(journal, "trash-kept", state), trash, keepUntil: journal.keepUntil } };
+    }
+    // One deleter at a time (D64): a live detached delete finishes it, journal included.
+    const deleting = await claimedReason(io, trash);
+    if (deleting !== undefined) {
+      deps.log("info", `the trash ${trash} is left: ${deleting}`);
+      return { op: { ...entry(journal, "trash-kept", state), trash } };
     }
     try {
       await removeTrash(io, trash);

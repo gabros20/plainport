@@ -52,5 +52,6 @@ export * from "./status/projects.ts";
 export * from "./store.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";
+export * from "./trash-claim.ts";
 export * from "./ulid.ts";
 export { VERSION } from "./version.ts";

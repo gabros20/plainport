@@ -292,6 +292,18 @@ describe("gc, through the CLI", () => {
     expect(done.freedBytes).toBeGreaterThan(0);
     await expectInvariants("api");
   });
+
+  test("gc deletes a trash past its deadline itself, under the lock: its own housekeeping hands it to no detached delete (D64)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
+    await cli(["offload", "work:api", "--yes"]);
+    const run = await cli(["gc", "--json"], {}, new Date(NOW.getTime() + 2 * 3_600_000));
+    expect(run.code).toBe(0);
+    const done = data("gc", run.out);
+    expect([done.deleted.length, done.kept.length]).toEqual([1, 0]);
+    expect(done.freedBytes).toBeGreaterThan(0);
+    expect(run.err).not.toContain("past its keepLocalFor deadline");
+    await expectInvariants("api");
+  });
 });
 
 describe("restore, through the CLI (D58)", () => {

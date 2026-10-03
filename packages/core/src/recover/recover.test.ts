@@ -417,7 +417,6 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
     "offload.release.renamed": "finished",
     "offload.release.stub-placed": "finished",
     "offload.release.registry-updated": "finished",
-    "offload.release.detached": "trash-deleted",
   };
   for (const [point, outcome] of Object.entries(FINISHED)) {
     test(`a crash at ${point} (journal at ${OFFLOAD_AFTER_EFFECT[point as keyof typeof OFFLOAD_AFTER_EFFECT]}) ends shelved`, async () => {
@@ -428,6 +427,17 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
       await expectInvariants();
     });
   }
+
+  test("a crash at offload.release.detached (journal at offload.release.delete): the live detached delete keeps its claim and finishes (D64)", async () => {
+    await crashOffloadAt("offload.release.detached");
+    // The detached delete outlives the crash: recover leaves its trash to it, or finds it done already.
+    const ops = reportOf(await recover(recoverDeps())).operations;
+    expect(ops.every((o) => o.outcome === "trash-kept" && o.state === "shelved")).toBe(true);
+    await waitJournalsGone();
+    expect(await journals()).toEqual([]);
+    await expectShelved();
+    await expectInvariants();
+  });
 
   test("a crash at offload.root-created (journal at offload.begin) rolls back; the root event stays", async () => {
     await crashOffloadAt("offload.root-created");
@@ -453,6 +463,7 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
     expect(Object.keys(OFFLOAD_AFTER_EFFECT).sort()).toEqual(
       [
         ...Object.keys(FINISHED),
+        "offload.release.detached",
         "offload.root-created",
         "offload.snapshot.discarded.appended",
         "offload.diverged.appended",
@@ -2028,5 +2039,108 @@ describe("fix wave q1: recover's routing table, Ctrl-C and exit code (D64)", () 
       await held.release();
     }
     expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+  });
+});
+
+describe("fix wave q1: one deleter per trash, by its claim (D64)", () => {
+  /**
+   * A host whose detached delete claims the trash as this live process, then waits for the gate before it deletes,
+   * slowly, as a real rm of a large tree does.
+   */
+  const gated = () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let done: Promise<void> = Promise.resolve();
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      deleteTrashDetached: async (trash, journal) => {
+        writeFileSync(
+          `${trash}.claim`,
+          JSON.stringify({
+            v: 1,
+            pid: process.pid,
+            host: real.proc.hostname(),
+            bootedAt: real.proc.bootedAtMs(),
+            startedAt: new Date().toISOString(),
+          }),
+        );
+        done = (async () => {
+          await gate;
+          rmSync(trash, { recursive: true, force: true });
+          rmSync(`${trash}.claim`, { force: true });
+          rmSync(journal, { force: true });
+        })();
+        return ok({ pid: process.pid });
+      },
+    };
+    return { host, open: () => open(), done: () => done };
+  };
+  const trashDeps = (host: HostPorts, now?: Date): TrashDeps => ({
+    host,
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...(now === undefined ? {} : { now: () => now }),
+  });
+  const files = (path: string): number => {
+    let n = 0;
+    const walk = (at: string) => {
+      for (const e of readdirSync(at, { withFileTypes: true, encoding: "utf8" }))
+        if (e.isDirectory()) walk(join(at, e.name));
+        else n++;
+    };
+    walk(path);
+    return n;
+  };
+
+  test("gc and recover leave a trash a live detached delete has claimed, whole, and take over one whose claimer died", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    for (let i = 0; i < 2000; i++) box.file(`work/web/node_modules/big/f${i}.js`, "x".repeat(64));
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const trash = journal?.trash as string;
+    const before = files(trash);
+    const later = new Date(Date.parse(journal?.keepUntil as string) + 1000);
+    const slow = gated();
+    expect((await housekeeping(trashDeps(slow.host, later))).started).toHaveLength(1);
+    expect(existsSync(`${trash}.claim`)).toBe(true);
+    // The claimer is alive: neither gc nor recover deletes beside it, and nothing fails.
+    const gc = value(await collectTrash(trashDeps(testHost(), later), { early: true }));
+    expect([gc.deleted, gc.kept.map((k) => k.op)]).toEqual([[], [journal?.op as string]]);
+    const rec = await recover(recoverDeps({ now: () => later }));
+    expect(rec.ok).toBe(true);
+    expect(reportOf(rec).operations.map((o) => o.outcome)).toEqual(["trash-kept"]);
+    expect(files(trash)).toBe(before);
+    slow.open();
+    await slow.done();
+    expect(trashes()).toEqual([]);
+    expect(await journals()).toEqual([]);
+  });
+
+  test("a claim whose process is gone is taken over: gc deletes the trash, the claim and the journal", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const trash = journal?.trash as string;
+    const { keepUntil: _k, ...rest } = journal as OffloadJournal;
+    await rewrite(rest);
+    writeFileSync(
+      `${trash}.claim`,
+      JSON.stringify({
+        v: 1,
+        pid: 99_999_999,
+        host: testHost().proc.hostname(),
+        bootedAt: testHost().proc.bootedAtMs(),
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    const gc = value(await collectTrash(trashDeps(testHost()), { early: false }));
+    expect(gc.deleted.map((d) => d.op)).toEqual([journal?.op as string]);
+    expect(trashes()).toEqual([]);
+    expect(await journals()).toEqual([]);
+    await expectInvariants();
   });
 });

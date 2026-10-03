@@ -2,11 +2,12 @@
 // session and process group (setsid, Bun's `detached`), and signals go to the whole group, kill(-pgid). POSIX
 // only, so it serves Linux as well until host-linux exists.
 
-import { constants } from "node:os";
+import { constants, hostname, uptime } from "node:os";
 import { isAbsolute } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { errorCode, systemErrorCode } from "./io.ts";
 import type { Spawner } from "./runner/types.ts";
+import { trashClaimFile } from "./trash-claim.ts";
 
 // Bun 1.3.14 names a child's terminating signal from the Linux signal table on every platform, so on macOS a
 // SIGUSR1 (30) comes back as "SIGPWR" and a SIGBUS (10) as "SIGUSR1". Map the name back to its Linux number, then to
@@ -92,9 +93,22 @@ export const posixSpawner: Spawner = {
 const TRASH = /\/\.plainport-trash\/([0-9A-HJKMNP-TV-Z]{26})$/;
 const JOURNAL = /\/journal\/([0-9A-HJKMNP-TV-Z]{26})\.json$/;
 
+/** Whether anything is at the path (a folder included); Bun.file().exists() only sees files. */
+const exists = async (path: string): Promise<boolean> => {
+  try {
+    await Bun.file(path).stat();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * HostPorts.deleteTrashDetached on POSIX (D47): /bin/sh in a new session (setsid), every stream on /dev/null, never
- * waited for. It makes the trash writable (a read-only folder cannot be emptied), deletes it, then the journal.
+ * waited for. It first claims the trash as its own (trash-claim.ts, D64: its pid, written by itself), makes the trash
+ * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal. This resolves once
+ * the claim is there (or the trash already gone), so a caller holding the project's lock releases it only after any
+ * other deleter can see the claim.
  */
 export const posixDeleteTrash = async (trash: string, journal: string): Promise<Result<{ pid: number }>> => {
   const op = TRASH.exec(trash)?.[1];
@@ -105,10 +119,17 @@ export const posixDeleteTrash = async (trash: string, journal: string): Promise<
       [
         "/bin/sh",
         "-c",
-        'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$2"',
+        [
+          'c="$1.claim"',
+          `printf '{"v":1,"pid":%s,"host":%s,"bootedAt":%s,"startedAt":"%s"}\\n' "$$" "$3" "$4" "$5" > "$c.tmp" && mv -f -- "$c.tmp" "$c" || exit 1`,
+          'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$c" && rm -f -- "$2"',
+        ].join("\n"),
         "plainport-trash",
         trash,
         journal,
+        JSON.stringify(hostname()),
+        String(Date.now() - uptime() * 1000),
+        new Date().toISOString(),
       ],
       {
         cwd: "/",
@@ -120,6 +141,12 @@ export const posixDeleteTrash = async (trash: string, journal: string): Promise<
       },
     );
     child.unref();
+    // Until the claim is there, nothing tells another deleter that this one runs (D64).
+    const claim = trashClaimFile(trash);
+    for (let waited = 0; waited < 2000; waited += 5) {
+      if ((await Bun.file(claim).exists()) || !(await exists(trash)) || child.exitCode !== null) break;
+      await Bun.sleep(5);
+    }
     return ok({ pid: child.pid });
   } catch (error) {
     const code = systemErrorCode(error);

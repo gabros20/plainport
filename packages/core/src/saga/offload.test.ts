@@ -238,6 +238,8 @@ describe("offload: the happy path", () => {
     expect(existsSync(dir)).toBe(false);
     await waitGone(join(box.home, "work/.plainport-trash", result.op));
     expect(existsSync(join(box.home, "work/.plainport-trash", result.op))).toBe(false);
+    // The detached delete then removes its claim (D64), then the journal.
+    await waitGone(join(box.paths.journalDir, `${result.op}.json`));
 
     // One snapshot, tagged, with the strip set left out.
     expect(engine.calls).toHaveLength(1);

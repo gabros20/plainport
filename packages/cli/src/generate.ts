@@ -12,6 +12,7 @@ import {
   configJsonSchemas,
   journalJsonSchemas,
   stagingJsonSchemas,
+  trashClaimJsonSchemas,
 } from "@plainport/core";
 import { z } from "zod";
 import { GLOBAL_OPTIONS } from "./gate.ts";
@@ -218,6 +219,7 @@ export const generateFiles = (registry: Registry): Map<string, string> => {
     ...catalogJsonSchemas(),
     ...journalJsonSchemas(),
     ...stagingJsonSchemas(),
+    ...trashClaimJsonSchemas(),
   };
   for (const name of Object.keys(schemas).sort()) {
     files.set(`schemas/${name}.json`, json(schemas[name as keyof typeof schemas]));

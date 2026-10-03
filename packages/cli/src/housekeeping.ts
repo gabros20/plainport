@@ -9,6 +9,8 @@ import type { CommandContext } from "./registry.ts";
 
 /** Commands that run before there is anything to keep, or that only describe plainport. */
 const SKIPPED: ReadonlySet<string> = new Set(["help", "version", "init"]);
+/** Commands that settle due trash themselves, under the lock: housekeeping only prints their notices (D64). */
+const SETTLE_TRASH: ReadonlySet<string> = new Set(["gc", "recover"]);
 
 export const housekeep = async (command: string, ctx: CommandContext): Promise<void> => {
   if (SKIPPED.has(command)) return;
@@ -23,7 +25,7 @@ export const housekeep = async (command: string, ctx: CommandContext): Promise<v
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
       },
-      { deleteDue: ctx.risk !== "read" },
+      { deleteDue: ctx.risk !== "read" && !SETTLE_TRASH.has(command) },
     );
     // recover settles them itself; telling it to run recover is noise.
     if (command !== "recover") for (const notice of done.notices) ctx.output.log("warn", notice);
