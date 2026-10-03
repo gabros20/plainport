@@ -14,9 +14,13 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok } from "@plainport/contract";
 import { type HostPorts, preflight, type RunOutcome, type RunSpec } from "@plainport/core";
+import { macOnlyTests } from "../../../test/platform.ts";
 import { makeGitFixture } from "../../core/src/testing/git-fixture.ts";
 import { createMacosChecks, DOCKER_CLI_FOLDERS, parseLsof } from "./checks.ts";
 import { testHost } from "./testing.ts";
+
+/** Tests that need the real macOS tools; skipped on Linux, counted on a Mac (test/platform.ts). */
+const testOnMac = macOnlyTests();
 
 const host = testHost();
 // Hermetic: no engine folder, no socket; docker is found only where a test puts it. HOME and DOCKER_HOST in `env`
@@ -140,7 +144,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     ]);
   });
 
-  test("a process working inside the folder is found", async () => {
+  testOnMac("a process working inside the folder is found", async () => {
     mkdirSync(join(dir, "src"));
     children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: join(dir, "src") }));
     await settle(dir, byPid(children[0]));
@@ -153,42 +157,48 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     }
   });
 
-  test("a process holding a file open inside the folder is found, under the folder's real path", async () => {
-    const file = join(dir, "data.db");
-    writeFileSync(file, "x");
-    children.push(Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', file], { cwd: "/" }));
-    await settle(dir, byPid(children[0]));
-    // Given by its /var spelling: lsof reports /private/var.
-    const spelled = dir.replace(/^\/private\/var\//, "/var/");
-    const result = await checks.processesUsing(spelled, { env });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const found = result.value.find((p) => p.pid === children[0]?.pid);
-      expect(found).toMatchObject({ cwd: false, files: [file], fileCount: 1 });
-    }
-  });
+  testOnMac(
+    "a process holding a file open inside the folder is found, under the folder's real path",
+    async () => {
+      const file = join(dir, "data.db");
+      writeFileSync(file, "x");
+      children.push(Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', file], { cwd: "/" }));
+      await settle(dir, byPid(children[0]));
+      // Given by its /var spelling: lsof reports /private/var.
+      const spelled = dir.replace(/^\/private\/var\//, "/var/");
+      const result = await checks.processesUsing(spelled, { env });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const found = result.value.find((p) => p.pid === children[0]?.pid);
+        expect(found).toMatchObject({ cwd: false, files: [file], fileCount: 1 });
+      }
+    },
+  );
 
-  test("a folder whose name lsof escapes (non-ASCII, tab, control, backslash, caret) is still matched", async () => {
-    const odd = join(dir, "p \u00e1\tt\u0001x\\y^z");
-    mkdirSync(odd);
-    writeFileSync(join(odd, "f.txt"), "f");
-    children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: odd }));
-    children.push(
-      Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(odd, "f.txt")], { cwd: "/" }),
-    );
-    await settle(odd, byPid(children[0]));
-    await settle(odd, byPid(children[1]));
-    const result = await checks.processesUsing(odd, { env });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.find((p) => p.pid === children[0]?.pid)).toMatchObject({ cwd: true });
-      expect(result.value.find((p) => p.pid === children[1]?.pid)).toMatchObject({
-        files: [join(odd, "f.txt")],
-      });
-    }
-  });
+  testOnMac(
+    "a folder whose name lsof escapes (non-ASCII, tab, control, backslash, caret) is still matched",
+    async () => {
+      const odd = join(dir, "p \u00e1\tt\u0001x\\y^z");
+      mkdirSync(odd);
+      writeFileSync(join(odd, "f.txt"), "f");
+      children.push(Bun.spawn(["/bin/sleep", "30"], { cwd: odd }));
+      children.push(
+        Bun.spawn(["/bin/sh", "-c", 'exec 3<"$0"; exec /bin/sleep 30', join(odd, "f.txt")], { cwd: "/" }),
+      );
+      await settle(odd, byPid(children[0]));
+      await settle(odd, byPid(children[1]));
+      const result = await checks.processesUsing(odd, { env });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.find((p) => p.pid === children[0]?.pid)).toMatchObject({ cwd: true });
+        expect(result.value.find((p) => p.pid === children[1]?.pid)).toMatchObject({
+          files: [join(odd, "f.txt")],
+        });
+      }
+    },
+  );
 
-  test("a file below the folder whose name lsof escapes comes back with its real name", async () => {
+  testOnMac("a file below the folder whose name lsof escapes comes back with its real name", async () => {
     const name = "f\u0001\t\u00e1\\.txt";
     writeFileSync(join(dir, name), "f");
     children.push(
@@ -201,36 +211,39 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     ]);
   });
 
-  test("git's fsmonitor daemon comes back with its command line, so preflight can tell it from other git", async () => {
-    const fx = makeGitFixture("plainport-fsmonitor-");
-    try {
-      const repo = fx.repo("web");
-      fx.git(repo, "fsmonitor--daemon", "start");
+  testOnMac(
+    "git's fsmonitor daemon comes back with its command line, so preflight can tell it from other git",
+    async () => {
+      const fx = makeGitFixture("plainport-fsmonitor-");
       try {
-        await settle(repo, (p) => p.args?.includes("fsmonitor--daemon run") ?? false);
-        const result = await checks.processesUsing(repo, { env });
-        expect(result.ok).toBe(true);
-        if (!result.ok) return;
-        const daemon = result.value.find((p) => p.args?.includes("fsmonitor--daemon"));
-        expect(daemon?.command).toBe("git");
-        expect(daemon?.args).toContain("fsmonitor--daemon");
-        // fx.env's PATH, without folders under the real home, which the guarded host refuses to search for docker.
-        const PATH = (fx.env.PATH ?? "")
-          .split(":")
-          .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
-          .join(":");
-        const report = await preflight(host, checks, repo, {
-          env: { ...fx.env, PATH, DOCKER_HOST: env.DOCKER_HOST },
-        });
-        expect(report.ok && report.value.fsmonitor).toEqual([daemon?.pid as number]);
-        expect(report.ok && report.value.findings).toEqual([]);
+        const repo = fx.repo("web");
+        fx.git(repo, "fsmonitor--daemon", "start");
+        try {
+          await settle(repo, (p) => p.args?.includes("fsmonitor--daemon run") ?? false);
+          const result = await checks.processesUsing(repo, { env });
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const daemon = result.value.find((p) => p.args?.includes("fsmonitor--daemon"));
+          expect(daemon?.command).toBe("git");
+          expect(daemon?.args).toContain("fsmonitor--daemon");
+          // fx.env's PATH, without folders under the real home, which the guarded host refuses to search for docker.
+          const PATH = (fx.env.PATH ?? "")
+            .split(":")
+            .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
+            .join(":");
+          const report = await preflight(host, checks, repo, {
+            env: { ...fx.env, PATH, DOCKER_HOST: env.DOCKER_HOST },
+          });
+          expect(report.ok && report.value.fsmonitor).toEqual([daemon?.pid as number]);
+          expect(report.ok && report.value.findings).toEqual([]);
+        } finally {
+          fx.gitStatus(repo, "fsmonitor--daemon", "stop");
+        }
       } finally {
-        fx.gitStatus(repo, "fsmonitor--daemon", "stop");
+        fx.cleanup();
       }
-    } finally {
-      fx.cleanup();
-    }
-  });
+    },
+  );
 
   test("lsof exiting 1 is not a whole listing, even with nothing on stderr", async () => {
     const { host: fake } = scripted(outcome({ exitCode: 1, out: "p1\nR0\nclaunchd\n" }));
@@ -247,7 +260,7 @@ describe("macOS checks: processes using the folder (lsof)", () => {
     expect(!stopped.ok && stopped.exitCode).toBe(130);
   });
 
-  test("an idle folder has no processes", async () => {
+  testOnMac("an idle folder has no processes", async () => {
     const result = await checks.processesUsing(dir, { env });
     expect(result).toEqual({ ok: true, value: [] });
   });
@@ -291,7 +304,7 @@ describe("macOS checks: placeholder (dataless) files", () => {
     expect(!stopped.ok && stopped.exitCode).toBe(130);
   });
 
-  test("an ordinary folder on APFS has none (find accepts the flag here)", async () => {
+  testOnMac("an ordinary folder on APFS has none (find accepts the flag here)", async () => {
     writeFileSync(join(dir, "a.txt"), "a");
     mkdirSync(join(dir, "sub"));
     expect(await checks.dataless(dir, { env })).toEqual({
@@ -404,21 +417,24 @@ describe("macOS checks: docker bind mounts", () => {
     expect(result).toEqual({ ok: true, value: { available: false, reason: "docker is not installed" } });
   });
 
-  test("docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)", async () => {
-    // This PATH without folders under the real home, which the guarded host refuses to look in.
-    const PATH = (process.env.PATH ?? "")
-      .split(":")
-      .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
-      .join(":");
-    const hasDocker = Bun.which("docker", { PATH }) !== null;
-    const result = await checks.dockerMounts(dir, {
-      env: { PATH, HOME: dir, DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
-    });
-    expect(result).toEqual({
-      ok: true,
-      value: { available: false, reason: hasDocker ? "docker is not running" : "docker is not installed" },
-    });
-  });
+  testOnMac(
+    "docker with no daemon to reach is unavailable (the real docker CLI, pointed at a socket that is not there)",
+    async () => {
+      // This PATH without folders under the real home, which the guarded host refuses to look in.
+      const PATH = (process.env.PATH ?? "")
+        .split(":")
+        .filter((folder) => !folder.startsWith(`${userInfo().homedir}/`))
+        .join(":");
+      const hasDocker = Bun.which("docker", { PATH }) !== null;
+      const result = await checks.dockerMounts(dir, {
+        env: { PATH, HOME: dir, DOCKER_HOST: `unix://${join(dir, "none.sock")}` },
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: { available: false, reason: hasDocker ? "docker is not running" : "docker is not installed" },
+      });
+    },
+  );
 
   test("docker is not running only when its socket is missing or refuses connections", async () => {
     for (const text of [
@@ -482,7 +498,7 @@ describe("macOS checks: docker bind mounts", () => {
 });
 
 describe("macOS checks: preflight with the real checks", () => {
-  test("proc.cwd and proc.open-files come from real processes; an idle folder has neither", async () => {
+  testOnMac("proc.cwd and proc.open-files come from real processes; an idle folder has neither", async () => {
     mkdirSync(join(dir, "web"));
     const web = join(dir, "web");
     writeFileSync(join(web, "server.log"), "");

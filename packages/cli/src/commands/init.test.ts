@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
+import { nodeLocalIo } from "@plainport/core";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import type { Prompter } from "../prompt.ts";
 import { capture, sandboxPorts } from "../testing.ts";
@@ -189,6 +190,37 @@ describe("init: from flags", () => {
     expect(run.code).toBe(2);
     expect(run.err).toContain("mbp");
     expect(device().name).toBe("mbp");
+  });
+});
+
+describe("init: device names from awkward host names", () => {
+  for (const [host, expected] of [
+    ["b315d8b14", "b315d8b14"],
+    ["223b315d8b14", "host-223b315d8b14"],
+    ["12345", "host-12345"],
+    ["dev-box.lan.example.com", "dev-box"],
+    ["___", "this-device"],
+  ] as const) {
+    test(`host name ${host} gives device ${expected} and a managed.toml every TOML reader accepts`, async () => {
+      box.dir("work");
+      const io = { ...nodeLocalIo, proc: { ...nodeLocalIo.proc, hostname: () => host } };
+      const run = await capture(["init", "--root", "work=~/work", "--store-path", "~/A", "--yes"], REGISTRY, {
+        ports: sandboxPorts(box.home, { io }),
+      });
+      expect(run.err).toBe("");
+      expect(run.code).toBe(0);
+      expect(device().name).toBe(expected);
+      const text = readFileSync(box.paths.managedFile, "utf8");
+      expect(Bun.TOML.parse(text)).toMatchObject({ roots: { work: { on: { [expected]: "~/work" } } } });
+    });
+  }
+
+  test("a --device that is not a valid name is refused with the --device <name> fix", async () => {
+    box.dir("work");
+    const run = await init(["--root", "work=~/work", "--store-path", "~/A", "--device", "1mac", "--yes"]);
+    expect(run.code).toBe(2);
+    expect(run.err).toContain("--device <name>");
+    expect(existsSync(box.paths.managedFile)).toBe(false);
   });
 });
 

@@ -49,6 +49,8 @@ describe("scan: one walk records the manifest", () => {
     const file = write("src/index.ts", "export {};\n");
     chmodSync(file, 0o640);
     mkdirSync(join(dir, "empty"));
+    // Set explicitly: the process umask (022 on a Mac, 002 in some Linux containers) would decide it otherwise.
+    chmodSync(join(dir, "src"), 0o755);
     symlinkSync("src/index.ts", join(dir, "entry"));
     const tree = await scan();
     expect([...tree.manifest].map((e) => e.path).sort()).toEqual(["empty", "entry", "src", "src/index.ts"]);

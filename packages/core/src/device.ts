@@ -13,21 +13,32 @@ import { errorCode, type LocalIo } from "./io.ts";
 import type { PlainportPaths } from "./paths.ts";
 import { UlidSchema, ulid } from "./ulid.ts";
 
-/** A device's name, as roots' `on` tables and `--device` spell it: a lower-case word, e.g. mbp or mini. */
+/**
+ * A device's name, as roots' `on` tables and `--device` spell it: a lower-case word starting with a letter, e.g.
+ * mbp or mini. Starting with a letter keeps it a plain key for every TOML reader and an unambiguous shell word: a
+ * name such as `223b315d8b14` (a container's host name) reads as a number to some parsers.
+ */
 export const DeviceNameSchema = z
   .string()
-  .regex(/^[a-z0-9][a-z0-9-]*$/, "a lower-case word of letters, digits and hyphens, e.g. mbp")
+  .regex(
+    /^[a-z][a-z0-9-]*$/,
+    "a lower-case word of letters, digits and hyphens, starting with a letter, e.g. mbp",
+  )
   .max(63);
 
-/** A device name made from a host name: `Tamass-MacBook-Pro.local` → `tamass-macbook-pro`. */
+/**
+ * A device name made from a host name: its first label, lower-cased, with anything but letters and digits turned
+ * into hyphens (`Tamass-MacBook-Pro.local` → `tamass-macbook-pro`). One starting with a digit gets a `host-` prefix
+ * (`223b315d8b14` → `host-223b315d8b14`); one with nothing left is `this-device`. Always a valid DeviceNameSchema.
+ */
 export const deviceNameFrom = (hostname: string): string => {
-  const name = (hostname.split(".")[0] ?? "")
+  const slug = (hostname.split(".")[0] ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 63)
-    .replace(/-+$/, "");
-  return name === "" ? "this-device" : name;
+    .replace(/^-+|-+$/g, "");
+  if (slug === "") return "this-device";
+  const name = /^[a-z]/.test(slug) ? slug : `host-${slug}`;
+  return name.slice(0, 63).replace(/-+$/, "");
 };
 
 export const DeviceSchema = z
@@ -92,7 +103,7 @@ export const ensureDevice = async (
     return fail(
       finding("usage.invalid", {
         message: `${JSON.stringify(options.name)} is not a device name: ${describeIssues(name.error)}`,
-        fix: "pass --device <name> with a lower-case word, e.g. --device mbp",
+        fix: "pass --device <name>: a lower-case word starting with a letter, e.g. --device mbp",
       }),
     );
   }
