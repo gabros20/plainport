@@ -53,7 +53,8 @@
 // nothing local has changed, so it removes its journal; on success the detached delete removes the trash and then
 // the journal. An expected I/O failure after the commit (a rename refused, a full disk) returns fs.write-failed and
 // keeps the journal, so recover finishes. Ctrl-C (the signal) is honoured at the safe points before the commit
-// (between phases, and inside restic, which it stops); after the commit the saga finishes release.
+// (between phases, and inside restic, which it stops); one that lands after the commit stops before release, with
+// the journal kept for recover (D52). Release itself starts by re-checking the folder's fingerprint (D51, D52).
 //
 // An injected fault (InjectedFault) is a simulated crash: nothing here catches it.
 
@@ -129,6 +130,52 @@ export const OFFLOAD_STEPS = [
   "offload.release.delete",
 ] as const;
 export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
+
+/**
+ * Crash seams right after a side effect, with no journal write (D52): a fault at one leaves the effect done and the
+ * journal at the step named here, as a lost journal write would. The crash matrix stops at these as well as at every
+ * step, so it reaches the states the recover table is written for.
+ */
+export const OFFLOAD_AFTER_EFFECT = {
+  "offload.root-created": "offload.begin",
+  "offload.snapshot.discarded.appended": "offload.snapshot.discarded",
+  "offload.diverged.appended": "offload.diverged",
+  "offload.commit.appended": "offload.commit.start",
+  "offload.release.renamed": "offload.release.trash",
+  "offload.release.stub-placed": "offload.release.moved",
+  "offload.release.registry-updated": "offload.release.moved",
+  "offload.release.detached": "offload.release.delete",
+} as const satisfies Record<string, OffloadStep>;
+export type OffloadAfterEffect = keyof typeof OFFLOAD_AFTER_EFFECT;
+
+/**
+ * The branches a plain run does not take, and what makes a run take each, so the crash matrix can show it covered
+ * every row: the steps and seams only a branch reaches, and the retry that reaches the preparation twice.
+ */
+export const OFFLOAD_BRANCHES = {
+  discarded: {
+    when: "restic cannot read a file during the upload (exit 3, D28)",
+    reaches: ["offload.snapshot.discarded", "offload.snapshot.discarded.appended"],
+  },
+  diverged: {
+    when: "another copy moves the project's head during the upload",
+    reaches: ["offload.diverged", "offload.diverged.appended"],
+  },
+  retry: {
+    when: "a file changes during the upload, once",
+    reaches: [
+      "offload.preflight.done",
+      "offload.scan.done",
+      "offload.strip.done",
+      "offload.planned",
+      "offload.snapshot.start",
+      "offload.snapshot.done",
+    ],
+  },
+  firstOffloadOfRoot: { when: "the root has no root-created event yet", reaches: ["offload.root-created"] },
+  keepStub: { when: "offload.stub = true (the default)", reaches: ["offload.release.stub-placed"] },
+  detached: { when: 'offload.keepLocalFor = "0" (the default)', reaches: ["offload.release.detached"] },
+} as const;
 
 /** What every journal names: the operation, the project and its folder, the store. */
 const IDENTITY = [
@@ -232,6 +279,15 @@ export interface OffloadConflict {
   store: string;
   stored: string;
 }
+
+/** operation.cancelled once the offload is committed: release did not start, and recover finishes it (D52). */
+const cancelledAfterCommit = (address: string, op: string): Failure =>
+  fail(
+    finding("operation.cancelled", {
+      message: `the offload of ${address} was committed as snapshot ${op} and then stopped before release; the folder is as it was`,
+      fix: "plainport recover finishes the release (it checks the folder is unchanged first)",
+    }),
+  );
 
 const cancelled = (): Failure =>
   fail(
@@ -480,6 +536,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         ...(req.allow === undefined ? {} : { allow: req.allow }),
         ...(signal === undefined ? {} : { signal }),
         ...(journalSteps ? { boundary, onFinding: report } : {}),
+        stopFsmonitor: true,
+        log: deps.log,
       });
       if (failed !== undefined) return failed;
       return prepared;
@@ -562,7 +620,6 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         });
         if (!settled.ok) return settled;
         if (signal?.aborted) return cancelled();
-        await stopFsmonitor(prepared.fsmonitor);
 
         // The fingerprint, re-checked right before restic reads the folder (DESIGN "Offload process" step 6).
         phase("snapshot", "start");
@@ -623,42 +680,6 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       }
     };
 
-    /** Asks git's fsmonitor daemons to stop, so none holds the folder while restic reads it. */
-    const stopFsmonitor = async (pids: readonly number[]): Promise<void> => {
-      // git runs in the folder's real path and may not look above it (D33), nor read the system config (D34).
-      let real: string | undefined;
-      if (pids.length > 0) {
-        try {
-          real = await io.fs.realpath(folder);
-        } catch (error) {
-          systemErrorCode(error);
-        }
-      }
-      const ceiling = real === undefined ? undefined : join(real, "..");
-      for (const pid of pids) {
-        const stopped =
-          real === undefined || ceiling === undefined || ceiling.includes(":")
-            ? undefined
-            : await host.run({
-                command: "git",
-                args: ["fsmonitor--daemon", "stop"],
-                cwd: real,
-                env: {
-                  PATH: deps.env.PATH ?? "/usr/bin:/bin",
-                  HOME: deps.env.HOME ?? paths.home,
-                  GIT_CEILING_DIRECTORIES: ceiling,
-                  GIT_CONFIG_NOSYSTEM: "1",
-                },
-                timeoutMs: 30_000,
-              });
-        const done = stopped?.ok === true && stopped.value.exitCode === 0;
-        deps.log(
-          done ? "info" : "warn",
-          `git fsmonitor daemon ${pid}: ${done ? "stopped" : "could not be stopped"}`,
-        );
-      }
-    };
-
     /** Commit (DESIGN step 7's head check and event), then release (step 8). */
     const commitAndRelease = async (verified: Verified): Promise<Result<OffloadOutcome>> => {
       phase("commit", "start");
@@ -698,6 +719,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         if (!forked.ok) return forked;
         const kept = await appendEvent(events, event);
         if (!kept.ok) return saga.keep(kept);
+        saga.after("offload.diverged.appended");
         const conflict: OffloadConflict = {
           op,
           exitCode: 8,
@@ -713,10 +735,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       const appended = await appendEvent(events, event);
       // Whether a failed append landed is unknown: the journal stays for recover to look (D24).
       if (!appended.ok) return saga.keep(appended);
+      saga.after("offload.commit.appended");
       saga.commit();
       const done = await saga.step("offload.committed");
       if (!done.ok) return done;
       phase("commit", "end");
+      // A cancel after the commit stops here, before release touches the folder; recover finishes it (D52).
+      if (signal?.aborted) return cancelledAfterCommit(ref.address, op);
 
       phase("release", "start");
       const released = await releaseOffload(
@@ -756,6 +781,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           key: ref.root,
         });
         if (!created.ok) return created;
+        saga.after("offload.root-created");
       }
       phase("resolve", "end");
       if (signal?.aborted) return cancelled();

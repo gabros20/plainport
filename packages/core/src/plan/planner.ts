@@ -15,7 +15,7 @@ import type { CheckContext, HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin, HydrateStep } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { preflight, scanFindings } from "../preflight/index.ts";
-import { gitTracked } from "../scan/git.ts";
+import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
 import type { TreeScan } from "../scan/walk.ts";
@@ -57,6 +57,14 @@ export interface OffloadPlanRequest {
   signal?: AbortSignal;
   /** Told each finding when no plan can be made, before the failure returns. */
   onFinding?(finding: Finding): void;
+  /**
+   * Stop the git fsmonitor daemons preflight found (the folder's and nested repositories'), before the scan, so the
+   * socket each removes as it stops never changes the folder between the plan and the snapshot (D52). A real run
+   * does; a dry run changes nothing and leaves them running.
+   */
+  stopFsmonitor?: boolean;
+  /** Said in passing: which daemons were stopped. */
+  log?(level: "info" | "warn", message: string): void;
 }
 
 /** Where the preparation stands: preflight done, the scan done, the strip set chosen, the plan made. */
@@ -150,8 +158,6 @@ export interface PreparedOffload {
   config: ResolvedConfig;
   /** The plugins that recognised the project. */
   ecosystems: string[];
-  /** Git fsmonitor daemons watching the folder, stopped before the snapshot. */
-  fsmonitor: number[];
 }
 
 export const planOffload = async (
@@ -201,6 +207,16 @@ export const prepareOffload = async (
         fix: 'set offload.verify = "manifest" (or remove it) in config.toml, then re-run',
       }),
     );
+  }
+
+  if (req.stopFsmonitor === true) {
+    for (const repo of report.fsmonitorRepos) {
+      const stopped = await stopFsmonitor(host, repo, ctx);
+      req.log?.(
+        stopped ? "info" : "warn",
+        `git fsmonitor daemon for ${repo}: ${stopped ? "stopped" : "could not be stopped"}`,
+      );
+    }
   }
 
   await req.boundary?.("preflight.end");
@@ -339,5 +355,5 @@ export const prepareOffload = async (
     expiresAt: new Date(req.now.getTime() + PLAN_TTL_MS).toISOString(),
   };
   await req.boundary?.("plan.end");
-  return ok({ plan, tree, config, ecosystems, fsmonitor: report.fsmonitor });
+  return ok({ plan, tree, config, ecosystems });
 };

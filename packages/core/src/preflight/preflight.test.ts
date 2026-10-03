@@ -56,7 +56,13 @@ describe("preflight: a clean folder", () => {
   test("a pushed repository nobody is using has no findings", async () => {
     const dir = fx.repo("web");
     fx.origin(dir);
-    expect(await run(dir)).toEqual({ findings: [], notes: [], fsmonitor: [], safeToRead: true });
+    expect(await run(dir)).toEqual({
+      findings: [],
+      notes: [],
+      fsmonitor: [],
+      fsmonitorRepos: [],
+      safeToRead: true,
+    });
   });
 
   test("a folder without git is checked for processes, containers and placeholders only", async () => {

@@ -88,6 +88,7 @@ export const takeSnapshot = async (req: SnapshotRequest): Promise<Result<string>
           ),
         );
       }
+      saga.after("offload.snapshot.discarded.appended");
     }
     return req.ctx.signal?.aborted ? req.cancelled() : made;
   }

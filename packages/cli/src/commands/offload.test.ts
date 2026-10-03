@@ -433,6 +433,72 @@ describe("offload: a real run", () => {
 });
 
 describeT1("offload with the real restic on a temp external-disk store", () => {
+  test("a real SIGKILL right after the rename (D52): the folder waits in the trash, the journal at release.trash, invariants hold", async () => {
+    const host = macosTestHost();
+    const env = {
+      HOME: box.home,
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      PLAINPORT_STORE_PASSWORD: "t1-pw",
+    };
+    const real = () => ports({ env, system: host, io: host, stores: localStores(host, env) });
+    const ssd = join(box.home, "t1-ssd");
+    const setup = await cli(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"], real());
+    expect(setup.code).toBe(0);
+    const before = captureTree(join(box.home, "work/web"));
+    const child = join(box.home, "crash.ts");
+    const src = join(import.meta.dir, "..");
+    writeFileSync(
+      child,
+      [
+        `import { REGISTRY } from ${JSON.stringify(join(src, "commands/index.ts"))};`,
+        `import { capture, sandboxPorts } from ${JSON.stringify(join(src, "testing.ts"))};`,
+        `import { localStores } from ${JSON.stringify(join(src, "stores.ts"))};`,
+        `import { testHost } from ${JSON.stringify(join(src, "../../host-macos/src/testing.ts"))};`,
+        `const env = ${JSON.stringify(env)};`,
+        'const host = testHost({ faults: { at: "offload.release.renamed", action: "kill" } });',
+        `const ports = sandboxPorts(env.HOME, { env, system: host, io: host, stores: localStores(host, env) });`,
+        'const ran = await capture(["offload", "work:web", "--store", "t1", "--yes", "--json"], REGISTRY, { ports });',
+        "console.log(ran.out);",
+        "process.exit(0);",
+      ].join("\n"),
+    );
+    // The child runs with this test process's own environment (its guard protects the real home); the sandbox is
+    // what its ports are given.
+    const run = Bun.spawn([process.execPath, child], {
+      cwd: box.home,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await run.exited;
+    const killed = run.signalCode === "SIGKILL";
+    expect({
+      signal: run.signalCode,
+      out: killed ? "" : `${await new Response(run.stdout).text()}${await new Response(run.stderr).text()}`,
+    }).toEqual({ signal: "SIGKILL", out: "" });
+    const journals = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    expect(journals).toHaveLength(1);
+    const journal = JSON.parse(readFileSync(join(box.paths.journalDir, journals[0] as string), "utf8"));
+    expect(journal.step).toBe("offload.release.trash");
+    expect(existsSync(join(box.home, "work/web"))).toBe(false);
+    expect(existsSync(join(journal.trash, "web/src/main.ts"))).toBe(true);
+    expect(readdirSync(box.paths.locksDir)).toEqual([`${journal.project.id}.lock`]);
+    const opened = await localStores(host, env).open("t1", { kind: "local", path: ssd }, "t1-pw");
+    if (!opened.ok) throw new Error(opened.finding.message);
+    const violations = await invariantViolations({
+      paths: box.paths,
+      device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
+      project: { id: journal.project.id, dir: join(box.home, "work/web") },
+      roots: [join(box.home, "work")],
+      store: { name: "t1", blob: fsBlobStore(host, ssd), engine: opened.value.engine },
+      released: before,
+      stripped: ["node_modules", "dist"],
+    });
+    // Invariant 2 (a stub exactly when shelved) holds only once recover finishes release (Task 14); 1 and 3 hold now.
+    expect(violations.filter((v) => !v.startsWith("invariant 2"))).toEqual([]);
+    expect(violations).toEqual(["invariant 2: the stub is missing, but the project is shelved"]);
+  }, 120_000);
+
   test("init creates the repository; offload snapshots, verifies and releases; restic lists what the catalog names", async () => {
     const host = macosTestHost({
       faults: {

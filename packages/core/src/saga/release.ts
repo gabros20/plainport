@@ -3,9 +3,15 @@
 // registry.json, then hand the trash to a detached delete (or keep it until keepLocalFor has passed). Everything it
 // reads comes from the journal and the committed event, so the live saga and `plainport recover` (Task 14) run the
 // same function.
+//
+// Right before the rename the folder's fingerprint is compared with the verified one (plan.fingerprint): an edit made
+// after verification, in the live run's commit window or in the hours before recover runs, is never deleted. Such a
+// folder is kept, no stub is written, its base becomes the committed snapshot, and the run ends with
+// offload.diverged-after-commit (exit 8, D51, D52). Each effect is followed by a crash seam (saga.after), so the crash
+// matrix reaches the states a lost journal write leaves.
 
 import { basename, dirname, join } from "node:path";
-import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -13,6 +19,7 @@ import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { placeStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
 import { type Saga, writeFailed } from "./journaled.ts";
+import { unchanged } from "./verify.ts";
 
 export const TRASH_DIR = ".plainport-trash";
 
@@ -41,6 +48,18 @@ export interface ReleaseContext {
   log(level: "warn", message: string): void;
 }
 
+/** Records the released copy's snapshot as the project's base on this device: the next offload builds on it. */
+const recordBase = (rc: ReleaseContext, journal: OffloadJournal) =>
+  updateRegistry(rc.host, rc.paths, (registry) => {
+    const entry = registry.projects[journal.project.id];
+    if (entry === undefined) return ok(registry);
+    const { onloadedAt: _, ...rest } = entry;
+    return ok({
+      ...registry,
+      projects: { ...registry.projects, [journal.project.id]: { ...rest, base: journal.op } },
+    });
+  });
+
 export interface Released {
   trash: string;
   stub?: string;
@@ -64,6 +83,30 @@ export const releaseOffload = async (
 
   const toTrash = await saga.step("offload.release.trash", { trash });
   if (!toTrash.ok) return toTrash;
+  // The D51 guard, right before the rename: only the folder as it was verified is ever moved aside.
+  const same = await unchanged(io.fs, folder, journal.plan?.fingerprint ?? "");
+  if (!same.ok) return same;
+  if (!same.value) {
+    const based = await recordBase(rc, journal);
+    if (!based.ok) rc.log("warn", `registry.json was not updated: ${based.finding.message}`);
+    await saga.close();
+    return failWith(
+      finding("offload.diverged-after-commit", {
+        message: `${folder} changed after its offload was committed as snapshot ${op}, so it was kept and no stub was written; the snapshot holds the folder as it was verified, and the later edits are only here`,
+        fix: `keep working in the folder; the next offload (plainport offload ${shellWord(project.address)} --yes) takes the edits, on top of snapshot ${op}`,
+        paths: [folder],
+      }),
+      {
+        op,
+        exitCode: 8 as const,
+        project: project.address,
+        snapshot: op,
+        store: journal.store.name,
+        stored: journal.verified ?? "",
+      },
+      8,
+    );
+  }
   try {
     await io.fs.mkdirp(trash);
     await io.fs.rename(folder, join(trash, basename(folder)));
@@ -81,6 +124,7 @@ export const releaseOffload = async (
     }
     return writeFailed(error, `moving ${folder} into ${trash}`, true, folder);
   }
+  saga.after("offload.release.renamed");
   const moved = await saga.step("offload.release.moved");
   if (!moved.ok) return moved;
 
@@ -118,14 +162,11 @@ export const releaseOffload = async (
         }),
       );
     }
+    saga.after("offload.release.stub-placed");
   }
-  const updated = await updateRegistry(io, paths, (registry) => {
-    const entry = registry.projects[project.id];
-    if (entry === undefined) return ok(registry);
-    const { onloadedAt: _, ...rest } = entry;
-    return ok({ ...registry, projects: { ...registry.projects, [project.id]: { ...rest, base: op } } });
-  });
+  const updated = await recordBase(rc, journal);
   if (!updated.ok) rc.log("warn", `registry.json was not updated: ${updated.finding.message}`);
+  else saga.after("offload.release.registry-updated");
   const stubbed = await saga.step("offload.release.stub", stubPath === undefined ? {} : { stub: stubPath });
   if (!stubbed.ok) return stubbed;
 
@@ -137,8 +178,10 @@ export const releaseOffload = async (
   if (keepUntil === undefined) {
     // Deletes the trash, then the journal, after this command has returned (D47); recover repeats it if it never runs.
     const started = await io.deleteTrashDetached(trash, journalFile(paths, op));
-    if (started.ok) freed = true;
-    else
+    if (started.ok) {
+      freed = true;
+      saga.after("offload.release.detached");
+    } else
       rc.log(
         "warn",
         `the trash ${trash} is not being deleted yet (${started.finding.message}); plainport recover deletes it`,

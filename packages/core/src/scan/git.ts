@@ -186,6 +186,13 @@ const records = (bytes: Uint8Array, separator: number): string[] =>
     .filter((record) => record !== "");
 
 /**
+ * Asks the git fsmonitor daemon serving the repository at `repo` to stop (DESIGN.md "Edge cases", D52), through the
+ * same git call as every other (its real path, the ceiling above it, gitEnv). Whether git said it stopped.
+ */
+export const stopFsmonitor = async (host: HostPorts, repo: string, ctx: GitContext): Promise<boolean> =>
+  (await git(host, repo, ctx, ["fsmonitor--daemon", "stop"])).ok;
+
+/**
  * fs.unreadable for a path plainport needed to look at and could not. `blocked` is what to fix: a file that cannot
  * be read (u+r), or, by default, the folder holding the path, which cannot be searched when lstat itself fails
  * (u+rx).

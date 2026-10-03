@@ -16,6 +16,7 @@ import {
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fail, finding, ok, type Result, type StreamEvent } from "@plainport/contract";
+import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
@@ -210,6 +211,9 @@ const value = <T>(result: Result<T>): T => {
   return result.value;
 };
 
+/** A journal step, as opposed to an after-effect crash seam (D52). */
+const isStep = (step: string): boolean => (OFFLOAD_STEPS as readonly string[]).includes(step);
+
 const waitGone = async (path: string) => {
   for (let i = 0; i < 200 && existsSync(path); i++) await Bun.sleep(25);
 };
@@ -311,7 +315,7 @@ describe("offload: the happy path", () => {
       "release",
     ]);
     expect(phases.every((e) => e.op === result.op)).toBe(true);
-    expect(steps).toEqual(
+    expect(steps.filter(isStep)).toEqual(
       OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
     );
     await expectInvariants();
@@ -334,10 +338,10 @@ describe("offload: the happy path", () => {
       },
     });
     value(await runOffload(deps({}, host), { project: await ref() }));
-    expect(seen.map((s) => s.step)).toEqual(
+    expect(seen.map((s) => s.step).filter(isStep)).toEqual(
       OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
     );
-    for (const { step, journal } of seen) expect(journal).toBe(step);
+    for (const { step, journal } of seen.filter((s) => isStep(s.step))) expect(journal).toBe(step);
     await expectInvariants();
   });
 
@@ -1484,7 +1488,8 @@ describe("offload: fix wave r3 (D50)", () => {
         onStep: (step) => {
           capture(step);
           steps.push(step);
-          seen.set(step, journalNow());
+          // An after-effect seam (D52) finds the journal of the step before it; only steps are keyed here.
+          if (isStep(step)) seen.set(step, journalNow());
         },
       },
     });
@@ -1681,7 +1686,7 @@ describe("offload: fix wave r3 (D50)", () => {
     await expectInvariants();
   });
 
-  test("git's fsmonitor daemon is stopped with git kept inside the folder (D33, D34)", async () => {
+  test("git's fsmonitor daemon is stopped through gitEnv, before the plan's scan (D33, D34, D52)", async () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir], {
       env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
     });
@@ -1690,12 +1695,22 @@ describe("offload: fix wave r3 (D50)", () => {
     const server = createServer();
     await new Promise<void>((done) => server.listen(socket, done));
     try {
-      const real = testHost({ faults: { onStep: capture } });
+      let scanned = false;
+      let stopsBeforeScan = false;
+      const real = testHost({
+        faults: {
+          onStep: (step) => {
+            capture(step);
+            if (step === "offload.scan.done") scanned = true;
+          },
+        },
+      });
       const calls: { args: readonly string[]; env?: Record<string, string> }[] = [];
       const host: HostPorts = {
         ...real,
         run: (spec) => {
-          if (spec.command !== "git" || spec.args?.[0] !== "fsmonitor--daemon") return real.run(spec);
+          if (spec.command !== "git" || !spec.args?.includes("fsmonitor--daemon")) return real.run(spec);
+          stopsBeforeScan = !scanned;
           // The socket answers nothing, so the real stop is not run; what it would be given is recorded.
           calls.push({ args: spec.args, ...(spec.env === undefined ? {} : { env: spec.env }) });
           return real.run({ ...spec, command: "true", args: [] });
@@ -1719,10 +1734,14 @@ describe("offload: fix wave r3 (D50)", () => {
       };
       value(await runOffload(deps({ checks }, host), { project: await ref() }));
       expect(calls).toHaveLength(1);
+      // The one git path (gitEnv, D33, D34), and before the plan's scan (D52).
       expect(calls[0]?.env).toMatchObject({
         GIT_CONFIG_NOSYSTEM: "1",
+        GIT_OPTIONAL_LOCKS: "0",
         GIT_CEILING_DIRECTORIES: join(realpathSync(box.home), "work"),
       });
+      expect(calls[0]?.args.slice(-2)).toEqual(["fsmonitor--daemon", "stop"]);
+      expect(stopsBeforeScan).toBe(true);
     } finally {
       await new Promise<void>((done) => server.close(() => done()));
     }
@@ -1835,4 +1854,260 @@ describe("offload: fix wave r3 (D50)", () => {
     await expectUntouched();
     await expectInvariants();
   });
+});
+
+describe("offload: fix wave q1 (D52)", () => {
+  const journalStep = (): string | undefined => {
+    if (!existsSync(box.paths.journalDir)) return undefined;
+    const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    if (names.length !== 1) return undefined;
+    return OffloadJournalSchema.parse(
+      JSON.parse(readFileSync(join(box.paths.journalDir, names[0] as string), "utf8")),
+    ).step;
+  };
+  const gitRepo = (path: string) => {
+    const git = Bun.spawnSync(["git", "init", "-q", path], {
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(git.exitCode).toBe(0);
+  };
+
+  test("an edit in the commit window keeps the folder: offload.diverged-after-commit (8), no stub, the next offload takes it", async () => {
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.committed")
+            writeFileSync(join(dir, "src/new.ts"), "export const late = 1;\n");
+        },
+      },
+    });
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([
+      8,
+      "offload.diverged-after-commit",
+    ]);
+    const offloaded = (await storeEvents()).filter((e) => e.type === "offloaded");
+    expect(offloaded).toHaveLength(1);
+    expect(result.ok ? undefined : result.data).toMatchObject({
+      exitCode: 8,
+      snapshot: offloaded[0]?.snapshot,
+    });
+    expect(readFileSync(join(dir, "src/new.ts"), "utf8")).toBe("export const late = 1;\n");
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+    expect(
+      value(await readRegistry(testHost(), box.paths)).projects[(await projectId()) as string]?.base,
+    ).toBe(offloaded[0]?.snapshot);
+    await expectInvariants();
+    released = undefined;
+    value(await offload());
+    expect(existsSync(dir)).toBe(false);
+    await expectInvariants();
+  });
+
+  test("Ctrl-C after the commit stops before release: exit 130 from the saga, the journal stays for recover", async () => {
+    const controller = new AbortController();
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.committed") controller.abort();
+        },
+      },
+    });
+    const result = await runOffload(deps({ signal: controller.signal }, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([130, "operation.cancelled"]);
+    expect(result.ok ? "" : result.finding.message).toContain("committed");
+    expect(result.ok ? "" : result.finding.fix).toContain("plainport recover");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(journalStep()).toBe("offload.committed");
+    await expectInvariants();
+  });
+
+  test("Ctrl-C during the scan is operation.cancelled: nothing uploaded, the journal closed", async () => {
+    const controller = new AbortController();
+    const real = testHost({ faults: { onStep: capture } });
+    let scanning = false;
+    const host: HostPorts = {
+      ...real,
+      faultAt: (step) => {
+        real.faultAt(step);
+        if (step === "offload.preflight.done") scanning = true;
+      },
+      fs: {
+        ...real.fs,
+        readdir: async (path) => {
+          if (scanning && path.endsWith("/work/web/src")) controller.abort();
+          return real.fs.readdir(path);
+        },
+      },
+    };
+    const result = await runOffload(deps({ signal: controller.signal }, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([130, "operation.cancelled"]);
+    expect(engine.calls).toHaveLength(0);
+    await expectUntouched();
+    await expectInvariants();
+  });
+
+  test("a fault point follows every side effect, with the journal still at the step before it", async () => {
+    const after = saga.OFFLOAD_AFTER_EFFECT as Record<string, string>;
+    const seen: { point: string; journal: string | undefined }[] = [];
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step in after) seen.push({ point: step, journal: journalStep() });
+        },
+      },
+    });
+    value(await runOffload(deps({}, host), { project: await ref() }));
+    expect(seen).toEqual(
+      [
+        "offload.root-created",
+        "offload.commit.appended",
+        "offload.release.renamed",
+        "offload.release.stub-placed",
+        "offload.release.registry-updated",
+        "offload.release.detached",
+      ].map((point) => ({ point, journal: after[point] })),
+    );
+    await expectInvariants();
+  });
+
+  test("a crash right after the offloaded event lands leaves the journal at commit.start and the event on the store", async () => {
+    const host = testHost({ faults: { at: "offload.commit.appended", onStep: capture } });
+    await expect(runOffload(deps({}, host), { project: await ref() })).rejects.toBeInstanceOf(InjectedFault);
+    expect(journalStep()).toBe("offload.commit.start");
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
+  });
+
+  test("the discarded and fork branches have their own after-effect points", async () => {
+    const after = saga.OFFLOAD_AFTER_EFFECT as Record<string, string>;
+    const seen: string[] = [];
+    const host = () =>
+      testHost({
+        faults: {
+          onStep: (step) => {
+            capture(step);
+            if (step in after) seen.push(`${step}@${journalStep()}`);
+          },
+        },
+      });
+    engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/main.ts"), 0o000);
+    await runOffload(deps({}, host()), { project: await ref() });
+    chmodSync(join(dir, "src/main.ts"), 0o644);
+    expect(seen).toContain("offload.snapshot.discarded.appended@offload.snapshot.discarded");
+    const id = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    engine.hooks.duringSnapshot = async () => {
+      const s = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: s,
+          op: s,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: s,
+          stored: { ssd: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    await runOffload(deps({}, host()), { project: await ref() });
+    expect(seen).toContain("offload.diverged.appended@offload.diverged");
+    expect(Object.keys(saga.OFFLOAD_BRANCHES as object).length).toBeGreaterThan(0);
+    await expectInvariants();
+  });
+
+  test("two offloads of the same project at once: one runs, the other is project.locked (11)", async () => {
+    const results = await Promise.all([offload(), offload()]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    const refused = results.find((r) => !r.ok);
+    expect(refused?.ok ? 0 : [refused?.exitCode, refused?.finding.code]).toEqual([11, "project.locked"]);
+    expect(engine.calls).toHaveLength(1);
+    await expectInvariants();
+  });
+
+  const testOnMac = macOnlyTests();
+  testOnMac(
+    "running fsmonitor daemons, the root's and a nested repository's, are stopped before the plan's scan",
+    async () => {
+      gitRepo(dir);
+      const nested = join(dir, "vendor/lib");
+      box.file("work/web/vendor/lib/README.md", "lib\n");
+      gitRepo(nested);
+      const gitEnv = { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" };
+      // lsof does not find a socket by its path, so the daemons are the ones that appear while they start.
+      const daemons = () =>
+        new Set(
+          Bun.spawnSync(["/usr/bin/pgrep", "-f", "fsmonitor--daemon run"], { env: gitEnv })
+            .stdout.toString()
+            .split("\n")
+            .filter(Boolean)
+            .map(Number),
+        );
+      const pids: number[] = [];
+      for (const repo of [dir, nested]) {
+        const known = daemons();
+        const started = Bun.spawnSync(["git", "fsmonitor--daemon", "start"], { cwd: repo, env: gitEnv });
+        expect(started.exitCode).toBe(0);
+        pids.push(...[...daemons()].filter((pid) => !known.has(pid)));
+      }
+      const sockets = [dir, nested].map((repo) => join(repo, ".git", "fsmonitor--daemon.ipc"));
+      for (let i = 0; i < 200 && !sockets.every(existsSync); i++) await Bun.sleep(25);
+      expect(pids).toHaveLength(2);
+      expect(pids.every((p) => Number.isInteger(p) && p > 1)).toBe(true);
+      try {
+        const checks = {
+          ...quietChecks,
+          processesUsing: async (folder: string) =>
+            ok(
+              sockets
+                .map((socket, i) => ({
+                  pid: pids[i] as number,
+                  ppid: 1,
+                  ancestor: false,
+                  command: "git",
+                  args: "git fsmonitor--daemon run --detach --ipc-threads=8",
+                  cwd: false,
+                  files: [socket],
+                  fileCount: 1,
+                }))
+                .filter((use) => existsSync(use.files[0] as string) && folder === dir),
+            ),
+        };
+        const result = await runOffload(deps({ checks }), { project: await ref() });
+        expect(result.ok ? "ok" : result.finding.code).toBe("ok");
+        for (const pid of pids) {
+          let alive = true;
+          for (let i = 0; i < 200 && alive; i++) {
+            try {
+              process.kill(pid, 0);
+              await Bun.sleep(25);
+            } catch {
+              alive = false;
+            }
+          }
+          expect({ pid, alive }).toEqual({ pid, alive: false });
+        }
+      } finally {
+        // Only a daemon's own pid: 0 or a negative number would signal this test's process group.
+        for (const pid of pids.filter((p) => Number.isInteger(p) && p > 1)) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+      }
+      await expectInvariants();
+    },
+    30_000,
+  );
 });
