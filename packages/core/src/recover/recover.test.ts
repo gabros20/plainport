@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { fail, finding, type Result } from "@plainport/contract";
+import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
@@ -44,6 +44,7 @@ import {
 } from "../saga/offload.ts";
 import { ONLOAD_AFTER_EFFECT, ONLOAD_STEPS, type OnloadDeps, runOnload } from "../saga/onload.ts";
 import { releaseOffload } from "../saga/release.ts";
+import { projectViews, type ViewDeps } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
@@ -945,5 +946,195 @@ describe("housekeeping at the start of a command (D59)", () => {
 
   test("nothing open: nothing done, nothing said", async () => {
     expect(await housekeeping(trashDeps())).toEqual({ started: [], notices: [] });
+  });
+});
+
+describe("status and ls views: every end state the sagas leave", () => {
+  const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
+    io: testHost(),
+    paths: box.paths,
+    env: env(),
+    device,
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: async () => ({ ok: true, value: mirror }),
+    ...over,
+  });
+  const web = async (over: Partial<ViewDeps> = {}) => {
+    const views = value(await projectViews(viewDeps(over)));
+    const view = views.projects.find((p) => p.address === "work:web");
+    if (view === undefined) throw new Error(`no view of work:web in ${JSON.stringify(views)}`);
+    return view;
+  };
+  const unreachableOpener: StoreOpener = {
+    open: async () => {
+      const gone = fail(finding("store.unreachable", { message: "the disk is not mounted" }));
+      return {
+        ok: true,
+        value: {
+          blob: { ...store, get: async () => gone, stat: async () => gone, list: async () => gone },
+          engine,
+        },
+      };
+    },
+  };
+  const registerWeb = async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try fails" })),
+    };
+    expect((await offloadNow()).ok).toBe(false);
+  };
+
+  test("local: a registered project here, never offloaded", async () => {
+    await registerWeb();
+    const view = await web();
+    expect([view.state, view.conditions, view.here, view.head]).toEqual(["local", [], true, null]);
+    expect(view.dir).toBe(dir);
+  });
+
+  test("shelved: offloaded, stub here, the head and its size", async () => {
+    const done = value(await offloadNow());
+    const view = await web();
+    expect([view.state, view.here, view.stub, view.head]).toEqual([
+      "shelved",
+      false,
+      `${dir}.plainport`,
+      done.snapshot,
+    ]);
+    expect(view.bytes).toBeGreaterThan(0);
+    expect(view.snapshots).toBe(1);
+    expect(view.stale).toBe(false);
+  });
+
+  test("conflicted: a fork in the catalog", async () => {
+    await registerWeb();
+    const id = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    value(await offloadNow().then(() => ok(undefined)));
+    for (const s of [ulid(), ulid()])
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: s,
+          op: s,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: s,
+          stored: { ssd: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    expect((await web()).state).toBe("conflicted");
+  });
+
+  test("restored-unhydrated: onloaded without its dependencies, and local once they are", async () => {
+    value(await offloadNow());
+    for (let i = 0; i < 400 && (await journals()).length > 0; i++) await Bun.sleep(25);
+    value(await runOnload(onloadDeps(testHost()), { project: await ref(), hydrate: false }));
+    const view = await web();
+    expect([view.state, view.here, view.stub]).toEqual(["restored-unhydrated", true, undefined]);
+    expect(view.lease).toMatchObject({ device: device.id, here: true });
+  });
+
+  test("incomplete: the catalog names a snapshot it does not hold", async () => {
+    value(await offloadNow());
+    const id = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    const s = ulid();
+    value(
+      await appendEvent(storeEventLog(store), {
+        v: 1,
+        id: s,
+        op: s,
+        type: "offloaded",
+        device: ulid(),
+        at: "2026-10-02T00:00:00.000Z",
+        project: id,
+        root: rootId,
+        path: "web",
+        base: ulid(),
+        snapshot: s,
+        stored: { ssd: "c".repeat(64) },
+        stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+      }),
+    );
+    const view = await web();
+    expect(view.conditions).toContain("incomplete");
+    expect(view.head).toBeNull();
+  });
+
+  test("diverged-after-commit: committed, the folder kept with an edit, no stub", async () => {
+    await crashOffloadAt("offload.committed");
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    await recover(recoverDeps());
+    const view = await web();
+    expect([view.state, view.conditions, view.here, view.stub]).toEqual([
+      "local",
+      ["diverged-after-commit"],
+      true,
+      undefined,
+    ]);
+  });
+
+  test("offloading, interrupted: an open journal, its step and plainport recover", async () => {
+    await crashOffloadAt("offload.committed");
+    await rewrite({ ...onlyJournal<OffloadJournal>(), pid: 99_999_999 });
+    const view = await web();
+    expect([view.state, view.conditions, view.journal?.step]).toEqual([
+      "offloading",
+      ["interrupted"],
+      "offload.committed",
+    ]);
+  });
+
+  test("unavailable: the root's volume is not mounted", async () => {
+    value(await offloadNow());
+    const absent = `/Volumes/plainport-test-absent-${ulid().toLowerCase()}`;
+    box.file(
+      ".config/plainport/config.toml",
+      readFileSync(join(box.home, ".config/plainport/config.toml"), "utf8").replace(
+        'on = { mbp = "~/work" }',
+        `on = { mbp = "${absent}/work" }`,
+      ),
+    );
+    const view = await web();
+    expect([view.state, view.here]).toEqual(["unavailable", false]);
+    expect(view.head).not.toBeNull();
+  });
+
+  test("stale and never synced: an unreachable store reads the mirror", async () => {
+    value(await offloadNow());
+    await web();
+    const stale = await web({ opener: unreachableOpener });
+    expect([stale.state, stale.stale, stale.conditions]).toEqual(["shelved", true, ["stale"]]);
+    expect(stale.syncedAt).toBeDefined();
+    expect(stale.head).not.toBeNull();
+    // A device that never reached the store: an empty mirror.
+    const empty = memoryBlobStore({ createIfAbsent: true });
+    const never = await web({
+      opener: unreachableOpener,
+      openMirror: async () => ({ ok: true, value: empty }),
+    });
+    expect([never.state, never.stale, never.syncedAt, never.conditions]).toEqual([
+      "shelved",
+      true,
+      undefined,
+      ["never-synced"],
+    ]);
+  });
+
+  test("a project offloaded from another device, never here: shelved, listed by its catalog address", async () => {
+    value(await offloadNow());
+    const id = (await projectId()) as string;
+    // This device forgets it: the registry entry and the stub go.
+    const registry = value(await readRegistry(testHost(), box.paths));
+    const { [id]: _, ...rest } = registry.projects;
+    writeFileSync(box.paths.registryFile, JSON.stringify({ ...registry, projects: rest }));
+    const view = await web();
+    expect([view.id, view.state]).toEqual([id, "shelved"]);
   });
 });
