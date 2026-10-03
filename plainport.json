@@ -783,12 +783,17 @@
                       },
                       "deleting": {
                         "type": "boolean"
+                      },
+                      "due": {
+                        "type": "boolean",
+                        "description": "Past its keepUntil (or none): gc deletes it when nothing is deleting it"
                       }
                     },
                     "required": [
                       "op",
                       "path",
-                      "deleting"
+                      "deleting",
+                      "due"
                     ],
                     "additionalProperties": {}
                   },
@@ -1260,12 +1265,17 @@
                 },
                 "deleting": {
                   "type": "boolean"
+                },
+                "due": {
+                  "type": "boolean",
+                  "description": "Past its keepUntil (or none): gc deletes it when nothing is deleting it"
                 }
               },
               "required": [
                 "op",
                 "path",
-                "deleting"
+                "deleting",
+                "due"
               ],
               "additionalProperties": {}
             },
@@ -2998,7 +3008,7 @@
           "unreadable"
         ],
         "additionalProperties": {},
-        "description": "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 1"
+        "description": "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 10, 4, 3, 2, 1"
       },
       "plan": null,
       "examples": [

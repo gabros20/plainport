@@ -129,7 +129,7 @@ export type ProjectStatus = {
   /** Every open journal of it, oldest first (the order recover settles them in). */
   journals: JournalView[];
   /** Released offloads' trash awaiting deletion: until keepUntil, or while its detached delete runs (D64). */
-  trash: { op: string; path: string; keepUntil?: string; deleting: boolean }[];
+  trash: { op: string; path: string; keepUntil?: string; deleting: boolean; due: boolean }[];
   /** Journals this version cannot read that name it, or name no project (journal-unreadable). */
   unreadableJournals?: string[];
   /** What to do next, when anything is to be done. */
@@ -150,7 +150,15 @@ export type StoreView = {
 };
 
 /** A project as the registry and catalogs name it, before its view is built: what a name is matched against. */
-export type KnownProject = { id: string; address: string; root: string; path: string; dir?: string };
+export type KnownProject = {
+  id: string;
+  address: string;
+  root: string;
+  path: string;
+  dir?: string;
+  /** Its stub, when one is here: restore reads the store it names. */
+  stub?: string;
+};
 
 /** What a project's view includes beyond its state: its folder's size (ls), its local planning (status). */
 export type ViewOptions = { sizes?: boolean; detail?: boolean };
@@ -285,7 +293,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       if (root.key !== null && !keyOf.has(rootId)) keyOf.set(rootId, root.key);
   for (const [key, rootId] of Object.entries(registry.value.roots ?? {})) keyOf.set(rootId, key);
 
-  const skip = new Set((deps.plugins ?? []).flatMap((plugin) => plugin.dependencyFolders ?? []));
+  // Sizing never walks a plugin's dependency folders, nor git's own (a repository's history is not the project's size).
+  const skip = new Set([".git", ...(deps.plugins ?? []).flatMap((plugin) => plugin.dependencyFolders ?? [])]);
   const ids = new Set<string>(Object.keys(registry.value.projects));
   for (const read of reads) for (const id of Object.keys(read.state.projects)) ids.add(id);
   /** Each project's registry entry, catalog and store read, by id: what its view is built from. */
@@ -304,8 +313,19 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     const path = entry?.path ?? catalog?.path ?? "";
     const rootPath = roots.get(root)?.path;
     const dir = entry?.override ?? (rootPath === undefined ? undefined : join(rootPath, ...path.split("/")));
+    const stub =
+      dir !== undefined && (await kindAt(io, `${dir}${STUB_SUFFIX}`)) === "file"
+        ? `${dir}${STUB_SUFFIX}`
+        : undefined;
     sources.set(id, {
-      known: { id, address: `${root}:${path}`, root, path, ...(dir === undefined ? {} : { dir }) },
+      known: {
+        id,
+        address: `${root}:${path}`,
+        root,
+        path,
+        ...(dir === undefined ? {} : { dir }),
+        ...(stub === undefined ? {} : { stub }),
+      },
       ...(entry === undefined ? {} : { entry }),
       ...(catalog === undefined ? {} : { catalog }),
       ...(found === undefined ? {} : { read: found }),
@@ -338,13 +358,9 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     options: ViewOptions,
   ): Promise<ProjectStatus> {
     const { known: project, entry, catalog, read } = source;
-    const { id, root, path, dir } = project;
+    const { id, root, path, dir, stub } = project;
     const rootView = roots.get(root);
     const here = dir !== undefined && (await kindAt(io, dir)) === "dir";
-    const stub =
-      dir !== undefined && (await kindAt(io, `${dir}${STUB_SUFFIX}`)) === "file"
-        ? `${dir}${STUB_SUFFIX}`
-        : undefined;
     const journals: JournalView[] = [];
     for (const j of open.filter(holdsProjectBack))
       journals.push({ op: j.op, kind: j.kind, step: j.step, running: await operationRunning(io, paths, j) });
@@ -448,7 +464,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         op: j.op,
         path: at,
         ...(j.keepUntil === undefined ? {} : { keepUntil: j.keepUntil }),
-        deleting: (await claimedReason(io, at)) !== undefined,
+        deleting: (await claimedReason(io, at, device.id)) !== undefined,
+        due: j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime(),
       });
     }
 
@@ -551,6 +568,8 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
       command: `plainport resolve ${address}`,
       reason: `the catalog holds a fork (M2); plainport restore ${address} --snapshot <id> --to <path> reads either copy`,
     };
+  if (p.trash.some((t) => t.due && !t.deleting))
+    return { command: "plainport gc", reason: "a released trash is due and nothing is deleting it" };
   if (p.state === "restored-unhydrated")
     return { command: `plainport hydrate ${address}`, reason: "its dependencies are not installed" };
   if (p.state === "shelved") return { command: `plainport onload ${address}`, reason: "it is offloaded" };

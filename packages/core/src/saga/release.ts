@@ -17,6 +17,7 @@
 
 import { basename, dirname, join } from "node:path";
 import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { readDevice } from "../device.ts";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -304,7 +305,17 @@ export const releaseOffload = async (
   let freed = false;
   if (keepUntil === undefined) {
     // Deletes the trash, then the journal, after this command has returned (D47); recover repeats it if it never runs.
-    const started = await io.deleteTrashDetached(trash, journalFile(paths, op));
+    // The claim it writes first names this device (D64).
+    const self = await readDevice(io, paths);
+    const started =
+      self.ok && self.value !== undefined
+        ? await io.deleteTrashDetached(trash, journalFile(paths, op), self.value.id)
+        : fail(
+            finding("device.none", {
+              message: "this device's identity could not be read, so its trash cannot be claimed",
+              fix: "plainport gc",
+            }),
+          );
     if (started.ok) {
       freed = true;
       saga.after("offload.release.detached");

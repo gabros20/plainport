@@ -79,6 +79,9 @@ export const ProjectStatusSchema = z
           path: z.string(),
           keepUntil: z.string().optional(),
           deleting: z.boolean(),
+          due: z
+            .boolean()
+            .meta({ description: "Past its keepUntil (or none): gc deletes it when nothing is deleting it" }),
         }),
       )
       .meta({

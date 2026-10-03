@@ -145,10 +145,13 @@ export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => 
     systemErrorCode(error);
     if (await stillThere(io, trash)) throw error;
   }
-  try {
-    await io.fs.unlink(trashClaimFile(trash));
-  } catch (error) {
-    if (systemErrorCode(error) !== "ENOENT") throw error;
+  // The claim, and a temporary one a delete killed while claiming left behind.
+  for (const file of [trashClaimFile(trash), `${trashClaimFile(trash)}.tmp`]) {
+    try {
+      await io.fs.unlink(file);
+    } catch (error) {
+      if (systemErrorCode(error) !== "ENOENT") throw error;
+    }
   }
 };
 
@@ -162,11 +165,21 @@ const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
   }
 };
 
-/** Why a trash is left now: a live detached delete claims it (D64). */
-export const claimedReason = async (io: LocalIo, trash: string): Promise<string | undefined> => {
-  const claimed = await trashClaim(io, trash);
+/** This device's id, which a trash claim names (D64); empty when it cannot be read, so no claim is this device's. */
+const thisDeviceId = async (io: LocalIo, paths: PlainportPaths): Promise<string> => {
+  const read = await readDevice(io, paths);
+  return read.ok && read.value !== undefined ? read.value.id : "";
+};
+
+/** Why a trash is left now: a live detached delete of this device claims it (D64). */
+export const claimedReason = async (
+  io: LocalIo,
+  trash: string,
+  device: string,
+): Promise<string | undefined> => {
+  const claimed = await trashClaim(io, trash, device);
   if (claimed.state !== "live") return undefined;
-  return `its detached delete (process ${claimed.claim?.pid} on ${claimed.claim?.host}, since ${claimed.claim?.startedAt}) is deleting it`;
+  return `its detached delete (process ${claimed.claim?.pid}, since ${claimed.claim?.startedAt}, claim ${trashClaimFile(trash)}) is deleting it`;
 };
 
 /** The onload journals renaming a released offload's trash back, by that offload's op. */
@@ -218,6 +231,7 @@ export const collectTrash = async (
     staging: [],
     stagingKept: [],
   };
+  const self = await thisDeviceId(io, paths);
   let problem: Failure | undefined;
   for (const journal of read.journals.filter(released)) {
     const item = itemOf(journal);
@@ -256,7 +270,7 @@ export const collectTrash = async (
         }
         const trash = itemOf(now).trash;
         // One deleter at a time (D64): a live detached delete's trash is its own.
-        const deleting = await claimedReason(io, trash);
+        const deleting = await claimedReason(io, trash, self);
         if (deleting !== undefined) {
           report.kept.push({ ...itemOf(now), reason: deleting });
           return ok(undefined);
@@ -466,6 +480,7 @@ export const housekeeping = async (
   }
   const journals = read.journals;
   const reused = renamedBack(journals);
+  const self = await thisDeviceId(io, paths);
   for (const journal of journals) {
     if (holdsProjectBack(journal)) {
       // One a live plainport on this host is still running (it holds the project's lock) is not interrupted.
@@ -475,8 +490,18 @@ export const housekeeping = async (
         );
       continue;
     }
-    if (!options.deleteDue || !released(journal) || journal.keepUntil === undefined) continue;
-    if (Date.parse(journal.keepUntil) > clock().getTime() || reused.has(journal.op)) continue;
+    if (!released(journal) || reused.has(journal.op)) continue;
+    const due = journal.keepUntil === undefined || Date.parse(journal.keepUntil) <= clock().getTime();
+    if (!due) continue;
+    // A due trash that housekeeping does not hand on now, and that no live delete claims (one that crashed before its
+    // claim, or could not write it): only gc deletes it, so say so.
+    if (!options.deleteDue || journal.keepUntil === undefined) {
+      if ((await claimedReason(io, itemOf(journal).trash, self)) === undefined)
+        done.notices.push(
+          `the trash ${itemOf(journal).trash} of ${journal.project.address}'s offload ${journal.op} is due and nothing is deleting it; plainport gc deletes it`,
+        );
+      continue;
+    }
     const gate = { io, paths, clock, log: deps.log };
     const started = await withProjectLock(
       gate,
@@ -496,7 +521,7 @@ export const housekeeping = async (
         const away = await rootAway(io, now);
         if (away !== undefined) return away;
         // A live deleter's already (D64); a dead one's is taken over by the new detached delete's claim.
-        if ((await claimedReason(io, itemOf(now).trash)) !== undefined) return ok(undefined);
+        if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
         // Without a deadline the trash is no longer renamed back by an onload (it may be being deleted).
         const { keepUntil: _, ...rest } = now;
         try {
@@ -505,7 +530,7 @@ export const housekeeping = async (
           return writeFailed(error, `writing the journal of ${now.op}`, true, journalFile(paths, now.op));
         }
         const item = itemOf(now);
-        const detached = await host.deleteTrashDetached(item.trash, journalFile(paths, now.op));
+        const detached = await host.deleteTrashDetached(item.trash, journalFile(paths, now.op), self);
         if (!detached.ok) return detached;
         done.started.push(item);
         return ok(undefined);

@@ -1,9 +1,10 @@
 // A released trash has one deleter at a time (D64): the detached delete (spawner.ts posixDeleteTrash) first writes
-// `<root>/.plainport-trash/<op>.claim` (its pid, host, this host's boot time and when it started), then deletes the
-// trash, the claim and the journal, in that order. housekeeping, gc and recover leave a trash whose claim belongs to a
-// live process alone, and take it over (deleting the claim with it) only from one that is gone: another host's claim
-// cannot be checked and counts as live, a claim from before this host's last boot or of a dead pid is gone, and a
-// claim that cannot be read is taken over (the trash is committed and released, so two deleters lose no work).
+// `<root>/.plainport-trash/<op>.claim` (this device's id, its pid, this host's boot time and when it started), then
+// deletes the trash, the claim and the journal, in that order. housekeeping, gc and recover leave a trash alone only
+// while its claim is live: this device's, from this boot, and its pid alive. Anything else is gone and taken over,
+// claim included: another device id (journals are per device, so only this device's delete can claim its trash), an
+// earlier boot, a dead pid, a claim that cannot be read (the trash is committed and released, so a takeover loses no
+// work). A pid reused within one boot keeps a claim live while that process lives (as D63).
 
 import { z } from "zod";
 import { type LocalIo, systemErrorCode } from "./io.ts";
@@ -11,8 +12,9 @@ import { type LocalIo, systemErrorCode } from "./io.ts";
 export const TrashClaimSchema = z
   .strictObject({
     v: z.literal(1),
+    /** This device's id (device.json), which a hostname change does not move. */
+    device: z.string().min(1),
     pid: z.int().positive(),
-    host: z.string().min(1),
     /** This host's boot time when the claim was written, in epoch milliseconds. */
     bootedAt: z.number(),
     startedAt: z.iso.datetime(),
@@ -29,10 +31,11 @@ export const trashClaimFile = (trash: string): string => `${trash}.claim`;
 /** Boot times computed at different moments differ by the clock's drift against uptime; a reboot moves it far more. */
 const SAME_BOOT_MS = 120_000;
 
-/** Whether the trash is claimed by a live deleter: `live`, `gone` (taken over), or `none`. */
+/** Whether the trash is claimed by a live deleter on this device: `live`, `gone` (taken over), or `none`. */
 export const trashClaim = async (
   io: LocalIo,
   trash: string,
+  device: string,
 ): Promise<{ state: "none" | "live" | "gone"; claim?: TrashClaim }> => {
   let text: string;
   try {
@@ -49,7 +52,7 @@ export const trashClaim = async (
   } catch {
     return { state: "gone" };
   }
-  if (claim.host !== io.proc.hostname()) return { state: "live", claim };
+  if (claim.device !== device) return { state: "gone", claim };
   if (Math.abs(claim.bootedAt - io.proc.bootedAtMs()) > SAME_BOOT_MS) return { state: "gone", claim };
   return { state: (await io.proc.isAlive(claim.pid)) ? "live" : "gone", claim };
 };

@@ -508,6 +508,7 @@ describe("status and ls: fix wave q1 (lazy views, the view model in core)", () =
         path: expect.stringContaining(".plainport-trash"),
         keepUntil: expect.any(String),
         deleting: false,
+        due: false,
       },
     ]);
     await cli(["root", "scan", "work"]);
@@ -529,5 +530,38 @@ describe("status and ls: fix wave q1 (lazy views, the view model in core)", () =
       { condition: "interrupted", message: expect.stringContaining("offload.committed") },
     ]);
     expect(open.next).toEqual({ command: "plainport recover", reason: expect.any(String) });
+  });
+});
+
+describe("status, ls and restore: fix wave q2", () => {
+  test("restore by name uses the store its stub names (the resolver keeps the stub)", async () => {
+    await offloaded("work:api");
+    const stub = `${join(box.home, "work/api")}.plainport`;
+    writeFileSync(stub, JSON.stringify({ ...JSON.parse(readFileSync(stub, "utf8")), store: "elsewhere" }));
+    const run = await cli(["restore", "api", "--to", "~/old/api"]);
+    expect(run.code).not.toBe(0);
+    expect(run.err).toContain("elsewhere");
+    expect(existsSync(join(box.home, "old/api"))).toBe(false);
+  });
+
+  test("ls never walks a .git folder to size a project", async () => {
+    for (let i = 0; i < 20; i++) box.file(`work/web/.git/objects/o${i}`, "x".repeat(1000));
+    await cli(["root", "scan", "work"]);
+    const listed: string[] = [];
+    const base = ports();
+    const fs = {
+      ...base.io.fs,
+      entries: (p: string) => {
+        listed.push(p);
+        return base.io.fs.entries(p);
+      },
+    };
+    const run = await capture(["ls", "--json"], REGISTRY, {
+      ports: { ...base, io: { ...base.io, fs } } as Ports,
+    });
+    expect(run.code).toBe(0);
+    expect(listed.filter((p) => p.includes("/.git"))).toEqual([]);
+    const web = data("ls", run.out).projects.find((p: { address: string }) => p.address === "work:web");
+    expect(web.bytes).toBeLessThan(1000);
   });
 });

@@ -60,6 +60,7 @@ import { ulid } from "../ulid.ts";
 import {
   OFFLOAD_RECOVERY,
   ONLOAD_RECOVERY,
+  RECOVER_EXIT_ORDER,
   RECOVERY_RULE_OUTCOMES,
   type RecoverDeps,
   type RecoveryReport,
@@ -992,10 +993,10 @@ describe("housekeeping at the start of a command (D59)", () => {
     value(await offloadNow());
     const [journal] = (await journals()) as OffloadJournal[];
     const later = new Date(Date.parse(journal?.keepUntil as string) + 1000);
-    expect(await housekeeping(trashDeps({ now: () => later }), { deleteDue: false })).toEqual({
-      started: [],
-      notices: [],
-    });
+    // Nothing deletes it now, so the notice names plainport gc (D64 revised).
+    const done = await housekeeping(trashDeps({ now: () => later }), { deleteDue: false });
+    expect(done.started).toEqual([]);
+    expect(done.notices).toEqual([expect.stringContaining("plainport gc")]);
     await Bun.sleep(100);
     expect(trashes()).toHaveLength(1);
     expect(await journals()).toEqual([journal as OffloadJournal]);
@@ -2068,7 +2069,7 @@ describe("fix wave q1: one deleter per trash, by its claim (D64)", () => {
           JSON.stringify({
             v: 1,
             pid: process.pid,
-            host: real.proc.hostname(),
+            device: device.id,
             bootedAt: real.proc.bootedAtMs(),
             startedAt: new Date().toISOString(),
           }),
@@ -2138,7 +2139,7 @@ describe("fix wave q1: one deleter per trash, by its claim (D64)", () => {
       JSON.stringify({
         v: 1,
         pid: 99_999_999,
-        host: testHost().proc.hostname(),
+        device: device.id,
         bootedAt: testHost().proc.bootedAtMs(),
         startedAt: new Date().toISOString(),
       }),
@@ -2148,5 +2149,85 @@ describe("fix wave q1: one deleter per trash, by its claim (D64)", () => {
     expect(trashes()).toEqual([]);
     expect(await journals()).toEqual([]);
     await expectInvariants();
+  });
+});
+
+describe("fix wave q2: claim edges, the notice for unclaimed due trash, the exit order (D64 revised)", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  /** A released trash with no deadline and no claim: housekeeping dropped keepUntil, then crashed before the spawn. */
+  const unclaimed = async (): Promise<OffloadJournal> => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const { keepUntil: _k, ...rest } = journal as OffloadJournal;
+    await rewrite(rest);
+    return rest as OffloadJournal;
+  };
+
+  test("a due trash nothing claims (a crash before the claim) is named with plainport gc, in the notice and the view; gc deletes it", async () => {
+    const journal = await unclaimed();
+    const notices = (await housekeeping(trashDeps(), { deleteDue: false })).notices;
+    expect(notices.some((n) => n.includes(journal.trash as string) && n.includes("plainport gc"))).toBe(true);
+    const views = value(
+      await projectViews({
+        io: testHost(),
+        paths: box.paths,
+        env: env(),
+        device,
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+      }),
+    );
+    const web = views.projects.find((p) => p.id === journal.project.id);
+    expect(web?.trash.map((t) => [t.deleting, t.due])).toEqual([[false, true]]);
+    expect(web?.next?.command).toBe("plainport gc");
+    expect(value(await collectTrash(trashDeps(), { early: false })).deleted).toHaveLength(1);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("a stray claim tmp file (a delete killed while claiming) goes with the trash", async () => {
+    const journal = await unclaimed();
+    writeFileSync(`${journal.trash}.claim.tmp`, '{"v":1,"pid":');
+    expect(value(await collectTrash(trashDeps(), { early: false })).deleted).toHaveLength(1);
+    expect(trashes()).toEqual([]);
+  });
+
+  const claimOf = (trash: string, over: Record<string, unknown> = {}) =>
+    writeFileSync(
+      `${trash}.claim`,
+      JSON.stringify({
+        v: 1,
+        device: device.id,
+        pid: process.pid,
+        bootedAt: testHost().proc.bootedAtMs(),
+        startedAt: new Date().toISOString(),
+        ...over,
+      }),
+    );
+  for (const [name, over] of [
+    ["another device id", { device: ulid() }],
+    ["an earlier boot", { bootedAt: Date.now() - 400 * 86_400_000 }],
+    ["a dead pid", { pid: 99_999_999 }],
+  ] as const) {
+    test(`a claim with ${name} is taken over: gc deletes the trash and the claim`, async () => {
+      const journal = await unclaimed();
+      claimOf(journal.trash as string, over);
+      expect(value(await collectTrash(trashDeps(), { early: false })).deleted).toHaveLength(1);
+      expect(trashes()).toEqual([]);
+      await expectInvariants();
+    });
+  }
+
+  test("gc's reason for a live claim names the claim file", async () => {
+    const journal = await unclaimed();
+    claimOf(journal.trash as string);
+    const kept = value(await collectTrash(trashDeps(), { early: false })).kept;
+    expect(kept[0]?.reason).toContain(`${journal.trash}.claim`);
+  });
+
+  test("recover's exit order is D64's: 130, then 8, 7, 6, 11, 9, 5, 10, 4, 3, 2, 1", () => {
+    expect(RECOVER_EXIT_ORDER).toEqual([130, 8, 7, 6, 11, 9, 5, 10, 4, 3, 2, 1]);
   });
 });

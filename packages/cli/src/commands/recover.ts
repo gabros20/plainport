@@ -73,7 +73,7 @@ export const recover = defineCommand({
     })
     .meta({
       description:
-        "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 1",
+        "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 10, 4, 3, 2, 1",
     }),
   examples: [{ argv: ["recover"], summary: "Settle whatever was interrupted on this device" }],
   human: (data) =>

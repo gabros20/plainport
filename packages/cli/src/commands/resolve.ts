@@ -65,6 +65,7 @@ const refOf = (known: KnownProject): ProjectRef => ({
   path: known.path,
   id: known.id,
   ...(known.dir === undefined ? {} : { dir: known.dir }),
+  ...(known.stub === undefined ? {} : { stub: known.stub }),
   match: "address",
 });
 

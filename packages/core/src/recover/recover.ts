@@ -223,14 +223,14 @@ const onloadRule = (step: string): OnloadRule | undefined =>
   Object.hasOwn(ONLOAD_RECOVERY, step) ? ONLOAD_RECOVERY[step as OnloadStep] : undefined;
 
 /**
- * Exit codes from the most severe down (D64): a kept folder with the user's edits or a conflict first, then a refusal,
- * a pending journal, a held lock, a store that did not answer, a config problem, an unexpected failure. A cancel
- * (130) outranks them all: the person stopped recover, and running it again reports the rest.
+ * Exit codes from the most severe down (D64 revised): a kept folder with the user's edits or a conflict first (8), then
+ * 7, a pending journal (6), a held lock (11), a store that did not answer (9), 5, 10, 4, 3, 2, an unexpected failure
+ * (1). A cancel (130, D65) outranks them all: the person stopped recover, and running it again reports the rest.
  */
-const SEVERITY = [130, 8, 7, 6, 11, 9, 5, 1];
+export const RECOVER_EXIT_ORDER: readonly number[] = [130, 8, 7, 6, 11, 9, 5, 10, 4, 3, 2, 1];
 const severity = (code: number): number => {
-  const at = SEVERITY.indexOf(code);
-  return at === -1 ? SEVERITY.length : at;
+  const at = RECOVER_EXIT_ORDER.indexOf(code);
+  return at === -1 ? RECOVER_EXIT_ORDER.length : at;
 };
 
 /** One operation's settlement, and the failure behind it when it is not settled (its exit code). */
@@ -853,7 +853,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       return { op: { ...entry(journal, "trash-kept", state), trash, keepUntil: journal.keepUntil } };
     }
     // One deleter at a time (D64): a live detached delete finishes it, journal included.
-    const deleting = await claimedReason(io, trash);
+    const deleting = await claimedReason(io, trash, deps.device.id);
     if (deleting !== undefined) {
       deps.log("info", `the trash ${trash} is left: ${deleting}`);
       return { op: { ...entry(journal, "trash-kept", state), trash } };
