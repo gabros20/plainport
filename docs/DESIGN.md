@@ -326,7 +326,7 @@ A root is a named folder of projects, such as `work` or `personal`, and each dev
 
 **Setting roots up**
 
-- **At `plainport init`:** plainport scans likely folders (`~/work`, `~/Developer`, `~/Projects`, `~/code`) for git repositories and shows each candidate with its project count and size. You pick them, name them and give each a default store. Flags skip the prompts: `plainport init --root work=~/work --root personal=~/personal`.
+- **At `plainport init`:** plainport scans likely folders (`~/work`, `~/Developer`, `~/Projects`, `~/code`) for git repositories and shows each candidate with its project count and size. You pick them, name them and give each a default store. Flags skip the prompts: `plainport init --root work=~/work --root personal=~/personal --store-path /Volumes/Archive/plainport --device mbp`. `--store-path` records a local store, named by `--store` (default `local`); `--device` names this device (default: its host name). Without a TTY, init never prompts, and a missing answer exits 2 naming the flags to pass.
 - **At pairing** (`plainport device add mini`): plainport asks for the mini's path for each root, proposes one, checks it is writable and can create it. A root can stay unbound on a device.
 - **From the CLI, any time:** `plainport root add | bind | unbind | rename | scan | list`, plus `plainport mv <project> <root>:<path>` to re-file a project. `bind --device mini` runs on the mini over SSH.
 - **In the file:** roots live in the shared config with one path per device under `on`, so a dotfiles repo can describe every machine.
@@ -505,8 +505,8 @@ Event files are written create-only where the store can do it (exclusive create 
 | --- | --- |
 | `~/.config/plainport/config.toml` | Your settings: devices, stores, roots, defaults, trusted hooks. plainport never rewrites it |
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
-| `~/.local/state/plainport/device.json` | This device's ULID, role and public keys; private keys stay in Keychain or the Secure Enclave |
-| `~/.local/state/plainport/registry.json` | Project ULID → local path (root binding plus relative path, or an override), base snapshot, onload time |
+| `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
+| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |

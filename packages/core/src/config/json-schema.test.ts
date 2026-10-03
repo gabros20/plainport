@@ -22,16 +22,50 @@ describe("config: published JSON Schemas", () => {
     expect(check({ defaultStore: "mini" })).toBe(false);
   });
 
-  test("device.json needs a ULID and a role", () => {
+  test("device.json needs a ULID, a name and a role", () => {
     const check = ajv.compile(schemas.device);
     const device = {
       v: 1,
       id: "01ARYZ6S410000000000000000",
+      name: "mbp",
       role: "owner",
       createdAt: "2026-10-03T12:00:00.000Z",
     };
     expect(check(device)).toBe(true);
     expect(check({ ...device, id: "nope" })).toBe(false);
     expect(check({ ...device, role: "admin" })).toBe(false);
+    expect(check({ ...device, name: "My Mac" })).toBe(false);
+  });
+
+  test("registry.json maps project ULIDs to a root and a relative path", () => {
+    const check = ajv.compile(schemas.registry);
+    const entry = { root: "work", path: "clients/acme/web", registeredAt: "2026-10-03T12:00:00.000Z" };
+    expect(check({ v: 1, projects: { "01ARYZ6S410000000000000000": entry } })).toBe(true);
+    expect(check({ v: 1, projects: { nope: entry } })).toBe(false);
+    expect(check({ v: 1, projects: { "01ARYZ6S410000000000000000": { ...entry, path: "a/../x" } } })).toBe(
+      false,
+    );
+    expect(check({ v: 1, projects: { "01ARYZ6S410000000000000000": { ...entry, path: "/abs" } } })).toBe(
+      false,
+    );
+  });
+
+  test("stub.json describes a .plainport stub", () => {
+    const check = ajv.compile(schemas.stub);
+    expect(
+      check({
+        plainport: 1,
+        project: "01J8A2C4E6G8J0K2M4P6R8T0VW",
+        root: "work",
+        rootId: "01J6RT7W2K9M4N6P8Q0S2V4X6Z",
+        path: "clients/acme/web",
+        store: "mini",
+        snapshot: "01J9Z6K2B8D4F6H8K0M2P4R6T8",
+        offloadedAt: "2026-09-29T14:02:11Z",
+        bytes: 1934000000,
+        restore: "plainport onload work:clients/acme/web",
+      }),
+    ).toBe(true);
+    expect(check({ plainport: 1 })).toBe(false);
   });
 });
