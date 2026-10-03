@@ -34,7 +34,12 @@ export interface GitFacts {
    * Commits on no remote-tracking branch: in total (HEAD included), per local branch that has some, and on a
    * detached HEAD but on no branch.
    */
-  unpushed: { commits: number; branches: { name: string; commits: number }[]; detachedHead: number };
+  unpushed: {
+    commits: number;
+    /** `remote` is the remote of the branch's upstream; absent for a local-only branch. */
+    branches: { name: string; commits: number; remote?: string }[];
+    detachedHead: number;
+  };
   /** Local branches with no upstream on a remote: none set, gone, or another local branch. */
   localOnly: string[];
   stashes: number;
@@ -133,14 +138,21 @@ const records = (bytes: Uint8Array, separator: number): string[] =>
     .map(text)
     .filter((record) => record !== "");
 
-/** What .git is in the folder: a folder (a repository), a file (a pointer: worktree or submodule), or nothing. */
-/** fs.unreadable for a path plainport needed to look at and could not. */
-export const unreadable = (path: string, error: unknown): Failure =>
+/**
+ * fs.unreadable for a path plainport needed to look at and could not. `blocked` is what to fix: a file that cannot
+ * be read (u+r), or, by default, the folder holding the path, which cannot be searched when lstat itself fails
+ * (u+rx).
+ */
+export const unreadable = (
+  path: string,
+  error: unknown,
+  blocked: { path: string; kind: "file" | "folder" } = { path: dirname(path), kind: "folder" },
+): Failure =>
   fail(
     finding("fs.unreadable", {
       message: `plainport cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`,
-      paths: [path],
-      fix: `give your user access to it: chmod u+rx ${shellWord(dirname(path))}`,
+      paths: [blocked.path],
+      fix: `chmod ${blocked.kind === "file" ? "u+r" : "u+rx"} ${shellWord(blocked.path)}`,
     }),
   );
 
@@ -249,16 +261,16 @@ export const gitFacts = async (
 
   const refs = await git(host, dir, ctx, [
     "for-each-ref",
-    "--format=%(refname)%00%(upstream)%00%(upstream:track)",
+    "--format=%(refname)%00%(upstream)%00%(upstream:track)%00%(upstream:remotename)",
     "refs/heads",
     "refs/remotes",
   ]);
   if (!refs.ok) return refs;
   let remoteBranches = false;
   const localOnly: string[] = [];
-  const toCount: string[] = [];
+  const toCount: { name: string; remote?: string }[] = [];
   for (const line of records(refs.value, NL)) {
-    const [ref = "", upstream = "", track = ""] = line.split("\0");
+    const [ref = "", upstream = "", track = "", remoteName = ""] = line.split("\0");
     if (ref.startsWith("refs/remotes/")) {
       remoteBranches = true;
       continue;
@@ -268,7 +280,8 @@ export const gitFacts = async (
     const remoteUpstream = upstream.startsWith("refs/remotes/") && !track.includes("gone");
     if (!remoteUpstream) localOnly.push(name);
     // A branch level with or behind a remote upstream has every commit on the remote already.
-    if (!remoteUpstream || track.includes("ahead")) toCount.push(name);
+    if (!remoteUpstream) toCount.push({ name });
+    else if (track.includes("ahead")) toCount.push({ name, remote: remoteName });
   }
 
   const remoteList = await git(host, dir, ctx, ["remote"]);
@@ -279,11 +292,11 @@ export const gitFacts = async (
     const out = await git(host, dir, ctx, ["rev-list", "--count", ...revisions, "--not", "--remotes", "--"]);
     return out.ok ? ok(Number(text(out.value).trim())) : out;
   };
-  const branches: { name: string; commits: number }[] = [];
-  for (const name of toCount) {
+  const branches: GitFacts["unpushed"]["branches"] = [];
+  for (const { name, remote } of toCount) {
     const commits = await count([`refs/heads/${name}`]);
     if (!commits.ok) return commits;
-    if (commits.value > 0) branches.push({ name, commits: commits.value });
+    if (commits.value > 0) branches.push({ name, commits: commits.value, ...(remote ? { remote } : {}) });
   }
   const total = await count([...(headOid === undefined ? [] : ["HEAD"]), "--branches"]);
   if (!total.ok) return total;

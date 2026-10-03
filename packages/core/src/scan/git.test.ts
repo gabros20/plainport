@@ -94,7 +94,7 @@ describe("scan: git facts", () => {
       commits: 3,
       branches: [
         { name: "feature/pricing", commits: 3 },
-        { name: "main", commits: 1 },
+        { name: "main", commits: 1, remote: "origin" },
       ],
       detachedHead: 0,
     });

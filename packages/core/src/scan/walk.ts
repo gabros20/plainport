@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { isAbsolute, posix, resolve } from "node:path";
-import { fail, finding, ok, type Result } from "@plainport/contract";
+import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { errorCode, type LinkStat, type LocalFs } from "../io.ts";
 import { type Manifest, ManifestBuilder } from "./manifest.ts";
 
@@ -92,7 +92,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
       finding("fs.unreadable", {
         message: `plainport cannot read ${dir}: ${error instanceof Error ? error.message : String(error)}`,
         paths: [dir],
-        fix: `give your user read access to ${dir}`,
+        fix: `chmod u+rx ${shellWord(dir)}`,
       }),
     );
   }
@@ -127,7 +127,7 @@ export const scanTree = async (fs: LocalFs, dir: string): Promise<Result<TreeSca
           finding("fs.unreadable", {
             message: `plainport cannot list ${dir}: ${error instanceof Error ? error.message : String(error)}`,
             paths: [dir],
-            fix: `give your user read access to ${dir}`,
+            fix: `chmod u+rx ${shellWord(dir)}`,
           }),
         );
       }
