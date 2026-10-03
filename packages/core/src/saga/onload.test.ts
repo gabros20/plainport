@@ -299,8 +299,11 @@ const expectShelvedUntouched = async () => {
 describe("onload: the round trip", () => {
   test("restores the offloaded folder byte for byte (stripped paths aside), swaps it in and hydrates it", async () => {
     const before = treeOf(dir);
+    // A folder mode a new folder would not get: the offloaded event records it (rootMode, D55).
+    chmodSync(dir, 0o750);
     const rootMode = lstatSync(dir).mode & 0o7777;
     const off = await offload();
+    expect((await storeEvents()).find((e) => e.type === "offloaded")).toMatchObject({ rootMode: 0o750 });
     expect(existsSync(dir)).toBe(false);
 
     const result = value(await onload());
@@ -315,7 +318,7 @@ describe("onload: the round trip", () => {
       hydrate: { status: "installed", steps: [{ path: "", command: "npm ci", ok: true }] },
     });
     expect(treeOf(dir)).toEqual(before);
-    // The folder itself is made by plainport (restic would make it 0700): a new folder's mode, as the original's was.
+    // The folder's own mode comes back from the offloaded event (D55); restic alone would make it 0700.
     expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe(rootMode.toString(8));
     // The install ran in the project, frozen, and put the dependencies back.
     expect(pmCalls()).toEqual([`${await canonicalReal(dir)}|npm ci`]);
@@ -437,6 +440,23 @@ describe("onload: the round trip", () => {
     expect(result.snapshot).toBe(off.op);
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
     await expectInvariants();
+  });
+
+  test("an offloaded event without rootMode (older writers) leaves the folder a new folder's mode (D55)", async () => {
+    chmodSync(dir, 0o750);
+    const off = await offload();
+    // The same event without rootMode, as a writer before D55 left it: the catalog is rebuilt from it alone.
+    const offloaded = (await storeEvents()).find((e) => e.type === "offloaded");
+    if (offloaded?.type !== "offloaded") throw new Error("no offloaded event");
+    const { rootMode: _, ...older } = offloaded;
+    value(await store.delete(`meta/v1/events/${offloaded.id}.json`));
+    value(await appendEvent(storeEventLog(store), older));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const result = value(await onload());
+    expect(result.snapshot).toBe(off.op);
+    const fresh = join(box.home, "fresh");
+    mkdirSync(fresh);
+    expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe((lstatSync(fresh).mode & 0o7777).toString(8));
   });
 
   test("onload --snapshot restores an older snapshot and still opens the lease over the head (D43)", async () => {

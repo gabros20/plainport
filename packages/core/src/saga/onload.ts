@@ -21,8 +21,9 @@
 //   onload.swap.start                     the rename may have happened (a lost write, D24): if `project.dir` stands
 //                                         and the source (`staging`, or `reuse.folder`) is gone, go on as from
 //                                         onload.swapped; otherwise roll back as above
-//   onload.swapped                        the folder is in place: remove `stub` if it is still this project's (in
-//                                         reuse mode, the trash folder and the offload journal `reuse.op` first),
+//   onload.swapped                        the folder is in place: give it `rootMode` if set (D55), remove `stub`
+//                                         if it is still this project's (in reuse mode, the trash folder and the
+//                                         offload journal `reuse.op` first),
 //                                         then go on as from onload.commit.start with a new event id
 //   onload.commit.start                   the onloaded event's id (`event`) is journaled: append it if the store lacks
 //                                         it (base `snapshot`, over `over`), then go on as from onload.committed
@@ -437,11 +438,13 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         : undefined;
     let files = 0;
     let bytes = 0;
+    let rootMode: number | undefined;
     if (reuse === undefined) {
       const listed = await listSnapshot(stored, ctx, made.event, placed.value);
       if (!listed.ok) return signal?.aborted ? cancelled() : listed;
       files = listed.value.files;
       bytes = listed.value.bytes;
+      rootMode = listed.value.rootMode;
     }
     phase("preflight", "end");
     if (signal?.aborted) return cancelled();
@@ -472,6 +475,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       ...(reuse === undefined ? { staging } : { reuse }),
       ...(req.to === undefined ? {} : { override: true as const }),
       ...(stubPath === undefined ? {} : { stub: stubPath }),
+      ...(rootMode === undefined ? {} : { rootMode }),
       history: [],
     };
     if (resumed !== undefined) Object.assign(journal, { pid: io.proc.pid, host: io.proc.hostname() });
@@ -682,7 +686,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     ctx: RunContext,
     event: string,
     nearest: string,
-  ): Promise<Result<{ files: number; bytes: number }>> {
+  ): Promise<Result<{ files: number; bytes: number; rootMode?: number }>> {
     let files = 0;
     let bytes = 0;
     const byFold = new Map<string, string[]>();
@@ -723,11 +727,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     }
     // The dependencies the install puts back, as the offload recorded them (DESIGN step 2).
     let stripped = 0;
+    let rootMode: number | undefined;
     const got = await store.blob.get(`${STORE_EVENTS_PREFIX}${event}.json`);
     if (got.ok && got.value !== null) {
       try {
         const parsed = CatalogEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
-        if (parsed.success && "stats" in parsed.data) stripped = parsed.data.stats.strippedBytes;
+        if (parsed.success && parsed.data.type === "offloaded") {
+          stripped = parsed.data.stats.strippedBytes;
+          rootMode = parsed.data.rootMode;
+        } else if (parsed.success && "stats" in parsed.data) stripped = parsed.data.stats.strippedBytes;
       } catch {
         // Unreadable here, as the fold would skip it: the dependencies are not counted.
       }
@@ -748,7 +756,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         }),
       );
     }
-    return ok({ files, bytes });
+    return ok({ files, bytes, ...(rootMode === undefined ? {} : { rootMode }) });
   }
 
   /** Restore into staging (taking over one left by a stopped onload), then compare it with the listing. */
@@ -902,6 +910,19 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     }
     saga.commit();
     saga.after("onload.swap.renamed");
+    // The folder's own mode, which the snapshot does not hold (D55); set after the rename, so a folder without
+    // owner write can still be moved into place. A renamed-back folder kept its own.
+    if (journal.rootMode !== undefined) {
+      try {
+        await io.fs.chmod(target, journal.rootMode);
+      } catch (error) {
+        assertSystemError(error);
+        deps.log(
+          "warn",
+          `${target} could not be given its mode ${journal.rootMode.toString(8)}; it keeps a new folder's`,
+        );
+      }
+    }
     if (journal.reuse !== undefined) {
       // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
       try {

@@ -120,6 +120,8 @@ export const OnloadJournalSchema = z
     reuse: z.strictObject({ op: UlidSchema, folder: z.string().min(1) }).optional(),
     /** --to: the landing folder is not the root's place for the project (registry.json records it as override). */
     override: z.literal(true).optional(),
+    /** The folder's own mode from the offloaded event (D55), set right after the swap; absent, a new folder's. */
+    rootMode: z.int().min(0).max(0o7777).optional(),
     /** The project's stub, removed after the swap when it is this project's. */
     stub: z.string().min(1).optional(),
     /** The onloaded event's id, journaled before it is appended: recovery looks for it on the store. */

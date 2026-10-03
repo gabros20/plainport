@@ -742,6 +742,17 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (sharedNow !== undefined) return fail(rootMismatch(store.name, ref.root, sharedNow));
       const head = headCheck(current.value, projectId, base, ref.address);
       if (head.kind === "incomplete") return fail(head.finding);
+      // The folder's own mode, which the snapshot does not hold (D55): onload gives it back.
+      let rootMode: number | undefined;
+      try {
+        rootMode = (await io.fs.lstat(folder)).mode;
+      } catch (error) {
+        assertSystemError(error);
+        deps.log(
+          "warn",
+          `the mode of ${folder} could not be read; an onload gives the folder a new folder's mode`,
+        );
+      }
       const event: CatalogEvent = {
         v: 1,
         id: ulid(clock().getTime()),
@@ -755,6 +766,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         ...(base === undefined ? {} : { base }),
         snapshot: op,
         stored: { [store.name]: verified.snapshot },
+        ...(rootMode === undefined ? {} : { rootMode }),
         stats: {
           files: verified.files,
           bytes: verified.bytes,

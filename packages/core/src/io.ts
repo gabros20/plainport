@@ -43,6 +43,8 @@ export interface LocalFs {
   /** Whether this process may read the path (access(2) with R_OK, so ACLs count); false when missing. Opens
    * nothing, so a placeholder file is not downloaded. */
   readable(path: string): Promise<boolean>;
+  /** Sets the path's permission bits (mode & 0o7777), following a symlink as chmod(2) does. */
+  chmod(path: string, mode: number): Promise<void>;
   /** Bytes this process may still write on the volume holding the path (statfs: available blocks × block size). */
   freeBytes(path: string): Promise<number>;
   /**

@@ -192,6 +192,7 @@ export const nodeLocalIo: LocalIo = {
         return false;
       }
     },
+    chmod: (path, mode) => chmod(path, mode & 0o7777),
     freeBytes: async (path) => {
       const info = await statfs(path);
       return Number(info.bavail) * Number(info.bsize);
