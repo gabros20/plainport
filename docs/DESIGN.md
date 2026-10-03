@@ -1066,7 +1066,7 @@ export interface RunContext {
 
 **Contracts every plugin follows**
 
-- **Strip candidates are proposals.** The core drops any candidate git tracks, as git itself matches paths in that repository (Unicode precomposition and `core.ignorecase` included; when unsure, the candidate stays), then applies `strip.keep` and `strip.never` from config to the candidates themselves: a candidate, or a folder above it, that a pattern matches is kept, and nothing inside a candidate keeps it, so `keep = ["dist/"]` keeps the project's `dist/`, never `node_modules` because packages ship a `dist/` of their own. `strip.extra` supports gitignore negation (`!audit.log`); a folder holding a re-included path is not stripped whole. Every candidate kept is listed in the plan with why (`strip.kept`).
+- **Strip candidates are proposals.** The core drops any candidate git tracks, as git itself matches paths in that repository (Unicode precomposition and `core.ignorecase` included; when unsure, the candidate stays), then applies `strip.keep` and `strip.never` from config to the candidates themselves: a candidate, or a folder above it, that a pattern matches is kept, and nothing inside a candidate keeps it, so `keep = ["dist/"]` keeps the project's `dist/`, never `node_modules` because packages ship a `dist/` of their own. `strip.extra` supports gitignore negation (`!audit.log`); a folder holding a re-included path is not stripped whole. Unlike gitignore, a negation also re-includes inside an excluded folder (`dist/` with `!dist/keep.txt` keeps that file and strips the rest of `dist/`), which only keeps more. Every candidate kept is listed in the plan with why (`strip.kept`).
 - **Several plugins can match one project**, such as a Next.js app with a Python tool folder. Each hydrates its own part, in detection order.
 - **Hydration runs with a timeout**, in the project directory, with the user's environment plus configured registry tokens. Its output streams as `log` events.
 
@@ -1080,7 +1080,7 @@ export interface RunContext {
 | `yarn.lock` alone | Yarn Classic | `yarn install --frozen-lockfile` |
 | `bun.lock` or `bun.lockb` | Bun | `bun install --frozen-lockfile` |
 
-The `packageManager` field in `package.json` overrides lockfile detection. The Node plugin proposes every `node_modules` that an install puts back (beside the project's own package.json, a package with its own lockfile, or a workspace member of either; any other is declined and stays) plus `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache` and `.vercel/output`. It proposes `dist/` and `build/` only when a package script writes them.
+The `packageManager` field in `package.json` overrides lockfile detection. The Node plugin proposes every `node_modules` that an install puts back (beside the project's own package.json, a package with its own lockfile, or a workspace member of either; any other is declined and stays, and one inside a build's output such as `.next/standalone` leaves with that folder), plus `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache` and `.vercel/output`. A project with no lockfile is still stripped and reinstalled, unfrozen, with `deps.no-lockfile` saying so, because its own install is what onload runs anyway; a sub-package with no lockfile is installed by nothing, so its `node_modules` stays. It proposes `dist/` and `build/` only when a package script writes them.
 
 **Other plugins at launch**
 
