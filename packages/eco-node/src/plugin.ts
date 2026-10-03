@@ -230,6 +230,7 @@ const where = (folder: string): string => (folder === "" ? "the project" : folde
 
 export const nodePlugin: EcosystemPlugin = {
   id: "node",
+  dependencyFolders: ["node_modules"],
 
   detect: async (project): Promise<Detection | null> => {
     const index = await indexOf(project);

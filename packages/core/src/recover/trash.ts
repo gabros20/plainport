@@ -102,8 +102,12 @@ const reread = async (io: LocalIo, paths: PlainportPaths, op: string): Promise<J
   }
 };
 
-/** Bytes of the files below a folder; what cannot be read counts as nothing. */
-export const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
+/** Bytes of the files below a folder, never entering a folder named in `skip`; what cannot be read counts as nothing. */
+export const treeBytes = async (
+  io: LocalIo,
+  path: string,
+  skip: ReadonlySet<string> = new Set(),
+): Promise<number> => {
   let total = 0;
   const visit = async (at: string) => {
     let entries: Awaited<ReturnType<LocalIo["fs"]["entries"]>>;
@@ -115,8 +119,9 @@ export const treeBytes = async (io: LocalIo, path: string): Promise<number> => {
     }
     for (const entry of entries) {
       const child = join(at, entry.name);
-      if (entry.kind === "dir") await visit(child);
-      else {
+      if (entry.kind === "dir") {
+        if (!skip.has(entry.name)) await visit(child);
+      } else {
         try {
           total += (await io.fs.lstat(child)).size;
         } catch (error) {

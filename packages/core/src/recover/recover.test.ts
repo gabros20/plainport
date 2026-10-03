@@ -1743,17 +1743,23 @@ describe("fix wave r2: sizes and the staging record's schema", () => {
     };
     expect((await offloadNow()).ok).toBe(false);
     const views = value(
-      await projectViews({
-        io: testHost(),
-        paths: box.paths,
-        env: env(),
-        device,
-        loader: new ConfigLoader(testHost(), box.paths),
-        opener,
-        openMirror: async () => ({ ok: true, value: mirror }),
-      }),
+      await projectViews(
+        {
+          io: testHost(),
+          paths: box.paths,
+          env: env(),
+          device,
+          loader: new ConfigLoader(testHost(), box.paths),
+          opener,
+          openMirror: async () => ({ ok: true, value: mirror }),
+          plugins: [nodePlugin],
+        },
+        { sizes: true },
+      ),
     );
-    expect(views.projects[0]?.bytes).toBeGreaterThan(400);
+    // Its folder's size without its dependency folders (node_modules holds 400 bytes).
+    expect(views.projects[0]?.bytes).toBeGreaterThan(0);
+    expect(views.projects[0]?.bytes).toBeLessThan(400);
   });
 
   test("the staging record is published as a JSON Schema", () => {
