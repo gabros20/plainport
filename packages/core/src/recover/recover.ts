@@ -104,7 +104,7 @@ export interface RecoverDeps {
   now?: () => Date;
 }
 
-export interface RecoveredOperation {
+export type RecoveredOperation = {
   op: string;
   kind: "offload" | "onload";
   /** root:path. */
@@ -124,14 +124,14 @@ export interface RecoveredOperation {
   /** Why it is pending, or diverged-after-commit's finding. */
   finding?: Finding;
   /** diverged-after-commit: exit 8's data, as offload gives it (D52). */
-  conflict?: OffloadConflict;
-}
+  conflict?: Pick<OffloadConflict, keyof OffloadConflict>;
+};
 
-export interface RecoveryReport {
+export type RecoveryReport = {
   operations: RecoveredOperation[];
   /** Journal files this version cannot read: never touched. */
   unreadable: string[];
-}
+};
 
 const BEFORE_SNAPSHOT: ReadonlySet<string> = new Set<OffloadStep>([
   "offload.begin",

@@ -1,0 +1,307 @@
+// status, ls, recover, gc and restore through the CLI: a sandboxed home set up by init, projects offloaded with the
+// fake engine (T0), --json output checked against each command's declared schema, crashes made with the host's
+// fault seam, and invariants 1–3 checked after every run that changes a project.
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fsBlobStore } from "@plainport/blob-fs";
+import { parseJsonLines } from "@plainport/contract";
+import { nodeLocalIo } from "@plainport/core";
+import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
+import { testHost } from "../../../core/src/testing/host.ts";
+import { captureTree, invariantViolations, type TreeCapture } from "../../../core/src/testing/invariants.ts";
+import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
+import { gate } from "../gate.ts";
+import type { Ports } from "../registry.ts";
+import { capture, fakeRepositoryAt, STORE_PASSWORD, sandboxPorts } from "../testing.ts";
+import { REGISTRY } from "./index.ts";
+
+let box: Sandbox;
+/** Each project folder as it stood when a release began, by its path under work/. */
+const released = new Map<string, TreeCapture>();
+const NOW = new Date("2026-10-03T12:00:00Z");
+const PATH = process.env.PATH ?? "/usr/bin:/bin";
+
+const dir = () => join(box.home, "work/web");
+const ssd = () => join(box.home, "ssd");
+
+const ports = (faults: { at?: string } = {}, now = NOW): Ports =>
+  sandboxPorts(box.home, {
+    clock: { now: () => now },
+    env: { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: STORE_PASSWORD },
+    system: testHost({
+      faults: {
+        ...faults,
+        onStep: (step) => {
+          if (step !== "offload.release.trash") return;
+          for (const path of ["web", "api"]) {
+            const folder = join(box.home, "work", path);
+            if (existsSync(folder)) released.set(path, captureTree(folder));
+          }
+        },
+      },
+    }),
+  });
+const cli = (argv: string[], faults: { at?: string } = {}, now = NOW) =>
+  capture(argv, REGISTRY, { ports: ports(faults, now) });
+const envelope = (out: string) => JSON.parse(out.trim().split("\n").at(-1) as string);
+const command = (name: string) => REGISTRY.find((c) => c.name === name);
+
+/** The --json output checked against the command's declared output schema. */
+const data = (name: string, out: string) => {
+  const schema = command(name)?.output;
+  if (schema === undefined) throw new Error(`no command ${name}`);
+  const parsed = parseJsonLines(out, schema);
+  if (!parsed.ok) throw new Error(parsed.finding.message);
+  return envelope(out).data;
+};
+
+beforeEach(async () => {
+  released.clear();
+  box = makeSandbox("plainport-status-cli-");
+  box.dir("work");
+  const run = await cli([
+    "init",
+    "--root",
+    "work=~/work",
+    "--store-path",
+    "~/ssd",
+    "--device",
+    "mbp",
+    "--yes",
+  ]);
+  if (run.code !== 0) throw new Error(run.err);
+  box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+  box.file("work/web/src/main.ts", "export const main = 1;\n");
+  box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+  box.file("work/api/README.md", "# api\n");
+});
+afterEach(() => box.cleanup());
+
+const projectId = (path: string) => {
+  const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+  return Object.entries(registry.projects as Record<string, { path: string }>).find(
+    ([, e]) => e.path === path,
+  )?.[0];
+};
+
+const expectInvariants = async (path = "web") =>
+  expect(
+    await invariantViolations({
+      paths: box.paths,
+      device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
+      project: { id: projectId(path), dir: join(box.home, "work", path) },
+      roots: [join(box.home, "work")],
+      store: {
+        name: "local",
+        blob: fsBlobStore(nodeLocalIo, ssd()),
+        engine: fakeEngine(fakeRepositoryAt(ssd())),
+      },
+      ...(released.has(path) ? { released: released.get(path) } : {}),
+      stripped: ["node_modules"],
+    }),
+  ).toEqual([]);
+
+const settle = async () => {
+  for (
+    let i = 0;
+    i < 400 && existsSync(box.paths.journalDir) && readdirSync(box.paths.journalDir).length > 0;
+    i++
+  )
+    await Bun.sleep(25);
+};
+
+const offloaded = async (project = "work:api") => {
+  const run = await cli(["offload", project, "--yes", "--json"]);
+  if (run.code !== 0) throw new Error(run.err);
+  await settle();
+  return envelope(run.out).data.op as string;
+};
+
+describe("status and ls: the commands", () => {
+  test("status and ls are read; recover, gc and restore are safe_write; gc --now is confirm", () => {
+    const risk = (argv: string[]) => {
+      const verdict = gate(argv, REGISTRY, { approved: () => false });
+      return verdict.ok ? verdict.risk : verdict.failure.finding.code;
+    };
+    expect(risk(["status", "web"])).toBe("read");
+    expect(risk(["ls"])).toBe("read");
+    expect(risk(["recover"])).toBe("safe_write");
+    expect(risk(["gc"])).toBe("safe_write");
+    expect(risk(["gc", "--now"])).toBe("risk.needs-yes");
+    expect(risk(["gc", "--now", "--yes"])).toBe("confirm");
+    expect(risk(["restore", "web", "--to", "/tmp/x"])).toBe("safe_write");
+  });
+});
+
+describe("ls: every project with its state", () => {
+  test("a local and a shelved project, filtered by --local, --shelved and --root, sorted by --sort", async () => {
+    await cli(["root", "scan", "work"]);
+    const snapshot = await offloaded();
+    const all = data("ls", (await cli(["ls", "--json"])).out);
+    expect(all.projects.map((p: { address: string; state: string }) => [p.address, p.state])).toEqual([
+      ["work:api", "shelved"],
+      ["work:web", "local"],
+    ]);
+    expect(all.projects[0]).toMatchObject({ head: snapshot, stale: false, here: false });
+    expect(data("ls", (await cli(["ls", "--shelved", "--json"])).out).projects).toHaveLength(1);
+    expect(
+      data("ls", (await cli(["ls", "--local", "--json"])).out).projects.map(
+        (p: { address: string }) => p.address,
+      ),
+    ).toEqual(["work:web"]);
+    expect(data("ls", (await cli(["ls", "--root", "nope", "--json"])).out).projects).toEqual([]);
+    const bySize = data("ls", (await cli(["ls", "--sort", "size", "--json"])).out).projects;
+    expect(bySize[0].address).toBe("work:api");
+  });
+
+  test("the human list: one line per project, state and size", async () => {
+    await cli(["root", "scan", "work"]);
+    await offloaded();
+    const run = await cli(["ls"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toMatch(/^work:api\s+shelved\s+/m);
+    expect(run.out).toMatch(/^work:web\s+local\s+/m);
+  });
+
+  test("an unknown --sort is a usage error (2)", async () => {
+    expect((await cli(["ls", "--sort", "colour"])).code).toBe(2);
+  });
+});
+
+describe("status: one project in detail", () => {
+  test("a shelved project: state, head, stub and catalog freshness (--json)", async () => {
+    const snapshot = await offloaded();
+    const run = await cli(["status", "work:api", "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("status", run.out)).toMatchObject({
+      address: "work:api",
+      state: "shelved",
+      head: snapshot,
+      stub: `${join(box.home, "work/api")}.plainport`,
+      stale: false,
+      conditions: [],
+    });
+  });
+
+  test("by its stub, and in human words", async () => {
+    await offloaded();
+    const run = await cli(["status", `${join(box.home, "work/api")}.plainport`]);
+    expect(run.code).toBe(0);
+    expect(run.out).toMatch(/^work:api {2}shelved\n/);
+    expect(run.out).toContain("plainport onload work:api");
+  });
+
+  test("an unknown project exits 4 (project.not-found)", async () => {
+    const run = await cli(["status", "work:nothing", "--json"]);
+    expect([run.code, envelope(run.out).error.finding.code]).toEqual([4, "project.not-found"]);
+  });
+});
+
+describe("recover, through the CLI", () => {
+  test("an offload killed after the rename: recover finishes it, status says shelved (ls and status after)", async () => {
+    const crashed = await cli(["offload", "work:web", "--yes"], { at: "offload.release.renamed" });
+    expect(crashed.code).toBe(1);
+    const interrupted = data("status", (await cli(["status", "work:web", "--json"])).out);
+    expect([interrupted.state, interrupted.journal?.step]).toEqual(["offloading", "offload.release.trash"]);
+    const run = await cli(["recover", "--json"]);
+    expect(run.code).toBe(0);
+    const report = data("recover", run.out);
+    expect(report.operations.map((o: { outcome: string; state: string }) => [o.outcome, o.state])).toEqual([
+      ["finished", "shelved"],
+    ]);
+    await settle();
+    expect(data("status", (await cli(["status", "work:web", "--json"])).out).state).toBe("shelved");
+    await expectInvariants();
+  });
+
+  test("nothing to recover: exit 0, and says so", async () => {
+    const run = await cli(["recover"]);
+    expect([run.code, run.out]).toEqual([0, "nothing to recover\n"]);
+  });
+
+  test("diverged-after-commit exits 8 with the report as data, the operation's kind named", async () => {
+    await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
+    writeFileSync(join(dir(), "src/main.ts"), "export const main = 2;\n");
+    const run = await cli(["recover", "--json"]);
+    expect(run.code).toBe(8);
+    const env = envelope(run.out);
+    expect(env.error.finding.code).toBe("offload.diverged-after-commit");
+    expect(env.data.operations[0]).toMatchObject({
+      outcome: "diverged-after-commit",
+      conflict: { kind: "diverged-after-commit" },
+    });
+    expect(data("status", (await cli(["status", "work:web", "--json"])).out).conditions).toEqual([
+      "diverged-after-commit",
+    ]);
+    await expectInvariants();
+  });
+});
+
+describe("housekeeping at the start of any command (D59)", () => {
+  test("an interrupted operation is named on stderr with plainport recover; ls still runs", async () => {
+    await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
+    // The injected crash left this live process's pid: a killed one would be gone.
+    const [name] = readdirSync(box.paths.journalDir);
+    const path = join(box.paths.journalDir, name as string);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), pid: 99_999_999 }));
+    const run = await cli(["ls"]);
+    expect(run.code).toBe(0);
+    expect(run.err).toContain(
+      "interrupted at offload.committed; plainport recover finishes or rolls it back",
+    );
+    expect((await cli(["recover"])).err).not.toContain("interrupted");
+  });
+
+  test("a kept trash past its deadline is deleted when any command starts", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
+    await cli(["offload", "work:api", "--yes"]);
+    expect(readdirSync(join(box.home, "work/.plainport-trash"))).toHaveLength(1);
+    await cli(["ls"], {}, new Date(NOW.getTime() + 2 * 3_600_000));
+    for (let i = 0; i < 400 && readdirSync(join(box.home, "work/.plainport-trash")).length > 0; i++)
+      await Bun.sleep(25);
+    expect(readdirSync(join(box.home, "work/.plainport-trash"))).toEqual([]);
+    await settle();
+    await expectInvariants("api");
+  });
+});
+
+describe("gc, through the CLI", () => {
+  test("--now needs --yes (3); with it, a kept trash goes and the bytes freed are reported", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
+    await cli(["offload", "work:api", "--yes"]);
+    const kept = data("gc", (await cli(["gc", "--json"])).out);
+    expect([kept.deleted.length, kept.kept.length]).toEqual([0, 1]);
+    expect((await cli(["gc", "--now"])).code).toBe(3);
+    const run = await cli(["gc", "--now", "--yes", "--json"]);
+    expect(run.code).toBe(0);
+    const done = data("gc", run.out);
+    expect(done.deleted).toHaveLength(1);
+    expect(done.freedBytes).toBeGreaterThan(0);
+    await expectInvariants("api");
+  });
+});
+
+describe("restore, through the CLI (D58)", () => {
+  test("the head side by side; an occupied path exits 6", async () => {
+    const snapshot = await offloaded();
+    const run = await cli(["restore", "work:api", "--to", "~/old/api", "--json"]);
+    expect(run.code).toBe(0);
+    expect(data("restore", run.out)).toMatchObject({
+      project: "work:api",
+      snapshot,
+      dir: join(box.home, "old/api"),
+    });
+    expect(readFileSync(join(box.home, "old/api/README.md"), "utf8")).toBe("# api\n");
+    expect(data("status", (await cli(["status", "work:api", "--json"])).out).state).toBe("shelved");
+    const again = await cli(["restore", "work:api", "--snapshot", snapshot, "--to", "~/old/api", "--json"]);
+    expect([again.code, envelope(again.out).error.finding.code]).toEqual([6, "path.occupied"]);
+    await expectInvariants("api");
+  });
+
+  test("--to is required (2)", async () => {
+    await offloaded();
+    expect((await cli(["restore", "work:api"])).code).toBe(2);
+  });
+});

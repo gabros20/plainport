@@ -467,6 +467,506 @@
       ]
     },
     {
+      "name": "ls",
+      "summary": "Every project with its root, state, device, size and last activity",
+      "usage": "plainport ls [--root <value>] [--local] [--shelved] [--sort <value>]",
+      "risk": "read",
+      "dryRun": false,
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "string",
+          "multiple": false,
+          "summary": "Only this root's projects"
+        },
+        {
+          "name": "local",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Only projects whose folder is on this device"
+        },
+        {
+          "name": "shelved",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Only shelved projects"
+        },
+        {
+          "name": "sort",
+          "type": "string",
+          "multiple": false,
+          "summary": "size: largest first; age: least recently used first"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "description": "Only this root's projects",
+            "type": "string"
+          },
+          "local": {
+            "description": "Only projects whose folder is on this device",
+            "type": "boolean"
+          },
+          "shelved": {
+            "description": "Only shelved projects",
+            "type": "boolean"
+          },
+          "sort": {
+            "description": "size: largest first; age: least recently used first",
+            "type": "string",
+            "enum": [
+              "size",
+              "age"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "description": "root:path"
+                },
+                "root": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The project's ULID"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "offloading",
+                    "shelved",
+                    "onloading",
+                    "restored-unhydrated",
+                    "conflicted",
+                    "unavailable"
+                  ],
+                  "title": "ProjectState",
+                  "description": "The project's one lifecycle state on this device: unavailable (its root's volume is not mounted), offloading or onloading (a journal is open), conflicted, restored-unhydrated, local or shelved"
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced"
+                },
+                "dir": {
+                  "description": "Its folder on this device",
+                  "type": "string"
+                },
+                "here": {
+                  "type": "boolean",
+                  "description": "The folder is on this device"
+                },
+                "stub": {
+                  "description": "Its .plainport stub, when one is here",
+                  "type": "string"
+                },
+                "store": {
+                  "description": "The store whose catalog holds it",
+                  "type": "string"
+                },
+                "head": {
+                  "description": "The catalog's head; null when there is none",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "base": {
+                  "description": "The snapshot this device's copy came from",
+                  "type": "string"
+                },
+                "lease": {
+                  "description": "The device whose onload holds the lease, and whether it is this one",
+                  "type": "object",
+                  "properties": {
+                    "device": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    },
+                    "base": {
+                      "type": "string"
+                    },
+                    "here": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "at",
+                    "base",
+                    "here"
+                  ],
+                  "additionalProperties": {}
+                },
+                "snapshots": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes": {
+                  "description": "Files' bytes in the head snapshot",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "strippedBytes": {
+                  "description": "Dependencies the head's offload stripped, which an onload installs again",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "lastActivity": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean",
+                  "description": "The catalog was read from this device's mirror: the store did not answer"
+                },
+                "syncedAt": {
+                  "description": "When the catalog last came from the store; absent: never",
+                  "type": "string"
+                },
+                "journal": {
+                  "description": "Its open journal; when not running, plainport recover settles it",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "offload",
+                        "onload"
+                      ]
+                    },
+                    "step": {
+                      "type": "string"
+                    },
+                    "running": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "op",
+                    "kind",
+                    "step",
+                    "running"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "address",
+                "root",
+                "path",
+                "id",
+                "state",
+                "conditions",
+                "here",
+                "head",
+                "snapshots",
+                "stale"
+              ],
+              "additionalProperties": {},
+              "description": "A project as this device sees it"
+            }
+          },
+          "stores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "syncedAt": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "name",
+                "stale"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Each store's catalog: stale when it did not answer"
+          }
+        },
+        "required": [
+          "projects",
+          "stores"
+        ],
+        "additionalProperties": {},
+        "description": "The projects, and how fresh each store's catalog is"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "ls"
+          ],
+          "summary": "Every project this device knows"
+        },
+        {
+          "argv": [
+            "ls",
+            "--shelved",
+            "--sort",
+            "size"
+          ],
+          "summary": "Shelved projects, largest first"
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "summary": "One project in detail: its state, head, lease and what to do next",
+      "usage": "plainport status [<project>]",
+      "risk": "read",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "description": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "root:path"
+          },
+          "root": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "The project's ULID"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "local",
+              "offloading",
+              "shelved",
+              "onloading",
+              "restored-unhydrated",
+              "conflicted",
+              "unavailable"
+            ],
+            "title": "ProjectState",
+            "description": "The project's one lifecycle state on this device: unavailable (its root's volume is not mounted), offloading or onloading (a journal is open), conflicted, restored-unhydrated, local or shelved"
+          },
+          "conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced"
+          },
+          "dir": {
+            "description": "Its folder on this device",
+            "type": "string"
+          },
+          "here": {
+            "type": "boolean",
+            "description": "The folder is on this device"
+          },
+          "stub": {
+            "description": "Its .plainport stub, when one is here",
+            "type": "string"
+          },
+          "store": {
+            "description": "The store whose catalog holds it",
+            "type": "string"
+          },
+          "head": {
+            "description": "The catalog's head; null when there is none",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base": {
+            "description": "The snapshot this device's copy came from",
+            "type": "string"
+          },
+          "lease": {
+            "description": "The device whose onload holds the lease, and whether it is this one",
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "base": {
+                "type": "string"
+              },
+              "here": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "device",
+              "at",
+              "base",
+              "here"
+            ],
+            "additionalProperties": {}
+          },
+          "snapshots": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "description": "Files' bytes in the head snapshot",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "strippedBytes": {
+            "description": "Dependencies the head's offload stripped, which an onload installs again",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "lastActivity": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "The catalog was read from this device's mirror: the store did not answer"
+          },
+          "syncedAt": {
+            "description": "When the catalog last came from the store; absent: never",
+            "type": "string"
+          },
+          "journal": {
+            "description": "Its open journal; when not running, plainport recover settles it",
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "offload",
+                  "onload"
+                ]
+              },
+              "step": {
+                "type": "string"
+              },
+              "running": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op",
+              "kind",
+              "step",
+              "running"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "address",
+          "root",
+          "path",
+          "id",
+          "state",
+          "conditions",
+          "here",
+          "head",
+          "snapshots",
+          "stale"
+        ],
+        "additionalProperties": {},
+        "description": "A project as this device sees it"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "status",
+            "work:clients/acme/api"
+          ],
+          "summary": "A shelved project's head and how to bring it back"
+        }
+      ]
+    },
+    {
       "name": "offload",
       "summary": "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
       "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
@@ -1819,6 +2319,468 @@
             "work:clients/acme/web"
           ],
           "summary": "Free the space its node_modules takes"
+        }
+      ]
+    },
+    {
+      "name": "restore",
+      "summary": "Restore a snapshot side by side into a free path: no lease, no hydration",
+      "usage": "plainport restore <project> --to <value> [--snapshot <value>]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "to",
+          "type": "string",
+          "multiple": false,
+          "summary": "Where the copy goes; nothing may stand there"
+        },
+        {
+          "name": "snapshot",
+          "type": "string",
+          "multiple": false,
+          "summary": "The snapshot to restore; the head when absent"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "to": {
+            "type": "string",
+            "description": "Where the copy goes; nothing may stand there"
+          },
+          "snapshot": {
+            "description": "The snapshot to restore; the head when absent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "store": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "Where the copy now is"
+          },
+          "files": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "snapshot",
+          "store",
+          "dir",
+          "files",
+          "bytes"
+        ],
+        "additionalProperties": {},
+        "description": "The snapshot restored side by side; the project itself is unchanged"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "restore",
+            "work:clients/acme/api",
+            "--to",
+            "~/personal/api-copy"
+          ],
+          "summary": "Read the head beside everything else"
+        }
+      ]
+    },
+    {
+      "name": "recover",
+      "summary": "Settle interrupted operations: roll back what had not committed, finish what had",
+      "usage": "plainport recover",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offload",
+                    "onload"
+                  ]
+                },
+                "project": {
+                  "type": "string",
+                  "description": "root:path"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "step": {
+                  "type": "string",
+                  "description": "The journal step recover found"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "rolled-back",
+                    "finished",
+                    "forked",
+                    "diverged-after-commit",
+                    "trash-deleted",
+                    "trash-kept",
+                    "pending"
+                  ],
+                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "offloading",
+                    "shelved",
+                    "onloading",
+                    "restored-unhydrated",
+                    "conflicted",
+                    "unavailable"
+                  ],
+                  "title": "ProjectState",
+                  "description": "The project's state on this device afterwards"
+                },
+                "snapshot": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                },
+                "conflict": {
+                  "description": "diverged-after-commit: exit 8's data, as offload gives it (D52)",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "fork",
+                        "diverged-after-commit"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "op",
+                "kind",
+                "project",
+                "projectId",
+                "step",
+                "outcome",
+                "state",
+                "snapshot"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "unreadable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Journal files this version cannot read: never touched"
+          }
+        },
+        "required": [
+          "operations",
+          "unreadable"
+        ],
+        "additionalProperties": {},
+        "description": "What recover did with each open journal. A failure carries this report as data: exit 8 for diverged-after-commit, else the first pending operation's code"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "recover"
+          ],
+          "summary": "Settle whatever was interrupted on this device"
+        }
+      ]
+    },
+    {
+      "name": "gc",
+      "summary": "Delete released trash past its keepLocalFor deadline; --now deletes it early",
+      "usage": "plainport gc [--now]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "positionals": [],
+      "options": [
+        {
+          "name": "now",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Also delete kept trash before its deadline",
+          "risk": "confirm"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "now": {
+            "description": "Also delete kept trash before its deadline",
+            "risk": "confirm",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "kept": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Before its deadline, or being renamed back by an onload"
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash",
+                "finding"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "freedBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "deleted",
+          "kept",
+          "skipped",
+          "freedBytes"
+        ],
+        "additionalProperties": {},
+        "description": "The trash deleted and kept"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "gc"
+          ],
+          "summary": "Delete trash whose deadline has passed"
+        },
+        {
+          "argv": [
+            "gc",
+            "--now",
+            "--yes"
+          ],
+          "summary": "Delete every kept trash now"
         }
       ]
     },

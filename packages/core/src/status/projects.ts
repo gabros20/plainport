@@ -63,7 +63,7 @@ export const PROJECT_CONDITIONS = [
   "never-synced",
 ] as const;
 
-export interface ProjectStatus {
+export type ProjectStatus = {
   /** root:path, the root by its key (the catalog's, when this device has no such root). */
   address: string;
   root: string;
@@ -98,23 +98,23 @@ export interface ProjectStatus {
   syncedAt?: string;
   /** Its open journal: running, or interrupted (plainport recover). */
   journal?: { op: string; kind: "offload" | "onload"; step: string; running: boolean };
-}
+};
 
-export interface StoreView {
+export type StoreView = {
   name: string;
   id?: string;
   stale: boolean;
   syncedAt?: string;
   /** Why its catalog could not be read at all, or why it is stale. */
   finding?: Finding;
-}
+};
 
-export interface Views {
+export type Views = {
   projects: ProjectStatus[];
   stores: StoreView[];
   /** Warnings from reading config, roots and catalogs. */
   findings: Finding[];
-}
+};
 
 interface Read {
   store: string;
@@ -229,6 +229,7 @@ export const projectViews = async (deps: ViewDeps): Promise<Result<Views>> => {
       ),
     );
   }
+  projects.sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
   return ok({ projects, stores, findings });
 
   async function viewOf(

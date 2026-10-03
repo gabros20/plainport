@@ -5,16 +5,23 @@ import { help } from "./help.ts";
 import { init } from "./init.ts";
 import { offload } from "./offload.ts";
 import { dehydrate, hydrate, onload } from "./onload.ts";
+import { gc, recover, restore } from "./recover.ts";
 import { rootAdd, rootBind, rootList, rootScan } from "./root.ts";
+import { ls, status } from "./status.ts";
 import { version } from "./version.ts";
 
 export const REGISTRY: Registry = [
   help,
   init,
+  ls,
+  status,
   offload,
   onload,
   hydrate,
   dehydrate,
+  restore,
+  recover,
+  gc,
   rootAdd,
   rootBind,
   rootList,

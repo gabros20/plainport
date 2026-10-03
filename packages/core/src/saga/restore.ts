@@ -69,7 +69,7 @@ export interface RestoreRequest {
   store?: string;
 }
 
-export interface RestoreOutcome {
+export type RestoreOutcome = {
   op: string;
   /** root:path. */
   project: string;
@@ -80,7 +80,7 @@ export interface RestoreOutcome {
   /** Files and bytes the snapshot holds. */
   files: number;
   bytes: number;
-}
+};
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 

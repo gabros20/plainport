@@ -41,7 +41,7 @@ export interface TrashDeps {
   now?: () => Date;
 }
 
-export interface TrashItem {
+export type TrashItem = {
   op: string;
   /** root:path. */
   project: string;
@@ -52,16 +52,16 @@ export interface TrashItem {
   bytes?: number;
   /** Why a due trash was kept. */
   reason?: string;
-}
+};
 
-export interface GcReport {
+export type GcReport = {
   deleted: TrashItem[];
   /** Before their deadline, or renamed back by an interrupted onload. */
   kept: TrashItem[];
   /** Not reached now: the finding says why (a lock a live process holds). */
   skipped: (TrashItem & { finding: Finding })[];
   freedBytes: number;
-}
+};
 
 const released = (journal: Journal): journal is OffloadJournal =>
   journal.kind === "offload" && journal.step === "offload.release.delete";
@@ -189,12 +189,12 @@ export const collectTrash = async (
   return ok(report);
 };
 
-export interface Housekept {
+export type Housekept = {
   /** Trash past its deadline handed to the detached delete. */
   started: TrashItem[];
   /** One line per interrupted operation: what stopped where, and that plainport recover settles it. */
   notices: string[];
-}
+};
 
 /**
  * Housekeeping at the start of any command (D59; see above). It never fails the command: what it cannot do now
