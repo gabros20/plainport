@@ -75,6 +75,8 @@ interface InstallRoot {
 interface Index {
   packages: Package[];
   installRoots: InstallRoot[];
+  /** Package folder → the install that fills its node_modules: its own, or its workspace root's. */
+  coveredBy: Map<string, InstallRoot>;
   /** Outermost node_modules folders. */
   nodeModules: string[];
   /** Cache folders: path → which cache. */
@@ -147,7 +149,9 @@ const buildIndex = async (project: ProjectDir): Promise<Index> => {
   const caches: Index["caches"] = [];
   for (const entry of manifest) {
     const parts = entry.path.split("/");
-    if (parts.slice(0, -1).includes("node_modules") || parts.includes(".git")) continue;
+    // Inside node_modules, .git or Yarn's own folder (.yarn/unplugged holds packages): nothing of the project's.
+    if (parts.slice(0, -1).some((p) => p === "node_modules" || p === ".yarn") || parts.includes(".git"))
+      continue;
     const name = parts.at(-1) as string;
     if (entry.type === "dir" && name === "node_modules") nodeModules.push(entry.path);
     else if (entry.type === "dir" && CACHES.has(name)) caches.push({ path: entry.path, name });
@@ -165,13 +169,10 @@ const buildIndex = async (project: ProjectDir): Promise<Index> => {
   }
   const packages = await Promise.all(folders.sort().map((folder) => readPackage(project, folder)));
   const installRoots: InstallRoot[] = [];
+  const coveredBy = new Map<string, InstallRoot>();
   for (const pkg of packages) {
-    const lockfiles = new Set(
-      LOCKFILES.filter((name) => manifest.get(at(pkg.folder, name))?.type === "file"),
-    );
-    if (pkg.folder !== "" && lockfiles.size === 0) continue;
     // A workspace member is installed by its workspace root's one install, stray lockfile or not.
-    const member = installRoots.some(
+    const workspace = installRoots.find(
       (root) =>
         within(pkg.folder, root.folder) &&
         root.members.matches(
@@ -179,16 +180,25 @@ const buildIndex = async (project: ProjectDir): Promise<Index> => {
           "dir",
         ),
     );
-    if (pkg.folder !== "" && member) continue;
+    if (pkg.folder !== "" && workspace !== undefined) {
+      coveredBy.set(pkg.folder, workspace);
+      continue;
+    }
+    const lockfiles = new Set(
+      LOCKFILES.filter((name) => manifest.get(at(pkg.folder, name))?.type === "file"),
+    );
+    if (pkg.folder !== "" && lockfiles.size === 0) continue;
     const choice = choosePackageManager({
       lockfiles,
       yarnrc: manifest.get(at(pkg.folder, ".yarnrc.yml")) !== undefined,
       ...(pkg.packageManager === undefined ? {} : { packageManager: pkg.packageManager }),
     });
     const globs = [...pkg.workspaces, ...(await readPnpmWorkspace(project, pkg.folder))];
-    installRoots.push({ folder: pkg.folder, choice, members: compilePatterns(globs) });
+    const root = { folder: pkg.folder, choice, members: compilePatterns(globs) };
+    installRoots.push(root);
+    coveredBy.set(pkg.folder, root);
   }
-  return { packages, installRoots, nodeModules, caches };
+  return { packages, installRoots, coveredBy, nodeModules, caches };
 };
 
 const indexOf = (project: ProjectDir): Promise<Index> => {
@@ -201,18 +211,8 @@ const indexOf = (project: ProjectDir): Promise<Index> => {
 };
 
 /** The install root a path belongs to: the innermost one holding it. */
-const rootOf = (index: Index, path: string): InstallRoot | undefined =>
-  index.installRoots
-    .filter((r) => within(path, r.folder))
-    .reduce<InstallRoot | undefined>(
-      (best, r) => (best === undefined || r.folder.length > best.folder.length ? r : best),
-      undefined,
-    );
-
-const installed = (root: InstallRoot | undefined): string =>
-  root === undefined
-    ? "installed dependencies; a package install puts them back"
-    : `installed dependencies; ${root.choice.argv.join(" ")}${root.choice.lockfile === undefined ? "" : ` from ${root.choice.lockfile}`} puts them back`;
+const installed = (root: InstallRoot): string =>
+  `installed dependencies; ${root.choice.argv.join(" ")}${root.folder === "" ? "" : ` in ${root.folder}`}${root.choice.lockfile === undefined ? "" : ` from ${root.choice.lockfile}`} puts them back`;
 
 const where = (folder: string): string => (folder === "" ? "the project" : folder);
 
@@ -235,11 +235,22 @@ export const nodePlugin: EcosystemPlugin = {
 
   strip: async (ctx): Promise<StripCandidate[]> => {
     const index = await indexOf(ctx);
-    const candidates: StripCandidate[] = index.nodeModules.map((path) => ({
-      path,
-      reason: installed(rootOf(index, path)),
-      kind: "deps",
-    }));
+    // A node_modules is claimed only where an install puts it back: beside an install root's package.json or a
+    // workspace member's. Any other is declined, so it stays, and the plan says why.
+    const candidates: StripCandidate[] = index.nodeModules.map((path) => {
+      const folder = parentOf(path);
+      const root = index.coveredBy.get(folder);
+      if (root !== undefined) return { path, reason: installed(root), kind: "deps" };
+      const isPackage = index.packages.some((pkg) => pkg.folder === folder);
+      return {
+        path,
+        reason: "installed dependencies",
+        kind: "deps",
+        declined: isPackage
+          ? `no install puts it back: ${where(folder)} has no lockfile and is in no workspace`
+          : "no install puts it back: there is no package.json beside it",
+      };
+    });
     for (const root of index.installRoots) {
       if (root.choice.manager !== "yarn-berry") continue;
       for (const name of BERRY) {

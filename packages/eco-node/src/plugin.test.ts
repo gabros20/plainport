@@ -156,4 +156,38 @@ describe("Node plugin: detection, findings and hydration", () => {
     pkg("package.json", { workspaces: { packages: ["apps/*"] } });
     expect((await nodePlugin.hydrate(await ready())).steps.map((s) => s.path)).toEqual([""]);
   });
+
+  test("node_modules that no install puts back is declined, with why", async () => {
+    pkg("package.json");
+    put("package-lock.json", "{}");
+    put("node_modules/a/index.js");
+    // A package with no lockfile of its own, outside any workspace: the root's npm ci never fills it.
+    pkg("tools/package.json");
+    put("tools/node_modules/b/index.js");
+    // No package.json at all beside it.
+    put("scratch/node_modules/c/index.js");
+    const strip = await nodePlugin.strip(await ready());
+    expect(strip.map((c) => [c.path, c.declined === undefined])).toEqual([
+      ["node_modules", true],
+      ["scratch/node_modules", false],
+      ["tools/node_modules", false],
+    ]);
+    expect(strip.find((c) => c.path === "tools/node_modules")?.declined).toContain("tools has no lockfile");
+    expect(strip.find((c) => c.path === "scratch/node_modules")?.declined).toContain("no package.json");
+  });
+
+  test("a workspace member's node_modules is covered by the workspace root's install", async () => {
+    pkg("package.json", { workspaces: ["packages/*"] });
+    put("package-lock.json", "{}");
+    pkg("packages/ui/package.json");
+    put("packages/ui/node_modules/x/index.js");
+    const strip = await nodePlugin.strip(await ready());
+    expect(strip).toEqual([
+      expect.objectContaining({
+        path: "packages/ui/node_modules",
+        reason: expect.stringContaining("npm ci"),
+      }),
+    ]);
+    expect(strip[0]?.declined).toBeUndefined();
+  });
 });
