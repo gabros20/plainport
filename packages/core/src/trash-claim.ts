@@ -1,7 +1,7 @@
 // A released trash has one deleter at a time (D64): the detached delete (spawner.ts posixDeleteTrash) first writes
 // `<root>/.plainport-trash/<op>.claim` (this device's id, its pid, this host's boot time and when it started), then
-// deletes the trash, the journal and the claim, in that order (the claim last, so while the journal names the trash
-// the claim stands). housekeeping, gc and recover leave a trash alone only
+// deletes the trash, the claim and the journal, in that order (D67: a crash between the last two leaves a released
+// journal whose trash is gone, which housekeeping and gc read as finished and close). housekeeping, gc and recover leave a trash alone only
 // while its claim is live: this device's, from this boot, and its pid alive. Anything else is gone and taken over,
 // claim included: another device id (journals are per device, so only this device's delete can claim its trash), an
 // earlier boot, a dead pid, a claim that cannot be read (the trash is committed and released, so a takeover loses no

@@ -85,18 +85,18 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
     ]);
   });
 
-  test("its claim is the last thing it removes: while the journal is still there, so is the claim", async () => {
-    // A journal it cannot remove stops it between the two: the claim must still stand, so no one sees a due trash
-    // with a journal and no live claim while the delete runs.
+  test("it removes the trash, then its claim, then the journal (D67): a journal it cannot remove is left alone, no claim", async () => {
+    // A journal it cannot remove stops it after the claim: what is left is a released journal whose trash and claim
+    // are gone, which housekeeping and gc settle; never a claim no journal leads to (invariant 3).
     const journalDir = join(box.home, "state/journal");
     chmodSync(journalDir, 0o555);
     try {
       const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE);
       if (!started.ok) throw new Error(started.finding.message);
       for (let i = 0; i < 500 && (await testHost().proc.isAlive(started.value.pid)); i++) await Bun.sleep(10);
-      expect([existsSync(trash), existsSync(journal), existsSync(trashClaimFile(trash))]).toEqual([
+      expect([existsSync(trash), existsSync(trashClaimFile(trash)), existsSync(journal)]).toEqual([
         false,
-        true,
+        false,
         true,
       ]);
     } finally {

@@ -2234,3 +2234,38 @@ describe("fix wave q2: claim edges, the notice for unclaimed due trash, the exit
     expect(RECOVER_EXIT_ORDER).toEqual([130, 8, 7, 6, 11, 9, 5, 10, 4, 3, 2, 1]);
   });
 });
+
+describe("D67: a released journal whose trash is already gone is finished", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  /** The state a delete killed between removing its claim and its journal leaves: the journal alone. */
+  const killedBeforeJournal = async (): Promise<OffloadJournal> => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const { keepUntil: _k, ...rest } = journal as OffloadJournal;
+    await rewrite(rest);
+    rmSync(rest.trash as string, { recursive: true });
+    return rest as OffloadJournal;
+  };
+
+  test("housekeeping says nothing about it; a write command's removes the journal, a read command's leaves it", async () => {
+    await killedBeforeJournal();
+    const read = await housekeeping(trashDeps(), { deleteDue: false });
+    expect(read.notices).toEqual([]);
+    expect(await journals()).toHaveLength(1);
+    const write = await housekeeping(trashDeps());
+    expect([write.notices, write.started]).toEqual([[], []]);
+    expect(await journals()).toEqual([]);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+
+  test("gc removes the journal and reports nothing deleted; invariant 3 holds", async () => {
+    await killedBeforeJournal();
+    const gc = value(await collectTrash(trashDeps(), { early: false }));
+    expect([gc.deleted, gc.kept, gc.skipped]).toEqual([[], [], []]);
+    expect(await journals()).toEqual([]);
+    expect(trashes()).toEqual([]);
+    await expectInvariants();
+  });
+});

@@ -165,6 +165,15 @@ const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
   }
 };
 
+/**
+ * Whether a released offload's trash is already gone while its root is here (D67): its delete ran, and only the
+ * journal is left to close. A root that is away is not "gone": its trash may be on the unmounted volume.
+ */
+const finished = async (io: LocalIo, journal: OffloadJournal): Promise<boolean> => {
+  if ((await rootAway(io, journal)) !== undefined) return false;
+  return !(await stillThere(io, itemOf(journal).trash));
+};
+
 /** This device's id, which a trash claim names (D64); empty when it cannot be read, so no claim is this device's. */
 const thisDeviceId = async (io: LocalIo, paths: PlainportPaths): Promise<string> => {
   const read = await readDevice(io, paths);
@@ -273,6 +282,16 @@ export const collectTrash = async (
         const deleting = await claimedReason(io, trash, self);
         if (deleting !== undefined) {
           report.kept.push({ ...itemOf(now), reason: deleting });
+          return ok(undefined);
+        }
+        // Its trash already gone (a delete killed before it closed the journal, D67): finished; the journal goes.
+        if (await finished(io, now)) {
+          try {
+            await removeTrash(io, trash);
+            await removeJournal(io, paths, now.op);
+          } catch (error) {
+            return writeFailed(error, `closing the journal of ${now.op}`, true, journalFile(paths, now.op));
+          }
           return ok(undefined);
         }
         const bytes = await treeBytes(io, trash);
@@ -493,6 +512,34 @@ export const housekeeping = async (
     if (!released(journal) || reused.has(journal.op)) continue;
     const due = journal.keepUntil === undefined || Date.parse(journal.keepUntil) <= clock().getTime();
     if (!due) continue;
+    // Its trash already gone, and no live delete about to close the journal: finished (D67). A write command closes the
+    // journal, under the lock; a read command leaves it. Neither says anything.
+    if (
+      (await finished(io, journal)) &&
+      (await claimedReason(io, itemOf(journal).trash, self)) === undefined
+    ) {
+      if (options.deleteDue) {
+        const closed = await withProjectLock(
+          { io, paths, clock, log: deps.log },
+          { id: journal.project.id, address: journal.project.address },
+          async () => {
+            const now = await reread(io, paths, journal.op);
+            if (now === undefined || !released(now) || !(await finished(io, now))) return ok(undefined);
+            if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+            try {
+              await removeTrash(io, itemOf(now).trash);
+              await removeJournal(io, paths, now.op);
+            } catch (error) {
+              return writeFailed(error, `closing the journal of ${now.op}`, true, journalFile(paths, now.op));
+            }
+            return ok(undefined);
+          },
+          { resume: () => true },
+        );
+        if (!closed.ok) deps.log("info", `the journal of ${journal.op} is left: ${closed.finding.message}`);
+      }
+      continue;
+    }
     // A due trash that housekeeping does not hand on now, and that no live delete claims (one that crashed before its
     // claim, or could not write it): only gc deletes it, so say so.
     if (!options.deleteDue || journal.keepUntil === undefined) {

@@ -120,7 +120,8 @@ const awaitClaim = async (
 /**
  * HostPorts.deleteTrashDetached on POSIX (D47): /bin/sh in a new session (setsid), every stream on /dev/null, never
  * waited for. It first claims the trash as its own (trash-claim.ts, D64: its pid, written by itself), makes the trash
- * writable (a read-only folder cannot be emptied), deletes it, then the journal, then the claim (last, so a journal never stands unclaimed while it runs). This resolves ok only
+ * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal (D67: a crash between them leaves a journal whose trash is gone, which
+ * housekeeping and gc close; never a claim no journal leads to). This resolves ok only
  * once the claim is there (or the child already finished), polled through `io`, so a caller holding the project's
  * lock releases it only after any other deleter can see the claim. A child that exits without its claim is
  * fs.write-failed; one that has not claimed within CLAIM_WAIT_MS (a disk that hangs) is killed first, so no deleter
@@ -143,7 +144,7 @@ export const posixDeleteTrash = async (
         [
           'c="$1.claim"',
           `printf '{"v":1,"device":"%s","pid":%s,"bootedAt":%s,"startedAt":"%s"}\\n' "$3" "$$" "$4" "$5" > "$c.tmp" && mv -f -- "$c.tmp" "$c" || exit 1`,
-          'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$2" && rm -f -- "$c"',
+          'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$c" && rm -f -- "$2"',
         ].join("\n"),
         "plainport-trash",
         trash,
