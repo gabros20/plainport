@@ -211,8 +211,9 @@ The choice is low-risk because every adapter sits behind the six-method `BlobSto
 <store root>/
   repo/                      restic repository (config, data/, index/, keys/, snapshots/)
   meta/v1/
+    store.json               the store's identity {v, id}, written once at setup
     events/<ulid>.json       append-only catalog events, never overwritten
-    state.json               compacted fold of events (optional, rebuildable)
+    state.json               compacted fold of events (optional, rebuildable; M1 keeps it beside the mirror instead)
 ```
 
 The `Engine` interface keeps other engines possible later: rustic or Kopia, or a single-file `tar + zstd + age` engine for exports you can open with standard tools.
@@ -495,7 +496,7 @@ Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `snapshot
 - **Bindings** are each device's latest `root-bound` for a root. The device's own config always wins; the event is its published copy for other devices to plan with.
 - **Replication is a union.** Events are immutable files with unique names, so copying them between stores is a set union and never conflicts.
 
-Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time: it records the fold's version and a digest of the names and sizes of the event files it was folded from, and is reused only while both match. One read path serves every command: it syncs the store with the local mirror (fetching only events the mirror lacks and uploading only what the store lacks), folds the union, and caches the fold beside the mirror; when the store is unreachable it returns the mirror's state marked stale. A root's ULID comes from its first `root-created` event; each device records the ULID it uses for each root key in `registry.json`.
+Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time: it records the fold's version and a digest of the names and sizes of the event files it was folded from, and is reused only while both match. One read path serves every command: it checks the store's identity (`meta/v1/store.json`) against the id this device recorded, downloads into the local mirror only the events it lacks (files it found unreadable are remembered by name and size, not fetched again), folds the mirror's events and caches the fold beside them. A read never writes to a store: events reach a store only from the write that created them. When the store is unreachable it returns the mirror's state marked stale, with the time of its last sync (none if it never synced); a store whose identity differs is refused (`store.identity-changed`); a broken mirror never fails a read while the store is reachable, which is then read directly. A root's ULID comes from its first `root-created` event; each device records the ULID it uses for each root key in `registry.json`.
 
 **If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas and trims whitespace from its ends, so the engine percent-encodes (UTF-8 bytes) what restic would change: `,` as `%2C` and `%` as `%25` anywhere, control characters anywhere, and whitespace at the start or end; it decodes those when it reads tags back, so any project path keeps its exact `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
 
@@ -506,13 +507,13 @@ Event files are written create-only where the store can do it (exclusive create 
 | `~/.config/plainport/config.toml` | Your settings: devices, stores, roots, defaults, trusted hooks. plainport never rewrites it |
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
 | `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
-| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID |
+| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID, and store name → store id |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |
 | `~/.local/state/plainport/kit-ledger.json` | Every skill and MCP server plainport installed on this device, with hashes, so it never touches anything else |
 | `<root>/.plainport-parked/`, `.plainport-staging/`, `.plainport-trash/` | Parked copies kept for a trip back, restores in progress, and folders waiting to be deleted |
-| `~/.cache/plainport/<store>/events/` | Mirror of remote events, so `plainport ls` works offline |
+| `~/.cache/plainport/<store id>/events/` | Mirror of remote events, so `plainport ls` works offline; keyed by the store's identity, with `mirror.json` (last sync) and `state.json` (cached fold) beside it |
 
 **The stub** (`web.plainport`, JSON so agents can read it):
 
