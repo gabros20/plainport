@@ -535,21 +535,28 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       }
       // offload.diverged-after-commit (D52): the folder stands with no stub while the catalog says shelved; it is
       // this project's own working copy, ahead of (or at) its head.
-      const own =
+      // This project's own copy here, by registry.json: its base is a snapshot of it and nothing stubs it.
+      const ours =
         target === ref.dir &&
         there === "dir" &&
         !stubbed &&
         entry !== undefined &&
         entry.base !== undefined &&
         (entry.base === over || project.snapshots[entry.base] !== undefined);
+      // Shelved in the catalog, yet here: offload.diverged-after-commit kept it (D52). Otherwise it is onloaded here.
+      const kept = ours && project.status === "shelved";
       return fail(
         finding("path.occupied", {
-          message: own
+          message: kept
             ? `${target} is this project's own working copy, kept when its offload was committed as snapshot ${entry?.base} after the folder changed (offload.diverged-after-commit); onload never merges into it`
-            : `${target} already exists (a ${there}), so ${ref.address} was not onloaded there; onload never merges into an existing folder`,
-          fix: own
+            : ours
+              ? `${ref.address} is already onloaded here, at ${target}; onload never merges into it`
+              : `${target} already exists (a ${there}), so ${ref.address} was not onloaded there; onload never merges into an existing folder`,
+          fix: kept
             ? `keep working in ${shellWord(target)}; the next offload builds on snapshot ${entry?.base}. For a second copy: plainport onload ${shellWord(ref.address)} --to <path>`
-            : `move ${shellWord(target)} aside, or onload elsewhere: plainport onload ${shellWord(ref.address)} --to <path>`,
+            : ours
+              ? `work in ${shellWord(target)}; plainport offload ${shellWord(ref.address)} --yes shelves it`
+              : `move ${shellWord(target)} aside, or onload elsewhere: plainport onload ${shellWord(ref.address)} --to <path>`,
           paths: [target],
         }),
       );
@@ -752,10 +759,12 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   ): Promise<Result<void>> {
     const staging = saga.journal.staging as string;
     phase("restore", "start");
+    // Made here, not by restic: a snapshot holds the folder's contents, not the folder's own mode, and restic makes a
+    // target it creates private (0700). This one gets a new folder's mode, as the project folder had.
     try {
-      await io.fs.mkdirp(dirname(staging));
+      await io.fs.mkdirp(staging);
     } catch (error) {
-      return writeFailed(error, `making ${dirname(staging)}`, false, dirname(staging));
+      return writeFailed(error, `making ${staging}`, false, staging);
     }
     const starting = await saga.step("onload.restore.start");
     if (!starting.ok) return starting;

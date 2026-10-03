@@ -261,9 +261,6 @@ export const fakeEngine = (
       if (snapshot === undefined) return notFound(id);
       const failure = taken(hooks, "restore");
       const overwrite = options.overwrite ?? "always";
-      const call: RestoreCall = { snapshot: id, target, overwrite, written: 0, skipped: 0 };
-      restores.push(call);
-      mkdirSync(target, { recursive: true });
       const existing = (path: string) => {
         try {
           return lstatSync(path);
@@ -271,6 +268,13 @@ export const fakeEngine = (
           return undefined;
         }
       };
+      const call: RestoreCall = { snapshot: id, target, overwrite, written: 0, skipped: 0 };
+      restores.push(call);
+      // As restic does: a target it has to make is made private (0700); an existing one keeps its mode.
+      if (existing(target) === undefined) {
+        mkdirSync(join(target, ".."), { recursive: true });
+        mkdirSync(target, { mode: 0o700 });
+      }
       let bytes = 0;
       let files = 0;
       for (const entry of snapshot.entries) {

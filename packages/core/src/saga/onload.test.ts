@@ -299,6 +299,7 @@ const expectShelvedUntouched = async () => {
 describe("onload: the round trip", () => {
   test("restores the offloaded folder byte for byte (stripped paths aside), swaps it in and hydrates it", async () => {
     const before = treeOf(dir);
+    const rootMode = lstatSync(dir).mode & 0o7777;
     const off = await offload();
     expect(existsSync(dir)).toBe(false);
 
@@ -314,6 +315,8 @@ describe("onload: the round trip", () => {
       hydrate: { status: "installed", steps: [{ path: "", command: "npm ci", ok: true }] },
     });
     expect(treeOf(dir)).toEqual(before);
+    // The folder itself is made by plainport (restic would make it 0700): a new folder's mode, as the original's was.
+    expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe(rootMode.toString(8));
     // The install ran in the project, frozen, and put the dependencies back.
     expect(pmCalls()).toEqual([`${await canonicalReal(dir)}|npm ci`]);
     expect(readFileSync(join(dir, "node_modules/.installed-by"), "utf8").trim()).toBe("npm ci");
@@ -568,6 +571,17 @@ describe("onload: preflight refusals change nothing", () => {
     expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "path.occupied"]);
     expect(!result.ok && result.finding.message).toContain("this project's own working copy");
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("a project already onloaded here is named as such: path.occupied, never merged", async () => {
+    await offload();
+    value(await onload());
+    const again = await onload();
+    expect(!again.ok && [again.exitCode, again.finding.code]).toEqual([6, "path.occupied"]);
+    expect(!again.ok && again.finding.message).toBe(
+      `work:web is already onloaded here, at ${dir}; onload never merges into it`,
+    );
+    expect(!again.ok && again.finding.fix).toContain("plainport offload work:web --yes");
   });
 
   test("free space short of the snapshot, the dependencies and 10% refuses with fs.no-space", async () => {

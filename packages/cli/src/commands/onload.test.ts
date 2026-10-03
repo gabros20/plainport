@@ -310,6 +310,7 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
     symlinkSync("src/main.ts", join(dir(), "link"));
     symlinkSync("../outside/target", join(dir(), "dangling"));
     const before = treeOf(dir());
+    const rootMode = lstatSync(dir()).mode & 0o7777;
     const off = await run(["offload", "work:web", "--store", "t1", "--yes", "--json"]);
     expect(off.code).toBe(0);
     const op = envelope(off.out).data.op as string;
@@ -326,6 +327,8 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
       hydrate: { status: "installed" },
     });
     expect(treeOf(dir())).toEqual(before);
+    // restic would make the folder it restores into 0700; plainport makes it, with a new folder's mode.
+    expect((lstatSync(dir()).mode & 0o7777).toString(8)).toBe(rootMode.toString(8));
     const opened = await localStores(host, env).open(
       "t1",
       { kind: "local", path: join(box.home, "t1-ssd") },
