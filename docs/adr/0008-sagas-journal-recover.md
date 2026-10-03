@@ -16,6 +16,10 @@ distributed transaction. Restic exit code 3 (unreadable files) is a hard failure
 **Consequences.** The crash matrix (ADR-0017) kills the process at every journal step and checks the six
 invariants. Onload never merges into an existing folder; a failed install never undoes a good restore.
 
-**Status.** Accepted (owner, 2026-10-01).
+**Status.** Accepted (owner, 2026-10-01). Amended by run decision D59 (2026-10-03): only `plainport recover` replays
+a journal. The start of any other command does housekeeping instead: it deletes trash past its `keepLocalFor` deadline
+(under the project's lock, by the detached delete) and names each interrupted operation on stderr with `plainport
+recover`. Read commands never write (D45), and an onload stopped before its swap is taken over by the next onload, so
+an automatic replay would break both; a write command on a project with an open journal refuses with `journal.pending`.
 
 **Design.** Project lifecycle; Offload process; Onload process; Testing → invariants.

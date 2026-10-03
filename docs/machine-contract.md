@@ -41,7 +41,7 @@ The rules:
   false). This version prints no other top-level key; a later one may add keys (§7).
 - A failure carries `data` next to `error` only when it still has a useful result (D14): exit 10 carries the
   restored project and snapshot, exit 8 the kept snapshot, and exit 6 from a `--dry-run` the plan its blockers
-  stopped (§6). Otherwise a failure has no `data`. When present, `data` has the command's declared output shape, or
+  stopped (§6); `recover` and `gc` carry their report whenever they fail, since part of it may have been settled. Otherwise a failure has no `data`. When present, `data` has the command's declared output shape, or
   its plan shape under `--dry-run`.
 - `plainport_json` is the envelope version, `1`. It changes only on a breaking change to the envelope (§7).
 - `verb` is the command as registered, such as `offload` or `root add`.
@@ -195,14 +195,14 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `hydrate.failed` | block | no | 10 | The files are restored but installing the dependencies failed (restored-unhydrated). The error's `data` is the command's output (the project, the snapshot, the install that failed, D14) and `fix` is `plainport hydrate <project>` |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
-| `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
+| `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover`. From `recover` itself: a journal file this version cannot read, left as it is |
 | `lease.held` | warn | no | 8 | Another device holds the project's lease; a warning, or a refusal with exit 8 when `onload.leases = "strict"` |
-| `offload.diverged-after-commit` | block | no | 8 | Raised by `offload` (an edit between verification and the rename) and by `plainport recover` (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no `resolve` is needed. The error's `data` has `kind: "diverged-after-commit"`, where a fork (`catalog.head-moved`) has `kind: "fork"` (D51, D52) |
+| `offload.diverged-after-commit` | block | no | 8 | Raised by `offload` (an edit between verification and the rename) and by `plainport recover` (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no `resolve` is needed. The error's `data` has `kind: "diverged-after-commit"`, where a fork (`catalog.head-moved`) has `kind: "fork"` (D51, D52); from `recover`, `data` is its report, and the operation's `conflict` holds that `kind` |
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for `onload` and `hydrate`, during the install after a good restore; the project is then restored-unhydrated and `fix` is `plainport hydrate <project>` (D56) |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |
 | `path.stub-occupied` | block | no | 6 | Something other than this project's stub is at `<project>.plainport`, where the stub would go; plainport never overwrites it (D47) |
-| `path.occupied` | block | no | 6 | Something already stands where `onload` would put the project; it never merges, and `fix` names `--to <path>` (or, for the folder `offload.diverged-after-commit` kept, says to keep working in it) |
+| `path.occupied` | block | no | 6 | Something already stands where `onload` or `restore` would put the project; it never merges, and `fix` names `--to <path>` (or, for the folder `offload.diverged-after-commit` kept, says to keep working in it). Also from an offload's release, finished by `recover`, when a folder stands at the project's place after the project folder was moved aside: neither is touched and no stub is written |
 | `plan.stale` | block | no | 6 | The folder, the options or the config changed since the approved plan was made, or the plan is for another project; a fresh plan is saved, `fix` names its id and the error's `data` is that plan (D14) |
 | `process.cancelled` | block | no | 130 | A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped |
 | `process.idle-timeout` | block | no | 1 | A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output |

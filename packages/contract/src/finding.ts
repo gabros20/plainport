@@ -250,7 +250,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back",
+      "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back. From recover: a journal this version cannot read, left as it is",
   },
   "path.stub-occupied": {
     severity: "block",
@@ -629,7 +629,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Something already stands where onload would put the project; onload never merges into it, and fix names --to <path>",
+      "Something already stands where onload or restore would put the project, which never merge into it (fix names --to <path>); or a folder stands at the project's place after its offload's release moved the project aside, and neither is touched",
   },
   "project.already-local": {
     severity: "block",
