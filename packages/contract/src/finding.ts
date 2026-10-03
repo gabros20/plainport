@@ -270,7 +270,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "Recovery found the project folder changed after its offload was committed: the folder is kept, no stub is written, and the committed snapshot (named in the finding) and the folder are two copies for resolve (D51)",
+      "The project folder changed after its offload was committed (found by offload right before the rename, or by recover): the snapshot is the head, the folder is kept with its edits and no stub is written, and the next offload builds on the snapshot (D51, D52)",
   },
   "operation.cancelled": {
     severity: "block",

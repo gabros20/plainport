@@ -193,7 +193,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
-| `offload.diverged-after-commit` | block | no | 8 | `plainport recover` found the project folder changed after its offload was committed: it keeps the folder, writes no stub, and names the committed snapshot; the folder and that snapshot are two copies for `resolve` (D51) |
+| `offload.diverged-after-commit` | block | no | 8 | Raised by `offload` (an edit between verification and the rename) and by `plainport recover` (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no `resolve` is needed. The error's `data` has `kind: "diverged-after-commit"`, where a fork (`catalog.head-moved`) has `kind: "fork"` (D51, D52) |
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |

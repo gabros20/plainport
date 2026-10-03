@@ -358,6 +358,41 @@ describe("offload: a real run", () => {
     await expectInvariants();
   });
 
+  /** Ports whose host edits the folder once the offload is committed: the D52 guard keeps it. */
+  const editAfterCommit = () =>
+    ports({
+      system: testHost({
+        faults: {
+          onStep: (step) => {
+            if (step === "offload.committed") writeFileSync(join(dir(), "src/late.ts"), "late\n");
+          },
+        },
+      }),
+    });
+
+  test("a folder edited after the commit exits 8 told apart from a fork: kind diverged-after-commit (D52)", async () => {
+    const run = await cli(["offload", "work:web", "--yes", "--json"], editAfterCommit());
+    expect(run.code).toBe(8);
+    const env = envelope(run.out);
+    expect(env).toMatchObject({
+      error: { code: 8, finding: { code: "offload.diverged-after-commit" } },
+      data: { exitCode: 8, kind: "diverged-after-commit", project: "work:web", store: "local" },
+    });
+    expect(env.data.snapshot).toBe(env.data.op);
+    expect(existsSync(join(dir(), "src/late.ts"))).toBe(true);
+    await expectInvariants();
+  });
+
+  test("the human line for a folder edited after the commit says the snapshot is the head and the edits stay", async () => {
+    const run = await cli(["offload", "work:web", "--yes"], editAfterCommit());
+    expect(run.code).toBe(8);
+    expect(run.out).toMatch(
+      /^offloaded work:web to local as snapshot [0-9A-Z]{26}, now its head; the folder changed after the commit, so it stays here with its edits, and the next offload builds on that snapshot\n$/,
+    );
+    expect(run.out).not.toContain("fork");
+    await expectInvariants();
+  });
+
   test("a head that moves during the upload exits 8 with the kept snapshot as data (D14)", async () => {
     const first = await cli(["offload", "work:web", "--yes", "--json"]);
     expect(first.code).toBe(0);
@@ -396,6 +431,7 @@ describe("offload: a real run", () => {
       error: { code: 8, finding: { code: "catalog.head-moved" } },
       data: {
         exitCode: 8,
+        kind: "fork",
         project: "work:web",
         store: "local",
         stored: expect.stringMatching(/^[0-9a-f]{64}$/),

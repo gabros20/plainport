@@ -85,8 +85,8 @@ export const renderPlan = (plan: Plan): string => {
   return lines.join("\n");
 };
 
-/** A real run's data: the offload done; or, with exit 8, the snapshot kept as a fork; or, with exit 6 for a plan
- * that no longer holds, the fresh plan (D14, D38). */
+/** A real run's data: the offload done; or, with exit 8, the snapshot kept as a fork, or committed while the folder
+ * changed after the commit (kind); or, with exit 6 for a plan that no longer holds, the fresh plan (D14, D38, D52). */
 const OffloadOutputSchema = z.union([
   z.looseObject({
     op: z.string(),
@@ -108,13 +108,18 @@ const OffloadOutputSchema = z.union([
     .looseObject({
       op: z.string(),
       exitCode: z.literal(8),
+      kind: z.enum(["fork", "diverged-after-commit"]).meta({
+        description:
+          "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
+      }),
       project: z.string(),
       snapshot: z.string(),
       store: z.string(),
-      stored: z.string().meta({ description: "The store's restic id for the snapshot kept as a fork" }),
+      stored: z.string().meta({ description: "The store's restic id for the snapshot" }),
     })
     .meta({
-      description: "Exit 8: the head moved, the snapshot is kept as a fork and the folder stays (D14)",
+      description:
+        "Exit 8: the snapshot is kept as a fork (the head moved), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way (D14, D52)",
     }),
   PlanSchema.meta({ description: "Exit 6 (plan.stale): the fresh plan to review and approve (D14, D38)" }),
 ]);
@@ -149,7 +154,9 @@ export const offload = defineCommand({
   human: (data) => {
     if ("fingerprint" in data) return renderPlan(data as Plan);
     if (data.exitCode === 8)
-      return `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
+      return data.kind === "diverged-after-commit"
+        ? `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}, now its head; the folder changed after the commit, so it stays here with its edits, and the next offload builds on that snapshot`
+        : `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
     return [
       `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; freed ${formatBytes(data.freedBytes)}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
