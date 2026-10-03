@@ -211,6 +211,12 @@ describe("findings", () => {
       "lease.held": { severity: "warn", allowable: false, exitCode: 8, summary: expect.any(String) },
       "path.occupied": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "project.nested": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "project.already-local": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "snapshot.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "toolchain.mismatch": { severity: "warn", allowable: false, exitCode: 6, summary: expect.any(String) },
       "proc.cwd": { severity: "block", allowable: true, exitCode: 6, summary: expect.any(String) },

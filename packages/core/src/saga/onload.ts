@@ -588,7 +588,33 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         }),
       );
     }
-    // --to lands wherever its path is free, whatever stands at the project's own place (D56).
+    // --to lands wherever its path is free, unless this project's own copy is here: one working copy per device (D56).
+    if (req.to !== undefined && ref.dir !== undefined && ref.dir !== target) {
+      const entry = registered.ok ? registered.value.projects[id] : undefined;
+      let own = false;
+      try {
+        own =
+          entry?.base !== undefined &&
+          (entry.base === over || project.snapshots[entry.base] !== undefined) &&
+          (await kindAt(io, ref.dir)) === "dir" &&
+          (await kindAt(io, `${ref.dir}${STUB_SUFFIX}`)) === undefined;
+      } catch (error) {
+        return unreadable(
+          ref.dir,
+          error,
+          "whether the project is already here is unknown; nothing was restored",
+        );
+      }
+      if (own) {
+        return fail(
+          finding("project.already-local", {
+            message: `${ref.address}'s own working copy is already on this device, at ${ref.dir}, so it was not onloaded a second time at ${target}`,
+            fix: `work in ${shellWord(ref.dir)}; for a side-by-side copy of a snapshot: plainport restore ${shellWord(ref.address)} --snapshot <id> --to ${shellWord(target)}`,
+            paths: [ref.dir],
+          }),
+        );
+      }
+    }
     return undefined;
   }
 

@@ -596,6 +596,17 @@ describe("onload: preflight refusals change nothing", () => {
     await expectInvariants("web", elsewhere);
   });
 
+  test("--to refuses while this project's own onloaded copy is here (project.already-local, D56): one copy per device", async () => {
+    await offload();
+    value(await onload());
+    mkdirSync(join(box.home, "elsewhere"));
+    const second = await onload({ to: join(box.home, "elsewhere/web") });
+    expect(!second.ok && [second.exitCode, second.finding.code]).toEqual([6, "project.already-local"]);
+    expect(!second.ok && second.finding.fix).toContain("plainport restore work:web --snapshot");
+    expect(readdirSync(join(box.home, "elsewhere"))).toEqual([]);
+    await expectInvariants();
+  });
+
   test("a folder kept after offload.diverged-after-commit is this project's own copy: path.occupied says so", async () => {
     await offload();
     value(await onload());

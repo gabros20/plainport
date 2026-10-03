@@ -277,7 +277,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 130,
     summary:
-      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local",
+      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56)",
   },
   "plan.not-found": {
     severity: "block",
@@ -630,6 +630,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "Something already stands where onload would put the project; onload never merges into it, and fix names --to <path>",
+  },
+  "project.already-local": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The project's own onloaded copy is already on this device, so onload --to would make a second working copy; a side-by-side copy is plainport restore --snapshot <id> --to <path> (D56)",
   },
   "project.nested": {
     severity: "block",
