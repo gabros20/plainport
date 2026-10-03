@@ -8,6 +8,7 @@
 // - strip.keep or strip.never match: the candidate itself or a folder above it, never something inside it (D39),
 // - holds a repository of its own, whose unpushed work could live nowhere else,
 // - git tracks, in whole or in part (a tracked build/, a committed .yarn/cache),
+// - holds a candidate kept for any of these reasons, which excluding it would take along (D39),
 //
 // and collapses what is left to the outermost paths. "Gitignored does not mean disposable": nothing is stripped
 // for being ignored, only for being claimed.
@@ -29,6 +30,7 @@ export type KeptReason =
   | "protected"
   | "holds-repo"
   | "tracked"
+  | "holds-kept"
   | "inside";
 
 export interface StripInput {
@@ -179,6 +181,24 @@ export const resolveStripSet = async (input: StripInput): Promise<Result<StripSe
     keep(c, "tracked", "git tracks it");
     return false;
   });
+
+  // A candidate holding a kept one is kept too: excluding it would take the kept one with it (D39). Innermost first,
+  // so a keep reaches every candidate around it.
+  /** Each folder above a staying path → that path. */
+  const holding = new Map<string, string>();
+  const stays = (path: string) => {
+    for (const folder of ancestors(path)) if (!holding.has(folder)) holding.set(folder, path);
+  };
+  for (const k of kept) if (k.why !== "missing" && k.why !== "inside") stays(k.path);
+  const held = new Set<string>();
+  for (const c of [...remaining].sort((a, b) => b.path.length - a.path.length)) {
+    const inner = holding.get(c.path);
+    if (inner === undefined) continue;
+    keep(c, "holds-kept", `it holds ${inner}, which stays`);
+    held.add(c.path);
+    stays(c.path);
+  }
+  remaining = remaining.filter((c) => !held.has(c.path));
 
   // Outermost only: one inside another is left out with it.
   const outer = new Set(remaining.map((c) => c.path));

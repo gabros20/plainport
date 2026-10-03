@@ -124,13 +124,24 @@ describe("plan: the strip set", () => {
     expect(kept?.paths).toEqual(["apps/web/.next", "dist"]);
   });
 
-  test("a kept candidate inside a stripped one leaves with it, so the plan does not say it stays", async () => {
+  test("D39: a candidate holding a kept candidate is kept too, naming the inner keep", async () => {
     put("out/keep/a.js");
     put("out/b.js");
+    put("gen/sub/tools/node_modules/x.js");
     writeFileSync(join(dir, ".plainport.toml"), '[strip]\nkeep = ["out/keep"]\n');
-    const p = await plan([output("out"), output("out/keep")]);
-    expect(stripped(p)).toEqual(["out"]);
-    expect(p.findings.find((f) => f.code === "strip.kept")).toBeUndefined();
+    const declined: StripCandidate = {
+      path: "gen/sub/tools/node_modules",
+      reason: "installed dependencies",
+      kind: "deps",
+      declined: "no install puts it back",
+    };
+    // gen holds gen/sub, which holds the declined node_modules: the keep reaches every candidate around it.
+    const p = await plan([output("out"), output("out/keep"), output("gen"), output("gen/sub"), declined]);
+    expect(stripped(p)).toEqual([]);
+    const kept = p.findings.find((f) => f.code === "strip.kept");
+    expect(kept?.paths).toEqual(["gen", "gen/sub", "gen/sub/tools/node_modules", "out", "out/keep"]);
+    expect(kept?.message).toContain("out (it holds out/keep, which stays)");
+    expect(kept?.message).toContain("gen/sub (it holds gen/sub/tools/node_modules, which stays)");
   });
 
   test("a kept candidate shows in the plan with why: strip.kept (info)", async () => {
