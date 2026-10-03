@@ -5,6 +5,7 @@
 import { constants } from "node:fs";
 import {
   access,
+  chmod,
   link,
   lstat,
   mkdir,
@@ -14,7 +15,9 @@ import {
   readlink,
   realpath,
   rename,
+  rm,
   stat,
+  statfs,
   unlink,
 } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -77,6 +80,21 @@ const linkKindOf = (info: {
 
 const kindOf = (entry: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
   entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other";
+
+/** Gives every folder below `path` (itself included) owner rwx, so rm can empty a read-only one; never follows links. */
+const openUp = async (path: string): Promise<void> => {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (!info.isDirectory()) return;
+  if ((Number(info.mode) & 0o700) !== 0o700) await chmod(path, (Number(info.mode) & 0o7777) | 0o700);
+  for (const entry of await readdir(path, { withFileTypes: true }))
+    if (entry.isDirectory()) await openUp(join(path, entry.name));
+};
 
 export const nodeLocalIo: LocalIo = {
   fs: {
@@ -173,6 +191,15 @@ export const nodeLocalIo: LocalIo = {
       } catch {
         return false;
       }
+    },
+    chmod: (path, mode) => chmod(path, mode & 0o7777),
+    freeBytes: async (path) => {
+      const info = await statfs(path);
+      return Number(info.bavail) * Number(info.bsize);
+    },
+    removeTree: async (path) => {
+      await openUp(path);
+      await rm(path, { recursive: true, force: true });
     },
   },
   proc: {

@@ -49,6 +49,7 @@ describe("roots: project addresses", () => {
       path: "clients/acme/web",
       id: ids["work:clients/acme/web"] as string,
       dir: join(box.home, "work/clients/acme/web"),
+      place: join(box.home, "work/clients/acme/web"),
       match: "registered",
     });
   });
@@ -134,6 +135,7 @@ describe("roots: project addresses", () => {
       root: "work",
       path: "shelved/thing",
       dir: join(box.home, "work/shelved/thing"),
+      place: join(box.home, "work/shelved/thing"),
       match: "address",
     });
   });
@@ -181,6 +183,7 @@ describe("roots: project addresses", () => {
       path: "clients/old",
       id: "01J8A2C4E6G8J0K2M4P6R8T0VW",
       dir: join(box.home, "work/clients/old"),
+      place: join(box.home, "work/clients/old"),
       stub,
       match: "stub",
     });

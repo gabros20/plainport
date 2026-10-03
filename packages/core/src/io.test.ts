@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { systemErrorCode } from "./io.ts";
+import { nodeLocalIo } from "./node-io.ts";
 
 describe("io: systemErrorCode", () => {
   test("gives the errno code of a system error", () => {
@@ -17,5 +21,29 @@ describe("io: systemErrorCode", () => {
     expect(() => systemErrorCode(refused)).toThrow(refused);
     expect(() => systemErrorCode("a string")).toThrow();
     expect(() => systemErrorCode(undefined)).toThrow();
+  });
+});
+
+describe("io: nodeLocalIo's removeTree and freeBytes", () => {
+  test("removeTree empties read-only folders, removes links without following them, and accepts nothing there", async () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-io-"));
+    try {
+      const kept = join(root, "kept");
+      mkdirSync(kept);
+      writeFileSync(join(kept, "file"), "stays\n");
+      const tree = join(root, "tree");
+      mkdirSync(join(tree, "locked/deeper"), { recursive: true });
+      writeFileSync(join(tree, "locked/deeper/file"), "x");
+      symlinkSync(kept, join(tree, "link"));
+      chmodSync(join(tree, "locked/deeper"), 0o500);
+      chmodSync(join(tree, "locked"), 0o500);
+      await nodeLocalIo.fs.removeTree(tree);
+      expect(existsSync(tree)).toBe(false);
+      expect(existsSync(join(kept, "file"))).toBe(true);
+      await nodeLocalIo.fs.removeTree(join(root, "nothing-here"));
+      expect(await nodeLocalIo.fs.freeBytes(root)).toBeGreaterThan(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

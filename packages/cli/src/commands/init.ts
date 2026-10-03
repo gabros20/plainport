@@ -1,8 +1,10 @@
 // plainport init (DESIGN.md "Roots" → Setting roots up, "CLI design"): names this device, sets up its roots and
 // records the store their snapshots go to. Flags do it all (`--root work=~/work --store-path <path> --device mbp`);
 // on a TTY without --no-input it asks for what the flags left out, starting with a scan of the likely folders.
-// Without a TTY it never prompts: a missing answer is a usage error naming the exact flags to pass. Creating the
-// restic repository itself arrives with the engine (run decision D22); init records the store in managed.toml.
+// Without a TTY it never prompts: a missing answer is a usage error naming the exact flags to pass. init records the
+// store in managed.toml, then sets it up: its identity file, its restic repository (the password read from
+// --store-secret's reference, never passed itself), and this device's record of its id (D45). A store whose disk is
+// not mounted stays recorded, with a warning to run init again.
 
 import { basename } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
@@ -18,6 +20,10 @@ import {
   readDevice,
   rootCandidates,
   rootKeyFrom,
+  SecretRefSchema,
+  type StoreSetup,
+  setUpStore,
+  ulid,
   writeRoots,
 } from "@plainport/core";
 import { z } from "zod";
@@ -119,6 +125,12 @@ export const init = defineCommand({
     "store-path": z.string().min(1).optional().meta({
       description: "A local folder for the store, e.g. on an external disk; --store names it (default local)",
     }),
+    // A reference, checked at the argument boundary, so a password typed here by mistake is refused before any
+    // message or re-run hint could repeat it (AGENTS.md rule 9).
+    "store-secret": SecretRefSchema.optional().meta({
+      description:
+        "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD",
+    }),
     device: z
       .string()
       .optional()
@@ -132,9 +144,20 @@ export const init = defineCommand({
       created: z.boolean().meta({ description: "This run created the identity" }),
     }),
     roots: z.array(z.looseObject({ key: z.string(), path: z.string().optional() })),
-    store: z.looseObject({ name: z.string(), path: z.string() }).optional(),
+    store: z
+      .looseObject({
+        name: z.string(),
+        path: z.string(),
+        id: z
+          .string()
+          .optional()
+          .meta({ description: "The id in its meta/v1/store.json, once it is set up" }),
+      })
+      .optional(),
     files: z.looseObject({ config: z.string(), managed: z.string(), device: z.string() }),
-    changed: z.boolean().meta({ description: "This run wrote managed.toml or created device.json" }),
+    changed: z
+      .boolean()
+      .meta({ description: "This run wrote managed.toml, created device.json or set the store up" }),
     findings: FindingsSchema,
   }),
   examples: [
@@ -152,7 +175,11 @@ export const init = defineCommand({
     [
       `device ${data.device.name}${data.device.created ? " (new)" : ""}`,
       ...data.roots.map((r) => `root ${r.key}${r.path === undefined ? "" : ` at ${r.path}`}`),
-      ...(data.store === undefined ? [] : [`store ${data.store.name} at ${data.store.path}`]),
+      ...(data.store === undefined
+        ? []
+        : [
+            `store ${data.store.name} at ${data.store.path}${data.store.id === undefined ? "" : ` (${data.store.id})`}`,
+          ]),
       data.changed ? `settings written to ${data.files.managed}` : "nothing changed: already set up",
       ...findingLines(data.findings),
     ].join("\n"),
@@ -268,7 +295,28 @@ export const init = defineCommand({
         ? { kind: "add", key: r.key, path: r.path }
         : { kind: "bind", key: r.key, path: r.path },
     );
-    const store = storePath === undefined ? undefined : { name: ctx.store ?? DEFAULT_STORE, path: storePath };
+    const secret = args["store-secret"];
+    if (secret !== undefined && storePath === undefined) {
+      // The reference belongs to the store it is recorded with: never applied silently to one already set up.
+      const named = ctx.store ?? config.defaultStore;
+      const existing = named === undefined ? undefined : config.stores[named];
+      return fail(
+        finding("usage.invalid", {
+          message: "--store-secret is recorded with --store-path; pass the store's path too",
+          fix: [
+            "plainport init",
+            `--store-path ${existing !== undefined && "path" in existing ? word(existing.path) : "<path>"}`,
+            ...(ctx.store === undefined ? [] : [`--store ${word(ctx.store)}`]),
+            `--store-secret ${word(secret)}`,
+            "--yes",
+          ].join(" "),
+        }),
+      );
+    }
+    const store =
+      storePath === undefined
+        ? undefined
+        : { name: ctx.store ?? DEFAULT_STORE, path: storePath, ...(secret === undefined ? {} : { secret }) };
     let findings: z.output<typeof FindingsSchema> = [];
     let writtenRoots: { key: string; path?: string }[] = [];
     let writtenStore: { name: string; path: string } | undefined;
@@ -296,12 +344,47 @@ export const init = defineCommand({
     const device = made.device ?? (await createDevice());
     if (!device.ok) return device;
     const { id, role } = device.value.device;
+
+    // The store: its identity, its restic repository, and this device's record of its id (D45). A store that cannot
+    // be reached yet (its disk unplugged) or used by this build stays recorded, with a warning to run init again.
+    const reloaded = await new ConfigLoader(ctx.io, paths).load({ env: ctx.env });
+    if (!reloaded.ok) return reloaded;
+    const storeName = writtenStore?.name ?? ctx.store ?? reloaded.value.config.defaultStore;
+    const storeConfig = storeName === undefined ? undefined : reloaded.value.config.stores[storeName];
+    let setUp: StoreSetup | undefined;
+    if (storeName !== undefined && storeConfig !== undefined) {
+      const ready = await setUpStore(ctx.io, {
+        paths,
+        env: ctx.env,
+        name: storeName,
+        store: storeConfig,
+        opener: ctx.stores,
+        mint: () => ulid(ctx.clock.now().getTime()),
+      });
+      if (ready.ok) setUp = ready.value;
+      else if (ready.finding.code === "store.unreachable" || ready.finding.code === "store.unsupported") {
+        findings = [
+          ...findings,
+          finding("store.setup-pending", {
+            message: `store ${storeName} is recorded but not set up yet: ${ready.finding.message}`,
+            fix: "plainport init --yes once the store is reachable",
+            ...(ready.finding.paths === undefined ? {} : { paths: ready.finding.paths }),
+          }),
+        ];
+      } else return ready;
+    }
+    const shownStore =
+      setUp !== undefined && storeName !== undefined
+        ? { name: storeName, path: writtenStore?.path ?? setUp.path, id: setUp.id }
+        : writtenStore;
+    const storeChanged =
+      setUp !== undefined && (setUp.identityCreated || setUp.repositoryCreated || setUp.recorded);
     return ok({
       device: { id, name: device.value.device.name, role, created: device.value.created },
       roots: writtenRoots,
-      ...(writtenStore !== undefined && { store: writtenStore }),
+      ...(shownStore !== undefined && { store: shownStore }),
       files: { config: paths.configFile, managed: paths.managedFile, device: paths.deviceFile },
-      changed: writes || device.value.created,
+      changed: writes || device.value.created || storeChanged,
       findings,
     });
   },

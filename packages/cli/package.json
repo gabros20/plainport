@@ -7,9 +7,11 @@
   },
   "dependencies": {
     "@clack/prompts": "1.8.1",
+    "@plainport/blob-fs": "workspace:*",
     "@plainport/contract": "workspace:*",
     "@plainport/core": "workspace:*",
     "@plainport/eco-node": "workspace:*",
+    "@plainport/engine-restic": "workspace:*",
     "@plainport/host-macos": "workspace:*",
     "zod": "4.6.5"
   }

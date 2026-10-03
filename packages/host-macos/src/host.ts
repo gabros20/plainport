@@ -8,6 +8,7 @@ import {
   faultSeam,
   type HostPorts,
   nodeLocalIo,
+  posixDeleteTrash,
   runProcess,
   type Spawner,
 } from "@plainport/core";
@@ -75,6 +76,10 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
     },
     liveGroups: () => [...groups],
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
+    deleteTrashDetached: async (trash, journal) => {
+      await guard?.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
+      return posixDeleteTrash(trash, journal);
+    },
   };
 };
 

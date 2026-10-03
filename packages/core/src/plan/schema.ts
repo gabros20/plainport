@@ -4,7 +4,7 @@
 //
 // A plan is output, so its schema stays open (D16); the plan file wrapping it is plainport's own and strict.
 
-import { FindingSchema, outputObject, PhaseSchema } from "@plainport/contract";
+import { type Finding, FindingSchema, outputObject, PhaseSchema, shellWord } from "@plainport/contract";
 import { z } from "zod";
 import { UlidSchema } from "../ulid.ts";
 
@@ -64,7 +64,14 @@ export const PlanSchema = outputObject({
   id: UlidSchema,
   kind: OperationKindSchema,
   project: ProjectViewSchema.optional(),
-  fingerprint: z.string().min(1).meta({ description: "The scan's tree hash; re-checked when the plan runs" }),
+  fingerprint: z.string().min(1).meta({
+    description:
+      "The scan's tree hash over the included paths (the strip set left out); re-checked when the plan runs",
+  }),
+  fp: z.literal(2).optional().meta({
+    description:
+      "The fingerprint's kind (D53); a plan without it is of an older kind, never compared, so its approval is stale",
+  }),
   include: outputObject({
     files: z.int().nonnegative(),
     bytes,
@@ -76,6 +83,22 @@ export const PlanSchema = outputObject({
   arrival: z.array(ArrivalItemSchema).optional().meta({
     description: "What each part becomes where the project lands; for an offload, how it comes back",
   }),
+  options: outputObject({
+    keepDeps: z.boolean(),
+    allow: z.array(z.string()).meta({ description: "--allow codes, sorted" }),
+    store: z.string().min(1).optional().meta({ description: "--store, when it was given" }),
+    storeId: UlidSchema.optional().meta({
+      description:
+        "The id in the store's meta/v1/store.json (D45): an approval holds for that store only (D48)",
+    }),
+    keepLocalFor: z.string(),
+    stub: z.boolean(),
+  })
+    .optional()
+    .meta({
+      description:
+        "What the plan was made with: options and the release settings. An approved plan runs only with the same",
+    }),
   estimate: outputObject({
     uploadBytes: bytes.optional(),
     downloadBytes: bytes.optional(),
@@ -84,6 +107,27 @@ export const PlanSchema = outputObject({
   expiresAt: z.iso.datetime().meta({ description: "After this, --plan <id> no longer runs it" }),
 }).meta({ title: "Plan" });
 export type Plan = z.infer<typeof PlanSchema>;
+export type PlanOptions = NonNullable<Plan["options"]>;
+
+/**
+ * The block finding that stops this plan: the first one its own --allow list (options.allow) does not override, as
+ * an allowable blocker named there is overridden (D50). A plan with one is refused and never approvable (D38).
+ */
+export const planBlocker = (plan: Plan): Finding | undefined => {
+  const allow = new Set(plan.options?.allow ?? []);
+  return plan.findings.find((f) => f.severity === "block" && !(f.allowable && allow.has(f.code)));
+};
+
+/** The exact command that runs this plan: `--plan <id>` with the options it was made with (D36, D38). */
+export const planCommand = (plan: Plan): string => {
+  const options = plan.options;
+  return [
+    `plainport ${plan.kind} ${shellWord(plan.project?.address ?? "")} --plan ${plan.id}`,
+    ...(options?.keepDeps === true ? ["--keep-deps"] : []),
+    ...(options?.allow ?? []).map((code) => `--allow ${shellWord(code)}`),
+    ...(options?.store === undefined ? [] : [`--store ${shellWord(options.store)}`]),
+  ].join(" ");
+};
 
 /** plans/<id>.json: a versioned wrapper around the plan (DESIGN.md "Versioned documents"). */
 export const PlanFileSchema = z.strictObject({ v: z.literal(1), plan: PlanSchema });

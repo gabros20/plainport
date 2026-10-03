@@ -3,14 +3,21 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, join as joinPath } from "node:path";
+import { fsBlobStore } from "@plainport/blob-fs";
 import { ok } from "@plainport/contract";
-import { nodeLocalIo } from "@plainport/core";
+import { nodeLocalIo, type StoreOpener, storeRoot } from "@plainport/core";
 import { nodePlugin } from "@plainport/eco-node";
 import { z } from "zod";
 import { quietChecks } from "../../core/src/testing/checks.ts";
+import {
+  type FakeEngineHooks,
+  type FakeRepository,
+  fakeEngine,
+  fakeRepository,
+} from "../../core/src/testing/fake-engine.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { help } from "./commands/help.ts";
 import { REGISTRY } from "./commands/index.ts";
@@ -38,6 +45,37 @@ const FAKE_HOME = join(tmpdir(), "plainport-fake-home-never-created");
 /** PATH for the children commands run (git); nothing else of the real environment. */
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
 
+/** The repository password the fake ports' environment holds (DEFAULT_LOCAL_SECRET reads it). */
+export const STORE_PASSWORD = "test-store-password";
+
+/** Every fake repository, by its folder, so the runs of one test share what they wrote. */
+const fakeRepositories = new Map<string, FakeRepository>();
+/** Hooks for the fake engine of the store at a folder, for tests that edit files mid-upload or damage a listing. */
+export const fakeEngineHooks = new Map<string, FakeEngineHooks>();
+
+/** The fake repository of the store at this folder (its repo/ inside), made on first use. */
+export const fakeRepositoryAt = (storeFolder: string): FakeRepository => {
+  const key = joinPath(storeFolder, "repo");
+  let repository = fakeRepositories.get(key);
+  if (repository === undefined) {
+    repository = fakeRepository();
+    fakeRepositories.set(key, repository);
+  }
+  return repository;
+};
+
+/** Local stores as the binary opens them, but with the fake engine (T0): events on disk through blob-fs. */
+export const fakeStores = (home: string): StoreOpener => ({
+  open: async (name, store) => {
+    if (store.kind !== "local") throw new Error(`fake stores: ${name} is not local`);
+    const root = storeRoot(store, home);
+    return ok({
+      blob: fsBlobStore(nodeLocalIo, root),
+      engine: fakeEngine(fakeRepositoryAt(root), fakeEngineHooks.get(root) ?? {}),
+    });
+  },
+});
+
 /**
  * Ports for tests: a home folder that is never created, a fixed clock, the approvedPlans set, no prompts, a host
  * that refuses the real home, host checks that find nothing, and the Node plugin.
@@ -47,20 +85,22 @@ export const fakePorts = (): Ports => ({
   clock: { now: () => new Date("2026-10-03T12:00:00Z") },
   plans: { approved: (command, id) => approvedPlans.has(`${command} ${id}`) },
   io: nodeLocalIo,
-  env: { HOME: FAKE_HOME, PATH },
+  env: { HOME: FAKE_HOME, PATH, PLAINPORT_STORE_PASSWORD: STORE_PASSWORD },
   cwd: FAKE_HOME,
   prompt: noPrompts,
   system: testHost(),
   checks: quietChecks,
   plugins: [nodePlugin],
+  stores: fakeStores(FAKE_HOME),
 });
 
 /** Ports whose HOME (and cwd) is a test's sandbox, so commands read and write only inside it. */
 export const sandboxPorts = (home: string, overrides: Partial<Ports> = {}): Ports => ({
   ...fakePorts(),
   host: { home },
-  env: { HOME: home, PATH },
+  env: { HOME: home, PATH, PLAINPORT_STORE_PASSWORD: STORE_PASSWORD },
   cwd: home,
+  stores: fakeStores(home),
   ...overrides,
 });
 
@@ -214,8 +254,8 @@ export const FAKE_REGISTRY: Registry = [
 
 /**
  * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
- * project, an empty git repository), store local, and the folders the examples name (~/personal,
- * ~/Developer/Work). cleanup() removes it.
+ * project, an empty git repository, and a shelved one, work:clients/acme/api), store local, and the folders the
+ * examples name (~/personal, ~/Developer/Work). cleanup() removes it.
  */
 export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
@@ -235,6 +275,20 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   if (setup.code !== 0) {
     rmSync(home, { recursive: true, force: true });
     throw new Error(`example home setup failed: ${setup.err}`);
+  }
+  // A shelved project for onload's examples: offloaded once (an empty git repository with a README; no package
+  // manager, so its onload installs nothing).
+  const api = join(home, "work/clients/acme/api");
+  mkdirSync(api, { recursive: true });
+  writeFileSync(join(api, "README.md"), "# api\n");
+  const apiGit = Bun.spawnSync(["git", "init", "-q", api], {
+    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1" },
+  });
+  if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
+  const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
+  if (shelved.code !== 0) {
+    rmSync(home, { recursive: true, force: true });
+    throw new Error(`example home setup failed: ${shelved.err}`);
   }
   return { home, ports, cleanup: () => rmSync(home, { recursive: true, force: true }) };
 };

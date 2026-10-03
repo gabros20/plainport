@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { nodeLocalIo } from "@plainport/core";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import type { Prompter } from "../prompt.ts";
-import { capture, sandboxPorts } from "../testing.ts";
+import { capture, fakeRepositoryAt, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
 
 let box: Sandbox;
@@ -320,5 +320,189 @@ describe("init: interactive scan (TTY, injected prompter)", () => {
     expect(run.err).toContain("command.cancelled");
     expect(existsSync(box.paths.managedFile)).toBe(false);
     expect(existsSync(box.paths.deviceFile)).toBe(false);
+  });
+});
+
+describe("init: setting the store up (D45)", () => {
+  const storeJson = (path: string) => JSON.parse(readFileSync(join(path, "meta/v1/store.json"), "utf8"));
+  const registry = () => JSON.parse(readFileSync(box.paths.registryFile, "utf8"));
+
+  test("creates the store's identity and repository and records its id; a second run changes nothing", async () => {
+    box.dir("work");
+    const run = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      "~/ssd",
+      "--device",
+      "mbp",
+      "--yes",
+      "--json",
+    ]);
+    expect(run.code).toBe(0);
+    const ssd = join(box.home, "ssd");
+    const { id } = storeJson(ssd);
+    expect(envelope(run.out).data).toMatchObject({ store: { name: "local", path: ssd, id }, changed: true });
+    expect(registry().stores).toEqual({ local: id });
+    expect(fakeRepositoryAt(ssd).initialized).toBe(true);
+
+    const again = await init(["--yes", "--json"]);
+    expect(again.code).toBe(0);
+    expect(envelope(again.out).data).toMatchObject({ store: { name: "local", id }, changed: false });
+    expect(storeJson(ssd).id).toBe(id);
+  });
+
+  test("a store whose disk is not mounted stays recorded, with store.setup-pending; nothing is created there", async () => {
+    box.dir("work");
+    const missing = join(box.home, "Volumes/Archive/plainport");
+    const run = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      missing,
+      "--device",
+      "mbp",
+      "--yes",
+      "--json",
+    ]);
+    expect(run.code).toBe(0);
+    const data = envelope(run.out).data;
+    expect(data.findings).toEqual([
+      expect.objectContaining({ code: "store.setup-pending", severity: "warn" }),
+    ]);
+    expect(data.findings[0].fix).toBe("plainport init --yes once the store is reachable");
+    expect(existsSync(join(box.home, "Volumes"))).toBe(false);
+    expect(managed()).toMatchObject({ stores: { local: { kind: "local" } } });
+
+    box.dir("Volumes/Archive");
+    const later = await init(["--yes", "--json"]);
+    expect(later.code).toBe(0);
+    expect(envelope(later.out).data).toMatchObject({ store: { name: "local", path: missing }, findings: [] });
+    expect(registry().stores.local).toBe(storeJson(missing).id);
+  });
+
+  test("--store-secret names where the password is (file:), and is written as that reference", async () => {
+    box.dir("work");
+    box.file("secrets/ssd.key", "from-a-file\n");
+    const run = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      "~/ssd",
+      "--store-secret",
+      "file:~/secrets/ssd.key",
+      "--device",
+      "mbp",
+      "--yes",
+    ]);
+    expect(run.code).toBe(0);
+    expect(managed()).toMatchObject({ stores: { local: { secret: "file:~/secrets/ssd.key" } } });
+    expect(readFileSync(box.paths.managedFile, "utf8")).not.toContain("from-a-file");
+  });
+
+  test("a password that is not there refuses with store.secret-missing (exit 6), naming the variable", async () => {
+    box.dir("work");
+    const run = await capture(
+      ["init", "--root", "work=~/work", "--store-path", "~/ssd", "--device", "mbp", "--yes", "--json"],
+      REGISTRY,
+      {
+        ports: sandboxPorts(box.home, { env: { HOME: box.home, PATH: process.env.PATH ?? "/usr/bin:/bin" } }),
+      },
+    );
+    expect(run.code).toBe(6);
+    expect(envelope(run.out).error).toMatchObject({
+      finding: { code: "store.secret-missing" },
+      message: expect.stringContaining("PLAINPORT_STORE_PASSWORD is not set"),
+    });
+  });
+
+  test("--store-secret must be a reference, never the password itself", async () => {
+    box.dir("work");
+    const run = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      "~/ssd",
+      "--store-secret",
+      "hunter2",
+      "--yes",
+    ]);
+    expect(run.code).toBe(2);
+    expect(run.err).toContain("usage.invalid");
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+});
+
+describe("init: secrets stay references (fix wave r1)", () => {
+  test("a --store-secret that is not a reference is never echoed back, in human or --json output", async () => {
+    box.dir("work");
+    for (const json of [[], ["--json"]]) {
+      const run = await init([
+        "--root",
+        "work=~/work",
+        "--store-path",
+        "~/ssd",
+        "--store-secret",
+        "hunter2",
+        "--yes",
+        ...json,
+      ]);
+      expect(run.code).toBe(2);
+      expect(`${run.out}${run.err}`).not.toContain("hunter2");
+    }
+  });
+
+  test("init --store-path again without --store-secret keeps the saved reference", async () => {
+    box.dir("work");
+    box.file("secrets/ssd.key", "from-a-file\n");
+    const first = await init([
+      "--root",
+      "work=~/work",
+      "--store-path",
+      "~/ssd",
+      "--store-secret",
+      "file:~/secrets/ssd.key",
+      "--device",
+      "mbp",
+      "--yes",
+    ]);
+    expect(first.code).toBe(0);
+    const again = await init(["--store-path", "~/ssd", "--yes"]);
+    expect(again.code).toBe(0);
+    expect(managed()).toMatchObject({ stores: { local: { secret: "file:~/secrets/ssd.key" } } });
+  });
+});
+
+describe("init: secrets stay references (fix wave r2)", () => {
+  test("a literal --store-secret is refused at the argument boundary, never echoed: no --yes, --dry-run, --json", async () => {
+    box.dir("work");
+    for (const extra of [[], ["--dry-run"], ["--json"], ["--yes"], ["--yes", "--json"]]) {
+      const run = await init([
+        "--root",
+        "work=~/work",
+        "--store-path",
+        "~/ssd",
+        "--store-secret",
+        "hunter2",
+        ...extra,
+      ]);
+      expect(run.code).toBe(2);
+      expect(`${run.out}${run.err}`).not.toContain("hunter2");
+    }
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+
+  test("--store-secret for a store already set up, without --store-path, is refused with the exact fix", async () => {
+    box.dir("work");
+    expect(
+      (await init(["--root", "work=~/work", "--store-path", "~/ssd", "--device", "mbp", "--yes"])).code,
+    ).toBe(0);
+    box.file("secrets/ssd.key", "k\n");
+    const run = await init(["--store-secret", "file:~/secrets/ssd.key", "--yes", "--json"]);
+    expect(run.code).toBe(2);
+    expect(envelope(run.out).error).toMatchObject({
+      finding: { code: "usage.invalid" },
+      hint: "plainport init --store-path ~/ssd --store-secret file:~/secrets/ssd.key --yes",
+    });
   });
 });

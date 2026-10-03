@@ -173,6 +173,11 @@
           ],
           "additionalProperties": false
         },
+        "rootMode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
         "move": {
           "type": "object",
           "properties": {

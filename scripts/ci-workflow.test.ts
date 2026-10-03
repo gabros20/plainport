@@ -47,3 +47,15 @@ test("the Linux job installs zsh, so the real-shell re-run test runs there too",
 test("fails when plainport.json, schemas/ or completions/ are stale (ADR-0007, AGENTS.md rule 4)", () => {
   expect(runs("macos")).toContain("bun run contract --check");
 });
+
+test("both test jobs install npm, pnpm and Yarn Classic, so the real offline installs run there (Task 13)", () => {
+  for (const job of ["macos", "linux"]) {
+    expect(
+      workflow.jobs[job]?.steps.some((step) => (step as { uses?: string }).uses === "actions/setup-node@v4"),
+    ).toBe(true);
+    expect(runs(job)).toContain("npm install -g pnpm@10.32.1 yarn@1.22.22");
+    expect(runs(job).indexOf("npm install -g pnpm@10.32.1 yarn@1.22.22")).toBeLessThan(
+      runs(job).indexOf("bun run test"),
+    );
+  }
+});

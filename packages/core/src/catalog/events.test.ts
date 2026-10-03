@@ -98,6 +98,7 @@ describe("catalog: event schemas", () => {
       "catalog-event",
       "catalog-state",
       "event-mirror",
+      "root-claim",
       "store-identity",
     ]);
     const text = JSON.stringify(schemas["catalog-event"]);

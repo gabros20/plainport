@@ -7,6 +7,7 @@ export { MANAGED_HEADER, type ManagedOptions, type ManagedUpdate, updateManaged 
 export {
   type ConfigLayer,
   ConfigLayerSchema,
+  DEFAULT_LOCAL_SECRET,
   DEFAULTS,
   DurationSchema,
   type ProjectConfig,

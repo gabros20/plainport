@@ -43,6 +43,15 @@ export interface LocalFs {
   /** Whether this process may read the path (access(2) with R_OK, so ACLs count); false when missing. Opens
    * nothing, so a placeholder file is not downloaded. */
   readable(path: string): Promise<boolean>;
+  /** Sets the path's permission bits (mode & 0o7777), following a symlink as chmod(2) does. */
+  chmod(path: string, mode: number): Promise<void>;
+  /** Bytes this process may still write on the volume holding the path (statfs: available blocks × block size). */
+  freeBytes(path: string): Promise<number>;
+  /**
+   * Removes the path and everything below it, making read-only folders writable first; symlinks are removed, never
+   * followed. Nothing there is fine. Only for plainport's own folders (staging) and what a plugin proves regenerable.
+   */
+  removeTree(path: string): Promise<void>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";
@@ -97,6 +106,14 @@ export const errorCode = (error: unknown): string | undefined =>
  * findings. Anything else, a TypeError, a guard's refusal (ERR_PLAINPORT_PATH_REFUSED), a plain string, is a bug and
  * is thrown again, so a catch never swallows one (AGENTS.md rule 7: exceptions mean bugs).
  */
+/**
+ * For a catch site that tolerates any expected system error (a cleanup that may fail): returns when `error` is one,
+ * throws it again when it is a bug (systemErrorCode).
+ */
+export const assertSystemError = (error: unknown): void => {
+  systemErrorCode(error);
+};
+
 export const systemErrorCode = (error: unknown): string => {
   const code = error instanceof Error ? errorCode(error) : undefined;
   if (code !== undefined && /^E[A-Z0-9]+$/.test(code)) return code;

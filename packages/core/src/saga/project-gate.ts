@@ -1,0 +1,216 @@
+// The gate every project operation passes (ADR-0008, DESIGN.md "Offload process" step 1): the project's lock
+// (locks/<project>.lock; a lock held by a dead process is broken, a live one is project.locked, exit 11), then the
+// journals: an operation of this project that was interrupted must be finished or rolled back by `plainport recover`
+// before a new one starts (journal.pending). A journal this build cannot read fails closed: it could be this
+// project's. The lock is released on every way out but a crash. A simulated crash (InjectedFault) unwinds through
+// here and releases it, which a killed process never does; the crash matrix uses the seam's `kill` action wherever
+// what it checks is recover breaking a dead holder's lock. The body gets stillHeld(), to re-check the lock before an
+// irreversible step (lock.ts's known limit). Offload uses it now; onload and recover take the same lock.
+
+import { join } from "node:path";
+import { fail, finding, ok, type Result } from "@plainport/contract";
+import { readDevice } from "../device.ts";
+import { assertSystemError, type LocalIo } from "../io.ts";
+import { type Journal, journalFile, readJournals } from "../journal/index.ts";
+import { acquireLock, type LockHolder } from "../lock.ts";
+import type { Env, PlainportPaths } from "../paths.ts";
+import { readRegistry } from "../registry.ts";
+import { type CanonicalPath, canonicalPath, overlapOf } from "../roots/canonical.ts";
+import { listRoots } from "../roots/roots.ts";
+import { writeFailed } from "./journaled.ts";
+
+/** Steps after which an operation is finished but for deleting its trash: they hold no project back. An onload
+ * closes its journal once it is committed and registered, so every onload step holds it back. */
+const RELEASED: ReadonlySet<string> = new Set(["offload.release.delete"]);
+
+/** Whether an interrupted operation still holds its project back from a new one. */
+export const holdsProjectBack = (journal: Journal): boolean => !RELEASED.has(journal.step);
+
+const lockHeld = (address: string) => (holder: LockHolder | undefined, path: string, ours: boolean) =>
+  finding("project.locked", {
+    message: ours
+      ? `this process is already working on ${address}`
+      : `${address} is locked by ${
+          holder === undefined
+            ? "an unreadable lock file"
+            : `plainport process ${holder.pid} on ${holder.host}, started ${holder.startedAt}`
+        }`,
+    fix:
+      ours || holder !== undefined
+        ? "wait for the other plainport run to finish, then re-run"
+        : `delete ${path} if no plainport is running, then re-run`,
+    paths: [path],
+  });
+
+export interface GateContext {
+  io: LocalIo;
+  paths: PlainportPaths;
+  clock(): Date;
+  log(level: "warn", message: string): void;
+}
+
+export interface ProjectLock {
+  /** Whether this run still holds the project's lock. */
+  stillHeld(): Promise<boolean>;
+}
+
+export interface GateOptions {
+  /**
+   * The registered projects nested with this one (inside it, or holding it, D53): their locks are taken too, so no
+   * operation on one runs while this one changes the folder that holds or contains it.
+   */
+  related?: readonly { id: string; address: string }[];
+  /** An interrupted operation of this project the caller takes over instead of refusing (onload's staging). */
+  resume?(journal: Journal): boolean;
+}
+
+/** A registered project and its effective folder on this device: its override, else its root's place for it. */
+export interface RegisteredFolder {
+  id: string;
+  address: string;
+  folder: string;
+  /** The folder's canonical form (symlinks resolved, the volume's spelling, its case rule), for comparing. */
+  canon: CanonicalPath;
+}
+
+/**
+ * Every registered project's effective folder on this device (D53 revised): `override ?? place`, where the place is
+ * the root's binding here plus the path. A project whose root is not bound here, and has no override, has none.
+ * Folders are compared canonically (R1): a spelling in another case on a volume that ignores case, or one through a
+ * symlink, is the same folder.
+ */
+export const registeredFolders = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  env: Env,
+): Promise<Result<RegisteredFolder[]>> => {
+  const registry = await readRegistry(io, paths);
+  if (!registry.ok) return registry;
+  const device = await readDevice(io, paths);
+  if (!device.ok) return device;
+  const listed = await listRoots(io, paths, {
+    env,
+    ...(device.value === undefined ? {} : { device: device.value.name }),
+  });
+  if (!listed.ok) return listed;
+  const rootFolder = new Map(listed.value.roots.map((r) => [r.key, r.path]));
+  const folders: RegisteredFolder[] = [];
+  for (const [id, e] of Object.entries(registry.value.projects)) {
+    const root = rootFolder.get(e.root);
+    const folder = e.override ?? (root === undefined ? undefined : join(root, ...e.path.split("/")));
+    if (folder === undefined) continue;
+    const canon = await canonicalPath(io, folder, paths.home);
+    // A folder that cannot be resolved (a loop, no permission) holds nothing this device can reach.
+    if (canon.ok)
+      folders.push({ id, address: `${e.root}:${e.path}`, folder: canon.value.path, canon: canon.value });
+  }
+  return ok(folders);
+};
+
+export type Nested = RegisteredFolder & {
+  /** Its folder lies inside this one. */
+  inside: boolean;
+  /** Its folder is this one (R2). */
+  same: boolean;
+};
+
+/**
+ * The registered projects nested with a folder (D53 revised), decided by canonical effective folders, never by
+ * logical paths: those whose folder lies inside it (`inside`), is it (`same`), or holds it.
+ */
+export const nestedProjects = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  folders: readonly RegisteredFolder[],
+  project: { id?: string; folder: string },
+): Promise<Result<Nested[]>> => {
+  const canon = await canonicalPath(io, project.folder, paths.home);
+  if (!canon.ok) return canon;
+  const found: Nested[] = [];
+  for (const f of folders) {
+    if (f.id === project.id) continue;
+    const relation = overlapOf(f.canon, canon.value);
+    if (relation === undefined) continue;
+    found.push({ ...f, inside: relation === "inside", same: relation === "same" });
+  }
+  return ok(found.sort((x, y) => (x.id < y.id ? -1 : 1)));
+};
+
+/**
+ * Runs `body` holding the project's lock and its nested projects' (options.related), once no interrupted operation
+ * of the project is open; an open one `options.resume` accepts is handed to the body instead.
+ */
+export const withProjectLock = async <T>(
+  ctx: GateContext,
+  project: { id: string; address: string },
+  body: (lock: ProjectLock, resumed?: Journal) => Promise<Result<T>>,
+  options: GateOptions = {},
+): Promise<Result<T>> => {
+  const { io, paths } = ctx;
+  const held: { path: string; release(): Promise<void>; stillHeld(): Promise<boolean> }[] = [];
+  try {
+    // The project's own lock first, then each nested one's (D53), all without waiting: a held one refuses at once.
+    for (const each of [project, ...(options.related ?? [])]) {
+      const lockFile = join(paths.locksDir, `${each.id}.lock`);
+      let lock: Awaited<ReturnType<typeof acquireLock>>;
+      try {
+        lock = await acquireLock(io, lockFile, {
+          timeoutMs: 0,
+          held: lockHeld(each.address),
+          now: ctx.clock,
+        });
+      } catch (error) {
+        return writeFailed(error, `taking the lock ${lockFile}`, false, lockFile);
+      }
+      if (!lock.ok) {
+        if (each === project) return lock;
+        return fail({
+          ...lock.finding,
+          message: `${lock.finding.message}; ${each.address} is nested with ${project.address} (D53), so nothing was started`,
+        });
+      }
+      held.push({ path: lockFile, release: lock.value.release, stillHeld: lock.value.stillHeld });
+    }
+    let journals: Awaited<ReturnType<typeof readJournals>>;
+    try {
+      journals = await readJournals(io, paths);
+    } catch (error) {
+      return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+    }
+    const [unreadable] = journals.unreadable;
+    if (unreadable !== undefined) {
+      return fail(
+        finding("journal.pending", {
+          message: `${unreadable} is a journal this version of plainport cannot read, so it may be an interrupted operation of ${project.address}; nothing new was started`,
+          fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run",
+          paths: [unreadable],
+        }),
+      );
+    }
+    const open = journals.journals.filter((j) => j.project.id === project.id && holdsProjectBack(j));
+    const [blocking] = open.filter((j) => options.resume?.(j) !== true);
+    if (blocking !== undefined) {
+      return fail(
+        finding("journal.pending", {
+          message: `an ${blocking.kind} of ${project.address} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
+          fix: "plainport recover finishes or rolls it back, then re-run",
+          paths: [journalFile(paths, blocking.op)],
+        }),
+      );
+    }
+    const own = held[0] as (typeof held)[number];
+    return await body({ stillHeld: () => own.stillHeld() }, open[0]);
+  } finally {
+    for (const lock of held.reverse()) {
+      try {
+        await lock.release();
+      } catch (error) {
+        assertSystemError(error);
+        ctx.log(
+          "warn",
+          `the lock ${lock.path} could not be removed; a later run breaks it once this process is gone`,
+        );
+      }
+    }
+  }
+};

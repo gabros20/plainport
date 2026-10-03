@@ -25,6 +25,13 @@ jobs:
         with:
           # Pinned to .bun-version, never `latest`, so CI tests the toolchain the code was written against.
           bun-version-file: .bun-version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install pnpm and Yarn Classic
+        # The hydration tests run real offline installs (npm, pnpm, Yarn Classic, Bun) against vendored tarballs;
+        # under CI a missing manager fails them rather than skipping (packages/eco-node/src/hydrate.test.ts).
+        run: npm install -g pnpm@10.32.1 yarn@1.22.22
       - run: bun run check:bun
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
@@ -55,6 +62,13 @@ jobs:
       - name: install zsh
         # The re-run quoting test parses the line in real zsh and bash; the runner image has no zsh.
         run: sudo apt-get update && sudo apt-get install -y zsh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: install pnpm and Yarn Classic
+        # The hydration tests run real offline installs (npm, pnpm, Yarn Classic, Bun) against vendored tarballs;
+        # under CI a missing manager fails them rather than skipping (packages/eco-node/src/hydrate.test.ts).
+        run: npm install -g pnpm@10.32.1 yarn@1.22.22
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test

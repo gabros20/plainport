@@ -3,8 +3,9 @@
 // processes using the folder, containers mounting it, placeholder files. scanFindings() reads the scan's own
 // results: unreadable files, links leading outside, unpushed work and git operations in progress.
 //
-// Nothing here changes anything: git's fsmonitor daemon, which DESIGN says is stopped rather than blocking, is only
-// reported (fsmonitor) for the offload saga to stop.
+// Nothing here changes anything: git's fsmonitor daemons, which DESIGN says are stopped rather than blocking (the
+// project's own and those of repositories nested inside it), are only reported (fsmonitor, fsmonitorRepos) for the
+// planner to stop before it scans (D52).
 //
 // Every check fails closed: what cannot be shown safe blocks. The placeholder check runs first, and the git checks
 // (which read .git and run git, so they would download a placeholder) run only once it has passed with none found.
@@ -24,14 +25,19 @@ export interface PreflightReport {
   findings: Finding[];
   /** Said in passing, never a finding: docker not installed or not running, a pruned worktree. */
   notes: string[];
-  /** Pids of git fsmonitor daemons watching the folder: stopped before the snapshot, never a blocker. */
+  /** Pids of git fsmonitor daemons watching the folder or a repository inside it: stopped, never a blocker. */
   fsmonitor: number[];
+  /** The repositories those daemons serve (the folder, or one nested in it), each once, as the daemons named them. */
+  fsmonitorRepos: string[];
   /**
    * The placeholder check answered, found none, and could search every folder, so reading the folder downloads
    * nothing. The git checks ran only if this holds, and scanProject() refuses to run without it.
    */
   safeToRead: boolean;
 }
+
+/** A repository's fsmonitor socket, after the repository's folder. */
+const SOCKET_TAIL = "/.git/fsmonitor--daemon.ipc";
 
 /** At most this many paths go into a finding; its message gives the full count. */
 const MAX_PATHS = 100;
@@ -100,25 +106,29 @@ const processFindings = (
   uses: readonly ProcessUse[],
   dir: string,
   /**
-   * What this repository's fsmonitor daemon holds open inside the folder: the folder itself and the repository's
-   * socket, under each spelling. Empty when that socket is not there, so nothing is exempt.
+   * What an fsmonitor daemon may hold open inside the folder, and the repository each path belongs to: a repository's
+   * folder and its socket, under each spelling, for the folder's own repository and for repositories nested in it
+   * whose socket is really there. A repository without its socket is not in it, so nothing of it is exempt.
    */
-  daemonPaths: ReadonlySet<string>,
+  daemonPaths: ReadonlyMap<string, string>,
   report: PreflightReport,
 ): void => {
   const others: ProcessUse[] = [];
   for (const use of uses) {
-    // Exempt only git's fsmonitor daemon (by its command line) for this repository: the repository's socket is a
-    // real socket, and the daemon holds nothing inside the folder but the folder itself (it watches it) and that
-    // socket. A daemon for a repository nested inside also holds the nested folder, so it is not exempt; anything
-    // else, git included, is an ordinary process with files open. `files` is a sample: a process holding more than
+    // Exempt only git's fsmonitor daemon (by its command line) for one repository, the folder's own or one nested in
+    // it: that repository's socket is a real socket, and the daemon holds nothing inside the folder but the
+    // repository's folder (it watches it) and that socket. Anything else, git included, is an ordinary process with
+    // files open. `files` is a sample: a process holding more than
     // it lists is not known to hold only the daemon's paths, so it is not exempt either. Only the daemon's own
     // subcommand (`git fsmonitor--daemon run`) counts, not a client (`… status`) or a git given the word as an
     // argument; and the exemption covers what the daemon holds, never its working directory.
     const daemon = use.command === "git" && /^\S*git\s+fsmonitor--daemon\s+run(\s|$)/.test(use.args ?? "");
-    const known = use.fileCount === use.files.length && use.files.every((path) => daemonPaths.has(path));
-    if (daemon && daemonPaths.size > 0 && known) {
+    const repos = new Set(use.files.map((path) => daemonPaths.get(path)));
+    const [repo] = repos;
+    const known = use.fileCount === use.files.length && repos.size === 1 && repo !== undefined;
+    if (daemon && known) {
       report.fsmonitor.push(use.pid);
+      if (!report.fsmonitorRepos.includes(repo)) report.fsmonitorRepos.push(repo);
       if (use.cwd) others.push({ ...use, files: [], fileCount: 0 });
     } else others.push(use);
   }
@@ -164,7 +174,13 @@ export const preflight = async (
   dir: string,
   ctx: CheckContext,
 ): Promise<Result<PreflightReport>> => {
-  const report: PreflightReport = { findings: [], notes: [], fsmonitor: [], safeToRead: false };
+  const report: PreflightReport = {
+    findings: [],
+    notes: [],
+    fsmonitor: [],
+    fsmonitorRepos: [],
+    safeToRead: false,
+  };
   const failed = (failure: Failure): Failure | undefined => {
     if (failure.exitCode === 130) return failure;
     report.findings.push(failure.finding);
@@ -202,9 +218,10 @@ export const preflight = async (
   if (!processes.ok) {
     if (failed(processes)) return processes;
   } else {
-    // The daemon's socket is looked up inside .git only once the folder is known safe to read; otherwise nothing is
-    // exempt, which can only add blockers.
-    const daemonPaths = new Set<string>();
+    // Sockets are looked up inside .git only once the folder is known safe to read; otherwise nothing is exempt,
+    // which can only add blockers. The candidates are the folder's own repository and every repository a daemon's
+    // listed paths point at inside the folder (its socket, or the folder it watches).
+    const daemonPaths = new Map<string, string>();
     if (report.safeToRead) {
       const spellings = [resolve(dir)];
       try {
@@ -213,12 +230,26 @@ export const preflight = async (
         // The spelling given is all there is: fewer paths are exempt, never more.
         systemErrorCode(error);
       }
-      for (const spelling of spellings) {
-        const socket = join(spelling, ".git", "fsmonitor--daemon.ipc");
+      const spelledBy = (path: string) => spellings.find((s) => path === s || path.startsWith(`${s}/`));
+      const inside = (path: string) => spelledBy(path) !== undefined;
+      /** One name per repository, under the folder's spelling as given, whichever spelling a path used. */
+      const canonical = (repo: string) => {
+        const spelling = spelledBy(repo) ?? (spellings[0] as string);
+        return `${spellings[0]}${repo.slice(spelling.length)}`;
+      };
+      const candidates = new Set(spellings);
+      for (const use of processes.value)
+        for (const path of use.files) {
+          const repo = path.endsWith(SOCKET_TAIL) ? path.slice(0, -SOCKET_TAIL.length) : path;
+          if (inside(repo)) candidates.add(repo);
+        }
+      for (const repo of candidates) {
+        const socket = `${repo}${SOCKET_TAIL}`;
         try {
-          if ((await host.fs.lstat(socket)).kind === "socket") daemonPaths.add(socket).add(spelling);
+          if ((await host.fs.lstat(socket)).kind === "socket")
+            daemonPaths.set(socket, canonical(repo)).set(repo, canonical(repo));
         } catch (error) {
-          // No socket there, or none that can be looked at: nothing is exempt.
+          // No socket there, or none that can be looked at: nothing of that repository is exempt.
           systemErrorCode(error);
         }
       }

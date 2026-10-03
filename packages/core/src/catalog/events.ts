@@ -63,6 +63,11 @@ export const OffloadedEventSchema = z.strictObject({
   type: z.literal("offloaded"),
   ...project,
   ...snapshotFields,
+  /**
+   * The project folder's own mode (permission bits, mode & 0o7777), which the snapshot does not hold: restic stores the
+   * folder's contents. Onload gives the folder this mode; without it (an older writer), a new folder's (D55).
+   */
+  rootMode: z.int().min(0).max(0o7777).optional(),
   /** A move: the device the project goes to, whose onloaded event follows. */
   move: z.strictObject({ to: UlidSchema }).optional(),
 });
