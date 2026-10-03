@@ -4,7 +4,7 @@
 //
 // A plan is output, so its schema stays open (D16); the plan file wrapping it is plainport's own and strict.
 
-import { FindingSchema, outputObject, PhaseSchema } from "@plainport/contract";
+import { FindingSchema, outputObject, PhaseSchema, shellWord } from "@plainport/contract";
 import { z } from "zod";
 import { UlidSchema } from "../ulid.ts";
 
@@ -79,7 +79,11 @@ export const PlanSchema = outputObject({
   options: outputObject({
     keepDeps: z.boolean(),
     allow: z.array(z.string()).meta({ description: "--allow codes, sorted" }),
-    store: z.string().min(1).optional(),
+    store: z.string().min(1).optional().meta({ description: "--store, when it was given" }),
+    storeId: UlidSchema.optional().meta({
+      description:
+        "The id in the store's meta/v1/store.json (D45): an approval holds for that store only (D48)",
+    }),
     keepLocalFor: z.string(),
     stub: z.boolean(),
   })
@@ -97,6 +101,17 @@ export const PlanSchema = outputObject({
 }).meta({ title: "Plan" });
 export type Plan = z.infer<typeof PlanSchema>;
 export type PlanOptions = NonNullable<Plan["options"]>;
+
+/** The exact command that runs this plan: `--plan <id>` with the options it was made with (D36, D38). */
+export const planCommand = (plan: Plan): string => {
+  const options = plan.options;
+  return [
+    `plainport ${plan.kind} ${shellWord(plan.project?.address ?? "")} --plan ${plan.id}`,
+    ...(options?.keepDeps === true ? ["--keep-deps"] : []),
+    ...(options?.allow ?? []).map((code) => `--allow ${shellWord(code)}`),
+    ...(options?.store === undefined ? [] : [`--store ${shellWord(options.store)}`]),
+  ].join(" ");
+};
 
 /** plans/<id>.json: a versioned wrapper around the plan (DESIGN.md "Versioned documents"). */
 export const PlanFileSchema = z.strictObject({ v: z.literal(1), plan: PlanSchema });

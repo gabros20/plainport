@@ -175,12 +175,19 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
     }
   }
 
-  // 2
+  // 2: a stub is a file that reads as one; anything else at the path (D47) is not this project's stub.
   const stub = `${dir}.plainport`;
   const shelved = project?.status === "shelved" && gone;
-  if (present(stub) !== shelved) {
+  const isStub = (() => {
+    try {
+      return lstatSync(stub).isFile() && StubSchema.safeParse(JSON.parse(readFileSync(stub, "utf8"))).success;
+    } catch {
+      return false;
+    }
+  })();
+  if (isStub !== shelved) {
     problems.push(
-      `invariant 2: the stub ${present(stub) ? "exists" : "is missing"}, but the project is ${
+      `invariant 2: the stub ${isStub ? "exists" : "is missing"}, but the project is ${
         shelved
           ? "shelved"
           : `${project?.status ?? "not in the catalog"} with its folder ${gone ? "gone" : "present"}`

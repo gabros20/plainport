@@ -43,7 +43,6 @@ import {
   type StreamEvent,
   shellWord,
 } from "@plainport/contract";
-import { writeAtomic } from "../atomic.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import type { CatalogState } from "../catalog/fold.ts";
 import { appendEvent, loadCatalog, storeEventLog } from "../catalog/log.ts";
@@ -62,6 +61,7 @@ import { acquireLock, type LockHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { type PlanBoundary, type PreparedOffload, prepareOffload } from "../plan/planner.ts";
 import type { Plan } from "../plan/schema.ts";
+import { planCommand } from "../plan/schema.ts";
 import { readPlan, savePlan } from "../plan/store.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostChecks } from "../ports/checks.ts";
@@ -73,7 +73,7 @@ import { updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
-import { readStub, STUB_SUFFIX, type Stub, StubSchema } from "../stub.ts";
+import { placeStub, readStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { isExcluded, verifyListing } from "./verify.ts";
 
@@ -269,6 +269,21 @@ const headCheck = (
   return { kind: "ok" };
 };
 
+/** A root of the store's catalog other than `rootId` (by key when known): the store already serves it (D48). */
+const otherRoot = (state: CatalogState, rootId: string): string | undefined => {
+  const roots = new Set(Object.keys(state.roots));
+  for (const project of Object.values(state.projects)) roots.add(project.root);
+  roots.delete(rootId);
+  const [other] = [...roots].sort();
+  return other === undefined ? undefined : (state.roots[other]?.key ?? other);
+};
+
+const rootMismatch = (store: string, root: string, other: string): Finding =>
+  finding("store.root-mismatch", {
+    message: `store ${store} already holds root ${other}'s snapshots; one repository serves one root (ADR-0010), so root ${root} was not offloaded there`,
+    fix: `give root ${root} its own store: plainport init --store-path <path> --store <name> --yes, then set roots.${root}.store to it`,
+  });
+
 /** What an approval must still hold for a fresh plan to run as the approved one (D36, D38). */
 const approvalKey = (plan: Plan): string =>
   JSON.stringify({
@@ -309,7 +324,16 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     if (kind === "symlink") return notHere(`is a symlink at ${dir}; offload the folder it points to`);
     if (kind !== "dir") return notHere(`is not a folder at ${dir}`);
   } catch (error) {
-    if (systemErrorCode(error) !== "ENOENT") throw error;
+    const code = systemErrorCode(error);
+    if (code !== "ENOENT") {
+      return fail(
+        finding("fs.unreadable", {
+          message: `${dir} cannot be inspected (${code}), so it was not offloaded`,
+          fix: `check that you can read ${shellWord(dir)} and the folder that holds it, then re-run`,
+          paths: [dir],
+        }),
+      );
+    }
     // ProjectRef's match "address" (or a stub) means the folder was never checked: it is simply not here.
     const stub = (await readStub(io, `${dir}${STUB_SUFFIX}`)).ok;
     return notHere(
@@ -360,23 +384,37 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const projectId = id as string;
   const base = registered.value.projects[projectId]?.base;
 
-  const lock = await acquireLock(io, join(paths.locksDir, `${projectId}.lock`), {
-    timeoutMs: 0,
-    held: lockHeld(ref.address),
-    now: clock,
-  });
+  const lockFile = join(paths.locksDir, `${projectId}.lock`);
+  let lock: Awaited<ReturnType<typeof acquireLock>>;
+  try {
+    lock = await acquireLock(io, lockFile, { timeoutMs: 0, held: lockHeld(ref.address), now: clock });
+  } catch (error) {
+    return writeFailed(error, `taking the lock ${lockFile}`, false, lockFile);
+  }
   if (!lock.ok) return lock;
   try {
     return await locked();
   } finally {
-    await lock.value.release();
+    try {
+      await lock.value.release();
+    } catch (error) {
+      systemErrorCode(error);
+      deps.log(
+        "warn",
+        `the lock ${lockFile} could not be removed; a later run breaks it once this process is gone`,
+      );
+    }
   }
 
   async function locked(): Promise<Result<OffloadOutcome>> {
     const folder = dir as string;
-    const open = (await readJournals(io, paths)).journals.find(
-      (j) => j.project.id === projectId && !RELEASED.has(j.step),
-    );
+    let journals: Awaited<ReturnType<typeof readJournals>>;
+    try {
+      journals = await readJournals(io, paths);
+    } catch (error) {
+      return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+    }
+    const open = journals.journals.find((j) => j.project.id === projectId && !RELEASED.has(j.step));
     if (open !== undefined) {
       return fail(
         finding("journal.pending", {
@@ -411,7 +449,20 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     if (early.kind !== "ok") return fail(early.finding);
 
     const rootFolder = rootFolderOf(ref, folder);
-    const [here, beside] = await Promise.all([io.fs.stat(folder), io.fs.stat(rootFolder)]);
+    let here: { dev: number };
+    let beside: { dev: number };
+    try {
+      [here, beside] = await Promise.all([io.fs.stat(folder), io.fs.stat(rootFolder)]);
+    } catch (error) {
+      const code = systemErrorCode(error);
+      return fail(
+        finding("fs.unreadable", {
+          message: `${folder} or ${rootFolder} cannot be inspected (${code}), so it was not offloaded`,
+          fix: "check that you can read both folders, then re-run",
+          paths: [folder, rootFolder],
+        }),
+      );
+    }
     if (here.dev !== beside.dev) {
       return fail(
         finding("fs.cross-volume", {
@@ -434,6 +485,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       );
     });
     if (!rooted.ok) return rooted;
+    const shared = otherRoot(before.value, rootId);
+    if (shared !== undefined) return fail(rootMismatch(store.name, ref.root, shared));
     const needsRootEvent = (before.value.roots[rootId]?.created ?? null) === null;
 
     const startedAt = clock().toISOString();
@@ -540,7 +593,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         loader: deps.loader,
         env: deps.env,
         now: clock(),
-        store: store.name,
+        ...(req.store === undefined ? {} : { store: req.store }),
+        storeId: store.id,
         ...(req.keepDeps === true ? { keepDeps: true } : {}),
         ...(req.allow === undefined ? {} : { allow: req.allow }),
         ...(signal === undefined ? {} : { signal }),
@@ -550,7 +604,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       return prepared;
     };
     /** plan.stale (exit 6), the fresh plan saved and carried as the error's data (D14, D38). */
-    const stale = async (message: string): Promise<Failure> => {
+    const stale = async (message: string, uploaded = false): Promise<Failure> => {
       const fresh = await plan(false);
       if (!fresh.ok) return abandon(fresh);
       const blocked = fresh.value.plan.findings.some((f) => f.severity === "block");
@@ -567,9 +621,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       return abandon(
         failWith(
           finding("plan.stale", {
-            message: `${message}; nothing was uploaded`,
+            message: `${message}; ${
+              uploaded
+                ? "a snapshot was uploaded but not committed, so it is never a head, and nothing local was deleted"
+                : "nothing was uploaded"
+            }`,
             fix: saved
-              ? `review the fresh plan (it is this error's data, or plainport offload ${address} --dry-run), then approve it: plainport offload ${address} --plan ${fresh.value.plan.id}`
+              ? `review the fresh plan (it is this error's data), then approve it: ${planCommand(fresh.value.plan)}`
               : `plainport offload ${address} --dry-run, fix what it reports, then approve the new plan`,
           }),
           fresh.value.plan,
@@ -600,6 +658,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           attempt === 1
             ? `the folder, the options or the config changed since plan ${approved.id} was approved`
             : `files changed during the upload, so plan ${approved.id} no longer describes the folder`,
+          attempt > 1,
         );
       }
       for (const code of allow) {
@@ -697,21 +756,45 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (!done.ok) return abandon(done);
       phase("snapshot", "end");
 
-      // Verify: re-stat the folder, then compare the snapshot's listing with the scan it was made from.
+      // Verify: re-stat the folder, compare the snapshot's listing with the scan it was made from, then re-stat once
+      // more, so an edit made while the listing was read is caught too (DESIGN "Offload process" step 7).
       phase("verify", "start");
-      const after = await scanTree(io.fs, folder);
-      if (!after.ok) return abandon(after);
-      if (after.value.fingerprint !== prepared.tree.fingerprint) {
+      /** Whether the folder still matches the scan the snapshot was made from; a failure ends the run. */
+      const unchanged = async (): Promise<Result<boolean>> => {
+        const after = await scanTree(io.fs, folder);
+        if (!after.ok) return after;
+        return ok(after.value.fingerprint === prepared?.tree.fingerprint);
+      };
+      let same = await unchanged();
+      if (!same.ok) return abandon(same);
+      let totals: { files: number; bytes: number } | undefined;
+      if (same.value) {
+        const checked = await verifyListing({
+          engine: store.engine,
+          fs: io.fs,
+          snapshot: made.value.id,
+          dir: folder,
+          manifest: prepared.tree.manifest,
+          excluded,
+          ctx,
+        });
+        if (!checked.ok) return abandon(signal?.aborted ? cancelled() : checked);
+        totals = checked.value;
+        same = await unchanged();
+        if (!same.ok) return abandon(same);
+      }
+      if (!same.value || totals === undefined) {
         phase("verify", "end");
         if (approved !== undefined)
           return stale(
             `files changed during the upload, so plan ${approved.id} no longer describes the folder`,
+            true,
           );
         if (attempt >= ATTEMPTS) {
           return abandon(
             fail(
               finding("verify.changed", {
-                message: `files in ${ref.address} changed while the snapshot was made, twice; nothing local was deleted`,
+                message: `files in ${ref.address} changed while the snapshot was made or checked, twice; nothing local was deleted`,
                 fix: "stop whatever is writing to the folder (a dev server, a watcher, an agent), then re-run",
                 paths: [folder],
               }),
@@ -726,17 +809,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         if (signal?.aborted) return abandon(cancelled());
         continue;
       }
-      const checked = await verifyListing({
-        engine: store.engine,
-        fs: io.fs,
-        snapshot: made.value.id,
-        dir: folder,
-        manifest: prepared.tree.manifest,
-        excluded,
-        ctx,
-      });
-      if (!checked.ok) return abandon(signal?.aborted ? cancelled() : checked);
-      verified = { snapshot: made.value.id, ...checked.value };
+      verified = { snapshot: made.value.id, ...totals };
     }
     const ready = prepared as PreparedOffload;
     const policy = journal.release as NonNullable<OffloadJournal["release"]>;
@@ -749,6 +822,9 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     phase("commit", "start");
     const current = await catalog();
     if (!current.ok) return abandon(current);
+    // Two roots' first offloads to one store at once both pass the early check; the later one stops here (D48).
+    const sharedNow = otherRoot(current.value, rootId);
+    if (sharedNow !== undefined) return abandon(fail(rootMismatch(store.name, ref.root, sharedNow)));
     const head = headCheck(current.value, projectId, base, ref.address);
     if (head.kind === "incomplete") return abandon(fail(head.finding));
     const event: CatalogEvent = {
@@ -827,22 +903,6 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     let stubPath: string | undefined;
     if (policy.stub) {
       stubPath = `${folder}${STUB_SUFFIX}`;
-      const there = await readStub(io, stubPath);
-      const present = await io.fs.lstat(stubPath).then(
-        () => true,
-        (error: unknown) => (systemErrorCode(error) === "ENOENT" ? false : Promise.reject(error)),
-      );
-      // D47: only an absent path or this project's own stub may be replaced; preflight blocked anything else, so this
-      // is something put there since. It is left alone and recover writes the stub once it is moved.
-      if (present && !(there.ok && there.value.project === projectId)) {
-        return fail(
-          finding("path.stub-occupied", {
-            message: `${stubPath} appeared during the offload and is not this project's stub; the snapshot is committed and the folder is in ${trash}`,
-            fix: `move ${shellWord(stubPath)} somewhere else, then run plainport recover`,
-            paths: [stubPath],
-          }),
-        );
-      }
       const stub: Stub = StubSchema.parse({
         plainport: 1,
         project: projectId,
@@ -855,10 +915,24 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         bytes: verified.bytes,
         restore: `plainport onload ${shellWord(ref.address)}`,
       });
+      let placed: StubPlacement;
       try {
-        await writeAtomic(io, stubPath, `${JSON.stringify(stub, null, 2)}\n`);
+        placed = await placeStub(io, stubPath, stub, op);
       } catch (error) {
         return writeFailed(error, `writing the stub ${stubPath}`, true, stubPath);
+      }
+      // D47, D48: something else is there, put there after preflight; it is left alone, and recover writes the stub
+      // once it is moved.
+      if (!placed.placed) {
+        return fail(
+          finding("path.stub-occupied", {
+            message: `${stubPath} appeared during the offload and is not this project's stub${
+              placed.aside === undefined ? "" : ` (it waits at ${placed.aside})`
+            }; the snapshot is committed and the folder is in ${trash}`,
+            fix: `move ${shellWord(stubPath)} somewhere else, then run plainport recover`,
+            paths: [stubPath, ...(placed.aside === undefined ? [] : [placed.aside])],
+          }),
+        );
       }
     }
     const updated = await updateRegistry(io, paths, (registry) => {

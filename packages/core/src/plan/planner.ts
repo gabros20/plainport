@@ -46,6 +46,8 @@ export interface OffloadPlanRequest {
   now: Date;
   /** --store: overrides the root's store and the default one. */
   store?: string;
+  /** The resolved store's id (D45), recorded in the plan's options so an approval binds that store (D48). */
+  storeId?: string;
   /** --keep-deps: installed dependencies travel in the snapshot. */
   keepDeps?: boolean;
   /** --allow: recorded in the plan's options, so an approval holds only for the same overrides. */
@@ -79,15 +81,22 @@ const stubOccupied = async (
   project: OffloadPlanRequest["project"],
 ): Promise<Finding | undefined> => {
   const path = `${dir}${STUB_SUFFIX}`;
+  let kind: string;
   try {
-    await host.fs.lstat(path);
+    kind = (await host.fs.lstat(path)).kind;
   } catch (error) {
-    if (systemErrorCode(error) === "ENOENT") return undefined;
-    throw error;
+    const code = systemErrorCode(error);
+    if (code === "ENOENT") return undefined;
+    return finding("path.stub-occupied", {
+      message: `${path}, where the stub would go, cannot be inspected (${code})`,
+      fix: `check ${shellWord(path)} (permissions, the disk), then re-run`,
+      paths: [path],
+    });
   }
-  const stub = await readStub(host, path);
+  // Only a regular file can be a stub; anything else (a FIFO, a socket, a folder) is never opened.
+  const stub = kind === "file" ? await readStub(host, path) : undefined;
   const ours =
-    stub.ok &&
+    stub?.ok === true &&
     (project.id === undefined
       ? stub.value.root === project.root && stub.value.path === project.path
       : stub.value.project === project.id);
@@ -312,7 +321,8 @@ export const prepareOffload = async (
     options: {
       keepDeps,
       allow: [...new Set(req.allow ?? [])].sort(),
-      ...(store === undefined ? {} : { store }),
+      ...(req.store === undefined ? {} : { store: req.store }),
+      ...(req.storeId === undefined ? {} : { storeId: req.storeId }),
       keepLocalFor: config.offload.keepLocalFor,
       stub: config.offload.stub,
     },

@@ -23,6 +23,7 @@ export {
   PlanSchema,
   type ProjectView,
   ProjectViewSchema,
+  planCommand,
   SizedPathSchema,
   type StripEntry,
   StripEntrySchema,

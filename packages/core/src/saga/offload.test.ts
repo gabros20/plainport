@@ -165,25 +165,33 @@ const storeEvents = async (): Promise<CatalogEvent[]> => {
   return read.value.events;
 };
 
-const projectId = async (): Promise<string | undefined> => {
+const projectIdOf = async (path: string): Promise<string | undefined> => {
   const registry = await readRegistry(testHost(), box.paths);
   if (!registry.ok) throw new Error(registry.finding.message);
-  return Object.entries(registry.value.projects).find(([, e]) => e.path === "web")?.[0];
+  return Object.entries(registry.value.projects).find(([, e]) => e.path === path)?.[0];
 };
+const projectId = () => projectIdOf("web");
 
-const expectInvariants = async (settleMs?: number) => {
-  const violations = await invariantViolations({
+/** Invariants 1–3 for the web project, or another one (`target`) with its own capture. */
+const invariantsOf = async (
+  settleMs?: number,
+  target: { path: string; released: TreeCapture | undefined } = { path: "web", released },
+) =>
+  invariantViolations({
     paths: box.paths,
     device: device.id,
-    project: { id: await projectId(), dir },
+    project: { id: await projectIdOf(target.path), dir: join(box.home, "work", target.path) },
     roots: [join(box.home, "work")],
     store: { name: "ssd", blob: store, engine },
-    ...(released === undefined ? {} : { released }),
+    ...(target.released === undefined ? {} : { released: target.released }),
     stripped: ["node_modules"],
     ...(settleMs === undefined ? {} : { settleMs }),
   });
-  expect(violations).toEqual([]);
-};
+
+const expectInvariants = async (
+  settleMs?: number,
+  target?: { path: string; released: TreeCapture | undefined },
+) => expect(await invariantsOf(settleMs, target)).toEqual([]);
 
 const expectUntouched = async () => {
   expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
@@ -593,6 +601,7 @@ describe("offload: approved plans", () => {
         loader: new ConfigLoader(testHost(), box.paths),
         env: { HOME: box.home, PATH },
         now: new Date(),
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
     await savePlan(testHost(), box.paths, prepared.plan, new Date());
@@ -703,6 +712,7 @@ describe("offload: the store", () => {
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.not-set-up"]);
     expect(result.ok ? "" : result.finding.fix).toContain("plainport init");
     await expectUntouched();
+    await expectInvariants();
   });
 
   test("an unreachable store fails with exit 9 before anything is uploaded", async () => {
@@ -711,6 +721,7 @@ describe("offload: the store", () => {
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([9, "store.unreachable"]);
     expect(engine.calls).toHaveLength(0);
     await expectUntouched();
+    await expectInvariants();
   });
 
   test("a project folder on another volume than its root refuses before the snapshot (fs.cross-volume)", async () => {
@@ -890,6 +901,7 @@ describe("offload: fix wave r1", () => {
       }),
     );
     expect(planned.plan.findings.map((f) => f.code)).toContain("path.stub-occupied");
+    await expectInvariants();
   });
 
   test("a plan approved with --keep-deps runs only with --keep-deps; otherwise a fresh plan is the error's data", async () => {
@@ -900,7 +912,7 @@ describe("offload: fix wave r1", () => {
         loader: new ConfigLoader(testHost(), box.paths),
         env: { HOME: box.home, PATH },
         now: new Date(),
-        store: "ssd",
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
         keepDeps: true,
       }),
     );
@@ -928,7 +940,7 @@ describe("offload: fix wave r1", () => {
         loader: new ConfigLoader(testHost(), box.paths),
         env: { HOME: box.home, PATH },
         now: new Date(),
-        store: "ssd",
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
     await savePlan(testHost(), box.paths, prepared.plan, new Date());
@@ -936,6 +948,7 @@ describe("offload: fix wave r1", () => {
     const result = await offload({ plan: prepared.plan.id });
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
     expect(engine.calls).toHaveLength(0);
+    await expectInvariants();
   });
 
   const forkDuringUpload = async () => {
@@ -999,6 +1012,7 @@ describe("offload: fix wave r1", () => {
       event: expect.any(String),
     });
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
   });
 
   test("keepLocalFor and the stub policy are in the journal from the plan on, before anything is released", async () => {
@@ -1029,6 +1043,10 @@ describe("offload: fix wave r1", () => {
     expect(existsSync(join(result.trash, "web/src/main.ts"))).toBe(true);
     expect(journalNow().step).toBe("offload.release.delete");
     expect(logs.join("\n")).toContain("plainport recover");
+    // Invariants 1 and 2 hold; 3 holds once recover has deleted the trash (Task 14).
+    const violations = await invariantsOf(0);
+    expect(violations.filter((v) => !v.startsWith("invariant 3"))).toEqual([]);
+    expect(violations).toEqual([expect.stringContaining(`invariant 3: ${result.trash}`)]);
   });
 
   test("an I/O error in release is a coded failure, never an exception; the journal stays for recover", async () => {
@@ -1048,6 +1066,7 @@ describe("offload: fix wave r1", () => {
     expect(result.ok ? "" : result.finding.fix).toContain("plainport recover");
     expect(journalNow().step).toBe("offload.release.trash");
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
   });
 
   test("a journal that cannot be written before the commit fails coded, with nothing changed", async () => {
@@ -1067,19 +1086,31 @@ describe("offload: fix wave r1", () => {
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
     expect(engine.calls).toHaveLength(0);
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
   });
 
   test("first offloads of two projects in one root at once agree on the root's ULID", async () => {
     box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
+    const apiDir = join(box.home, "work/api");
+    let apiReleased: TreeCapture | undefined;
+    const apiHost = testHost({
+      faults: {
+        onStep: (step) => {
+          if (step === "offload.release.trash") apiReleased = captureTree(apiDir);
+        },
+      },
+    });
     const [a, b] = await Promise.all([
       offload(),
-      ref("work:api").then((r) => runOffload(deps(), { project: r })),
+      ref("work:api").then((r) => runOffload(deps({}, apiHost), { project: r })),
     ]);
     expect(a.ok && b.ok).toBe(true);
     const offloads = (await storeEvents()).filter((e) => e.type === "offloaded");
     expect(new Set(offloads.map((e) => e.root)).size).toBe(1);
     const registry = value(await readRegistry(testHost(), box.paths));
     expect(registry.roots?.work).toBe(offloads[0]?.root);
+    await expectInvariants();
+    await expectInvariants(undefined, { path: "api", released: apiReleased });
   });
 
   test("a root ULID the catalog already holds is recorded in registry.json", async () => {
@@ -1099,6 +1130,7 @@ describe("offload: fix wave r1", () => {
     value(await offload());
     expect(value(await readRegistry(testHost(), box.paths)).roots?.work).toBe(rootId);
     expect((await storeEvents()).filter((e) => e.type === "root-created")).toHaveLength(1);
+    await expectInvariants();
   });
 });
 
@@ -1172,5 +1204,249 @@ describe("the detached trash delete (D47)", () => {
     value(await posixDeleteTrash(trash, journal));
     await waitGone(journal);
     expect([existsSync(trash), existsSync(journal)]).toEqual([false, false]);
+  });
+});
+
+describe("offload: fix wave r2", () => {
+  const stubPath = () => `${dir}.plainport`;
+  const journalNow = () => {
+    const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    return OffloadJournalSchema.parse(
+      JSON.parse(readFileSync(join(box.paths.journalDir, names[0] as string), "utf8")),
+    );
+  };
+  const register = async () => {
+    const id = ulid();
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          projects: { [id]: { root: "work", path: "web", registeredAt: "2026-10-01T00:00:00.000Z" } },
+        },
+      })),
+    );
+    return id;
+  };
+
+  test("a file that appears at the stub's path while it is written is never overwritten (D48)", async () => {
+    const real = testHost({ faults: { onStep: capture } });
+    let planted = false;
+    const plant = (to: string) => {
+      if (!planted && to === stubPath()) {
+        planted = true;
+        writeFileSync(stubPath(), "written by someone else\n");
+      }
+    };
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        rename: async (from, to) => {
+          plant(to);
+          return real.fs.rename(from, to);
+        },
+        link: async (from, to) => {
+          plant(to);
+          return real.fs.link(from, to);
+        },
+      },
+    };
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(planted).toBe(true);
+    expect(readFileSync(stubPath(), "utf8")).toBe("written by someone else\n");
+    expect(result.ok ? 0 : result.finding.code).toBe("path.stub-occupied");
+    expect(journalNow().step).toBe("offload.release.moved");
+  });
+
+  test("this project's own stub at the path is compared, then replaced", async () => {
+    const id = await register();
+    writeFileSync(
+      stubPath(),
+      JSON.stringify({
+        plainport: 1,
+        project: id,
+        root: "work",
+        rootId: ulid(),
+        path: "web",
+        store: "ssd",
+        snapshot: ulid(),
+        offloadedAt: "2026-10-01T00:00:00.000Z",
+        bytes: 1,
+        restore: "plainport onload work:web",
+      }),
+    );
+    const result = value(await offload());
+    expect(JSON.parse(readFileSync(stubPath(), "utf8"))).toMatchObject({ project: id, snapshot: result.op });
+    await expectInvariants();
+  });
+
+  test("a FIFO at the stub's path blocks in preflight without being read", async () => {
+    expect(Bun.spawnSync(["mkfifo", stubPath()]).exitCode).toBe(0);
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "path.stub-occupied"]);
+    expect(engine.calls).toHaveLength(0);
+    rmSync(stubPath());
+    await expectInvariants();
+  }, 10_000);
+
+  test("an edit while the listing is read is caught by the re-stat after it, and the offload plans again", async () => {
+    let edited = false;
+    engine.hooks.duringListing = () => {
+      if (edited) return;
+      edited = true;
+      writeFileSync(join(dir, "src/main.ts"), "export const main = 3;\n");
+    };
+    value(await offload());
+    expect(engine.calls).toHaveLength(2);
+    const committed = engine.repository.snapshots[1];
+    expect(new TextDecoder().decode(committed?.data.get("src/main.ts"))).toBe("export const main = 3;\n");
+    await expectInvariants();
+  });
+
+  const approve = async (over: { keepDeps?: boolean; storeId?: string } = {}) => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(),
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
+        ...over,
+      }),
+    );
+    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    return prepared.plan;
+  };
+
+  test("an approval binds the store's identity: the same name on another store refuses (D48)", async () => {
+    const approved = await approve();
+    store = memoryBlobStore({ createIfAbsent: true });
+    engine = fakeEngine();
+    value(
+      await setUpStore(testHost(), {
+        paths: box.paths,
+        env: { PLAINPORT_STORE_PASSWORD: "pw" },
+        name: "ssd",
+        store: { kind: "local", path: "~/ssd" },
+        opener,
+        mint: () => ulid(),
+      }),
+    );
+    const result = await offload({ plan: approved.id });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    expect(engine.calls).toHaveLength(0);
+    await expectInvariants();
+  });
+
+  test("a stale plan's fix is the exact command that runs the fresh plan, its options included", async () => {
+    const approved = await approve();
+    const result = await offload({ plan: approved.id, keepDeps: true });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    const fix = result.ok ? "" : (result.finding.fix ?? "");
+    const fresh = /--plan ([0-9A-Z]{26})/.exec(fix)?.[1] as string;
+    expect(fix).toEndWith(`plainport offload work:web --plan ${fresh} --keep-deps`);
+    expect(result.ok ? undefined : result.data).toMatchObject({ id: fresh, options: { keepDeps: true } });
+    value(await offload({ plan: fresh, keepDeps: true }));
+    await expectInvariants();
+  });
+
+  test("plan.stale after an upload says a snapshot was uploaded and not committed", async () => {
+    const approved = await approve();
+    engine.hooks.duringSnapshot = () => writeFileSync(join(dir, "src/main.ts"), "edited\n");
+    const result = await offload({ plan: approved.id });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    const message = result.ok ? "" : result.finding.message;
+    expect(message).not.toContain("nothing was uploaded");
+    expect(message).toContain("uploaded but not committed");
+    await expectInvariants();
+  });
+
+  test("one store serves one root (D48): a second root naming the same store is refused", async () => {
+    config('[roots.personal]\nstore = "ssd"\non = { mbp = "~/personal" }');
+    box.file("personal/notes/package.json", `${JSON.stringify({ name: "notes" })}\n`);
+    value(await offload());
+    const other = await resolveProject(testHost(), box.paths, "personal:notes", {
+      cwd: box.home,
+      env: { HOME: box.home },
+      device: "mbp",
+    });
+    const result = await runOffload(deps(), { project: value(other) });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.root-mismatch"]);
+    expect(result.ok ? "" : result.finding.fix).toContain("its own store");
+    expect(existsSync(join(box.home, "personal/notes/package.json"))).toBe(true);
+    expect(engine.calls).toHaveLength(1);
+    await expectInvariants();
+  });
+
+  const spy = (fail: (method: string, path: string) => string | undefined): HostPorts => {
+    const real = testHost({ faults: { onStep: capture } });
+    const wrap =
+      <A extends unknown[], R>(method: string, fn: (path: string, ...rest: A) => Promise<R>) =>
+      async (path: string, ...rest: A): Promise<R> => {
+        const code = fail(method, path);
+        if (code !== undefined) throw Object.assign(new Error(`${code}: injected`), { code });
+        return fn(path, ...rest);
+      };
+    return {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: wrap("lstat", real.fs.lstat),
+        readdir: wrap("readdir", real.fs.readdir),
+        writeTextDurable: wrap("writeTextDurable", real.fs.writeTextDurable),
+      },
+    };
+  };
+
+  test("I/O errors are coded: the project folder cannot be stat'ed", async () => {
+    const host = spy((m, p) => (m === "lstat" && p === dir ? "EACCES" : undefined));
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("fs.unreadable");
+    await expectInvariants();
+  });
+
+  test("I/O errors are coded: the journal folder cannot be listed", async () => {
+    const host = spy((m, p) => (m === "readdir" && p === box.paths.journalDir ? "EIO" : undefined));
+    box.dir(".local/state/plainport/journal");
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("fs.write-failed");
+    await expectInvariants();
+  });
+
+  test("I/O errors are coded: the project lock cannot be written", async () => {
+    const host = spy((m, p) =>
+      m === "writeTextDurable" && p.startsWith(box.paths.locksDir) ? "EROFS" : undefined,
+    );
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("fs.write-failed");
+    await expectInvariants();
+  });
+
+  test("I/O errors are coded: the stub's path cannot be inspected during release", async () => {
+    let moved = false;
+    const real = spy((m, p) => (moved && m === "lstat" && p === stubPath() ? "EIO" : undefined));
+    const host: HostPorts = {
+      ...real,
+      faultAt: (step) => {
+        real.faultAt(step);
+        if (step === "offload.release.moved") moved = true;
+      },
+      fs: {
+        ...real.fs,
+        link: async (from, to) => {
+          if (to === stubPath()) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+          return real.fs.link(from, to);
+        },
+        rename: async (from, to) => {
+          if (to === stubPath()) throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+          return real.fs.rename(from, to);
+        },
+      },
+    };
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("fs.write-failed");
+    expect(result.ok ? "" : result.finding.fix).toContain("plainport recover");
   });
 });

@@ -52,6 +52,8 @@ export const fakeRepository = (): FakeRepository => ({
 export interface FakeEngineHooks {
   /** Runs while a snapshot "uploads", after the walk started: a test edits files here. `attempt` counts from 1. */
   duringSnapshot?(input: SnapshotInput, attempt: number): void | Promise<void>;
+  /** Runs while a listing is read, before its entries are handed out: a test edits files here. */
+  duringListing?(snapshot: string): void | Promise<void>;
   /** Rewrites the entries a listing hands out, to fake a snapshot that does not match the folder. */
   listing?(entries: EntryMeta[]): EntryMeta[];
   /** The next call of this method returns the failure instead of running. */
@@ -228,6 +230,7 @@ export const fakeEngine = (
       if (!repository.initialized) return missing();
       const snapshot = find(id);
       if (snapshot === undefined) return notFound(id);
+      await hooks.duringListing?.(id);
       const listed = hooks.listing?.(snapshot.entries.map((e) => ({ ...e }))) ?? snapshot.entries;
       for (const entry of listed) onEntry({ ...entry });
       return ok({ snapshot: snapshot.info, count: listed.length });
