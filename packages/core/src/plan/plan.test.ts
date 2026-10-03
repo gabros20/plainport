@@ -179,6 +179,15 @@ describe("plan: the strip set", () => {
     );
   });
 
+  test("strip.extra re-includes inside an excluded folder, which gitignore cannot: dist/ minus dist/keep.txt", async () => {
+    put("dist/a.js");
+    put("dist/sub/b.js");
+    put("dist/keep.txt");
+    userConfig('[strip]\nextra = ["dist/", "!dist/keep.txt"]\n');
+    // git would ignore dist/keep.txt with its folder; plainport keeps it and strips the rest one by one.
+    expect(stripped(await plan([])).sort()).toEqual(["dist/a.js", "dist/sub"]);
+  });
+
   test("D39: strip.extra supports negation; a folder holding a re-included file is not stripped whole", async () => {
     put("a.log");
     put("audit.log");
@@ -207,6 +216,16 @@ describe("plan: the strip set", () => {
     renameSync(join(dir, "tmp-build"), join(dir, "build"));
     if (!existsSync(join(dir, "BUILD"))) return; // a case-sensitive volume: nothing to show
     expect(fx.git(dir, "config", "core.ignorecase").trim()).toBe("true");
+    expect(stripped(await plan([output("build")]))).toEqual([]);
+  });
+
+  test("case is folded even when core.ignorecase is false (a repository made on a case-sensitive volume)", async () => {
+    fx.git(dir, "config", "core.ignorecase", "false");
+    put("Build/a.js");
+    commit("Build/a.js");
+    renameSync(join(dir, "Build"), join(dir, "tmp-build"));
+    renameSync(join(dir, "tmp-build"), join(dir, "build"));
+    if (!existsSync(join(dir, "BUILD"))) return; // a case-sensitive volume: nothing to show
     expect(stripped(await plan([output("build")]))).toEqual([]);
   });
 

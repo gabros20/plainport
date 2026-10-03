@@ -119,6 +119,23 @@ describe("scan: one walk records the manifest", () => {
   });
 });
 
+describe("scan: manifest order", () => {
+  test("iteration yields every folder before anything inside it (the planner's strip.extra relies on it)", async () => {
+    for (const path of ["b/z/y/x.txt", "a/c.txt", "a/b/c/d.txt", "a/b/e.txt", "z.txt", "m/n/o/p/q.txt"])
+      write(path);
+    const seen = new Set<string>();
+    for (const entry of (await scan()).manifest) {
+      const parent = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : "";
+      expect({ entry: entry.path, parentSeen: parent === "" || seen.has(parent) }).toEqual({
+        entry: entry.path,
+        parentSeen: true,
+      });
+      seen.add(entry.path);
+    }
+    expect(seen.size).toBe(16);
+  });
+});
+
 describe("scan: the fingerprint", () => {
   test("is stable across runs", async () => {
     write("a.txt", "one");

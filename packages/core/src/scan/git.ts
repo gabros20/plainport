@@ -468,13 +468,21 @@ export const gitWorktrees = async (
 };
 
 /**
+ * A path as the tracked check compares it: NFC, then case-folded through upper case and back to lower case, so
+ * σ, ς and Σ (and ß and SS) come out the same. It folds more than git or the volume ever do, which can only make
+ * more paths count as tracked, and so keep more (run decision D39).
+ */
+export const foldPath = (path: string): string =>
+  path.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
+
+/**
  * Which of the given paths (relative to the repository's top folder, "/"-separated) git tracks: a path is tracked
  * when it is a tracked file or a folder holding one (run decision D39). The whole index is read once
  * (`git ls-files -z`), so any number of paths fits, with no argument list to outgrow; each index path and each asked
- * path are compared as git itself compares them in this repository: precomposed to NFC (core.precomposeunicode,
- * applied always, since folding more only keeps more) and case-folded when core.ignorecase is set. A path git
- * printed in bytes that are not UTF-8 cannot be compared, so every asked path that is not UTF-8 either counts as
- * tracked: when unsure, keep.
+ * path are compared folded (foldPath): Unicode form and case always, whatever core.precomposeunicode and
+ * core.ignorecase say, since a repository made on a case-sensitive volume still finds Build/ as build/ on a
+ * case-insensitive one. A path git printed in bytes that are not UTF-8 cannot be compared, so every asked path that
+ * is not UTF-8 either counts as tracked: when unsure, keep.
  */
 export const gitTracked = async (
   host: HostPorts,
@@ -484,22 +492,11 @@ export const gitTracked = async (
 ): Promise<Result<Set<string>>> => {
   const tracked = new Set<string>();
   if (paths.length === 0) return ok(tracked);
-  const ignorecase = await git(host, repo, ctx, [
-    "config",
-    "--bool",
-    "--default",
-    "false",
-    "core.ignorecase",
-  ]);
-  if (!ignorecase.ok) return ignorecase;
-  const icase = text(ignorecase.value).trim() === "true";
-  const fold = (path: string): string =>
-    icase ? path.normalize("NFC").toLowerCase() : path.normalize("NFC");
   const out = await git(host, repo, ctx, ["ls-files", "-z", "--cached"]);
   if (!out.ok) return out;
   const wanted = new Map<string, string[]>();
   for (const path of paths) {
-    const key = fold(path);
+    const key = foldPath(path);
     const same = wanted.get(key);
     if (same === undefined) wanted.set(key, [path]);
     else same.push(path);
@@ -508,7 +505,7 @@ export const gitTracked = async (
   for (const file of records(out.value, NUL)) {
     if (file.includes("\uFFFD")) undecodable = true;
     // The file itself and every folder above it that was asked about.
-    const key = fold(file);
+    const key = foldPath(file);
     for (let at = key; at !== ""; at = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "") {
       for (const path of wanted.get(at) ?? []) tracked.add(path);
     }

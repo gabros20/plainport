@@ -83,6 +83,12 @@ const normalized = (path: string): string | undefined => {
  * strip.extra's matches: the outermost entries the patterns strip, outside any repository's own folder. The last
  * matching pattern decides and a folder's state passes to what it holds, as in gitignore; a negation re-includes
  * (D39). A folder holding anything re-included is not stripped whole: what it holds is looked at one by one.
+ *
+ * Unlike gitignore, a negation re-includes even inside a folder a pattern excludes: git would leave dist/keep.txt
+ * ignored under dist/, plainport keeps it and strips the rest of dist/ entry by entry. That only keeps more.
+ *
+ * It relies on the manifest yielding every folder before anything inside it (Manifest's iteration order), so a
+ * folder's state is known when its contents are reached.
  */
 const extraMatches = (manifest: Manifest, patterns: readonly string[]): ProposedStrip[] => {
   if (patterns.length === 0) return [];

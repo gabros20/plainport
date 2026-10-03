@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } f
 import { join } from "node:path";
 import { type GitFixture, makeGitFixture } from "../testing/git-fixture.ts";
 import { testHost } from "../testing/host.ts";
-import { type GitFacts, gitFacts } from "./git.ts";
+import { foldPath, type GitFacts, gitFacts } from "./git.ts";
 import { scanTree } from "./walk.ts";
 
 const host = testHost();
@@ -270,5 +270,19 @@ describe("scan: git only reads (q1)", () => {
     const result = await gitFacts(host, dir, { env: fx.env });
     expect(result.ok).toBe(true);
     expect(existsSync(marker)).toBe(false);
+  });
+});
+
+describe("git: path folding for the tracked check", () => {
+  test("foldPath folds case and Unicode form conservatively both ways", () => {
+    const same = (a: string, b: string) => expect(foldPath(a)).toBe(foldPath(b));
+    same("Build/x.js", "build/X.JS");
+    same("cafe\u0301", "caf\u00e9");
+    same("CAF\u00c9", "cafe\u0301");
+    // Greek final sigma: ς, σ and Σ are one letter to a case-insensitive volume.
+    same("\u03b1\u03c2", "\u03b1\u03c3");
+    same("\u0391\u03a3", "\u03b1\u03c2");
+    same("\u03c3\u03b1", "\u03c2\u03b1");
+    expect(foldPath("a/b")).not.toBe(foldPath("a/c"));
   });
 });

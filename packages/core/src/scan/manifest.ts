@@ -151,7 +151,7 @@ export class Manifest {
     return undefined;
   }
 
-  /** Every entry, in scan order. */
+  /** Every entry, in scan order: every folder comes before anything inside it (the planner relies on it). */
   *[Symbol.iterator](): IterableIterator<ManifestEntry> {
     for (let i = 0; i < this.paths.length; i++) yield this.at(i);
   }
