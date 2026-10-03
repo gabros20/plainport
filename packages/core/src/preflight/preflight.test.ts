@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type Finding, fail, finding, ok } from "@plainport/contract";
 import { testHost } from "../../../host-macos/src/testing.ts";
 import type { HostChecks, ProcessUse } from "../ports/checks.ts";
+import type { HostPorts } from "../ports/host.ts";
 import { scanProject } from "../scan/index.ts";
 import { type GitFixture, makeGitFixture } from "../testing/git-fixture.ts";
 import { type PreflightReport, preflight, scanFindings } from "./index.ts";
@@ -275,12 +276,12 @@ describe("preflight: a check that cannot answer", () => {
     const report = await run(dir, {
       processesUsing: async () =>
         fail(finding("proc.open-files", { message: "could not list open files: lsof failed" })),
-      dataless: async () => fail(finding("process.timeout", { message: "find ran too long" })),
+      dockerMounts: async () => fail(finding("process.timeout", { message: "docker ran too long" })),
     });
     expect(codes(report.findings)).toEqual([
-      "block git.locked",
       "block proc.open-files",
       "block process.timeout",
+      "block git.locked",
     ]);
   });
 
@@ -411,5 +412,195 @@ describe("preflight: findings from the scan", () => {
     const found = await scanned(dir);
     expect(codes(found)).toEqual(["warn git.in-progress"]);
     expect(found[0]?.message).toContain("bisect");
+  });
+});
+
+describe("preflight: fails closed", () => {
+  /** The host with every child run and every file read recorded. */
+  const watched = () => {
+    const runs: string[] = [];
+    const reads: string[] = [];
+    const spy: HostPorts = {
+      ...host,
+      run: async (spec) => {
+        runs.push(spec.command);
+        return host.run(spec);
+      },
+      fs: {
+        ...host.fs,
+        readText: async (path) => {
+          reads.push(path);
+          return host.fs.readText(path);
+        },
+      },
+    };
+    return { spy, runs, reads };
+  };
+  const runWith = async (
+    spy: HostPorts,
+    dir: string,
+    checks: Partial<HostChecks> = {},
+  ): Promise<PreflightReport> => {
+    const result = await preflight(spy, { ...quiet, ...checks }, dir, { env: fx.env });
+    if (!result.ok) throw new Error(`${result.finding.code}: ${result.finding.message}`);
+    return result.value;
+  };
+
+  test("placeholders are checked before git: with any present, no git command runs and nothing is read", async () => {
+    const dir = fx.repo("web");
+    fx.write(join(dir, ".git", "index.lock"));
+    const { spy, runs, reads } = watched();
+    const report = await runWith(spy, dir, { dataless: async () => ok(["assets/a.mov"]) });
+    expect(codes(report.findings)).toEqual(["block fs.dataless"]);
+    expect(runs).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(report.notes.join("\n")).toContain("git was not checked");
+  });
+
+  test("when the placeholder check cannot answer, git is not run either", async () => {
+    const dir = fx.repo("web");
+    const { spy, runs } = watched();
+    const report = await runWith(spy, dir, {
+      dataless: async () => fail(finding("fs.dataless", { message: "find failed" })),
+    });
+    expect(codes(report.findings)).toEqual(["block fs.dataless"]);
+    expect(runs).toEqual([]);
+  });
+
+  test("a linked worktree's .git pointer is read only once the placeholder check has passed", async () => {
+    const dir = fx.repo("web");
+    const linked = join(fx.root, "web-feature");
+    fx.git(dir, "worktree", "add", "-q", "-b", "feature", linked);
+    const { spy, reads } = watched();
+    const report = await runWith(spy, linked, { dataless: async () => ok([".git"]) });
+    expect(codes(report.findings)).toEqual(["block fs.dataless"]);
+    expect(reads).toEqual([]);
+  });
+
+  test("a FIFO named .git is never opened: it blocks, with a fix", async () => {
+    const dir = join(fx.root, "piped");
+    mkdirSync(dir);
+    Bun.spawnSync(["/usr/bin/mkfifo", join(dir, ".git")]);
+    const { spy, runs, reads } = watched();
+    const [found] = (await runWith(spy, dir)).findings;
+    expect(found).toMatchObject({ code: "fs.unreadable", severity: "block", paths: [join(dir, ".git")] });
+    expect(found?.message).toContain("fifo");
+    expect(found?.fix).toBeDefined();
+    expect(reads).toEqual([]);
+    expect(runs).toEqual([]);
+  });
+
+  test("a socket named .git blocks the same way", async () => {
+    const dir = join(fx.root, "socketed");
+    mkdirSync(dir);
+    const server = createServer();
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(join(dir, ".git"), done));
+    const { spy, reads } = watched();
+    const [found] = (await runWith(spy, dir)).findings;
+    expect(found).toMatchObject({ code: "fs.unreadable", severity: "block" });
+    expect(found?.message).toContain("socket");
+    expect(reads).toEqual([]);
+  });
+
+  test("a .git file that is not a gitdir pointer is git.failed, with git's own words", async () => {
+    const dir = join(fx.root, "odd");
+    mkdirSync(dir);
+    fx.write(join(dir, ".git"), "not a pointer\n");
+    const [found] = (await run(dir)).findings;
+    expect(found).toMatchObject({ code: "git.failed", severity: "block" });
+    expect(found?.message).toContain("gitfile");
+  });
+
+  test("a .git file too large to be a pointer is not read by plainport", async () => {
+    const dir = join(fx.root, "huge");
+    mkdirSync(dir);
+    fx.write(join(dir, ".git"), `gitdir: ${"x".repeat(70_000)}\n`);
+    const { spy, reads } = watched();
+    const [found] = (await runWith(spy, dir)).findings;
+    expect(found?.code).toBe("git.failed");
+    expect(reads).toEqual([]);
+  });
+
+  test("the fsmonitor exemption needs every file the daemon holds to be known, not only the sample", async () => {
+    const dir = fx.repo("web");
+    const server = createServer();
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(join(dir, ".git", "fsmonitor--daemon.ipc"), done));
+    const report = await run(dir, {
+      processesUsing: async () =>
+        ok([
+          use({
+            pid: 6,
+            command: "git",
+            args: "git fsmonitor--daemon run --detach --ipc-threads=8",
+            files: [dir],
+            fileCount: 51,
+          }),
+        ]),
+    });
+    expect(codes(report.findings)).toEqual(["block proc.open-files"]);
+    expect(report.fsmonitor).toEqual([]);
+  });
+
+  test("a folder with an unusable .git inside another repository is git.failed, never the parent's facts", async () => {
+    const parent = fx.repo("parent");
+    const dir = join(parent, "sub");
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    const report = await run(dir);
+    expect(codes(report.findings)).toEqual(["block git.failed"]);
+  });
+});
+
+describe("preflight: git.unpushed fixes cover everything reported", () => {
+  const scanned = async (dir: string) => {
+    const result = await scanProject(host, dir, { env: fx.env });
+    if (!result.ok) throw new Error(result.finding.message);
+    return scanFindings(result.value);
+  };
+  const stash = (dir: string) => {
+    fx.write(join(dir, "README.md"), "stash me\n");
+    fx.git(dir, "stash", "-q");
+  };
+  const detach = (dir: string) => {
+    fx.git(dir, "switch", "-q", "--detach");
+    fx.write(join(dir, "d.txt"), "d\n");
+    fx.git(dir, "add", "d.txt");
+    fx.git(dir, "commit", "-q", "-m", "detached");
+  };
+
+  test("with no remote: the stashes and the detached commits are covered, not only the branches", async () => {
+    const dir = fx.repo("web");
+    stash(dir);
+    detach(dir);
+    const [found] = await scanned(dir);
+    expect(found?.code).toBe("git.unpushed");
+    expect(found?.fix).toContain("git remote add");
+    expect(found?.fix).toContain("git stash list");
+    expect(found?.fix).toContain("git switch -c");
+  });
+
+  test("with a remote never fetched: the same", async () => {
+    const dir = fx.repo("web");
+    fx.git(dir, "remote", "add", "origin", join(fx.root, "nowhere.git"));
+    stash(dir);
+    detach(dir);
+    const [found] = await scanned(dir);
+    expect(found?.fix).toContain("git fetch origin");
+    expect(found?.fix).toContain("git stash list");
+    expect(found?.fix).toContain("git switch -c");
+  });
+
+  test("stashes alongside unpushed commits are not left out of the fix", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.write(join(dir, "m.txt"), "m\n");
+    fx.git(dir, "add", "m.txt");
+    fx.git(dir, "commit", "-q", "-m", "m");
+    stash(dir);
+    const [found] = await scanned(dir);
+    expect(found?.message).toContain("1 stash");
+    expect(found?.fix).toContain("git push origin main");
+    expect(found?.fix).toContain("git stash list");
   });
 });

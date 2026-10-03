@@ -5,12 +5,16 @@
 //
 // Nothing here changes anything: git's fsmonitor daemon, which DESIGN says is stopped rather than blocking, is only
 // reported (fsmonitor) for the offload saga to stop.
+//
+// Every check fails closed: what cannot be shown safe blocks. The placeholder check runs first, and the git checks
+// (which read .git and run git, so they would download a placeholder) run only once it has passed with none found.
+// The process and container checks read nothing in the folder, so they always run.
 
 import { join, resolve } from "node:path";
 import { type Failure, type Finding, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { CheckContext, HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
-import { dotGit, exists, gitWorktrees, unreadable } from "../scan/git.ts";
+import { dotGit, exists, gitPointer, gitWorktrees } from "../scan/git.ts";
 import type { ProjectScan } from "../scan/index.ts";
 
 export interface PreflightReport {
@@ -43,15 +47,11 @@ const gitChecks = async (
   if (!kind.ok) return kind;
   if (kind.value === "none") return undefined;
   if (kind.value === "file") {
-    let pointer: string;
-    try {
-      pointer = (await host.fs.readText(join(dir, ".git"))).trim().replace(/^gitdir:\s*/, "");
-    } catch (error) {
-      return unreadable(join(dir, ".git"), error, { path: join(dir, ".git"), kind: "file" });
-    }
+    const pointer = await gitPointer(host, dir, ctx);
+    if (!pointer.ok) return pointer;
     report.findings.push(
       finding("git.is-worktree", {
-        message: `${dir} is a linked git worktree or a submodule's checkout: its .git only points to ${pointer}, which stays behind`,
+        message: `${dir} is a linked git worktree or a submodule's checkout: its .git only points to ${pointer.value}, which stays behind`,
         paths: [join(dir, ".git")],
         fix: "offload the repository that holds it instead; git worktree list, run here, names it",
       }),
@@ -104,10 +104,11 @@ const processFindings = (
     // Exempt only git's fsmonitor daemon (by its command line) for this repository: the repository's socket is a
     // real socket, and the daemon holds nothing inside the folder but the folder itself (it watches it) and that
     // socket. A daemon for a repository nested inside also holds the nested folder, so it is not exempt; anything
-    // else, git included, is an ordinary process with files open.
+    // else, git included, is an ordinary process with files open. `files` is a sample: a process holding more than
+    // it lists is not known to hold only the daemon's paths, so it is not exempt either.
     const daemon = use.command === "git" && /(^|\s)fsmonitor--daemon(\s|$)/.test(use.args ?? "");
-    if (daemon && daemonPaths.size > 0 && use.files.every((path) => daemonPaths.has(path)))
-      report.fsmonitor.push(use.pid);
+    const known = use.fileCount === use.files.length && use.files.every((path) => daemonPaths.has(path));
+    if (daemon && daemonPaths.size > 0 && known) report.fsmonitor.push(use.pid);
     else others.push(use);
   }
   const holding = others.filter((p) => p.fileCount > 0);
@@ -143,7 +144,8 @@ const processFindings = (
 
 /**
  * The checks before the scan. A check that fails is reported as a blocker under its own code and the others still
- * run, so one run shows every blocker; only a cancellation ends preflight early.
+ * run, so one run shows every blocker; only a cancellation ends preflight early. The one exception is git, which
+ * is checked only once the folder is known to hold no placeholder, since reading .git could download one.
  */
 export const preflight = async (
   host: HostPorts,
@@ -158,8 +160,20 @@ export const preflight = async (
     return undefined;
   };
 
-  const git = await gitChecks(host, dir, ctx, report);
-  if (git !== undefined && failed(git)) return git;
+  const dataless = await checks.dataless(dir, ctx);
+  if (!dataless.ok) {
+    if (failed(dataless)) return dataless;
+  } else if (dataless.value.length > 0) {
+    const paths = dataless.value;
+    report.findings.push(
+      finding("fs.dataless", {
+        message: `${plural(paths.length, "file")} in ${dir} ${paths.length === 1 ? "is a placeholder" : "are placeholders"} (iCloud Drive or Dropbox): ${paths.length === 1 ? "its" : "their"} data is not on this disk, and reading ${paths.length === 1 ? "it" : "them"} would download or fail`,
+        paths: capped(paths),
+        fix: "download them first (in Finder: Download Now, or open each one), then re-run",
+      }),
+    );
+  }
+  const safeToRead = dataless.ok && dataless.value.length === 0;
 
   const processes = await checks.processesUsing(dir, ctx);
   if (!processes.ok) {
@@ -200,17 +214,12 @@ export const preflight = async (
     );
   }
 
-  const dataless = await checks.dataless(dir, ctx);
-  if (!dataless.ok) {
-    if (failed(dataless)) return dataless;
-  } else if (dataless.value.length > 0) {
-    const paths = dataless.value;
-    report.findings.push(
-      finding("fs.dataless", {
-        message: `${plural(paths.length, "file")} in ${dir} ${paths.length === 1 ? "is a placeholder" : "are placeholders"} (iCloud Drive or Dropbox): ${paths.length === 1 ? "its" : "their"} data is not on this disk, and reading ${paths.length === 1 ? "it" : "them"} would download or fail`,
-        paths: capped(paths),
-        fix: "download them first (in Finder: Download Now, or open each one), then re-run",
-      }),
+  if (safeToRead) {
+    const git = await gitChecks(host, dir, ctx, report);
+    if (git !== undefined && failed(git)) return git;
+  } else {
+    report.notes.push(
+      "git was not checked: the placeholder check must pass first, since reading .git could download one",
     );
   }
 
@@ -261,18 +270,38 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
       ...(stashes > 0 ? [stashText] : []),
     ];
     const remote = git.remotes[0] ?? "origin";
+    // What a push of the branches leaves behind: commits on a detached HEAD and stashes each need a step of their
+    // own, so every fix that reports them says so.
+    const besides = [
+      ...(unpushed.detachedHead > 0
+        ? [
+            `git switch -c <branch> to keep the ${plural(unpushed.detachedHead, "detached commit")}, then push it`,
+          ]
+        : []),
+      ...(stashes > 0
+        ? [
+            `git stash list shows the ${stashText}; keep each as a branch (git stash branch <name> stash@{0}) and push it, or drop it`,
+          ]
+        : []),
+    ];
     if (git.remotes.length === 0 && what.length > 0) {
       findings.push(
         finding("git.unpushed", {
           message: `the repository has no remote, so its ${andList(what)} exist only in this folder`,
-          fix: "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
+          fix: [
+            "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
+            ...besides,
+          ].join("; "),
         }),
       );
     } else if (!git.remoteBranches && what.length > 0) {
       findings.push(
         finding("git.unpushed", {
           message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} are not known to be on a remote`,
-          fix: `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
+          fix: [
+            `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
+            ...besides,
+          ].join("; "),
         }),
       );
     } else {
@@ -304,12 +333,7 @@ export const scanFindings = (scan: ProjectScan): Finding[] => {
             .filter((b) => !localOnly.has(b.name) && b.remote !== undefined)
             .map((b) => `git push ${shellWord(b.remote as string)} ${shellWord(b.name)}`),
           ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
-          ...(unpushed.detachedHead > 0
-            ? ["git switch -c <branch> to keep the detached commits, then push it"]
-            : []),
-          ...(stashes > 0 && onCommits.length === 0 && bare.length === 0
-            ? ["git stash list shows them; commit and push what you want to keep"]
-            : []),
+          ...besides,
         ];
         findings.push(finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; ") }));
       }
