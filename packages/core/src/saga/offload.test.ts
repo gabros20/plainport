@@ -28,6 +28,7 @@ import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
+import { scanTree } from "../scan/walk.ts";
 import { posixDeleteTrash } from "../spawner.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
@@ -1619,6 +1620,29 @@ describe("offload: fix wave r3 (D50)", () => {
     expect(forked.ok ? 0 : forked.exitCode).toBe(8);
     expect(seen.has("offload.diverged")).toBe(true);
     expectRecoverable(seen);
+    await expectInvariants();
+  });
+
+  test("from snapshot.done until the folder is moved, the journal carries the verified fingerprint (D51)", async () => {
+    const steps = [
+      "offload.snapshot.done",
+      "offload.verified",
+      "offload.commit.start",
+      "offload.committed",
+      "offload.release.trash",
+    ] as const;
+    const needs = saga.RECOVERY_NEEDS as Record<string, readonly string[]>;
+    for (const step of steps)
+      expect({ step, has: needs[step]?.includes("plan.fingerprint") }).toEqual({ step, has: true });
+    const before = await scanTree(testHost().fs, dir);
+    if (!before.ok) throw new Error(before.finding.message);
+    const seen = new Map<string, OffloadJournal>();
+    value(await runOffload(deps({}, journalsBy(seen)), { project: await ref() }));
+    for (const step of steps)
+      expect({ step, fingerprint: seen.get(step)?.plan?.fingerprint }).toEqual({
+        step,
+        fingerprint: before.value.fingerprint,
+      });
     await expectInvariants();
   });
 

@@ -265,6 +265,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "The approved plan is more than an hour old; plan again with --dry-run",
   },
+  "offload.diverged-after-commit": {
+    severity: "block",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "Recovery found the project folder changed after its offload was committed: the folder is kept, no stub is written, and the committed snapshot (named in the finding) and the folder are two copies for resolve (D51)",
+  },
   "operation.cancelled": {
     severity: "block",
     allowable: false,

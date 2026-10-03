@@ -193,6 +193,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | `git.unpushed-required` | block | no | 6 | `requirePushed` is set and work exists only in this copy of the repository; it replaces `git.unpushed` (D30) |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; `fix` is `plainport recover` |
+| `offload.diverged-after-commit` | block | no | 8 | `plainport recover` found the project folder changed after its offload was committed: it keeps the folder, writes no stub, and names the committed snapshot; the folder and that snapshot are two copies for `resolve` (D51) |
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point before it changed anything local |
 | `plan.expired` | block | no | 6 | The saved plan is more than an hour old; `fix` plans again with `--dry-run` |
 | `plan.not-found` | block | no | 4 | No saved plan has this id on this device |

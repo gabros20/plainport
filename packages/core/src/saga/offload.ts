@@ -20,14 +20,22 @@
 //                                          search the store for an offloaded event of this op (every event carries
 //                                          `op`) that names a snapshot in `attempts`. None: roll back. One that the
 //                                          catalog folds as the project's head (snapshot = op): it was committed,
-//                                          so finish release as from offload.committed. One that is not the head
-//                                          (the project forked): handle it as offload.diverged
+//                                          so go on as from offload.committed (the fingerprint check included). One
+//                                          that is not the head (the project forked): handle it as offload.diverged
 //   offload.diverged                       the head moved: the event (`event`, `diverged`) keeps the snapshot as a
 //                                          fork. Append it if the store lacks it, never release, remove the journal
-//   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, finish
-//                                          release; if not, roll back (a lost write never deletes a folder, D24)
+//   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, go on as
+//                                          from offload.committed; if not, roll back (a lost write never deletes a
+//                                          folder, D24)
 //   offload.committed .. release.stub      committed: finish release as the journal's `release` says (rename,
-//                                          stub, registry, delete). The trash is `trash`; when the release.trash
+//                                          stub, registry, delete), but while the folder still stands at
+//                                          project.dir, only if scanTree(project.dir) still has the verified
+//                                          fingerprint (plan.fingerprint: the plan of the attempt that was verified).
+//                                          The machine may have been used for hours since the crash; if the folder
+//                                          changed, keep it, write no stub, and report
+//                                          offload.diverged-after-commit naming the snapshot (D51): the folder and
+//                                          the committed snapshot are two copies for resolve. The trash is `trash`;
+//                                          when the release.trash
 //                                          write was lost (the journal says committed and has none), it is
 //                                          offloadTrashOf(journal), and the folder may already be in it: look in
 //                                          both places. The stub's offloadedAt and bytes are the event's
@@ -132,7 +140,8 @@ const POLICY = [...IDENTITY, "plan.id", "release.keepLocalFor", "release.stub"];
 
 /**
  * The journal fields (dotted paths) recovery reads at each step, by the table in the file comment: a journal at that
- * step always holds them. Task 14's recover reads nothing else.
+ * step always holds them. Task 14's recover reads nothing else. plan.fingerprint is listed wherever recovery may
+ * release a folder that still stands (D51): release.trash may be the last write before a rename that did happen.
  */
 export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = {
   "offload.begin": IDENTITY,
@@ -142,12 +151,12 @@ export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = 
   "offload.planned": POLICY,
   "offload.snapshot.start": POLICY,
   "offload.snapshot.discarded": [...POLICY, "discarded.snapshot", "discarded.event"],
-  "offload.snapshot.done": [...POLICY, "attempts.0"],
-  "offload.verified": [...POLICY, "attempts.0", "verified"],
+  "offload.snapshot.done": [...POLICY, "plan.fingerprint", "attempts.0"],
+  "offload.verified": [...POLICY, "plan.fingerprint", "attempts.0", "verified"],
   "offload.diverged": [...POLICY, "verified", "event", "diverged"],
-  "offload.commit.start": [...POLICY, "verified", "event"],
-  "offload.committed": [...POLICY, "verified", "event"],
-  "offload.release.trash": [...POLICY, "verified", "event", "trash"],
+  "offload.commit.start": [...POLICY, "plan.fingerprint", "verified", "event"],
+  "offload.committed": [...POLICY, "plan.fingerprint", "verified", "event"],
+  "offload.release.trash": [...POLICY, "plan.fingerprint", "verified", "event", "trash"],
   "offload.release.moved": [...POLICY, "verified", "event", "trash"],
   "offload.release.stub": [...POLICY, "verified", "event", "trash"],
   "offload.release.delete": [...POLICY, "verified", "event", "trash"],
