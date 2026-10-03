@@ -11,13 +11,20 @@ import { type Journal, journalFile, removeJournal, writeJournal } from "../journ
 import type { PlainportPaths } from "../paths.ts";
 
 /** fs.write-failed for an expected I/O error (systemErrorCode rethrows anything else, a bug). */
-export const writeFailed = (error: unknown, what: string, committed: boolean, path: string): Failure => {
+export const writeFailed = (
+  error: unknown,
+  what: string,
+  committed: boolean,
+  path: string,
+  kind: "offload" | "onload" = "offload",
+): Failure => {
   const code = systemErrorCode(error);
+  const safe = kind === "offload" ? "the snapshot is committed" : "the files are in place";
   return fail(
     finding("fs.write-failed", {
-      message: `${what} failed (${code}): ${(error as Error).message}${committed ? "; the snapshot is committed, and nothing is lost" : "; nothing local was changed"}`,
+      message: `${what} failed (${code}): ${(error as Error).message}${committed ? `; ${safe}, and nothing is lost` : "; nothing local was changed"}`,
       fix: committed
-        ? "fix what the message names (permissions, free space), then run plainport recover to finish the offload"
+        ? `fix what the message names (permissions, free space), then run plainport recover to finish the ${kind}`
         : "fix what the message names (permissions, free space), then re-run",
       paths: [path],
     }),
@@ -31,6 +38,8 @@ export const withFix = (failure: Failure, fix: string): Failure => ({
 });
 
 export interface SagaContext {
+  /** Which saga: what a failure after the commit says is safe, and which one recover finishes. Default offload. */
+  kind?: "offload" | "onload";
   io: LocalIo;
   paths: PlainportPaths;
   /** The host's crash seam. */
@@ -81,6 +90,7 @@ export const openSaga = <J extends Journal, S extends string = string>(
           `writing the journal at ${name}`,
           committed,
           journalFile(ctx.paths, journal.op),
+          ctx.kind,
         );
       }
       ctx.faultAt(name);

@@ -45,8 +45,13 @@ export const verifyListing = async (options: {
   manifest: Manifest;
   excluded: ReadonlySet<string>;
   ctx: RunContext;
+  /** What the manifest describes, for messages: "the folder's scan" (offload), "the restored folder" (onload). */
+  subject?: string;
+  /** The fix verify.mismatch names; offload's by default. */
+  fix?: string;
 }): Promise<Result<VerifiedTotals>> => {
   const { manifest, excluded } = options;
+  const subject = options.subject ?? "the folder's scan";
   // Only the first SHOWN are named; the rest are counted, so a listing of the wrong tree stays cheap.
   const problems: string[] = [];
   let differences = 0;
@@ -62,7 +67,7 @@ export const verifyListing = async (options: {
       seen.add(entry.path);
       const expected = isExcluded(excluded, entry.path) ? undefined : manifest.get(entry.path);
       if (expected === undefined) {
-        problem(`${entry.path} is in the snapshot but not in the folder's scan`);
+        problem(`${entry.path} is in the snapshot but not in ${subject}`);
         return;
       }
       const difference = differs(expected, entry);
@@ -100,7 +105,9 @@ export const verifyListing = async (options: {
       message: `snapshot ${options.snapshot.slice(0, 8)} does not match the folder (${differences} difference${
         differences === 1 ? "" : "s"
       }): ${problems.slice(0, SHOWN).join("; ")}${differences > SHOWN ? "; …" : ""}`,
-      fix: "nothing was deleted; re-run the offload, and if it fails again run restic check on the store",
+      fix:
+        options.fix ??
+        "nothing was deleted; re-run the offload, and if it fails again run restic check on the store",
       paths: [options.dir],
     }),
   );

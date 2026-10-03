@@ -48,7 +48,7 @@ import {
   type StreamEvent,
   shellWord,
 } from "@plainport/contract";
-import { type CatalogEvent, CatalogEventSchema } from "../catalog/events.ts";
+import { CatalogEventSchema } from "../catalog/events.ts";
 import type { CatalogProject } from "../catalog/fold.ts";
 import { catalogReader } from "../catalog/head.ts";
 import { appendEvent, STORE_EVENTS_PREFIX, storeEventLog } from "../catalog/log.ts";
@@ -58,6 +58,7 @@ import type { Device } from "../device.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
+  journalFile,
   type OffloadJournal,
   type OnloadJournal,
   readJournals,
@@ -240,6 +241,7 @@ const unreadable = (path: string, error: unknown, what: string): Failure =>
 
 /**
  * Whether the volume holding `folder` ignores case: a probe file made there is looked up with its name upper-cased.
+ * The folder is plainport's own staging holder, so a probe a crash leaves behind is in a folder recover owns.
  * (roots/canonical.ts probes a path's own name in its parent, which at a mount point is the volume around it.)
  */
 const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Result<boolean>> => {
@@ -329,6 +331,11 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     report,
   });
 
+  const notInStore = () => ({
+    message: `store ${store.name} holds no snapshot of ${ref.address}`,
+    fix: "check the address (plainport ls lists the projects), or name the store that holds it with --store",
+  });
+
   const registered = await readRegistry(io, paths);
   if (!registered.ok) return registered;
   // The project's ULID: the stub's or this device's registry's, else the catalog's for its root and path.
@@ -345,12 +352,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       ([, p]) => p.root === rootId && p.path === ref.path,
     )?.[0];
     if (projectId === undefined) {
-      return fail(
-        finding("project.not-found", {
-          message: `store ${store.name} holds no snapshot of ${ref.address}`,
-          fix: "check the address (plainport ls lists the projects), or name the store that holds it with --store",
-        }),
-      );
+      return fail(finding("project.not-found", notInStore()));
     }
   }
   const id = projectId;
@@ -367,12 +369,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     if (!state.ok) return state;
     const project = state.value.projects[id];
     if (project === undefined) {
-      return fail(
-        finding("project.not-found", {
-          message: `store ${store.name} holds no snapshot of ${ref.address}`,
-          fix: "check the address (plainport ls lists the projects), or name the store that holds it with --store",
-        }),
-      );
+      return fail(finding("project.not-found", notInStore()));
     }
     const head = headOf(project);
     if (!head.ok) return head;
@@ -405,7 +402,20 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       if (!dropped.ok) return dropped;
       resumed = undefined;
     }
-    if (resumed !== undefined) op = resumed.op;
+    // A renamed-back folder taken over is checked again (D51): it may have changed since that onload stopped.
+    if (resumed?.reuse !== undefined) {
+      const still = await reusable(snapshot, landing);
+      if (still?.op !== resumed.reuse.op) {
+        const dropped = await dropStaging(resumed);
+        if (!dropped.ok) return dropped;
+        resumed = undefined;
+      }
+    }
+    if (resumed !== undefined) {
+      op = resumed.op;
+      // The head may have moved while it was stopped: the onload is written over the head as it is now (D43).
+      resumed.over = over;
+    }
     phase("resolve", "end");
 
     phase("preflight", "start");
@@ -428,6 +438,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
     const placed = await landingChecks(rootFolder);
     if (!placed.ok) return placed;
+    const holder = join(rootFolder, STAGING_DIR);
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),
@@ -436,14 +447,21 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
 
     // The same head's folder, still in its offload's trash: renamed back rather than restored.
     const reuse =
-      resumed === undefined && snapshot === over && req.to === undefined
-        ? await reusable(snapshot, landing)
-        : undefined;
+      resumed !== undefined
+        ? resumed.reuse
+        : snapshot === over && req.to === undefined
+          ? await reusable(snapshot, landing)
+          : undefined;
     let files = 0;
     let bytes = 0;
     let rootMode: number | undefined;
     if (reuse === undefined) {
-      const listed = await listSnapshot(stored, ctx, made.event, placed.value);
+      try {
+        await io.fs.mkdirp(holder);
+      } catch (error) {
+        return writeFailed(error, `making ${holder}`, false, holder);
+      }
+      const listed = await listSnapshot(stored, ctx, made.event, placed.value, holder, resumed !== undefined);
       if (!listed.ok) return signal?.aborted ? cancelled() : listed;
       files = listed.value.files;
       bytes = listed.value.bytes;
@@ -481,14 +499,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       stored,
       over,
       ...(reuse === undefined ? { staging } : { reuse }),
-      ...(req.to === undefined ? {} : { override: true as const }),
+      // Not the root's place for it (--to, or an earlier --to the registry keeps): recorded as the override.
+      ...(landing !== ref.place ? { override: true as const } : {}),
       ...(stubPath === undefined ? {} : { stub: stubPath }),
       ...(rootMode === undefined ? {} : { rootMode }),
       history: [],
     };
     if (resumed !== undefined) Object.assign(journal, { pid: io.proc.pid, host: io.proc.hostname() });
     const saga = openSaga<OnloadJournal, OnloadStep>(
-      { io, paths, faultAt: (point) => host.faultAt(point), clock, log: deps.log },
+      { kind: "onload", io, paths, faultAt: (point) => host.faultAt(point), clock, log: deps.log },
       journal,
     );
 
@@ -716,10 +735,14 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     ctx: RunContext,
     event: string,
     nearest: string,
+    holder: string,
+    resuming: boolean,
   ): Promise<Result<{ files: number; bytes: number; rootMode?: number }>> {
     let files = 0;
     let bytes = 0;
-    const byFold = new Map<string, string[]>();
+    // The first name of each folded key, and every group that has more than one.
+    const firstOf = new Map<string, string>();
+    const groups = new Map<string, string[]>();
     const listed = await store.engine.entries(
       stored,
       (entry) => {
@@ -728,16 +751,16 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           bytes += entry.size ?? 0;
         }
         const key = foldCaseAndForm(entry.path);
-        const same = byFold.get(key);
-        if (same === undefined) byFold.set(key, [entry.path]);
-        else same.push(entry.path);
+        const first = firstOf.get(key);
+        if (first === undefined) firstOf.set(key, entry.path);
+        else groups.set(key, [...(groups.get(key) ?? [first]), entry.path]);
       },
       ctx,
     );
     if (!listed.ok) return listed;
-    const collisions = [...byFold.values()].filter((names) => names.length > 1);
+    const collisions = [...groups.values()];
     if (collisions.length > 0) {
-      const insensitive = await ignoresCase(io, nearest, op);
+      const insensitive = await ignoresCase(io, holder, op);
       if (!insensitive.ok) return insensitive;
       if (insensitive.value) {
         const names = collisions.flat().sort();
@@ -759,14 +782,16 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     const made = await producedBy(event);
     const stripped = made?.stats.strippedBytes ?? 0;
     const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
-    const needed = Math.ceil((bytes + stripped) * 1.1);
+    // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore
+    // already holds part of it in staging, and verification still catches a short one, so it is not counted again.
+    const needed = Math.ceil((bytes + stripped + files * 2048) * 1.1);
     let free: number;
     try {
       free = await io.fs.freeBytes(nearest);
     } catch (error) {
       return unreadable(nearest, error, "its free space is unknown; nothing was restored");
     }
-    if (free < needed) {
+    if (!resuming && free < needed) {
       return fail(
         finding("fs.no-space", {
           message: `${ref.address} needs about ${needed} bytes on the volume of ${nearest} (the snapshot's ${bytes}, ${stripped} of dependencies and a 10% margin), and ${free} are free; nothing was restored`,
@@ -818,20 +843,10 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       manifest: scanned.value.manifest,
       excluded: new Set(),
       ctx,
+      subject: "the restored folder",
+      fix: `the restored copy was removed and the stub stays; re-run plainport onload ${shellWord(ref.address)}, and if it fails again run restic check on the store`,
     });
-    if (!checked.ok) {
-      if (signal?.aborted) return cancelled();
-      return withFix(
-        {
-          ...checked,
-          finding: {
-            ...checked.finding,
-            message: `${checked.finding.message.replace(/the folder's scan/g, "the restored folder")}; the restored copy was removed and the stub stays`,
-          },
-        },
-        `re-run plainport onload ${shellWord(ref.address)}; if it fails again, run restic check on the store`,
-      );
-    }
+    if (!checked.ok) return signal?.aborted ? cancelled() : checked;
     const verified = await saga.step("onload.verified");
     if (!verified.ok) return verified;
     phase("verify", "end");
@@ -862,7 +877,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         error,
         `removing the interrupted onload ${journal.op}`,
         false,
-        journal.staging ?? "",
+        journal.staging ?? journalFile(paths, journal.op),
       );
     }
     deps.log(
@@ -893,11 +908,33 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           }),
         ),
       );
-    const swapping = await saga.step("onload.swap.start");
+    // The head, read again right before the commit (D43, D44): the onload is never written over a stale one.
+    const fresh = await catalog();
+    if (!fresh.ok) return abandon(saga, fresh);
+    const project = fresh.value.projects[id];
+    const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
+    if (!head.ok) return abandon(saga, head);
+    let over = journal.over;
+    if (head.value !== journal.over) {
+      if (req.snapshot === undefined)
+        return abandon(
+          saga,
+          fail(
+            finding("catalog.head-moved", {
+              message: `${ref.address} was offloaded from another copy while snapshot ${journal.snapshot} was restored: the head is now ${head.value}; nothing was swapped in and the stub stays`,
+              fix: `plainport onload ${shellWord(ref.address)} restores the new head`,
+            }),
+          ),
+        );
+      // An older snapshot asked for by name stays the one restored; it is written over the head as it is now.
+      over = head.value;
+    }
+    const swapping = await saga.step("onload.swap.start", { over });
     if (!swapping.ok) return abandon(saga, swapping);
     try {
       await io.fs.mkdirp(dirname(target));
-      // rename(2) replaces an empty folder; something that appeared since preflight is never merged into or replaced.
+      // Something that appeared since preflight is not merged into. The window to the rename stays open: rename(2)
+      // would still replace an empty folder made in it, which loses nothing.
       if ((await kindAt(io, target)) !== undefined) {
         return abandon(
           saga,
@@ -925,108 +962,21 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
             }),
           ),
         );
-      return abandon(saga, writeFailed(error, `moving ${source} to ${target}`, false, target));
+      return abandon(saga, writeFailed(error, `moving ${source} to ${target}`, false, target, "onload"));
     }
     saga.commit();
     saga.after("onload.swap.renamed");
-    // The folder's own mode, which the snapshot does not hold (D55); set after the rename, so a folder without
-    // owner write can still be moved into place. A renamed-back folder kept its own.
-    if (journal.rootMode !== undefined) {
-      try {
-        await io.fs.chmod(target, journal.rootMode);
-      } catch (error) {
-        assertSystemError(error);
-        deps.log(
-          "warn",
-          `${target} could not be given its mode ${journal.rootMode.toString(8)}; it keeps a new folder's`,
-        );
-      }
-    }
-    if (journal.reuse !== undefined) {
-      // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
-      try {
-        await io.fs.removeTree(dirname(journal.reuse.folder));
-        await removeJournal(io, paths, journal.reuse.op);
-      } catch (error) {
-        assertSystemError(error);
-        deps.log(
-          "warn",
-          `the offload ${journal.reuse.op}'s empty trash or journal could not be removed; plainport recover removes them`,
-        );
-      }
-      saga.after("onload.reuse.cleared");
-    }
-    const swapped = await saga.step("onload.swapped");
-    if (!swapped.ok) return swapped;
-
-    // The stub goes only while it is this project's; anything else at the path is never touched (D47).
-    if (journal.stub !== undefined) {
-      const at = await readStub(io, journal.stub);
-      if (at.ok && at.value.project === id) {
-        try {
-          await io.fs.unlink(journal.stub);
-        } catch (error) {
-          return writeFailed(error, `removing the stub ${journal.stub}`, true, journal.stub);
-        }
-        saga.after("onload.stub.removed");
-      }
-    }
-
-    const event: CatalogEvent = {
-      v: 1,
-      id: ulid(clock().getTime()),
-      type: "onloaded",
+    const finished = await finishOnload({
+      host,
+      paths,
+      saga,
+      store: store.blob,
       device: device.id,
-      at: now(),
-      op: journal.op,
-      project: id,
-      root: journal.project.rootId,
-      path: journal.project.path,
-      base: journal.snapshot,
-      over: journal.over,
-    };
-    const starting = await saga.step("onload.commit.start", { event: event.id });
-    if (!starting.ok) return starting;
-    const appended = await appendEvent(storeEventLog(store.blob), event);
-    if (!appended.ok)
-      return withFix(
-        appended,
-        `the files are in ${target}; run plainport recover once the store accepts writes, to record the onload`,
-      );
-    saga.after("onload.commit.appended");
-    const committed = await saga.step("onload.committed");
-    if (!committed.ok) return committed;
-    phase("swap", "end");
-
-    // This device's copy: its place, its base (the head it was written over, D43), not hydrated yet.
-    const at = now();
-    const recorded = await updateRegistry(io, paths, (registry: ProjectRegistry) => {
-      const entry = registry.projects[id];
-      const {
-        override: _o,
-        unhydrated: _u,
-        ...rest
-      } = entry ?? { root: ref.root, path: ref.path, registeredAt: at };
-      return ok({
-        ...registry,
-        roots: { ...registry.roots, [ref.root]: registry.roots?.[ref.root] ?? journal.project.rootId },
-        projects: {
-          ...registry.projects,
-          [id]: {
-            ...rest,
-            root: ref.root,
-            path: ref.path,
-            ...(journal.override === true ? { override: target } : {}),
-            base: journal.over,
-            onloadedAt: at,
-            ...(journal.reuse === undefined ? { unhydrated: true as const } : {}),
-          },
-        },
-      });
+      clock,
+      log: deps.log,
     });
-    if (!recorded.ok) return recorded;
-    saga.after("onload.registry-updated");
-    await saga.close();
+    if (!finished.ok) return finished;
+    phase("swap", "end");
     return ok({
       op: journal.op,
       exitCode: 0,
@@ -1094,4 +1044,188 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
     return ok(result);
   }
+};
+
+/** The journal steps from the swap on, in order: a journal at one of them has done everything before it. */
+const AFTER_SWAP = [
+  "onload.swap.start",
+  "onload.swapped",
+  "onload.commit.start",
+  "onload.committed",
+] as const;
+
+/**
+ * Whether an onload's swap happened: its landing folder stands and the folder it came from (staging, or the trash
+ * folder renamed back) is gone. At onload.swap.start, recover rolls back when it did not (a lost rename) and finishes
+ * with finishOnload when it did.
+ */
+export const onloadSwapped = async (io: LocalIo, journal: OnloadJournal): Promise<boolean> => {
+  const source = journal.reuse?.folder ?? journal.staging;
+  if (source === undefined) return false;
+  return (await kindAt(io, journal.project.dir)) === "dir" && (await kindAt(io, source)) === undefined;
+};
+
+export interface FinishContext {
+  host: HostPorts;
+  paths: PlainportPaths;
+  /** The onload's saga, past its swap: its journal says what is left to do. */
+  saga: Saga<OnloadJournal, OnloadStep>;
+  /** The store's catalog events. */
+  store: BlobStore;
+  /** This device's id, for the onloaded event. */
+  device: string;
+  clock(): Date;
+  log(level: "warn", message: string): void;
+}
+
+/**
+ * Finishes an onload whose swap has happened (onloadSwapped), from wherever its journal stands, the counterpart of
+ * offload's releaseOffload: the folder's mode (D55), the renamed-back trash cleared, the stub removed while it is this
+ * project's (D47), the onloaded event appended unless the store holds it, registry.json, then the journal removed.
+ * Each stage checks whether it is done, and a journal step already reached is not written again, so the live saga
+ * and `plainport recover` (Task 14) call the same function.
+ */
+export const finishOnload = async (
+  ctx: FinishContext,
+): Promise<Result<{ dir: string; snapshot: string; over: string; restored: "restore" | "reuse" }>> => {
+  const { host: io, paths, saga } = ctx;
+  const journal = saga.journal;
+  const target = journal.project.dir;
+  const now = () => ctx.clock().toISOString();
+  saga.commit();
+  const reached = (step: (typeof AFTER_SWAP)[number]): boolean =>
+    AFTER_SWAP.indexOf(journal.step as (typeof AFTER_SWAP)[number]) >= AFTER_SWAP.indexOf(step);
+
+  if (!reached("onload.swapped")) {
+    // The folder's own mode, which the snapshot does not hold (D55), set after the rename, so a folder without owner
+    // write could still be moved into place. A renamed-back folder kept its own.
+    if (journal.rootMode !== undefined) {
+      try {
+        await io.fs.chmod(target, journal.rootMode);
+      } catch (error) {
+        assertSystemError(error);
+        ctx.log(
+          "warn",
+          `${target} could not be given its mode ${journal.rootMode.toString(8)}; it keeps a new folder's`,
+        );
+      }
+    }
+    if (journal.reuse !== undefined) {
+      // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
+      try {
+        await io.fs.removeTree(dirname(journal.reuse.folder));
+        await removeJournal(io, paths, journal.reuse.op);
+      } catch (error) {
+        assertSystemError(error);
+        ctx.log(
+          "warn",
+          `the offload ${journal.reuse.op}'s empty trash or journal could not be removed; plainport recover removes them`,
+        );
+      }
+      saga.after("onload.reuse.cleared");
+    }
+    const swapped = await saga.step("onload.swapped");
+    if (!swapped.ok) return swapped;
+  }
+
+  // The stub goes only while it is this project's; anything else at the path is never touched (D47).
+  if (journal.stub !== undefined && !reached("onload.commit.start")) {
+    let there: string | undefined;
+    try {
+      there = await kindAt(io, journal.stub);
+    } catch (error) {
+      return writeFailed(error, `looking at the stub ${journal.stub}`, true, journal.stub, "onload");
+    }
+    if (there !== undefined) {
+      const at = await readStub(io, journal.stub);
+      if (at.ok && at.value.project === journal.project.id) {
+        try {
+          await io.fs.unlink(journal.stub);
+        } catch (error) {
+          return writeFailed(error, `removing the stub ${journal.stub}`, true, journal.stub, "onload");
+        }
+        saga.after("onload.stub.removed");
+      } else
+        ctx.log(
+          "warn",
+          `${journal.stub} is not ${journal.project.address}'s stub (${at.ok ? "another project's" : "it does not read as one"}); it was left as it is, and an offload of the project refuses until it is moved`,
+        );
+    }
+  }
+
+  // The onloaded event: its id journaled before it is appended, appended only if the store lacks it.
+  const eventId = journal.event ?? ulid(ctx.clock().getTime());
+  if (!reached("onload.commit.start")) {
+    const starting = await saga.step("onload.commit.start", { event: eventId });
+    if (!starting.ok) return starting;
+  }
+  const held = await ctx.store.stat(`${STORE_EVENTS_PREFIX}${eventId}.json`);
+  if (!held.ok)
+    return withFix(
+      held,
+      `the files are in ${target}; run plainport recover once the store answers, to record the onload`,
+    );
+  if (held.value === null) {
+    const appended = await appendEvent(storeEventLog(ctx.store), {
+      v: 1,
+      id: eventId,
+      type: "onloaded",
+      device: ctx.device,
+      at: now(),
+      op: journal.op,
+      project: journal.project.id,
+      root: journal.project.rootId,
+      path: journal.project.path,
+      base: journal.snapshot,
+      over: journal.over,
+    });
+    if (!appended.ok)
+      return withFix(
+        appended,
+        `the files are in ${target}; run plainport recover once the store accepts writes, to record the onload`,
+      );
+    saga.after("onload.commit.appended");
+  }
+  if (!reached("onload.committed")) {
+    const committed = await saga.step("onload.committed");
+    if (!committed.ok) return committed;
+  }
+
+  // This device's copy: its place (the override when it is not the root's), its base (the head it was written over,
+  // D43), its onload time, not hydrated yet unless it came back with its dependencies.
+  const at = now();
+  const { project } = journal;
+  const recorded = await updateRegistry(io, paths, (registry: ProjectRegistry) => {
+    const entry = registry.projects[project.id];
+    const {
+      override: _o,
+      unhydrated: _u,
+      ...rest
+    } = entry ?? { root: project.root, path: project.path, registeredAt: at };
+    return ok({
+      ...registry,
+      roots: { ...registry.roots, [project.root]: registry.roots?.[project.root] ?? project.rootId },
+      projects: {
+        ...registry.projects,
+        [project.id]: {
+          ...rest,
+          root: project.root,
+          path: project.path,
+          ...(journal.override === true ? { override: target } : {}),
+          base: journal.over,
+          onloadedAt: at,
+          ...(journal.reuse === undefined ? { unhydrated: true as const } : {}),
+        },
+      },
+    });
+  });
+  if (!recorded.ok) return recorded;
+  saga.after("onload.registry-updated");
+  await saga.close();
+  return ok({
+    dir: target,
+    snapshot: journal.snapshot,
+    over: journal.over,
+    restored: journal.reuse === undefined ? "restore" : "reuse",
+  });
 };

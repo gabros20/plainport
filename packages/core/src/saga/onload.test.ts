@@ -43,13 +43,17 @@ import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-st
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { ulid } from "../ulid.ts";
 import { runDehydrate, runHydrate } from "./hydrate.ts";
+import { openSaga } from "./journaled.ts";
 import { type OffloadDeps, runOffload } from "./offload.ts";
 import {
+  finishOnload,
   ONLOAD_AFTER_EFFECT,
   ONLOAD_RECOVERY_NEEDS,
   ONLOAD_STEPS,
   type OnloadDeps,
   type OnloadRequest,
+  type OnloadStep,
+  onloadSwapped,
   runOnload,
 } from "./onload.ts";
 
@@ -470,6 +474,88 @@ describe("onload: the round trip", () => {
     await expectInvariants();
   });
 
+  test("a head that moves during the restore is never written as a stale over: onload refuses before the swap (I2)", async () => {
+    const off = await offload();
+    const id = await projectId();
+    const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
+    engine.hooks.duringRestore = async () => {
+      // Another device offloads a newer copy while this restore runs.
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: ulid(),
+          type: "offloaded",
+          device: ulid(),
+          at: new Date().toISOString(),
+          op: ulid(),
+          project: id,
+          root,
+          path: "web",
+          base: off.op,
+          snapshot: ulid(),
+          stored: { ssd: "d".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    const result = await onload();
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([8, "catalog.head-moved"]);
+    expect(!result.ok && result.finding.fix).toContain("plainport onload work:web");
+    await expectShelvedUntouched();
+  });
+
+  test("a resumed --snapshot onload writes the current head as over, not the one it began with (I2, D43)", async () => {
+    const first = await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    const crash = testHost({ faults: { at: "onload.restored" } });
+    await expect(onload({ snapshot: first.op }, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    // The head moves while the onload is stopped.
+    const id = await projectId();
+    const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
+    const third = ulid();
+    value(
+      await appendEvent(storeEventLog(store), {
+        v: 1,
+        id: ulid(),
+        type: "offloaded",
+        device: ulid(),
+        at: new Date().toISOString(),
+        op: third,
+        project: id,
+        root,
+        path: "web",
+        base: second.op,
+        snapshot: third,
+        stored: { ssd: "e".repeat(64) },
+        stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+      }),
+    );
+    const result = value(await onload({ snapshot: first.op }));
+    expect(result).toMatchObject({ snapshot: first.op, over: third });
+    expect((await storeEvents()).filter((e) => e.type === "onloaded").at(-1)).toMatchObject({
+      base: first.op,
+      over: third,
+    });
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.base).toBe(third);
+  });
+
+  test("a crash part-way through the restore is taken up again: what is missing or cut short is written (M16)", async () => {
+    await offload();
+    engine.hooks.duringRestore = (target) => {
+      rmSync(join(target, "src/main.ts"));
+      writeFileSync(join(target, "run.sh"), "#!");
+      throw new InjectedFault("restic killed mid-restore");
+    };
+    await expect(onload()).rejects.toBeInstanceOf(InjectedFault);
+    engine.hooks.duringRestore = undefined;
+    const result = value(await onload());
+    expect(engine.restores.at(-1)).toMatchObject({ overwrite: "if-changed", written: 2 });
+    expect(readFileSync(join(result.dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    await expectInvariants();
+  });
+
   test("onload --snapshot restores an older snapshot and still opens the lease over the head (D43)", async () => {
     const first = await offload();
     value(await onload());
@@ -504,6 +590,62 @@ const canonicalReal = async (path: string): Promise<string> => {
   if (!resolved.ok) throw new Error(resolved.finding.message);
   return resolved.value.real;
 };
+
+describe("onload: finishing from the journal alone (finishOnload, for recover)", () => {
+  // Every point after the swap's rename where a crash can leave the journal: the steps, and the seams after an effect.
+  const POINTS = [
+    "onload.swap.renamed",
+    "onload.swapped",
+    "onload.stub.removed",
+    "onload.commit.start",
+    "onload.commit.appended",
+    "onload.committed",
+    "onload.registry-updated",
+  ];
+  for (const point of POINTS) {
+    test(`a crash at ${point} is finished by finishOnload, each stage done once`, async () => {
+      const off = await offload();
+      await expect(onload({}, {}, testHost({ faults: { at: point } }))).rejects.toBeInstanceOf(InjectedFault);
+      const [journal] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+      if (journal === undefined) throw new Error("no journal");
+      expect(await onloadSwapped(testHost(), journal)).toBe(true);
+      const saga = openSaga<OnloadJournal, OnloadStep>(
+        { io: testHost(), paths: box.paths, faultAt: () => {}, clock: () => new Date(), log: () => {} },
+        journal,
+      );
+      const done = value(
+        await finishOnload({
+          host: testHost(),
+          paths: box.paths,
+          saga,
+          store: store,
+          device: device.id,
+          clock: () => new Date(),
+          log: () => {},
+        }),
+      );
+      expect(done).toMatchObject({ dir, snapshot: off.op, over: off.op });
+      expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+      expect(existsSync(`${dir}.plainport`)).toBe(false);
+      const onloaded = (await storeEvents()).filter((e) => e.type === "onloaded" && e.op === journal.op);
+      expect(onloaded).toHaveLength(1);
+      expect(onloaded[0]).toMatchObject({ base: off.op, over: off.op });
+      const entry = value(await readRegistry(testHost(), box.paths)).projects[await projectId()];
+      expect(entry).toMatchObject({ base: off.op, onloadedAt: expect.any(String), unhydrated: true });
+      expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+      await expectInvariants();
+    });
+  }
+
+  test("before the rename, onloadSwapped says so: recover rolls back instead", async () => {
+    await offload();
+    await expect(onload({}, {}, testHost({ faults: { at: "onload.swap.start" } }))).rejects.toBeInstanceOf(
+      InjectedFault,
+    );
+    const [journal] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+    expect(await onloadSwapped(testHost(), journal as OnloadJournal)).toBe(false);
+  });
+});
 
 describe("onload: the same head's folder still in the trash", () => {
   test("with keepLocalFor, onloading the same head renames the folder back instead of restoring it", async () => {
@@ -607,6 +749,42 @@ describe("onload: preflight refusals change nothing", () => {
     await expectInvariants();
   });
 
+  test("--to, offload, plain onload: the project lands where the registry says, and stays one copy (I1, D56)", async () => {
+    await offload();
+    mkdirSync(join(box.home, "elsewhere"));
+    const elsewhere = join(box.home, "elsewhere/web");
+    value(await onload({ to: elsewhere }));
+    const id = await projectId();
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
+    // Offloaded from there: the stub stands beside it, the registry keeps the override.
+    const off = value(await runOffload(offloadDeps(), { project: await ref() }));
+    for (let i = 0; i < 400 && existsSync(join(box.home, "elsewhere/.plainport-trash", off.op)); i++)
+      await Bun.sleep(25);
+    expect(existsSync(`${elsewhere}.plainport`)).toBe(true);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
+    // A plain onload lands there again, and the registry still says so.
+    const back = value(await onload());
+    expect(back.dir).toBe(elsewhere);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
+    expect(existsSync(dir)).toBe(false);
+    // A second working copy is impossible: at its place it is already onloaded, elsewhere it is already local.
+    const again = await onload();
+    expect(!again.ok && [again.exitCode, again.finding.code]).toEqual([6, "path.occupied"]);
+    const atPlace = await onload({ to: dir });
+    expect(!atPlace.ok && [atPlace.exitCode, atPlace.finding.code]).toEqual([6, "project.already-local"]);
+    expect(existsSync(dir)).toBe(false);
+    await expectInvariants("web", elsewhere);
+  });
+
+  test("--to the root's own place records no override (nit)", async () => {
+    await offload();
+    value(await onload({ to: dir }));
+    expect(
+      value(await readRegistry(testHost(), box.paths)).projects[await projectId()]?.override,
+    ).toBeUndefined();
+    await expectInvariants();
+  });
+
   test("a folder kept after offload.diverged-after-commit is this project's own copy: path.occupied says so", async () => {
     await offload();
     value(await onload());
@@ -635,6 +813,7 @@ describe("onload: preflight refusals change nothing", () => {
     expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "path.occupied"]);
     expect(!result.ok && result.finding.message).toContain("this project's own working copy");
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
   });
 
   test("a project already onloaded here is named as such: path.occupied, never merged", async () => {
@@ -646,6 +825,7 @@ describe("onload: preflight refusals change nothing", () => {
       `work:web is already onloaded here, at ${dir}; onload never merges into it`,
     );
     expect(!again.ok && again.finding.fix).toContain("plainport offload work:web --yes");
+    await expectInvariants();
   });
 
   test("free space short of the snapshot, the dependencies and 10% refuses with fs.no-space", async () => {
@@ -691,6 +871,15 @@ describe("onload: preflight refusals change nothing", () => {
     expect(!locked.ok && [locked.exitCode, locked.finding.code]).toEqual([11, "project.locked"]);
     rmSync(join(box.paths.locksDir, `${id}.lock`));
     await expectShelvedUntouched();
+
+    // An offload of the project stopped after its commit holds it back: journal.pending, exit 6.
+    const crash = testHost({ faults: { at: "offload.release.moved" } });
+    value(await onload());
+    await expect(runOffload(offloadDeps(crash), { project: await ref() })).rejects.toBeInstanceOf(
+      InjectedFault,
+    );
+    const pending = await onload();
+    expect(!pending.ok && [pending.exitCode, pending.finding.code]).toEqual([6, "journal.pending"]);
   });
 
   test("the lock of a registered project holding this one is taken too (D53): held, it exits 11", async () => {
@@ -755,7 +944,7 @@ describe("onload: preflight refusals change nothing", () => {
     await expectShelvedUntouched();
   });
 
-  test("an incomplete head refuses with catalog.incomplete; a conflicted one with catalog.head-moved (D44)", async () => {
+  test("an incomplete head refuses with catalog.incomplete (D44)", async () => {
     await offload();
     const id = await projectId();
     const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
@@ -842,6 +1031,7 @@ describe("onload: preflight refusals change nothing", () => {
     const warned = events.filter((e) => e.type === "finding" && e.finding.code === "lease.held");
     expect(warned).toHaveLength(1);
     expect(warned[0]?.type === "finding" && warned[0].finding.severity).toBe("warn");
+    await expectInvariants();
   });
 });
 

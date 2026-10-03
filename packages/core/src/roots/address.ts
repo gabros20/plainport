@@ -33,6 +33,8 @@ export interface ProjectRef {
   id?: string;
   /** Its folder on this device, when the root is bound here (or the registry holds an override). */
   dir?: string;
+  /** The root's place for it on this device (the binding plus the path), whatever an override says. */
+  place?: string;
   /** The stub the project was named by. */
   stub?: string;
   match: ProjectMatch;
@@ -73,15 +75,15 @@ interface Known {
 const refOf = (known: Known, root: string, path: string, match: ProjectMatch): ProjectRef => {
   const entry = Object.entries(known.registry.projects).find(([, e]) => e.root === root && e.path === path);
   const rootView = known.roots.find((r) => r.key === root);
-  const dir =
-    entry?.[1].override ??
-    (rootView?.path === undefined ? undefined : join(rootView.path, ...path.split("/")));
+  const place = rootView?.path === undefined ? undefined : join(rootView.path, ...path.split("/"));
+  const dir = entry?.[1].override ?? place;
   return {
     address: `${root}:${path}`,
     root,
     path,
     ...(entry !== undefined && { id: entry[0] }),
     ...(dir !== undefined && { dir }),
+    ...(place !== undefined && { place }),
     match,
   };
 };
