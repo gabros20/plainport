@@ -75,6 +75,18 @@ describe("host: the macOS host port implements LocalIo", () => {
     await expect(fs.lstat(join(dir, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("realpath resolves a path holding a backslash, which Bun 1.3.14's realpath reports as missing", async () => {
+    const { fs } = createMacosHost();
+    const odd = join(dir, "p\\q", "Inner");
+    await fs.mkdirp(odd);
+    symlinkSync(odd, join(dir, "link"));
+    expect(await fs.realpath(odd)).toBe(odd);
+    // Through a symlink, and spelled as the volume stores it when given in another case.
+    expect(await fs.realpath(join(dir, "link"))).toBe(odd);
+    expect(await fs.realpath(join(dir, "p\\q", "inner"))).toBe(odd);
+    await expect(fs.realpath(join(dir, "p\\q", "missing"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("every host shares the process's one ProcessInfo, so locks see one process", async () => {
     const a = createMacosHost();
     const b = createMacosHost();

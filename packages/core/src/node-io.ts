@@ -18,7 +18,43 @@ import {
   unlink,
 } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { type DirEntry, errorCode, type FileKind, type LinkStat, type LocalIo } from "./io.ts";
+
+/**
+ * realpath(3) through Bun 1.3.14 reports ENOENT for any path holding a backslash, although lstat and readdir see
+ * it (Node resolves it). When a path reported missing is there, it is resolved here one component at a time:
+ * realpath(3) wherever it works, and for a component it refuses, readlink for a symlink, or the parent's listing
+ * for the spelling the volume stores. A missing path still rejects with ENOENT, a link loop with ELOOP.
+ */
+const realpathByParts = async (path: string, depth = 0): Promise<string> => {
+  if (depth > 40)
+    throw Object.assign(new Error(`ELOOP: too many symbolic links, realpath '${path}'`), { code: "ELOOP" });
+  let current: string = sep;
+  for (const name of resolve(path)
+    .split(sep)
+    .filter((part) => part !== "")) {
+    const next = join(current, name);
+    try {
+      current = await realpath(next);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      // Missing, or refused: lstat tells which; a missing component rejects as realpath did.
+      const info = await lstat(next);
+      if (info.isSymbolicLink()) {
+        current = await realpathByParts(resolve(dirname(next), await readlink(next)), depth + 1);
+        continue;
+      }
+      const listed = await readdir(current);
+      const fold = (s: string) => s.normalize("NFC").toLowerCase();
+      current = join(
+        current,
+        listed.find((e) => e === name) ?? listed.find((e) => fold(e) === fold(name)) ?? name,
+      );
+    }
+  }
+  return current;
+};
 
 const linkKindOf = (info: {
   isFile(): boolean;
@@ -75,7 +111,14 @@ export const nodeLocalIo: LocalIo = {
       }
     },
     // fs/promises' realpath is libuv's, so realpath(3): on macOS it also spells names as the volume stores them.
-    realpath: (path) => realpath(path),
+    realpath: async (path) => {
+      try {
+        return await realpath(path);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+        return realpathByParts(path);
+      }
+    },
     stat: async (path) => {
       const info = await stat(path);
       const kind = kindOf(info);
