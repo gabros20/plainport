@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { testHost } from "../../../host-macos/src/testing.ts";
 import { type GitFixture, makeGitFixture } from "../testing/git-fixture.ts";
@@ -37,11 +37,12 @@ describe("scan: git facts", () => {
       dirty: 0,
       untracked: 0,
       changed: [],
-      unpushed: { commits: 0, branches: [] },
+      unpushed: { commits: 0, branches: [], detachedHead: 0 },
       localOnly: [],
       stashes: 0,
       inProgress: [],
-      remotes: true,
+      remotes: ["origin"],
+      remoteBranches: true,
     });
   });
 
@@ -60,8 +61,16 @@ describe("scan: git facts", () => {
     fx.write(join(dir, "newdir/y.txt"), "y\n");
     const got = await facts(dir);
     expect(got?.dirty).toBe(3);
-    expect(got?.untracked).toBe(2);
-    expect(got?.changed.sort()).toEqual(["README.md", "b.txt", "new.txt", "newdir/", "renamed.txt"]);
+    // Files, not folders: newdir/ holds two.
+    expect(got?.untracked).toBe(3);
+    expect(got?.changed.sort()).toEqual([
+      "README.md",
+      "b.txt",
+      "new.txt",
+      "newdir/x.txt",
+      "newdir/y.txt",
+      "renamed.txt",
+    ]);
   });
 
   test("unpushed commits, local-only branches and stashes are found", async () => {
@@ -87,6 +96,7 @@ describe("scan: git facts", () => {
         { name: "feature/pricing", commits: 3 },
         { name: "main", commits: 1 },
       ],
+      detachedHead: 0,
     });
     expect(got?.localOnly).toEqual(["feature/pricing", "merged-only"]);
     expect(got?.stashes).toBe(1);
@@ -96,8 +106,9 @@ describe("scan: git facts", () => {
   test("without a remote every commit is unpushed", async () => {
     const dir = fx.repo("web");
     const got = await facts(dir);
-    expect(got?.remotes).toBe(false);
-    expect(got?.unpushed).toEqual({ commits: 1, branches: [{ name: "main", commits: 1 }] });
+    expect(got?.remotes).toEqual([]);
+    expect(got?.remoteBranches).toBe(false);
+    expect(got?.unpushed).toEqual({ commits: 1, branches: [{ name: "main", commits: 1 }], detachedHead: 0 });
     expect(got?.localOnly).toEqual(["main"]);
   });
 
@@ -112,6 +123,40 @@ describe("scan: git facts", () => {
     expect(got?.detached).toBe(true);
     expect(got?.branch).toBeUndefined();
     expect(got?.unpushed.commits).toBe(1);
+    expect(got?.unpushed.detachedHead).toBe(1);
+  });
+
+  test("a branch whose upstream is another local branch is local-only, and its commits are counted", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.git(dir, "switch", "-q", "--track", "-c", "child", "main");
+    fx.write(join(dir, "c.txt"), "c\n");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "child");
+    fx.git(dir, "switch", "-q", "--track", "-c", "level", "main");
+    const got = await facts(dir);
+    expect(got?.localOnly).toEqual(["child", "level"]);
+    expect(got?.unpushed.branches).toEqual([{ name: "child", commits: 1 }]);
+  });
+
+  test("a configured remote with nothing fetched is still a remote", async () => {
+    const dir = fx.repo("web");
+    fx.git(dir, "remote", "add", "origin", join(fx.root, "nowhere.git"));
+    const got = await facts(dir);
+    expect(got?.remotes).toEqual(["origin"]);
+    expect(got?.remoteBranches).toBe(false);
+  });
+
+  test("a project folder plainport may not read is fs.unreadable, never an exception", async () => {
+    const dir = fx.repo("web");
+    chmodSync(dir, 0o000);
+    try {
+      const result = await gitFacts(host, dir, { env: fx.env });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.finding.code).toBe("fs.unreadable");
+    } finally {
+      chmodSync(dir, 0o755);
+    }
   });
 
   test("a merge with conflicts and a bisect are in progress", async () => {
@@ -134,7 +179,11 @@ describe("scan: git facts", () => {
     mkdirSync(dir);
     fx.git(dir, "init", "-q");
     const got = await facts(dir);
-    expect(got).toMatchObject({ branch: "main", detached: false, unpushed: { commits: 0, branches: [] } });
+    expect(got).toMatchObject({
+      branch: "main",
+      detached: false,
+      unpushed: { commits: 0, branches: [], detachedHead: 0 },
+    });
   });
 
   test("reading git state writes nothing: the fingerprint is the same before and after", async () => {

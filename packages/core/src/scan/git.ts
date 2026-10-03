@@ -9,8 +9,8 @@
 // (process.output-incomplete), and would hold the folder open. core.untrackedCache=false keeps git from updating
 // that cache. The user's own config is otherwise read as usual.
 
-import { join, resolve } from "node:path";
-import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
+import { dirname, join, resolve } from "node:path";
+import { type Failure, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { errorCode } from "../io.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { capturedOutput, splitRecords } from "../runner/runner.ts";
@@ -26,18 +26,23 @@ export interface GitFacts {
   detached: boolean;
   /** Tracked paths with staged or unstaged changes, conflicts included. */
   dirty: number;
-  /** Untracked paths; a new folder counts once. Ignored files are not counted. */
+  /** Untracked files, each file in a new folder counted. Ignored files are not counted. */
   untracked: number;
   /** Up to 20 of the dirty and untracked paths, for messages. */
   changed: string[];
-  /** Commits on no remote-tracking branch: in total (HEAD included), and per local branch that has some. */
-  unpushed: { commits: number; branches: { name: string; commits: number }[] };
-  /** Local branches with no upstream, or whose upstream is gone. */
+  /**
+   * Commits on no remote-tracking branch: in total (HEAD included), per local branch that has some, and on a
+   * detached HEAD but on no branch.
+   */
+  unpushed: { commits: number; branches: { name: string; commits: number }[]; detachedHead: number };
+  /** Local branches with no upstream on a remote: none set, gone, or another local branch. */
   localOnly: string[];
   stashes: number;
   inProgress: InProgress[];
-  /** Whether the repository has any remote-tracking branch at all. */
-  remotes: boolean;
+  /** The remotes configured, fetched or not. */
+  remotes: string[];
+  /** Whether any remote-tracking branch has been fetched. */
+  remoteBranches: boolean;
 }
 
 export interface Worktree {
@@ -129,23 +134,36 @@ const records = (bytes: Uint8Array, separator: number): string[] =>
     .filter((record) => record !== "");
 
 /** What .git is in the folder: a folder (a repository), a file (a pointer: worktree or submodule), or nothing. */
-export const dotGit = async (host: HostPorts, dir: string): Promise<"dir" | "file" | "none"> => {
+/** fs.unreadable for a path plainport needed to look at and could not. */
+export const unreadable = (path: string, error: unknown): Failure =>
+  fail(
+    finding("fs.unreadable", {
+      message: `plainport cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      paths: [path],
+      fix: `give your user access to it: chmod u+rx ${shellWord(dirname(path))}`,
+    }),
+  );
+
+/** Whether something is at the path (not followed); a path that cannot be looked at is fs.unreadable. */
+export const exists = async (host: HostPorts, path: string): Promise<Result<boolean>> => {
   try {
-    const stat = await host.fs.lstat(join(dir, ".git"));
-    return stat.kind === "dir" ? "dir" : "file";
+    await host.fs.lstat(path);
+    return ok(true);
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return "none";
-    throw error;
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return ok(false);
+    return unreadable(path, error);
   }
 };
 
-const exists = async (host: HostPorts, path: string): Promise<boolean> => {
+/** What .git is in the folder: a folder (a repository), a file (a pointer: worktree or submodule), or nothing. */
+export const dotGit = async (host: HostPorts, dir: string): Promise<Result<"dir" | "file" | "none">> => {
+  const path = join(dir, ".git");
   try {
-    await host.fs.lstat(path);
-    return true;
+    const stat = await host.fs.lstat(path);
+    return ok(stat.kind === "dir" ? "dir" : "file");
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return false;
-    throw error;
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return ok("none");
+    return unreadable(path, error);
   }
 };
 
@@ -159,12 +177,15 @@ const IN_PROGRESS: readonly [string, InProgress][] = [
 ];
 
 /** The operations in progress, from the marker files git leaves in its folder. */
-export const inProgress = async (host: HostPorts, gitDir: string): Promise<InProgress[]> => {
+export const inProgress = async (host: HostPorts, gitDir: string): Promise<Result<InProgress[]>> => {
   const found: InProgress[] = [];
   for (const [name, op] of IN_PROGRESS) {
-    if (!found.includes(op) && (await exists(host, join(gitDir, name)))) found.push(op);
+    if (found.includes(op)) continue;
+    const there = await exists(host, join(gitDir, name));
+    if (!there.ok) return there;
+    if (there.value) found.push(op);
   }
-  return found;
+  return ok(found);
 };
 
 /** The facts for a folder with a .git; undefined when it has none. */
@@ -173,7 +194,9 @@ export const gitFacts = async (
   dir: string,
   ctx: GitContext,
 ): Promise<Result<GitFacts | undefined>> => {
-  if ((await dotGit(host, dir)) === "none") return ok(undefined);
+  const kind = await dotGit(host, dir);
+  if (!kind.ok) return kind;
+  if (kind.value === "none") return ok(undefined);
 
   const gitDirOut = await git(host, dir, ctx, ["rev-parse", "--absolute-git-dir"]);
   if (!gitDirOut.ok) return gitDirOut;
@@ -185,7 +208,7 @@ export const gitFacts = async (
     "-z",
     "--branch",
     "--show-stash",
-    "--untracked-files=normal",
+    "--untracked-files=all",
   ]);
   if (!status.ok) return status;
   let branch: string | undefined;
@@ -231,21 +254,26 @@ export const gitFacts = async (
     "refs/remotes",
   ]);
   if (!refs.ok) return refs;
-  let remotes = false;
+  let remoteBranches = false;
   const localOnly: string[] = [];
   const toCount: string[] = [];
   for (const line of records(refs.value, NL)) {
     const [ref = "", upstream = "", track = ""] = line.split("\0");
     if (ref.startsWith("refs/remotes/")) {
-      remotes = true;
+      remoteBranches = true;
       continue;
     }
     const name = ref.slice("refs/heads/".length);
-    const gone = track.includes("gone");
-    if (upstream === "" || gone) localOnly.push(name);
-    // A branch level with or behind its upstream has every commit on the remote already.
-    if (upstream === "" || gone || track.includes("ahead")) toCount.push(name);
+    // An upstream that is another local branch puts nothing on a remote.
+    const remoteUpstream = upstream.startsWith("refs/remotes/") && !track.includes("gone");
+    if (!remoteUpstream) localOnly.push(name);
+    // A branch level with or behind a remote upstream has every commit on the remote already.
+    if (!remoteUpstream || track.includes("ahead")) toCount.push(name);
   }
+
+  const remoteList = await git(host, dir, ctx, ["remote"]);
+  if (!remoteList.ok) return remoteList;
+  const remotes = records(remoteList.value, NL);
 
   const count = async (revisions: readonly string[]): Promise<Result<number>> => {
     const out = await git(host, dir, ctx, ["rev-list", "--count", ...revisions, "--not", "--remotes", "--"]);
@@ -259,6 +287,22 @@ export const gitFacts = async (
   }
   const total = await count([...(headOid === undefined ? [] : ["HEAD"]), "--branches"]);
   if (!total.ok) return total;
+  let detachedHead = 0;
+  if (branch === undefined && headOid !== undefined) {
+    const out = await git(host, dir, ctx, [
+      "rev-list",
+      "--count",
+      "HEAD",
+      "--not",
+      "--branches",
+      "--remotes",
+      "--",
+    ]);
+    if (!out.ok) return out;
+    detachedHead = Number(text(out.value).trim());
+  }
+  const operations = await inProgress(host, gitDir);
+  if (!operations.ok) return operations;
 
   return ok({
     gitDir,
@@ -267,11 +311,12 @@ export const gitFacts = async (
     dirty,
     untracked,
     changed,
-    unpushed: { commits: total.value, branches },
+    unpushed: { commits: total.value, branches, detachedHead },
     localOnly,
     stashes,
-    inProgress: await inProgress(host, gitDir),
+    inProgress: operations.value,
     remotes,
+    remoteBranches,
   });
 };
 
