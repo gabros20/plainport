@@ -3,13 +3,16 @@
 // - if the command has already finished, nothing changes: plainport exits with the command's own code;
 // - if no child is running and no saga holds the command's cancellation, plainport exits 130 at once, as an
 //   unhandled Ctrl-C would (any run about to start is cancelled first, so none starts);
-// - a saga that holds it is told through its AbortSignal and stops at its next safe point;
+// - a saga that holds it is told through its AbortSignal and stops at its next safe point; plainport waits for its
+//   report however long that takes, so the exit code is the saga's own (130 only when the saga says it was
+//   cancelled; after its commit a saga may report something else) and its journal is never cut off mid-step (D52);
 // - otherwise it stops every child (the host's stopAll: TERM, then KILL after the grace period, whole groups) and
 //   waits up to settleMs for the command to report. A command that reports in time exits normally with its own
 //   code, so the exit code always matches its envelope (130 when its run was cancelled) and the envelope is flushed;
 //   one that does not exits 130.
-// Signals that arrive while it is stopping are ignored, so a second Ctrl-C cannot cut the KILL short and leave a
-// child behind; the wait is bounded by the runs' grace periods.
+// Signals that arrive while the children are being stopped are ignored, so a second Ctrl-C cannot cut the KILL
+// short and leave a child behind. Once they are stopped, a second signal while a saga winds down exits 130 at once:
+// the person asked twice, and recover finishes whatever the saga left journaled.
 
 /**
  * The running command's cancellation: the first signal aborts it. A command that holds it (a saga) stops at its own
@@ -77,6 +80,8 @@ export const stopOnSignals = (
     () => {},
   );
   let stopping = false;
+  /** The children are stopped and plainport is waiting for a held saga: a second signal exits at once. */
+  let waitingForSaga = false;
   // After SIGHUP the terminal may be gone, and a write to it can throw: that must never end the handler before the
   // children are stopped.
   const say = (text: string): void => {
@@ -88,7 +93,14 @@ export const stopOnSignals = (
   };
   const handler = (signal: NodeJS.Signals): void => {
     // Finished already: the command's own code and envelope stand, and the normal exit follows.
-    if (stopping || finished !== undefined) return;
+    if (finished !== undefined) return;
+    if (stopping) {
+      if (waitingForSaga) {
+        say(`plainport: ${signal} again: exiting; plainport recover finishes what the operation journaled\n`);
+        exit(130);
+      }
+      return;
+    }
     stopping = true;
     const running = host.liveGroups().length > 0 || options.operation?.busy() === true;
     options.operation?.abort();
@@ -103,14 +115,20 @@ export const stopOnSignals = (
     void (async () => {
       try {
         await stopped;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([
-          reported,
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, options.settleMs ?? 2_000);
-          }),
-        ]);
-        clearTimeout(timer);
+        if (options.operation?.busy() === true) {
+          // A held saga reports from its own safe point; its result is the exit code, whenever it comes.
+          waitingForSaga = true;
+          await reported;
+        } else {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            reported,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, options.settleMs ?? 2_000);
+            }),
+          ]);
+          clearTimeout(timer);
+        }
       } finally {
         if (finished === undefined) exit(130);
         // The command reported: let the normal exit flush its envelope with its own code. Should something still

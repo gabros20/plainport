@@ -116,7 +116,8 @@ describe("interrupt: signals to plainport stop its children", () => {
     expect(members(pgid)).toEqual([]);
   });
 
-  test("a saga holding the cancellation hears Ctrl-C through its signal, and its own report decides the exit", async () => {
+  /** A saga-like process holding the cancellation, reporting `code` `afterMs` after Ctrl-C, on the default wait. */
+  const startSaga = async (afterMs: number, code: number) => {
     const fixture = join(dir, "saga.ts");
     writeFileSync(
       fixture,
@@ -127,8 +128,8 @@ describe("interrupt: signals to plainport stop its children", () => {
         "const release = operation.hold();\n" +
         // No child runs: without the hold, plainport would exit 130 at once instead of letting the saga report.
         "const done = new Promise((resolve) => operation.signal.addEventListener('abort', () =>\n" +
-        "  setTimeout(() => { release(); resolve(42); }, 200)));\n" +
-        "stopOnSignals(host, done, { stderr: (t) => process.stderr.write(t), settleMs: 20_000, operation });\n" +
+        `  setTimeout(() => { release(); resolve(${code}); }, ${afterMs})));\n` +
+        "stopOnSignals(host, done, { stderr: (t) => process.stderr.write(t), operation });\n" +
         "console.log('ready');\n" +
         "process.exitCode = await done;\n",
     );
@@ -142,9 +143,30 @@ describe("interrupt: signals to plainport stop its children", () => {
     const reader = parent.stdout.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
     reader.releaseLock();
+    return parent;
+  };
+
+  test("a saga holding the cancellation hears Ctrl-C through its signal, and its own report decides the exit", async () => {
+    const parent = await startSaga(200, 42);
     parent.kill("SIGINT");
     expect(await parent.exited).toBe(42);
   });
+
+  test("plainport waits for a held saga's report however long it takes (D52): no 130 after the default wait", async () => {
+    const parent = await startSaga(3_500, 0);
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(0);
+  }, 15_000);
+
+  test("a second signal while a held saga winds down exits 130 at once", async () => {
+    const parent = await startSaga(60_000, 0);
+    parent.kill("SIGINT");
+    await Bun.sleep(300);
+    const started = performance.now();
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(130);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  }, 20_000);
 
   test("with no child running, Ctrl-C exits 130 at once, without waiting", async () => {
     const { parent } = await startParent("", "run");
