@@ -113,11 +113,92 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "This device has no identity yet; plainport init creates it",
   },
+  "env.docker-mount": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A running container bind-mounts the project folder or a folder inside it; offloading would pull files from under it",
+  },
+  "fs.dataless": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "A file is an iCloud or Dropbox placeholder (dataless): reading it triggers a download or fails",
+  },
+  "fs.link-outside": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "A symlink points outside the project; the link is stored, its target is not",
+  },
+  "fs.unreadable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "plainport cannot read some files or folders in the project, so a snapshot would be incomplete",
+  },
+  "git.failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A git command plainport runs to read the repository's state failed; the message is git's",
+  },
+  "git.in-progress": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "A rebase, merge, cherry-pick, revert or bisect is in progress; it restores exactly as it is",
+  },
+  "git.is-worktree": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The folder is a linked git worktree or submodule: its .git is only a pointer to a repository elsewhere",
+  },
+  "git.locked": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "The repository's index.lock exists: a git process is running or crashed",
+  },
+  "git.unpushed": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy",
+  },
+  "git.worktrees": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "Linked worktrees of this repository live outside the folder; offloading would orphan them",
+  },
   "internal.unexpected": {
     severity: "block",
     allowable: false,
     exitCode: 1,
     summary: "A bug: an exception escaped a command; the message names it",
+  },
+  "proc.cwd": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "Another process has its working directory inside the project folder",
+  },
+  "proc.cwd-shell": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "The shell or agent that started plainport has its working directory inside the project folder",
+  },
+  "proc.open-files": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "A process holds files open inside the project folder (an editor, a dev server, an agent)",
   },
   "process.cancelled": {
     severity: "block",
