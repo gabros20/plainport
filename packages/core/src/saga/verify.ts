@@ -54,7 +54,13 @@ export const verifyListing = async (options: {
   ctx: RunContext;
 }): Promise<Result<VerifiedTotals>> => {
   const { manifest, excluded } = options;
+  // Only the first SHOWN are named; the rest are counted, so a listing of the wrong tree stays cheap.
   const problems: string[] = [];
+  let differences = 0;
+  const problem = (text: string) => {
+    differences++;
+    if (problems.length <= SHOWN) problems.push(text);
+  };
   const seen = new Set<string>();
   const links: { path: string; target: string | undefined }[] = [];
   const listed = await options.engine.entries(
@@ -63,11 +69,11 @@ export const verifyListing = async (options: {
       seen.add(entry.path);
       const expected = isExcluded(excluded, entry.path) ? undefined : manifest.get(entry.path);
       if (expected === undefined) {
-        problems.push(`${entry.path} is in the snapshot but not in the folder's scan`);
+        problem(`${entry.path} is in the snapshot but not in the folder's scan`);
         return;
       }
       const difference = differs(expected, entry);
-      if (difference !== undefined) problems.push(`${entry.path} ${difference}`);
+      if (difference !== undefined) problem(`${entry.path} ${difference}`);
       else if (entry.type === "symlink") links.push({ path: entry.path, target: entry.linkTarget });
     },
     options.ctx,
@@ -78,7 +84,7 @@ export const verifyListing = async (options: {
   let bytes = 0;
   for (const entry of manifest) {
     if (isExcluded(excluded, entry.path)) continue;
-    if (!seen.has(entry.path)) problems.push(`${entry.path} is in the folder but not in the snapshot`);
+    if (!seen.has(entry.path)) problem(`${entry.path} is in the folder but not in the snapshot`);
     else if (entry.type === "file") {
       files++;
       bytes += entry.size ?? 0;
@@ -89,18 +95,18 @@ export const verifyListing = async (options: {
     try {
       target = await options.fs.readlink(join(options.dir, link.path));
     } catch (error) {
-      problems.push(`${link.path} could not be read back as a link (${systemErrorCode(error)})`);
+      problem(`${link.path} could not be read back as a link (${systemErrorCode(error)})`);
       continue;
     }
     if (target !== link.target)
-      problems.push(`${link.path} points to ${JSON.stringify(target)} here, not to what the snapshot holds`);
+      problem(`${link.path} points to ${JSON.stringify(target)} here, not to what the snapshot holds`);
   }
-  if (problems.length === 0) return ok({ files, bytes });
+  if (differences === 0) return ok({ files, bytes });
   return fail(
     finding("verify.mismatch", {
-      message: `snapshot ${options.snapshot.slice(0, 8)} does not match the folder (${problems.length} difference${
-        problems.length === 1 ? "" : "s"
-      }): ${problems.slice(0, SHOWN).join("; ")}${problems.length > SHOWN ? "; …" : ""}`,
+      message: `snapshot ${options.snapshot.slice(0, 8)} does not match the folder (${differences} difference${
+        differences === 1 ? "" : "s"
+      }): ${problems.slice(0, SHOWN).join("; ")}${differences > SHOWN ? "; …" : ""}`,
       fix: "nothing was deleted; re-run the offload, and if it fails again run restic check on the store",
       paths: [options.dir],
     }),

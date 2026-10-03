@@ -7,7 +7,9 @@
 // crash seam, faultAt(step), so the crash matrix can stop the saga at any of them. What each step leaves for
 // `plainport recover` (Task 14) when the process dies there:
 //
-//   offload.begin .. offload.planned       nothing is uploaded yet: roll back (remove the journal). A root-created
+//   offload.begin .. offload.planned       roll back (remove the journal). On a retry these are reached again while
+//                                          `attempts` names the earlier attempt's restic snapshot, which no event
+//                                          names: it stays unexplained (D28 (d)), never a head. A root-created
 //                                          event the journal names (rootCreated) may or may not be on the store,
 //                                          and the store's root claim (meta/v1/root.json) names this root; both are
 //                                          harmless and stay
@@ -78,7 +80,7 @@ import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
-import { type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { OffloadJournal } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { type PlanBoundary, type PreparedOffload, prepareOffload } from "../plan/planner.ts";
@@ -363,6 +365,28 @@ const sameVolume = async (io: LocalIo, folder: string, rootFolder: string): Prom
       }),
     );
   }
+  // An existing trash holder must be a real folder on the same volume too, or the rename fails after the commit.
+  const holder = join(rootFolder, TRASH_DIR);
+  try {
+    const trash = await io.fs.lstat(holder);
+    if (trash.kind !== "dir" || (await io.fs.stat(holder)).dev !== beside.dev)
+      return fail(
+        finding("fs.cross-volume", {
+          message: `${holder} is ${trash.kind === "dir" ? "on another volume" : `a ${trash.kind}, not a folder`}, so ${folder} cannot be moved aside into it in one rename`,
+          fix: `remove or rename ${shellWord(holder)} (plainport makes it again), then re-run`,
+          paths: [holder],
+        }),
+      );
+  } catch (error) {
+    if (systemErrorCode(error) !== "ENOENT")
+      return fail(
+        finding("fs.unreadable", {
+          message: `${holder} cannot be inspected (${systemErrorCode(error)}), so ${folder} was not offloaded`,
+          fix: `check that you can read ${shellWord(holder)}, then re-run`,
+          paths: [holder],
+        }),
+      );
+  }
   if (here.dev === beside.dev) return undefined;
   return fail(
     finding("fs.cross-volume", {
@@ -431,7 +455,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const base = registered.value.projects[projectId]?.base;
 
   const gate = { io, paths, clock, log: deps.log };
-  return withProjectLock(gate, { id: projectId, address: ref.address }, async () => {
+  return withProjectLock(gate, { id: projectId, address: ref.address }, async (lock) => {
     const mirror = await deps.openMirror(store.id);
     if (!mirror.ok) return mirror;
     const catalog = catalogReader({
@@ -543,16 +567,19 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       return prepared;
     };
 
-    /** plan.stale (exit 6), the fresh plan saved and carried as the error's data (D14, D38). */
-    const stale = async (message: string, uploaded = false): Promise<Failure> => {
-      const fresh = await plan(false);
-      if (!fresh.ok) return fresh;
+    /**
+     * plan.stale (exit 6), the fresh plan saved and carried as the error's data (D14, D38). `current` is a plan made
+     * from the folder as it is now, when there is one; otherwise the folder is planned again.
+     */
+    const stale = async (message: string, uploaded = false, current?: PreparedOffload): Promise<Failure> => {
+      const fresh = current === undefined ? await plan(false) : ok(current);
+      if (!fresh.ok) return signal?.aborted ? cancelled() : fresh;
       let saved = planBlocker(fresh.value.plan) === undefined;
       if (saved) {
         try {
           await savePlan(io, paths, fresh.value.plan, clock());
         } catch (error) {
-          systemErrorCode(error);
+          assertSystemError(error);
           saved = false;
         }
       }
@@ -563,9 +590,11 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
               ? "a snapshot was uploaded but not committed, so it is never a head, and nothing local was deleted"
               : "nothing was uploaded"
           }`,
-          fix: saved
-            ? `review the fresh plan (it is this error's data), then approve it: ${planCommand(fresh.value.plan)}`
-            : `plainport offload ${shellWord(ref.address)} --dry-run, fix what it reports, then approve the new plan`,
+          fix: !saved
+            ? `plainport offload ${shellWord(ref.address)} --dry-run, fix what it reports, then approve the new plan`
+            : req.plan === undefined
+              ? `re-run the same command to offload the folder as it is now (plainport offload ${shellWord(ref.address)} --yes), or review the fresh plan (it is this error's data) and approve it: ${planCommand(fresh.value.plan)}`
+              : `review the fresh plan (it is this error's data), then approve it: ${planCommand(fresh.value.plan)}`,
         }),
         fresh.value.plan,
         6,
@@ -601,6 +630,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
               ? `the folder, the options or the config changed since plan ${approved.id} was approved`
               : `files changed during the upload, so plan ${approved.id} no longer describes the folder`,
             attempt > 1,
+            prepared,
           );
         }
         for (const code of allow) {
@@ -730,6 +760,14 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         };
         return failWith(head.finding, conflict, 8);
       }
+      // lock.ts's known limit: a run that lost its lock to a breaker never commits.
+      if (!(await lock.stillHeld()))
+        return fail(
+          finding("project.locked", {
+            message: `the lock on ${ref.address} was taken over by another run during the offload; nothing was committed and nothing local was deleted`,
+            fix: "wait for the other plainport run to finish, then re-run",
+          }),
+        );
       const starting = await saga.step("offload.commit.start", { event: event.id });
       if (!starting.ok) return starting;
       const appended = await appendEvent(events, event);
@@ -745,7 +783,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
       phase("release", "start");
       const released = await releaseOffload(
-        { host, paths, saga, clock, log: deps.log },
+        { host, paths, saga, clock, log: deps.log, stillHeld: lock.stillHeld },
         { at: event.at, bytes: verified.bytes },
       );
       if (!released.ok) return released;

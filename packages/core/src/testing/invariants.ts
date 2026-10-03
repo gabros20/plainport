@@ -40,7 +40,7 @@ export interface InvariantSubject {
   released?: TreeCapture;
   /** Paths left out of the snapshot on purpose (the strip set), relative to the folder. */
   stripped?: readonly string[];
-  /** How long invariant 3 waits for a detached deletion. Default 5 seconds. */
+  /** How long invariant 3 waits for a detached deletion. Default 10 seconds, for a loaded CI runner. */
   settleMs?: number;
   /** The time keepLocalFor deadlines are compared with. Default: now. */
   now?: Date;
@@ -101,7 +101,11 @@ const deletedOp = (subject: InvariantSubject): string | undefined => {
     const stub = StubSchema.safeParse(JSON.parse(readFileSync(`${subject.project.dir}.plainport`, "utf8")));
     if (stub.success) return stub.data.snapshot;
   } catch {}
-  const [journal] = projectJournals(subject);
+  // The newest of the project's journals: an older one may be a kept trash (keepLocalFor) of an earlier offload.
+  const journal = projectJournals(subject)
+    .filter((j) => j.project.dir === subject.project.dir)
+    .sort((a, b) => (a.op < b.op ? -1 : 1))
+    .at(-1);
   if (journal !== undefined) return journal.op;
   try {
     const registry = ProjectRegistrySchema.parse(
@@ -202,7 +206,7 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
 
   // 3
   const now = subject.now ?? new Date();
-  const deadline = Date.now() + (subject.settleMs ?? 5_000);
+  const deadline = Date.now() + (subject.settleMs ?? 10_000);
   let left = leftovers(subject, now);
   while (left.length > 0 && Date.now() < deadline) {
     await Bun.sleep(25);

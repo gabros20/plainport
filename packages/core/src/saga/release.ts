@@ -41,6 +41,8 @@ export const offloadTrashOf = (journal: Pick<OffloadJournal, "op" | "project">):
 
 export interface ReleaseContext {
   host: HostPorts;
+  /** Re-checks the project's lock right before the rename (lock.ts's known limit); absent, it is not re-checked. */
+  stillHeld?(): Promise<boolean>;
   paths: PlainportPaths;
   /** The offload's saga, committed: its journal says what to release and how. */
   saga: Saga<OffloadJournal>;
@@ -86,6 +88,15 @@ export const releaseOffload = async (
   // The D51 guard, right before the rename: only the folder as it was verified is ever moved aside.
   const same = await unchanged(io.fs, folder, journal.plan?.fingerprint ?? "");
   if (!same.ok) return same;
+  if (rc.stillHeld !== undefined && !(await rc.stillHeld())) {
+    return fail(
+      finding("project.locked", {
+        message: `the lock on ${project.address} was taken over by another run before ${folder} was moved; the snapshot is committed and the folder is untouched`,
+        fix: "wait for the other plainport run to finish, then run plainport recover to finish this offload",
+        paths: [folder],
+      }),
+    );
+  }
   if (!same.value) {
     const based = await recordBase(rc, journal);
     if (!based.ok) rc.log("warn", `registry.json was not updated: ${based.finding.message}`);
@@ -109,6 +120,9 @@ export const releaseOffload = async (
   }
   try {
     await io.fs.mkdirp(trash);
+    // The new folders' own entries, so a power loss cannot orphan the trash (D24).
+    await io.fs.syncDir(dirname(trash));
+    await io.fs.syncDir(dirname(dirname(trash)));
     await io.fs.rename(folder, join(trash, basename(folder)));
     await io.fs.syncDir(trash);
     await io.fs.syncDir(dirname(folder));

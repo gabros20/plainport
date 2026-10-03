@@ -6,7 +6,7 @@
 // crashes), propagate and keep it too. Offload uses it now; onload and recover take the same shape.
 
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
-import { type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, journalFile, removeJournal, writeJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
 
@@ -99,7 +99,7 @@ export const openSaga = <J extends Journal, S extends string = string>(
       try {
         await removeJournal(ctx.io, ctx.paths, journal.op);
       } catch (error) {
-        systemErrorCode(error);
+        assertSystemError(error);
         ctx.log(
           "warn",
           `the journal ${journalFile(ctx.paths, journal.op)} could not be removed; plainport recover removes it`,

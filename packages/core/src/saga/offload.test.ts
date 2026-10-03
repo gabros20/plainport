@@ -189,7 +189,12 @@ const invariantsOf = async (
     roots: [join(box.home, "work")],
     store: { name: "ssd", blob: store, engine },
     ...(target.released === undefined ? {} : { released: target.released }),
-    stripped: ["node_modules"],
+    // The strip set the last snapshot was really made with (M16), not an assumed one.
+    stripped: [
+      ...(engine.calls.filter((c) => c.dir === join(box.home, "work", target.path)).at(-1)?.excludes ?? [
+        "node_modules",
+      ]),
+    ],
     ...(settleMs === undefined ? {} : { settleMs }),
   });
 
@@ -2110,4 +2115,62 @@ describe("offload: fix wave q1 (D52)", () => {
     },
     30_000,
   );
+});
+
+describe("offload: quality minors (q1)", () => {
+  test("a journal this build cannot read fails closed: journal.pending naming it", async () => {
+    box.file(`.local/state/plainport/journal/${ulid()}.json`, '{"v": 99}\n');
+    const result = await offload();
+    expect(result.ok ? 0 : result.finding.code).toBe("journal.pending");
+    expect(result.ok ? "" : result.finding.message).toContain("cannot read");
+    expect(engine.calls).toHaveLength(0);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    await expectInvariants();
+  });
+
+  test("a trash holder that is a symlink is refused before anything is uploaded", async () => {
+    box.dir("elsewhere");
+    symlinkSync(join(box.home, "elsewhere"), join(box.home, "work/.plainport-trash"));
+    const result = await offload();
+    expect(result.ok ? 0 : result.finding.code).toBe("fs.cross-volume");
+    expect(engine.calls).toHaveLength(0);
+    await expectUntouched();
+    await expectInvariants();
+  });
+
+  test("a verify.mismatch on a listing of the wrong tree names ten differences and counts the rest", async () => {
+    engine.hooks.listing = (entries) => [
+      ...entries,
+      ...Array.from({ length: 40 }, (_, i) => ({
+        ...(entries[0] as (typeof entries)[number]),
+        path: `extra/${i}`,
+      })),
+    ];
+    const result = await offload();
+    expect(result.ok ? 0 : result.finding.code).toBe("verify.mismatch");
+    expect(result.ok ? "" : result.finding.message).toContain("(40 differences)");
+    expect((result.ok ? "" : result.finding.message).match(/is in the snapshot but not/g)).toHaveLength(10);
+    await expectUntouched();
+    await expectInvariants();
+  });
+
+  test("without --plan, an edit between the plan and restic says re-run with --yes", async () => {
+    const real = testHost({ faults: { onStep: capture } });
+    let planned = false;
+    const host: HostPorts = {
+      ...real,
+      faultAt: (step) => {
+        real.faultAt(step);
+        if (step === "offload.planned" && !planned) {
+          planned = true;
+          writeFileSync(join(dir, "src/main.ts"), "export const main = 3;\n");
+        }
+      },
+    };
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
+    expect(result.ok ? "" : result.finding.fix).toContain("plainport offload work:web --yes");
+    await expectUntouched();
+    await expectInvariants();
+  });
 });
