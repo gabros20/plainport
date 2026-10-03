@@ -52,7 +52,10 @@ export interface Saga<J extends Journal, S extends string = string> {
   /** The commit landed: from here every failure keeps the journal, and fs.write-failed says the snapshot is safe. */
   commit(): void;
   readonly committed: boolean;
-  /** Marks a failure before the commit that must keep the journal: recover has something to settle. */
+  /**
+   * Marks a failure before the commit that must keep the journal: recover has something to settle. The mark is a
+   * field (keepJournal), so it survives a copy (withFix, a spread).
+   */
   keep(failure: Failure): Failure;
   /** Removes the journal now: the run ended with nothing left to recover. */
   close(): Promise<void>;
@@ -62,9 +65,8 @@ export interface Saga<J extends Journal, S extends string = string> {
 export const openSaga = <J extends Journal, S extends string = string>(
   ctx: SagaContext,
   journal: J,
-): Saga<J, S> & { readonly kept: (failure: Failure) => boolean } => {
+): Saga<J, S> => {
   let committed = false;
-  const kept = new WeakSet<Failure>();
   return {
     journal,
     async step(name, change = {}) {
@@ -91,10 +93,7 @@ export const openSaga = <J extends Journal, S extends string = string>(
     get committed() {
       return committed;
     },
-    keep(failure) {
-      kept.add(failure);
-      return failure;
-    },
+    keep: (failure) => ({ ...failure, keepJournal: true }) as Failure,
     async close() {
       try {
         await removeJournal(ctx.io, ctx.paths, journal.op);
@@ -106,16 +105,18 @@ export const openSaga = <J extends Journal, S extends string = string>(
         );
       }
     },
-    kept: (failure) => kept.has(failure),
   };
 };
 
 /** Runs a saga's body (see the file comment): the one place a failure's journal is kept or removed. */
+/** Whether a failure carries keep()'s mark. */
+const isKept = (failure: Failure): boolean => (failure as { keepJournal?: unknown }).keepJournal === true;
+
 export const runSaga = async <J extends Journal, T>(
-  saga: ReturnType<typeof openSaga<J>>,
+  saga: Saga<J, string>,
   body: () => Promise<Result<T>>,
 ): Promise<Result<T>> => {
   const result = await body();
-  if (!result.ok && !saga.committed && !saga.kept(result)) await saga.close();
+  if (!result.ok && !saga.committed && !isKept(result)) await saga.close();
   return result;
 };
