@@ -9,7 +9,9 @@
 //   a cycle of bases, which only a broken writer could make, is cut where the walk meets it). A snapshot named by a
 //   snapshot-discarded event (D28) is out of the tree: never a head, never part of a conflict.
 // - Each status event gets a position on that chain: an offloaded event sits at its snapshot's depth (2·d), and an
-//   onloaded event just after the snapshot it restored (2·d + 1), so before anything made from that working copy.
+//   onloaded event just after the head it was written over (`over`, D43), or the snapshot it restored when the event
+//   predates `over` (2·d + 1), so before anything made from that working copy. Onloading an older snapshot therefore
+//   comes after the head, not behind it.
 // - Status is the event furthest along the chain: offloaded → shelved, onloaded → local; local when there is none.
 // - A fork makes the project conflicted until a resolved event (M2) picks a side (D41): a kept snapshot with two or
 //   more kept children, offloaded or checkpointed alike. Two first offloads (no base) are a fork too. DESIGN's "two
@@ -79,7 +81,13 @@ export const CatalogStateSchema = z.strictObject({
 });
 export type CatalogState = z.infer<typeof CatalogStateSchema>;
 
-const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/**
+ * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
+ * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
+ */
+export const FOLD_VERSION = 1;
+
+export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** One event per id; of two different events claiming one id (a broken copy), the one whose JSON sorts first. */
 const canonical = (events: readonly CatalogEvent[]): CatalogEvent[] => {
@@ -131,7 +139,7 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   const depthOf = (snapshot: string | undefined): number =>
     snapshot === undefined ? 0 : (depth.get(snapshot) ?? 0);
   const position = (e: ProjectEvent): number =>
-    e.type === "onloaded" ? 2 * depthOf(e.base) + 1 : 2 * depthOf((e as Producer).snapshot);
+    e.type === "onloaded" ? 2 * depthOf(e.over ?? e.base) + 1 : 2 * depthOf((e as Producer).snapshot);
 
   const offloads = producers.filter((e) => e.type === "offloaded");
   const onloads = events.filter((e) => e.type === "onloaded");
@@ -159,7 +167,11 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   const heads = [...made.keys()].filter((s) => !parents.has(s) && made.get(s)?.base !== s).sort(compare);
   const missing = [
     ...new Set(
-      [...producers, ...onloads].flatMap((e) => (e.base === undefined || made.has(e.base) ? [] : [e.base])),
+      [...producers, ...onloads].flatMap((e) =>
+        [e.base, e.type === "onloaded" ? e.over : undefined].filter(
+          (s): s is string => s !== undefined && !made.has(s),
+        ),
+      ),
     ),
   ].sort(compare);
   const whole = conflicts.length === 0 && missing.length === 0 && !cyclic;
@@ -229,8 +241,9 @@ export const foldCatalog = (events: readonly CatalogEvent[]): CatalogState => {
   const byProject = new Map<string, ProjectEvent[]>();
   const rootEvents: RootEvent[] = [];
   for (const e of sorted) {
-    if ("project" in e) byProject.set(e.project, [...(byProject.get(e.project) ?? []), e]);
-    else rootEvents.push(e);
+    if (!("project" in e)) rootEvents.push(e);
+    else if (byProject.has(e.project)) byProject.get(e.project)?.push(e);
+    else byProject.set(e.project, [e]);
   }
   const projects: CatalogState["projects"] = {};
   for (const id of [...byProject.keys()].sort(compare))

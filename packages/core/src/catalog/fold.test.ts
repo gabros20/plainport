@@ -49,10 +49,11 @@ const checkpointed = (id: string, device: string, snapshot: string, from?: strin
   stored: { ssd: RESTIC },
   stats,
 });
-const onloaded = (id: string, device: string, from: string): CatalogEvent => ({
+const onloaded = (id: string, device: string, from: string, over?: string): CatalogEvent => ({
   ...base(id, device),
   type: "onloaded",
   base: from,
+  ...(over === undefined ? {} : { over }),
 });
 const discarded = (id: string, device: string, snapshot: string): CatalogEvent => ({
   ...base(id, device),
@@ -237,6 +238,38 @@ describe("catalog: fold rules", () => {
     expect(bOff).toMatchObject({ status: "shelved", head: S(2), lease: { device: A, event: E(2) } });
   });
 
+  test("onloading an older snapshot holds the lease (D43): the onload sits after the head it was written over", () => {
+    const history = [
+      offloaded(E(1), A, S(1)),
+      onloaded(E(2), A, S(1), S(1)),
+      offloaded(E(3), A, S(2), S(1)),
+      // A runs onload --snapshot S1 while the head is S2.
+      onloaded(E(4), A, S(1), S(2)),
+    ];
+    // What device B sees: A holds the lease on a local project, so B's onload warns.
+    expect(project(foldCatalog(history))).toMatchObject({
+      status: "local",
+      head: S(2),
+      lease: { device: A, event: E(4), base: S(1) },
+    });
+    // B onloads the head anyway: A, already there, keeps the lease.
+    const both = [...history, onloaded(E(5), B, S(2), S(2))];
+    expect(project(foldCatalog(both)).lease).toMatchObject({ device: A, event: E(4) });
+    // A offloads its rolled-back copy from the head it was written over: a step forward, never a fork.
+    const back = [...both, offloaded(E(6), A, S(3), S(2))];
+    expect(project(foldCatalog(back))).toMatchObject({
+      status: "shelved",
+      head: S(3),
+      conflicts: [],
+      lease: { device: B, event: E(5) },
+    });
+  });
+
+  test("an onload written over a head the catalog lacks makes the head incomplete", () => {
+    const events = [offloaded(E(1), A, S(1)), onloaded(E(2), A, S(1), S(7))];
+    expect(project(foldCatalog(events))).toMatchObject({ head: null, missing: [S(7)] });
+  });
+
   test("a later onload along the chain takes the lease over an older open one", () => {
     const events = [
       offloaded(E(1), A, S(1)),
@@ -372,8 +405,10 @@ const simulate = ({ steps, times }: { steps: Step[]; times: number[] }): Catalog
       case "onload": {
         if (snaps.length === 0) break;
         const s = snaps[pick % snaps.length] as string;
-        push(onloaded(id(), dev, s));
-        copy[device] = s;
+        // D43: an onload records the head it was written over; the copy then continues from it.
+        const over = pick % 4 === 0 ? undefined : (snaps[snaps.length - 1] as string);
+        push(onloaded(id(), dev, s, over));
+        copy[device] = over ?? s;
         break;
       }
       case "offload": {
@@ -393,7 +428,14 @@ const simulate = ({ steps, times }: { steps: Step[]; times: number[] }): Catalog
         break;
       }
       case "discard":
-        push(discarded(id(), dev, id()));
+        // Now and then a discard names a real snapshot, which then leaves the chain.
+        push(
+          discarded(
+            id(),
+            dev,
+            pick % 3 === 0 && snaps.length > 0 ? (snaps[pick % snaps.length] as string) : id(),
+          ),
+        );
         break;
       case "create-root":
         push(rootCreated(id(), dev, pick % 2 === 0 ? ROOT : idAt(7), pick % 3 === 0 ? "personal" : "work"));
@@ -508,6 +550,50 @@ describe("catalog: fold properties (fast-check)", () => {
     );
   });
 
+  test("invariant 5, by ancestry: the lease is never closed by its own device's later offload, and an untouched onload keeps one", () => {
+    fc.assert(
+      fc.property(historyArb.map(simulate), (events) => {
+        const dropped = new Set(events.flatMap((e) => (e.type === "snapshot-discarded" ? [e.snapshot] : [])));
+        const baseOf = new Map<string, string | undefined>();
+        for (const e of [...events].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+          if (
+            (e.type === "offloaded" || e.type === "checkpointed") &&
+            !dropped.has(e.snapshot) &&
+            !baseOf.has(e.snapshot)
+          )
+            baseOf.set(e.snapshot, e.base);
+        }
+        /** Whether `anchor` is `snapshot` or one of its ancestors through kept snapshots. */
+        const descends = (snapshot: string | undefined, anchor: string): boolean => {
+          for (let at = snapshot, steps = 0; at !== undefined && steps <= baseOf.size; steps++) {
+            if (at === anchor) return true;
+            at = baseOf.get(at);
+          }
+          return false;
+        };
+        const p = foldCatalog(events).projects[PROJECT];
+        if (p === undefined) return;
+        const onloads = events.filter((e) => e.type === "onloaded");
+        const offloads = events.filter((e) => e.type === "offloaded" && !dropped.has(e.snapshot));
+        if (p.lease !== null) {
+          const lease = p.lease;
+          const opened = onloads.find((e) => e.id === lease.event);
+          if (opened?.type !== "onloaded") throw new Error("the lease names no onloaded event");
+          const anchor = opened.over ?? opened.base;
+          // An offload by the same device made from the onloaded copy (or anything after it) ends the lease.
+          const closedBy = offloads.filter(
+            (e) => e.device === lease.device && e.type === "offloaded" && descends(e.base, anchor),
+          );
+          expect(closedBy).toEqual([]);
+        }
+        // A device that onloaded and never offloaded at all still holds a copy: someone holds the lease.
+        const neverOffloaded = onloads.some((o) => !offloads.some((e) => e.device === o.device));
+        if (neverOffloaded) expect(p.lease).not.toBeNull();
+      }),
+      RUNS,
+    );
+  });
+
   test("conflicted exactly when a kept snapshot (or no base) has two kept children (D41)", () => {
     fc.assert(
       fc.property(fc.oneof(historyArb.map(simulate), tangledArb), (events) => {
@@ -533,22 +619,27 @@ describe("catalog: fold properties (fast-check)", () => {
         const events: CatalogEvent[] = [registered(id(), A)];
         let holder: number | null = null;
         let head: string | undefined;
+        const snaps: string[] = [];
         let last: "shelved" | "local" = "local";
         for (const { kind, device, pick } of steps) {
           if (kind === "onload" && holder === null && head !== undefined) {
-            events.push(onloaded(id(), DEVICES[device] as string, head));
+            // Usually the head; now and then an older snapshot (onload --snapshot), written over the head (D43).
+            const restored = pick % 3 === 0 ? (snaps[pick % snaps.length] as string) : head;
+            events.push(onloaded(id(), DEVICES[device] as string, restored, head));
             holder = device;
             last = "local";
           } else if (kind === "offload" && (holder !== null || head === undefined)) {
             const s = id();
             events.push(offloaded(id(), DEVICES[holder ?? device] as string, s, head));
             head = s;
+            snaps.push(s);
             holder = null;
             last = "shelved";
           } else if (kind === "checkpoint" && holder !== null) {
             const s = id();
             events.push(checkpointed(id(), DEVICES[holder] as string, s, head));
             head = s;
+            snaps.push(s);
           } else if (kind === "discard" && holder !== null && pick % 2 === 0) {
             events.push(discarded(id(), DEVICES[holder] as string, id()));
           }

@@ -70,6 +70,12 @@ export const OnloadedEventSchema = z.strictObject({
   ...project,
   /** The snapshot restored. The event opens this device's lease. */
   base: UlidSchema,
+  /**
+   * The catalog's head when the event was written (D43). The fold places the onload after it, so onloading an older
+   * snapshot (onload --snapshot) holds the lease like any onload, and the copy's next offload is made from it.
+   * Optional to read; appendEvent requires it on every new onloaded event.
+   */
+  over: UlidSchema.optional(),
 });
 
 export const CheckpointedEventSchema = z.strictObject({

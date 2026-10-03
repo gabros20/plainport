@@ -29,7 +29,7 @@ const designExample = {
 const valid = {
   registered: { ...common, type: "registered", ...project },
   offloaded: designExample,
-  onloaded: { ...common, type: "onloaded", ...project, base: BASE },
+  onloaded: { ...common, type: "onloaded", ...project, base: BASE, over: OP },
   checkpointed: {
     ...common,
     type: "checkpointed",
@@ -68,6 +68,9 @@ describe("catalog: event schemas", () => {
     expect(CatalogEventSchema.safeParse(first).success).toBe(true);
     const { base: __, ...onload } = valid.onloaded;
     expect(CatalogEventSchema.safeParse(onload).success).toBe(false);
+    // D43: `over` (the head the onload was written over) is optional to read, for events written before it.
+    const { over: ___, ...older } = valid.onloaded;
+    expect(CatalogEventSchema.safeParse(older).success).toBe(true);
   });
 
   test("events are strict persisted documents: unknown fields, wrong v, bad ids and bad paths are refused", () => {
