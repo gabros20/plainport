@@ -3,7 +3,8 @@
 // Whatever throws, from the gate to the last write, ends as one internal.unexpected refusal (exit 1).
 
 import { decode, type Failure, fail, finding } from "@plainport/contract";
-import { nodeLocalIo, resolvePaths } from "@plainport/core";
+import { resolvePaths } from "@plainport/core";
+import { createMacosHost, guardFromEnv } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
 import { gate } from "./gate.ts";
 import { clackPrompter } from "./prompt.ts";
@@ -95,13 +96,14 @@ export const run = async (
   }
 };
 
-/** The real ports. The host port is a placeholder until Task 7; no plan store exists until Task 10, so no plan id
- * is approved yet and confirm commands need --yes. Paths come from the environment, never os.homedir(). */
+/** The real ports. core's io is the macOS host port (guarded only when a test run names its real home); no plan
+ * store exists until Task 10, so no plan id is approved yet and confirm commands need --yes. Paths come from the
+ * environment, never os.homedir(). */
 const realPorts = (): Ports => ({
   host: { home: process.env.HOME ?? "" },
   clock: { now: () => new Date() },
   plans: { approved: () => false },
-  io: nodeLocalIo,
+  io: createMacosHost({ guard: guardFromEnv(process.env) }),
   env: process.env,
   cwd: process.cwd(),
   prompt: clackPrompter,
