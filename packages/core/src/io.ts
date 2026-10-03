@@ -52,6 +52,11 @@ export interface LocalFs {
    * followed. Nothing there is fine. Only for plainport's own folders (staging) and what a plugin proves regenerable.
    */
   removeTree(path: string): Promise<void>;
+  /**
+   * Removes an empty folder, and nothing else: rejects with ENOTEMPTY when it holds anything (a folder another
+   * operation shares, which then stays), ENOENT when nothing is there.
+   */
+  rmdir(path: string): Promise<void>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";

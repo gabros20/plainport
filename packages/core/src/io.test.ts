@@ -47,3 +47,20 @@ describe("io: nodeLocalIo's removeTree and freeBytes", () => {
     }
   });
 });
+
+describe("io: nodeLocalIo's rmdir", () => {
+  test("removes an empty folder only: one that holds anything stays (ENOTEMPTY), and a missing one is ENOENT", async () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-io-"));
+    try {
+      mkdirSync(join(root, "empty"));
+      await nodeLocalIo.fs.rmdir(join(root, "empty"));
+      expect(existsSync(join(root, "empty"))).toBe(false);
+      mkdirSync(join(root, "full/inner"), { recursive: true });
+      await expect(nodeLocalIo.fs.rmdir(join(root, "full"))).rejects.toMatchObject({ code: "ENOTEMPTY" });
+      expect(existsSync(join(root, "full/inner"))).toBe(true);
+      await expect(nodeLocalIo.fs.rmdir(join(root, "nothing"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

@@ -16,6 +16,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   stat,
   statfs,
   unlink,
@@ -201,6 +202,7 @@ export const nodeLocalIo: LocalIo = {
       await openUp(path);
       await rm(path, { recursive: true, force: true });
     },
+    rmdir: (path) => rmdir(path),
   },
   proc: {
     pid: process.pid,
