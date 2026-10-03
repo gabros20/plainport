@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { deviceNameFrom, ensureDevice, readDevice } from "./device.ts";
+import { DeviceNameSchema, deviceNameFrom, ensureDevice, readDevice } from "./device.ts";
 import type { LocalIo } from "./io.ts";
 import { nodeLocalIo } from "./node-io.ts";
 import { type PlainportPaths, resolvePaths } from "./paths.ts";
@@ -119,8 +119,14 @@ describe("config: device identity", () => {
   });
 
   test("the device name is a lower-case word; a bad one is refused before anything is written", async () => {
-    const result = await ensureDevice(io, paths, { role: "owner", name: "My Mac", clock });
-    expect(result).toMatchObject({ ok: false, exitCode: 2, finding: { code: "usage.invalid" } });
+    for (const name of ["My Mac", "1mac", "12345", ""]) {
+      const result = await ensureDevice(io, paths, { role: "owner", name, clock });
+      expect(result).toMatchObject({
+        ok: false,
+        exitCode: 2,
+        finding: { code: "usage.invalid", fix: expect.stringContaining("--device <name>") },
+      });
+    }
     expect(await readDevice(io, paths)).toEqual({ ok: true, value: undefined });
   });
 
@@ -128,6 +134,16 @@ describe("config: device identity", () => {
     expect(deviceNameFrom("Tamass-MacBook-Pro.local")).toBe("tamass-macbook-pro");
     expect(deviceNameFrom("vps_01.example.eu")).toBe("vps-01");
     expect(deviceNameFrom("...")).toBe("this-device");
+    expect(deviceNameFrom("___.local")).toBe("this-device");
+    expect(deviceNameFrom("b315d8b14")).toBe("b315d8b14");
+    expect(deviceNameFrom("223b315d8b14")).toBe("host-223b315d8b14");
+    expect(deviceNameFrom("12345")).toBe("host-12345");
+    expect(deviceNameFrom("192.168.1.5")).toBe("host-192");
+    expect(deviceNameFrom("build-01.ci.example.com")).toBe("build-01");
+    expect(deviceNameFrom(`${"a".repeat(80)}.local`)).toBe("a".repeat(63));
+    for (const host of ["223b315d8b14", "12345", "...", "x".repeat(100), "-a-", "Ünïcödé"]) {
+      expect(DeviceNameSchema.safeParse(deviceNameFrom(host)).success).toBe(true);
+    }
   });
 
   test("a damaged device.json is reported, never replaced", async () => {

@@ -258,7 +258,7 @@ export const init = defineCommand({
       return fail(
         finding("usage.invalid", {
           message: `${JSON.stringify(name)} is not a device name: ${nameProblem}`,
-          fix: "pass --device <name> with a lower-case word, e.g. --device mbp",
+          fix: "pass --device <name>: a lower-case word starting with a letter, e.g. --device mbp",
         }),
       );
     }
