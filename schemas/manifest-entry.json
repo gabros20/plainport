@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "file",
+        "dir",
+        "symlink"
+      ]
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "mode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4095
+    },
+    "mtime": {
+      "type": "string"
+    },
+    "linkTarget": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "type",
+    "mode",
+    "mtime"
+  ],
+  "additionalProperties": false,
+  "title": "ManifestEntry"
+}

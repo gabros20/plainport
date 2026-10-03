@@ -5,7 +5,13 @@ import { EXIT, type FailureExitCode } from "./exit-codes.ts";
 import { FINDINGS, type Finding, type FindingSpec, finding } from "./finding.ts";
 
 export type Ok<T> = { ok: true; value: T };
-export type Failure = { ok: false; exitCode: FailureExitCode; finding: Finding };
+export type Failure = {
+  ok: false;
+  exitCode: FailureExitCode;
+  finding: Finding;
+  /** A useful result that still stands (D14): only with exit 6 (a blocked dry run's plan), 8 or 10. */
+  data?: unknown;
+};
 export type Result<T> = Ok<T> | Failure;
 
 export const ok = <T>(value: T): Ok<T> => ({ ok: true, value });
@@ -17,6 +23,12 @@ export const fail = (f: Finding, exitCode?: FailureExitCode): Failure => {
     : undefined;
   return { ok: false, exitCode: exitCode ?? spec?.exitCode ?? EXIT.unexpected, finding: f };
 };
+
+/** A failure that carries a useful result (D14), e.g. the plan a --dry-run's blockers stopped (exit 6, D38). */
+export const failWith = (f: Finding, data: unknown, exitCode?: FailureExitCode): Failure => ({
+  ...fail(f, exitCode),
+  data,
+});
 
 /** Validates a value at an edge. Bad input is an expected failure (contract.invalid), so this never throws. */
 export const decode = <S extends z.ZodType>(

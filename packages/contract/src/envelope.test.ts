@@ -87,17 +87,19 @@ describe("envelope", () => {
     expect(EnvelopeSchema.safeParse({ ...env, data: undefined }).success).toBe(true);
   });
 
-  test("D14: only exit 8 and exit 10 may carry data", () => {
-    for (const code of [1, 2, 3, 4, 5, 6, 7, 9, 11, 130]) {
+  test("D14: only exit 6 (a blocked dry run's plan), 8 and 10 may carry data", () => {
+    for (const code of [1, 2, 3, 4, 5, 7, 9, 11, 130]) {
       const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
       expect(EnvelopeSchema.safeParse(env).success).toBe(false);
     }
-    for (const code of [8, 10]) {
+    for (const code of [6, 8, 10]) {
       const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
       expect(EnvelopeSchema.safeParse(env).success).toBe(true);
     }
-    // @ts-expect-error data is only for exit 8 and 10
+    // @ts-expect-error data is only for exit 6, 8 and 10
     expect(() => errorEnvelope("ls", 4, "no project", { data: { project: "x" } })).toThrow(TypeError);
+    const blocked = errorEnvelope("offload", 6, "blocked", { data: { id: "plan" } });
+    expect(EnvelopeSchema.parse(blocked) as unknown).toEqual(blocked);
   });
 
   test("D14 holds at runtime when the code is not a literal", () => {

@@ -9,6 +9,14 @@ export interface LocalFs {
   readText(path: string): Promise<string>;
   /** Creates or truncates the file, writes the text and fsyncs it before resolving. */
   writeTextDurable(path: string, text: string): Promise<void>;
+  /** The file's bytes; rejects with ENOENT when it does not exist. */
+  readBytes(path: string): Promise<Uint8Array>;
+  /**
+   * Writes the bytes and fsyncs them before resolving. It creates or truncates the file; with `exclusive` it opens
+   * with O_CREAT|O_EXCL instead and rejects with EEXIST if anything is there (create-if-absent where hard links are
+   * missing, D41).
+   */
+  writeBytesDurable(path: string, data: Uint8Array, options?: { exclusive?: boolean }): Promise<void>;
   /** A hard link; rejects with EEXIST if `to` exists, which makes it an atomic create-if-absent. */
   link(from: string, to: string): Promise<void>;
   /** Atomically replaces `to`. */
@@ -28,6 +36,13 @@ export interface LocalFs {
   writable(path: string): Promise<boolean>;
   /** Whether the path is a regular file (symlinks followed) this process may execute; false when missing. */
   executable(path: string): Promise<boolean>;
+  /** What is at the path itself: a symlink is described, never followed. Rejects with ENOENT when nothing is. */
+  lstat(path: string): Promise<LinkStat>;
+  /** A symlink's target, as stored. */
+  readlink(path: string): Promise<string>;
+  /** Whether this process may read the path (access(2) with R_OK, so ACLs count); false when missing. Opens
+   * nothing, so a placeholder file is not downloaded. */
+  readable(path: string): Promise<boolean>;
 }
 
 export type FileKind = "file" | "dir" | "symlink" | "other";
@@ -37,6 +52,19 @@ export interface FileStat {
   /** Device and inode: two paths with equal ones are the same file. */
   dev: number;
   ino: number;
+}
+
+/** One entry as lstat(2) sees it, for the scan. Sockets, FIFOs and device files are their own kinds. */
+export interface LinkStat {
+  kind: "file" | "dir" | "symlink" | "socket" | "fifo" | "device";
+  /** Bytes: a file's length, a symlink's target length. */
+  size: number;
+  /** Permission bits, setuid, setgid and sticky included (st_mode & 0o7777). */
+  mode: number;
+  /** Nanoseconds since the epoch. */
+  mtimeNs: bigint;
+  /** The inode's change time, which every write, chmod or replace moves and nothing can set back. */
+  ctimeNs: bigint;
 }
 
 export interface DirEntry {
@@ -63,3 +91,14 @@ export interface LocalIo {
 /** The `code` of a Node error (ENOENT, EEXIST, …), if it has one. */
 export const errorCode = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+
+/**
+ * The errno code (ENOENT, EACCES, …) of a failed system call, for a catch site that turns expected failures into
+ * findings. Anything else, a TypeError, a guard's refusal (ERR_PLAINPORT_PATH_REFUSED), a plain string, is a bug and
+ * is thrown again, so a catch never swallows one (AGENTS.md rule 7: exceptions mean bugs).
+ */
+export const systemErrorCode = (error: unknown): string => {
+  const code = error instanceof Error ? errorCode(error) : undefined;
+  if (code !== undefined && /^E[A-Z0-9]+$/.test(code)) return code;
+  throw error;
+};

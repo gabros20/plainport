@@ -1,0 +1,89 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:monorepo",
+    "root": "work",
+    "path": "monorepo"
+  },
+  "include": {
+    "files": 10,
+    "bytes": 16233,
+    "largest": [
+      {
+        "path": "apps/web/public/hero.webp",
+        "bytes": 15000
+      },
+      {
+        "path": "pnpm-lock.yaml",
+        "bytes": 385
+      },
+      {
+        "path": "package.json",
+        "bytes": 215
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": "node_modules",
+      "bytes": 8000,
+      "plugin": "node",
+      "reason": "installed dependencies; pnpm install --frozen-lockfile from pnpm-lock.yaml puts them back"
+    },
+    {
+      "path": "apps/web/.next",
+      "bytes": 6021,
+      "plugin": "node",
+      "reason": "Next.js build output and cache; next build makes it again"
+    },
+    {
+      "path": ".turbo",
+      "bytes": 3000,
+      "plugin": "node",
+      "reason": "Turborepo's cache; turbo run fills it again"
+    },
+    {
+      "path": "apps/web/node_modules",
+      "bytes": 600,
+      "plugin": "node",
+      "reason": "installed dependencies; pnpm install --frozen-lockfile from pnpm-lock.yaml puts them back"
+    },
+    {
+      "path": "packages/ui/dist",
+      "bytes": 500,
+      "plugin": "node",
+      "reason": "build output; the build script (tsup src/index.ts --format esm) makes it again"
+    },
+    {
+      "path": "packages/ui/node_modules",
+      "bytes": 400,
+      "plugin": "node",
+      "reason": "installed dependencies; pnpm install --frozen-lockfile from pnpm-lock.yaml puts them back"
+    },
+    {
+      "path": "apps/web/.turbo",
+      "bytes": 120,
+      "plugin": "node",
+      "reason": "Turborepo's cache; turbo run fills it again"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "pnpm install --frozen-lockfile"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}

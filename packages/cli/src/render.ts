@@ -6,6 +6,7 @@ import {
   errorEnvelope,
   type Failure,
   type Finding,
+  type PartialExitCode,
   type PlainportEvent,
   type StreamEvent,
   successEnvelope,
@@ -83,18 +84,29 @@ export class Output {
     return 0;
   }
 
-  /** Prints the refusal or failure and closes the output. Returns its exit code. */
-  failure(failure: Failure): Failure["exitCode"] {
+  /**
+   * Prints the refusal or failure and closes the output. Returns its exit code. A failure carrying data (D14) prints
+   * it in the envelope, or as `human` on stdout before the refusal.
+   */
+  failure(failure: Failure, human?: string): Failure["exitCode"] {
     this.#open();
     this.#finished = true;
     const hint = hintOf(failure.finding);
     if (this.mode.json) {
-      const envelope = errorEnvelope(this.verb, failure.exitCode, failure.finding.message, {
-        ...(hint === undefined ? {} : { hint }),
-        finding: failure.finding,
-      });
+      const envelope = errorEnvelope(
+        this.verb,
+        failure.exitCode as PartialExitCode,
+        failure.finding.message,
+        {
+          ...(hint === undefined ? {} : { hint }),
+          finding: failure.finding,
+          ...(failure.data === undefined ? {} : { data: failure.data }),
+        },
+      );
       this.io.stdout(`${JSON.stringify(envelope)}\n`);
     } else {
+      if (failure.data !== undefined && human !== undefined && human !== "")
+        this.io.stdout(human.endsWith("\n") ? human : `${human}\n`);
       this.io.stderr(`plainport: ${failure.finding.code}: ${failure.finding.message}\n`);
       if (hint !== undefined) this.io.stderr(hint.startsWith("re-run: ") ? `${hint}\n` : `fix: ${hint}\n`);
     }

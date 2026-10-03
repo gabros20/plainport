@@ -9,5 +9,8 @@
     "@plainport/contract": "workspace:*",
     "smol-toml": "1.9.0",
     "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.2"
   }
 }

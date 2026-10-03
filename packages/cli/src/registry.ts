@@ -10,7 +10,7 @@
 
 import type { PlainportEvent, Result, RiskClass, StreamEvent } from "@plainport/contract";
 import { RISK_CLASSES } from "@plainport/contract";
-import type { Env, LocalIo, PlainportPaths } from "@plainport/core";
+import type { EcosystemPlugin, Env, HostChecks, HostPorts, LocalIo, PlainportPaths } from "@plainport/core";
 import { z } from "zod";
 import type { Prompter } from "./prompt.ts";
 
@@ -31,7 +31,10 @@ export interface Clock {
   now(): Date;
 }
 
-/** Approved plans (`--plan <id>`). Whether a plan is still fresh is checked when it runs (exit 6). */
+/**
+ * Approved plans (`--plan <id>`): the fresh plans saved on this device, loaded before the gate runs (plans.ts).
+ * Whether the folder still matches the plan is checked when it runs (exit 6).
+ */
 export interface PlanStore {
   approved(command: string, id: string): boolean;
 }
@@ -49,6 +52,12 @@ export interface Ports {
   cwd: string;
   /** Asks a person; used only when ctx.input is true. */
   prompt: Prompter;
+  /** The host port: file system, the one process runner, the clock (Task 7). */
+  system: HostPorts;
+  /** What only the platform can answer in preflight: processes, placeholders, containers. */
+  checks: HostChecks;
+  /** The ecosystem plugins, in detection order. */
+  plugins: readonly EcosystemPlugin[];
 }
 
 /** The --config path; loading the file arrives with the config task. */
@@ -85,6 +94,9 @@ export interface CommandContext {
   env: Env;
   cwd: string;
   prompt: Prompter;
+  system: HostPorts;
+  checks: HostChecks;
+  plugins: readonly EcosystemPlugin[];
   /** plainport's config and state paths, from env and --config; config.no-home when HOME is unusable. */
   paths(): Result<PlainportPaths>;
 }

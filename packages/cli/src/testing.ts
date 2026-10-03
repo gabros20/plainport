@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
 import { nodeLocalIo } from "@plainport/core";
+import { nodePlugin } from "@plainport/eco-node";
 import { z } from "zod";
+import { quietChecks } from "../../core/src/testing/checks.ts";
+import { testHost } from "../../core/src/testing/host.ts";
 import { help } from "./commands/help.ts";
 import { REGISTRY } from "./commands/index.ts";
 import { type IO, run } from "./main.ts";
@@ -32,22 +35,31 @@ export const noPrompts: Prompter = {
 
 const FAKE_HOME = join(tmpdir(), "plainport-fake-home-never-created");
 
-/** Ports for tests: a home folder that is never created, a fixed clock, the approvedPlans set and no prompts. */
+/** PATH for the children commands run (git); nothing else of the real environment. */
+const PATH = process.env.PATH ?? "/usr/bin:/bin";
+
+/**
+ * Ports for tests: a home folder that is never created, a fixed clock, the approvedPlans set, no prompts, a host
+ * that refuses the real home, host checks that find nothing, and the Node plugin.
+ */
 export const fakePorts = (): Ports => ({
   host: { home: FAKE_HOME },
   clock: { now: () => new Date("2026-10-03T12:00:00Z") },
   plans: { approved: (command, id) => approvedPlans.has(`${command} ${id}`) },
   io: nodeLocalIo,
-  env: { HOME: FAKE_HOME },
+  env: { HOME: FAKE_HOME, PATH },
   cwd: FAKE_HOME,
   prompt: noPrompts,
+  system: testHost(),
+  checks: quietChecks,
+  plugins: [nodePlugin],
 });
 
 /** Ports whose HOME (and cwd) is a test's sandbox, so commands read and write only inside it. */
 export const sandboxPorts = (home: string, overrides: Partial<Ports> = {}): Ports => ({
   ...fakePorts(),
   host: { home },
-  env: { HOME: home },
+  env: { HOME: home, PATH },
   cwd: home,
   ...overrides,
 });
@@ -202,13 +214,18 @@ export const FAKE_REGISTRY: Registry = [
 
 /**
  * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
- * project), store local, and the folders the examples name (~/personal, ~/Developer/Work). cleanup() removes it.
+ * project, an empty git repository), store local, and the folders the examples name (~/personal,
+ * ~/Developer/Work). cleanup() removes it.
  */
 export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
-  for (const dir of ["work/clients/acme/web/.git", "personal", "Developer/Work"]) {
+  for (const dir of ["work/clients/acme/web", "personal", "Developer/Work"]) {
     mkdirSync(join(home, dir), { recursive: true });
   }
+  const git = Bun.spawnSync(["git", "init", "-q", join(home, "work/clients/acme/web")], {
+    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1" },
+  });
+  if (git.exitCode !== 0) throw new Error(`git init failed: ${git.stderr.toString()}`);
   const ports = sandboxPorts(home);
   const setup = await capture(
     ["init", "--root", "work=~/work", "--store-path", "~/store", "--device", "mbp", "--yes"],

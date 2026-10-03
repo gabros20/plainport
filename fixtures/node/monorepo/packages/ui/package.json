@@ -1,0 +1,11 @@
+{
+  "name": "ui",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm"
+  },
+  "devDependencies": {
+    "tsup": "8.3.0"
+  }
+}

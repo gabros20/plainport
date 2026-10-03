@@ -1,0 +1,59 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:pnpm",
+    "root": "work",
+    "path": "pnpm"
+  },
+  "include": {
+    "files": 6,
+    "bytes": 30499,
+    "largest": [
+      {
+        "path": "public/demo.mp4",
+        "bytes": 30000
+      },
+      {
+        "path": "pnpm-lock.yaml",
+        "bytes": 192
+      },
+      {
+        "path": "package.json",
+        "bytes": 183
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": "node_modules",
+      "bytes": 9200,
+      "plugin": "node",
+      "reason": "installed dependencies; pnpm install --frozen-lockfile from pnpm-lock.yaml puts them back"
+    },
+    {
+      "path": "dist",
+      "bytes": 2800,
+      "plugin": "node",
+      "reason": "build output; the build script (vite build) makes it again"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "pnpm install --frozen-lockfile"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}

@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "store": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "title": "Ulid",
+      "description": "A ULID: 26 upper-case Crockford base32 characters"
+    },
+    "fold": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "lastSyncedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    },
+    "skipped": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "finding": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                "title": "FindingCode",
+                "description": "Stable dotted code, e.g. git.unpushed"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warn",
+                  "block"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "fix": {
+                "description": "The exact next step, e.g. a command to run",
+                "type": "string",
+                "minLength": 1
+              },
+              "allowable": {
+                "type": "boolean",
+                "description": "May --allow <code> override it?"
+              }
+            },
+            "required": [
+              "code",
+              "severity",
+              "message",
+              "allowable"
+            ],
+            "additionalProperties": {},
+            "title": "Finding"
+          }
+        },
+        "required": [
+          "size",
+          "finding"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "v",
+    "store",
+    "fold",
+    "lastSyncedAt",
+    "skipped"
+  ],
+  "additionalProperties": false,
+  "title": "EventMirror",
+  "description": "mirror.json beside a store's local event mirror"
+}

@@ -1,8 +1,9 @@
 // The project registry (DESIGN.md "Local state per machine"): registry.json in the state folder maps each project's
 // ULID to where it lives on this device (its root plus a relative path, or a one-off override), its base snapshot
-// and its onload time. Roots are named by key for now; root ULIDs arrive with root-created events (run decision
-// D22). Writers take registry.json.lock and replace the file atomically. A damaged file is reported, never
-// overwritten: the ULIDs in it are the projects' identities.
+// and its onload time. Entries name their root by key (run decision D22); `roots` records which root ULID each key
+// means on this device, once a root-created catalog event gave it one (catalog/roots.ts). Writers take
+// registry.json.lock and replace the file atomically. A damaged file is reported, never overwritten: the ULIDs in it
+// are the projects' identities.
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
@@ -41,6 +42,11 @@ export const ProjectRegistrySchema = z
   .strictObject({
     v: z.literal(1),
     projects: z.record(UlidSchema, RegistryEntrySchema),
+    /** Root key → the root's ULID, as its root-created catalog event names it. */
+    roots: z.record(RootKeySchema, UlidSchema).optional(),
+    /** Store name in config → the id in that store's meta/v1/store.json (D45): which mirror is its, and what a sync
+     * must find there. */
+    stores: z.record(z.string().min(1), UlidSchema).optional(),
   })
   .meta({ title: "ProjectRegistry", description: "registry.json: this device's projects by ULID" });
 export type ProjectRegistry = z.infer<typeof ProjectRegistrySchema>;

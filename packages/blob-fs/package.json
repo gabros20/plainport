@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@plainport/contract": "workspace:*",
     "@plainport/core": "workspace:*"
   }
 }

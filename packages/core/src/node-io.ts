@@ -6,17 +6,74 @@ import { constants } from "node:fs";
 import {
   access,
   link,
+  lstat,
   mkdir,
   open,
   readdir,
   readFile,
+  readlink,
   realpath,
   rename,
   stat,
   unlink,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { type DirEntry, errorCode, type FileKind, type LocalIo } from "./io.ts";
+import { dirname, join, resolve, sep } from "node:path";
+import { type DirEntry, errorCode, type FileKind, type LinkStat, type LocalIo } from "./io.ts";
+
+/**
+ * realpath(3) through Bun 1.3.14 reports ENOENT for any path holding a backslash, although lstat and readdir see
+ * it (Node resolves it). When a path reported missing is there, it is resolved here one component at a time:
+ * realpath(3) wherever it works, and for a component it refuses, readlink for a symlink, or the parent's listing
+ * for the spelling the volume stores. A missing path still rejects with ENOENT, a link loop with ELOOP.
+ */
+const realpathByParts = async (path: string, depth = 0): Promise<string> => {
+  if (depth > 40)
+    throw Object.assign(new Error(`ELOOP: too many symbolic links, realpath '${path}'`), { code: "ELOOP" });
+  let current: string = sep;
+  for (const name of resolve(path)
+    .split(sep)
+    .filter((part) => part !== "")) {
+    const next = join(current, name);
+    try {
+      current = await realpath(next);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      // Missing, or refused: lstat tells which; a missing component rejects as realpath did.
+      const info = await lstat(next);
+      if (info.isSymbolicLink()) {
+        current = await realpathByParts(resolve(dirname(next), await readlink(next)), depth + 1);
+        continue;
+      }
+      const listed = await readdir(current);
+      const fold = (s: string) => s.normalize("NFC").toLowerCase();
+      current = join(
+        current,
+        listed.find((e) => e === name) ?? listed.find((e) => fold(e) === fold(name)) ?? name,
+      );
+    }
+  }
+  return current;
+};
+
+const linkKindOf = (info: {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  isSocket(): boolean;
+  isFIFO(): boolean;
+}): LinkStat["kind"] =>
+  info.isSymbolicLink()
+    ? "symlink"
+    : info.isDirectory()
+      ? "dir"
+      : info.isFile()
+        ? "file"
+        : info.isSocket()
+          ? "socket"
+          : info.isFIFO()
+            ? "fifo"
+            : "device";
 
 const kindOf = (entry: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }): FileKind =>
   entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "dir" : entry.isFile() ? "file" : "other";
@@ -29,6 +86,16 @@ export const nodeLocalIo: LocalIo = {
       try {
         await handle.writeFile(text, "utf8");
         // fsync: survives a process crash; on macOS a power loss needs F_FULLFSYNC, left to the host port.
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
+    readBytes: async (path) => new Uint8Array(await readFile(path)),
+    writeBytesDurable: async (path, data, options = {}) => {
+      const handle = await open(path, options.exclusive ? "wx" : "w", 0o644);
+      try {
+        await handle.writeFile(data);
         await handle.sync();
       } finally {
         await handle.close();
@@ -54,7 +121,14 @@ export const nodeLocalIo: LocalIo = {
       }
     },
     // fs/promises' realpath is libuv's, so realpath(3): on macOS it also spells names as the volume stores them.
-    realpath: (path) => realpath(path),
+    realpath: async (path) => {
+      try {
+        return await realpath(path);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+        return realpathByParts(path);
+      }
+    },
     stat: async (path) => {
       const info = await stat(path);
       const kind = kindOf(info);
@@ -76,6 +150,25 @@ export const nodeLocalIo: LocalIo = {
       try {
         if (!(await stat(path)).isFile()) return false;
         await access(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    lstat: async (path) => {
+      const info = await lstat(path, { bigint: true });
+      return {
+        kind: linkKindOf(info),
+        size: Number(info.size),
+        mode: Number(info.mode) & 0o7777,
+        mtimeNs: info.mtimeNs,
+        ctimeNs: info.ctimeNs,
+      };
+    },
+    readlink: (path) => readlink(path),
+    readable: async (path) => {
+      try {
+        await access(path, constants.R_OK);
         return true;
       } catch {
         return false;

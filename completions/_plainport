@@ -8,6 +8,7 @@ _plainport_names() {
     names=(
         'help:Show every command, or one command'\''s arguments, options and risk class'
         'init:Name this device, set up its roots and record the store snapshots go to'
+        'offload:Snapshot a project, verify it and free its folder; --dry-run shows the plan first'
         'root:root commands'
         'version:Print plainport'\''s version'
     )
@@ -31,10 +32,11 @@ _plainport() {
   typed=(${words[2,CURRENT-1]:#-*})
   local cmd='' used=0
   if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
-  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|version) cmd=${typed[1]}; used=1 ;; esac; fi
+  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|offload|version) cmd=${typed[1]}; used=1 ;; esac; fi
   case "$cmd" in
     'help') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'init') opts=(--root --store-path --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'offload') opts=(--plan --keep-deps --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root add') opts=(--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root bind') opts=(--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root list') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;

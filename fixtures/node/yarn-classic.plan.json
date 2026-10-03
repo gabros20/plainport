@@ -1,0 +1,59 @@
+{
+  "kind": "offload",
+  "project": {
+    "address": "work:yarn-classic",
+    "root": "work",
+    "path": "yarn-classic"
+  },
+  "include": {
+    "files": 5,
+    "bytes": 12482,
+    "largest": [
+      {
+        "path": "src/logo.png",
+        "bytes": 12000
+      },
+      {
+        "path": "package.json",
+        "bytes": 223
+      },
+      {
+        "path": "yarn.lock",
+        "bytes": 207
+      }
+    ]
+  },
+  "strip": [
+    {
+      "path": "build",
+      "bytes": 4500,
+      "plugin": "node",
+      "reason": "build output; the build script (react-scripts build) makes it again"
+    },
+    {
+      "path": "node_modules",
+      "bytes": 1050,
+      "plugin": "node",
+      "reason": "installed dependencies; yarn install --frozen-lockfile from yarn.lock puts them back"
+    }
+  ],
+  "findings": [],
+  "phases": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release"
+  ],
+  "arrival": [
+    {
+      "part": "deps",
+      "outcome": "hydrate",
+      "detail": "yarn install --frozen-lockfile"
+    }
+  ],
+  "expiresAt": "2026-10-03T13:00:00.000Z"
+}

@@ -1,5 +1,6 @@
 // Loading the configuration (DESIGN.md "Configuration"). Precedence, highest first: flags, environment variables,
-// the project's .plainport.toml, config.toml, managed.toml, built-in defaults.
+// the project's .plainport.toml, the project's root's own [roots.<r>.strip] and [roots.<r>.deps] (run decision
+// D37), config.toml, managed.toml, built-in defaults.
 //
 // A loader remembers the last good contents of each file it has read. When a file that loaded before fails to
 // parse or check on a later load, its last good contents stay in effect and the load reports a
@@ -30,6 +31,8 @@ export interface LoadOptions {
   flags?: ConfigLayer;
   /** The project folder whose .plainport.toml applies, if any. */
   projectDir?: string;
+  /** The project's root: its strip and deps tables apply above the global ones, below the project file (D37). */
+  root?: string;
 }
 
 export interface LoadedConfig {
@@ -129,10 +132,16 @@ export class ConfigLoader {
         : await this.#layer(projectFile, ProjectConfigSchema, false, findings);
     if (!project.ok) return project;
 
+    const roots = (mergeLayers([managed.value, user.value]) as ConfigLayer).roots;
+    const rootTable =
+      options.root !== undefined && roots !== undefined && Object.hasOwn(roots, options.root)
+        ? roots[options.root]
+        : undefined;
     const merged = mergeLayers([
       DEFAULTS,
       managed.value,
       user.value,
+      { strip: rootTable?.strip, deps: rootTable?.deps },
       project.value,
       envLayer(options.env),
       flags.data,

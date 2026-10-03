@@ -9,6 +9,7 @@
     "@clack/prompts": "1.8.1",
     "@plainport/contract": "workspace:*",
     "@plainport/core": "workspace:*",
+    "@plainport/eco-node": "workspace:*",
     "@plainport/host-macos": "workspace:*",
     "zod": "4.6.5"
   }

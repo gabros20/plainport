@@ -33,11 +33,24 @@ export interface FindingSpec {
 
 /** Every finding code plainport emits. A code, once listed, keeps its meaning; later tasks add entries. */
 export const FINDINGS = Object.freeze({
+  "catalog.event-skipped": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed",
+  },
   "command.cancelled": {
     severity: "block",
     allowable: false,
     exitCode: 130,
     summary: "The person answering the prompts cancelled; nothing was written",
+  },
+  "command.unavailable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "This build registers the command but cannot run it for real yet; its --dry-run preview works",
   },
   "command.unknown": {
     severity: "block",
@@ -101,6 +114,20 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A value crossing an edge did not match its schema",
   },
+  "deps.ambiguous": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A package folder holds lockfiles of more than one package manager and no packageManager field says which to use",
+  },
+  "deps.no-lockfile": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A package folder has no lockfile for its package manager, so onload would resolve fresh dependency versions",
+  },
   "device.invalid": {
     severity: "block",
     allowable: false,
@@ -113,11 +140,118 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "This device has no identity yet; plainport init creates it",
   },
+  "env.docker-mount": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "A running container bind-mounts the project folder or a folder inside it; offloading would pull files from under it",
+  },
+  "fs.dataless": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "A file is an iCloud or Dropbox placeholder (dataless): reading it triggers a download or fails",
+  },
+  "fs.link-outside": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "A symlink points outside the project; the link is stored, its target is not",
+  },
+  "fs.unreadable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "plainport cannot read some files or folders in the project, so a snapshot would be incomplete",
+  },
+  "git.failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A git command plainport runs to read the repository's state failed; the message is git's",
+  },
+  "git.in-progress": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "A rebase, merge, cherry-pick, revert or bisect is in progress; it restores exactly as it is",
+  },
+  "git.is-worktree": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The folder is a linked git worktree or submodule: its .git is only a pointer to a repository elsewhere",
+  },
+  "git.locked": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "The repository's index.lock exists: a git process is running or crashed",
+  },
+  "git.nested-repos": {
+    severity: "info",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Repositories inside the project (nested clones and submodules) travel as plain files, their own .git included",
+  },
+  "git.unpushed": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary:
+      "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy",
+  },
+  "git.unpushed-required": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "requirePushed is set, and commits, branches or stashes exist only in this copy of the repository; push them first",
+  },
+  "git.worktrees": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "Linked worktrees of this repository live outside the folder; offloading would orphan them",
+  },
   "internal.unexpected": {
     severity: "block",
     allowable: false,
     exitCode: 1,
     summary: "A bug: an exception escaped a command; the message names it",
+  },
+  "plan.expired": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary: "The approved plan is more than an hour old; plan again with --dry-run",
+  },
+  "plan.not-found": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary: "No saved plan has this id on this device",
+  },
+  "proc.cwd": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "Another process has its working directory inside the project folder",
+  },
+  "proc.cwd-shell": {
+    severity: "warn",
+    allowable: true,
+    exitCode: 6,
+    summary: "The shell or agent that started plainport has its working directory inside the project folder",
+  },
+  "proc.open-files": {
+    severity: "block",
+    allowable: true,
+    exitCode: 6,
+    summary: "A process holds files open inside the project folder (an editor, a dev server, an agent)",
   },
   "process.cancelled": {
     severity: "block",
@@ -319,6 +453,33 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "The root has no folder on this device; plainport root bind gives it one",
   },
+  "store.failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary:
+      "A read or write in the store failed (permissions, a full disk, an I/O error); the message names the key and the error",
+  },
+  "store.identity-changed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
+  },
+  "store.key-exists": {
+    severity: "block",
+    allowable: false,
+    exitCode: 1,
+    summary: "A create-only write found the key already there; the existing value is left as it was",
+  },
+  "store.unreachable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 9,
+    summary:
+      "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved",
+  },
   "stub.invalid": {
     severity: "block",
     allowable: false,
@@ -336,6 +497,13 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 2,
     summary: "The arguments or options do not match the command's declared arguments",
+  },
+  "strip.kept": {
+    severity: "info",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept",
   },
   "tool.missing": {
     severity: "block",

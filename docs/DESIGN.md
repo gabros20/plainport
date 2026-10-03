@@ -164,7 +164,7 @@ Onload restores into a hidden staging folder, verifies it, then swaps it into pl
    - lease: if another device holds the project, warn; with `leases = "strict"`, block
 3. **Restore.** `restic restore` the project subtree into `<root>/.plainport-staging/<opId>/`. After an interruption, the rerun reuses the same staging folder, and restic's `--overwrite` modes skip files already written.
 4. **Verify.** Compare the staged tree with the snapshot listing: entry count, sizes, modes, link targets. Content is already authenticated by restic's encryption as it decrypts each blob.
-5. **Swap.** Rename staging to the target path, remove the stub, and append an `onloaded` event with host, path and base snapshot. That event opens the lease.
+5. **Swap.** Rename staging to the target path, remove the stub, and append an `onloaded` event with host, path, base snapshot and the head it was written over. That event opens the lease.
 6. **Agent state.** Each adapter places its captured state for the landing path, skipping anything the agent already holds, and checks the result with the agent's own read-only listing (see Agent state).
 7. **Toolchain.** The plugin reads `packageManager`, `engines`, `.nvmrc`, `.node-version`, `.tool-versions` or `mise.toml`. If mise, fnm or Volta is installed it activates the right version; otherwise it warns when the active version doesn't fit.
 8. **Hydrate.** Run the plugin's frozen install in the project, such as `pnpm install --frozen-lockfile` or `npm ci`. On failure the project is marked `restored-unhydrated` with exit code 10: files are safe and `plainport hydrate myapp` retries.
@@ -200,7 +200,7 @@ The choice is low-risk because every adapter sits behind the six-method `BlobSto
 | Store | Restic repository | Metadata | Notes |
 | --- | --- | --- | --- |
 | Peer device (Mac mini, VPS) | `rclone:` backend running `rclone serve restic --stdio --append-only` over SSH | Peer RPC over the same SSH link | The recommended hub. Other devices can only append; pruning runs there when you ask |
-| External SSD or local disk | `/Volumes/Archive/plainport/repo` | `node:fs` with exclusive create | Fastest; not off-site |
+| External SSD or local disk | `/Volumes/Archive/plainport/repo` | `node:fs` with exclusive create (a hard link where the volume has them, an `O_EXCL` open on exFAT and FAT) | Fastest; not off-site |
 | NAS over SFTP | `sftp:nas:/volume1/plainport/repo` | rclone over SFTP | For a NAS that can't run plainport; full access, so no append-only |
 | S3-compatible bucket (Backblaze B2, Hetzner, Scaleway, MinIO) | `s3:https://<endpoint>/<bucket>/repo` | rclone over S3, same bucket | Best as the hub's offsite replica. Pick an EU region; keep only the latest object version |
 | Restic REST server | `rest:https://nas:8000/plainport` | Not supported | Use a peer store instead; the REST protocol can't hold metadata files |
@@ -211,8 +211,9 @@ The choice is low-risk because every adapter sits behind the six-method `BlobSto
 <store root>/
   repo/                      restic repository (config, data/, index/, keys/, snapshots/)
   meta/v1/
+    store.json               the store's identity {v, id}, written once at setup
     events/<ulid>.json       append-only catalog events, never overwritten
-    state.json               compacted fold of events (optional, rebuildable)
+    state.json               compacted fold of events (optional, rebuildable; M1 keeps it beside the mirror instead)
 ```
 
 The `Engine` interface keeps other engines possible later: rustic or Kopia, or a single-file `tar + zstd + age` engine for exports you can open with standard tools.
@@ -482,20 +483,20 @@ The catalog is an append-only log of small JSON events on the store, and a proje
 }
 ```
 
-Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `renamed`, `resolved`, `lease-broken`, `forget-requested`, `forget-cancelled`, `forgotten`. Root events: `root-created`, `root-updated`, `root-bound`, `root-unbound`, `root-retired`. Device events: `device-paired`, `device-role-changed`, `device-revoked`, `secrets-granted`. A move is an `offloaded` event carrying a `move` field, followed by the target's `onloaded`.
+Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `snapshot-discarded`, `renamed`, `resolved`, `lease-broken`, `forget-requested`, `forget-cancelled`, `forgotten`. `snapshot-discarded` names a snapshot restic wrote although the offload failed (exit 3); it stays in an append-only repository but is never a head. Root events: `root-created`, `root-updated`, `root-bound`, `root-unbound`, `root-retired`. Device events: `device-paired`, `device-role-changed`, `device-revoked`, `secrets-granted`. A move is an `offloaded` event carrying a `move` field, followed by the target's `onloaded`.
 
 **Fold rules** (how state is computed from events):
 
 - **Status** is the latest `offloaded` or `onloaded` along the chain of `base` references. Clocks are for display only, so skew between machines can't reorder history.
-- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event.
+- **Head** is the snapshot of the newest `offloaded` or `checkpointed` event: the one tip of the `base` chain, a snapshot nothing kept was made from. A discarded snapshot is never a head. There is no head while the project is conflicted, or while an event names a snapshot the catalog does not hold (a partial mirror): a base, or the head an `onloaded` event was written over, which proves a newer snapshot exists. The head is then incomplete, onload refuses until the events are synced, and an older snapshot never becomes the head by default.
 - **Snapshot IDs are plainport ULIDs.** For an offload, the snapshot ID is the operation's ULID. `restic copy` gives a snapshot a new restic ID in every repository, so `stored` maps each store to its own restic ID.
-- **Conflict:** two `offloaded` events with the same `base` mean two copies diverged. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
-- **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device.
+- **Conflict:** a kept snapshot with two or more kept children, `offloaded` or `checkpointed` alike, means two copies diverged; two `offloaded` events with the same `base` are the common case, and two first offloads (no base) count too. A checkpoint on one side never hides the fork. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
+- **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device. An `onloaded` event records the head it was written over (`over`), and counts as later than that head and earlier than anything made from it; so onloading an older snapshot (`onload --snapshot`) holds the lease like any onload, and the copy's next offload is made from `over`, a step forward rather than a fork. If several devices have such an event, the one furthest along the chain holds the lease, then the smallest event id, so a project has at most one.
 - **Address** is root plus relative path (`work:clients/acme/web`), unique within its root. The ULID stays fixed across renames, re-filing and moves; a move changes the landing path, never the address.
 - **Bindings** are each device's latest `root-bound` for a root. The device's own config always wins; the event is its published copy for other devices to plan with.
 - **Replication is a union.** Events are immutable files with unique names, so copying them between stores is a set union and never conflicts.
 
-Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time.
+Event files are written create-only where the store can do it (exclusive create on local disks and peers), and ULID names make collisions practically impossible everywhere else. A compacted `state.json` is only a cache and is rebuilt from events at any time: it records the fold's version and a digest of the names and sizes of the event files it was folded from, and is reused only while both match. One read path serves every command: it checks the store's identity (`meta/v1/store.json`) against the id this device recorded, downloads into the local mirror only the events it lacks (a file whose bytes are no event, torn or not JSON, is remembered by name and size and not fetched again by the same version of the reader; an event this version cannot use, such as a type a newer plainport wrote, is read again on every sync, so an upgrade folds it), folds the mirror's events and caches the fold beside them. A read never writes to a store: events reach a store only from the write that created them. When the store is unreachable it returns the mirror's state marked stale, with the time of its last sync (none if it never synced); a store whose identity differs is refused (`store.identity-changed`); a broken mirror never fails a read while the store is reachable, which is then read directly. A root's ULID comes from its first `root-created` event; each device records the ULID it uses for each root key in `registry.json`.
 
 **If `meta/` is lost,** `plainport doctor --rebuild-catalog` rebuilds it from the repository alone. Every snapshot carries restic tags: `plainport`, `plainport:project=<ulid>`, `plainport:root=<ulid>`, `plainport:path=<relative path>`, `plainport:op=<ulid>`, `plainport:kind=offload|checkpoint`. Restic splits a tag at commas and trims whitespace from its ends, so the engine percent-encodes (UTF-8 bytes) what restic would change: `,` as `%2C` and `%` as `%25` anywhere, control characters anywhere, and whitespace at the start or end; it decodes those when it reads tags back, so any project path keeps its exact `plainport:path` tag. Root keys and device bindings come back as each device re-publishes its config.
 
@@ -506,13 +507,13 @@ Event files are written create-only where the store can do it (exclusive create 
 | `~/.config/plainport/config.toml` | Your settings: devices, stores, roots, defaults, trusted hooks. plainport never rewrites it |
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
 | `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
-| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it |
+| `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID, and store name → store id |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |
 | `~/.local/state/plainport/kit-ledger.json` | Every skill and MCP server plainport installed on this device, with hashes, so it never touches anything else |
 | `<root>/.plainport-parked/`, `.plainport-staging/`, `.plainport-trash/` | Parked copies kept for a trip back, restores in progress, and folders waiting to be deleted |
-| `~/.cache/plainport/<store>/events/` | Mirror of remote events, so `plainport ls` works offline |
+| `~/.cache/plainport/<store id>/events/` | Mirror of remote events, so `plainport ls` works offline; keyed by the store's identity, with `mirror.json` (last sync) and `state.json` (cached fold) beside it |
 
 **The stub** (`web.plainport`, JSON so agents can read it):
 
@@ -552,13 +553,13 @@ Every edge case resolves to one of three outcomes: handled silently, a warning i
 
 | Case | What plainport does |
 | --- | --- |
-| Symlinks | Stored as links. Warning `fs.link-outside` for absolute links pointing outside the project, whose targets are not captured. |
+| Symlinks | Stored as links. Warning `fs.link-outside` for links, absolute or relative, whose target resolves outside the project; the targets are not captured. |
 | Sockets, FIFOs, device files | Skipped and listed; dev servers leave `.sock` files behind. |
 | Unreadable files | Blocker `fs.unreadable` in preflight. Restic exit code 3 fails the snapshot, never a partial success. |
 | Files changing during upload | Fingerprint check before, re-stat after. A mismatch retries once, then fails with nothing deleted. |
 | iCloud or Dropbox placeholders | Blocker `fs.dataless`: reading them triggers downloads or fails. `--materialize` downloads them first. |
 | Names differing only by case | Onload blocker `fs.case-collision` on case-insensitive volumes. Restore with `--to` onto a case-sensitive volume. |
-| Very large files (videos, database dumps) | Included; the ten largest paths appear in the plan so you can add strip patterns. |
+| Very large files (videos, database dumps) | Included; the ten largest paths appear in the plan so you can add strip patterns. A repository's own `.git` counts as one entry there, since its files are never strippable. |
 | Permissions, exec bits, extended attributes | Preserved by restic; ownership is restored as the current user. |
 | APFS clones | Restored as separate copies, so onload can need more space than the original used. |
 
@@ -668,7 +669,7 @@ Every edge case resolves to one of three outcomes: handled silently, a warning i
 
 ## Configuration
 
-Configuration is plain TOML in three places: `config.toml`, which you own and plainport never rewrites; `managed.toml` beside it, which `plainport init`, the CLI and the app write; and an optional per-project `.plainport.toml`. Precedence runs CLI flags, then environment variables (`PLAINPORT_STORE`, `PLAINPORT_CONFIG`, `PLAINPORT_JSON=1`), then the project file, then `config.toml`, then `managed.toml`, then built-in defaults.
+Configuration is plain TOML in three places: `config.toml`, which you own and plainport never rewrites; `managed.toml` beside it, which `plainport init`, the CLI and the app write; and an optional per-project `.plainport.toml`. Precedence runs CLI flags, then environment variables (`PLAINPORT_STORE`, `PLAINPORT_CONFIG`, `PLAINPORT_JSON=1`), then the project file, then the project's root's own `[roots.<r>.strip]` and `[roots.<r>.deps]` tables, then `config.toml`, then `managed.toml`, then built-in defaults.
 
 **Merging and writing.** Tables merge key by key and arrays replace. Every writer (the CLI, the app, a remote `root bind`) takes `managed.toml.lock` and writes atomically through a temporary file and a rename. A file that fails to parse on reload leaves the last good configuration in place and reports the error.
 
@@ -821,7 +822,7 @@ work:clients/acme/web → mini-work
   plan      01J9Z6KB (valid 1h) → plainport offload web --plan 01J9Z6KB
 ```
 
-**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. A failure carries `data` too only when the operation partly succeeded: exit 10 carries the restored project and snapshot, exit 8 the kept snapshot. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
+**`--json` output** is NDJSON on stdout: progress lines, then exactly one final envelope, `{"plainport_json": 1, "ok": true, "verb": "offload", "data": {…}}`. On failure `ok` is false and `error` holds `code`, `message` and `hint`, with `code` equal to the exit code. A failure carries `data` too only when it still has a useful result: exit 10 carries the restored project and snapshot, exit 8 the kept snapshot, and exit 6 from a `--dry-run` the plan its blockers stopped. Logs go to stderr, and a generated `plainport.json` describes every command's arguments, output and risk class.
 
 ```
 {"type":"phase","op":"01J9Z6K2","phase":"snapshot","status":"start"}
@@ -1027,12 +1028,14 @@ export interface Engine {
 }
 
 export interface BlobStore {
+  // Every call returns a Result, as the Engine's do: an unmounted disk is store.unreachable, a create-only put on
+  // an existing key is store.key-exists. A catalog is small, so list returns the whole listing, sorted by key.
   capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean };
-  get(key: string): Promise<Uint8Array | null>;
-  put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<{ etag?: string }>;
-  list(prefix: string): AsyncIterable<{ key: string; size: number; etag?: string }>;
-  stat(key: string): Promise<{ size: number; etag?: string } | null>;
-  delete(key: string): Promise<void>;
+  get(key: string): Promise<Result<Uint8Array | null>>;
+  put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<Result<{ etag?: string }>>;
+  list(prefix: string): Promise<Result<{ key: string; size: number; etag?: string }[]>>;
+  stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
+  delete(key: string): Promise<Result<void>>;
 }
 
 export interface EcosystemPlugin {
@@ -1066,7 +1069,7 @@ export interface RunContext {
 
 **Contracts every plugin follows**
 
-- **Strip candidates are proposals.** The core drops any candidate git tracks, then applies `strip.keep` and `strip.never` from config.
+- **Strip candidates are proposals.** The core drops any candidate git tracks, as git itself matches paths in that repository (Unicode precomposition and `core.ignorecase` included; when unsure, the candidate stays), then applies `strip.keep` and `strip.never` from config to the candidates themselves: a candidate, or a folder above it, that a pattern matches is kept, and nothing inside a candidate keeps it, so `keep = ["dist/"]` keeps the project's `dist/`, never `node_modules` because packages ship a `dist/` of their own. `strip.extra` supports gitignore negation (`!audit.log`); a folder holding a re-included path is not stripped whole. Unlike gitignore, a negation also re-includes inside an excluded folder (`dist/` with `!dist/keep.txt` keeps that file and strips the rest of `dist/`), which only keeps more. Every candidate kept is listed in the plan with why (`strip.kept`).
 - **Several plugins can match one project**, such as a Next.js app with a Python tool folder. Each hydrates its own part, in detection order.
 - **Hydration runs with a timeout**, in the project directory, with the user's environment plus configured registry tokens. Its output streams as `log` events.
 
@@ -1080,7 +1083,7 @@ export interface RunContext {
 | `yarn.lock` alone | Yarn Classic | `yarn install --frozen-lockfile` |
 | `bun.lock` or `bun.lockb` | Bun | `bun install --frozen-lockfile` |
 
-The `packageManager` field in `package.json` overrides lockfile detection. The Node plugin proposes every `node_modules` plus `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache` and `.vercel/output`. It proposes `dist/` and `build/` only when a package script writes them.
+The `packageManager` field in `package.json` overrides lockfile detection. The Node plugin proposes every `node_modules` that an install puts back (beside the project's own package.json, a package with its own lockfile, or a workspace member of either; any other is declined and stays, and one inside a build's output such as `.next/standalone` leaves with that folder), plus `.next`, `.nuxt`, `.svelte-kit`, `.turbo`, `.parcel-cache` and `.vercel/output`. A project with no lockfile is still stripped and reinstalled, unfrozen, with `deps.no-lockfile` saying so, because its own install is what onload runs anyway; a sub-package with no lockfile is installed by nothing, so its `node_modules` stays. It proposes `dist/` and `build/` only when a package script writes them.
 
 **Other plugins at launch**
 

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, onTestFinished, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -10,9 +10,11 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpath,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -251,6 +253,7 @@ describe("home tripwire: a checkout outside the real home", () => {
   test("writes into the checkout still fail the test", () => {
     // Pretend the real home is an unrelated temp directory, so the checkout is no longer under it.
     const fakeHome = mkdtempSync(join(sandbox, "fake-home-"));
+    onTestFinished(() => rmSync(fakeHome, { recursive: true, force: true }));
     const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/checkout-write.fixture.ts"], {
       cwd: repoRoot,
       env: { ...process.env, PLAINPORT_TRIPWIRE_REAL_HOME: fakeHome },
@@ -263,4 +266,26 @@ describe("home tripwire: a checkout outside the real home", () => {
     expect(output).toContain("is in the checkout");
     expect(output).toMatch(/\b0 pass\b/);
   });
+});
+
+describe("home tripwire: cleanup", () => {
+  for (const fail of [false, true]) {
+    test(`removes its sandbox when the run ${fail ? "fails" : "passes"}`, () => {
+      // A private TMPDIR for the child, so whatever it leaves behind is easy to see.
+      const tmp = mkdtempSync(join(sandbox, "child-tmp-"));
+      onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+      const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/sandbox-cleanup.fixture.ts"], {
+        cwd: repoRoot,
+        env: { ...process.env, TMPDIR: tmp, PLAINPORT_FIXTURE_FAIL: fail ? "1" : "0" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = run.stdout.toString() + run.stderr.toString();
+      expect(run.exitCode === 0).toBe(!fail);
+      const childSandbox = /SANDBOX=(\S+)/.exec(output)?.[1] ?? "";
+      expect(under(tmp, childSandbox)).toBe(true);
+      expect(existsSync(childSandbox)).toBe(false);
+      expect(readdirSync(tmp)).toEqual([]);
+    });
+  }
 });

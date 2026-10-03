@@ -452,6 +452,418 @@
       ]
     },
     {
+      "name": "offload",
+      "summary": "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps]",
+      "risk": "confirm",
+      "dryRun": true,
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path, . or a stub; one for now",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "options": [
+        {
+          "name": "plan",
+          "type": "string",
+          "multiple": false,
+          "summary": "Run a plan a --dry-run saved, instead of --yes"
+        },
+        {
+          "name": "keep-deps",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Keep installed dependencies (node_modules) in the snapshot"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "minItems": 1,
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "An address (root:path), a unique name, a path, . or a stub; one for now"
+          },
+          "plan": {
+            "description": "Run a plan a --dry-run saved, instead of --yes",
+            "type": "string"
+          },
+          "keep-deps": {
+            "description": "Keep installed dependencies (node_modules) in the snapshot",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "number",
+            "const": 0
+          },
+          "project": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "freedBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "op",
+          "exitCode",
+          "project",
+          "snapshot",
+          "freedBytes"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "title": "Ulid",
+            "description": "A ULID: 26 upper-case Crockford base32 characters"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "offload",
+              "onload",
+              "move",
+              "relocate",
+              "restore",
+              "resolve",
+              "checkpoint",
+              "hydrate",
+              "dehydrate",
+              "forget",
+              "kit-apply",
+              "prune"
+            ],
+            "title": "OperationKind"
+          },
+          "project": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string",
+                "minLength": 1,
+                "description": "root:path"
+              },
+              "root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "description": "The project's ULID, when this device knows it",
+                "type": "string",
+                "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "title": "Ulid"
+              },
+              "dir": {
+                "description": "Its folder on this device, absolute",
+                "type": "string",
+                "minLength": 1
+              },
+              "store": {
+                "description": "The store the operation would use",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "address",
+              "root",
+              "path"
+            ],
+            "additionalProperties": {},
+            "title": "ProjectView"
+          },
+          "fingerprint": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The scan's tree hash; re-checked when the plan runs"
+          },
+          "include": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "largest": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Relative to the project folder"
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "bytes"
+                  ],
+                  "additionalProperties": {},
+                  "title": "SizedPath"
+                },
+                "description": "The ten largest included files, largest first"
+              }
+            },
+            "required": [
+              "files",
+              "bytes",
+              "largest"
+            ],
+            "additionalProperties": {}
+          },
+          "strip": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Relative to the project folder; left out of the snapshot"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "plugin": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The plugin that claimed it, or \"config\" for strip.extra"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Why it can be regenerated"
+                }
+              },
+              "required": [
+                "path",
+                "bytes",
+                "plugin",
+                "reason"
+              ],
+              "additionalProperties": {},
+              "title": "StripEntry"
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "phases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            }
+          },
+          "arrival": {
+            "description": "What each part becomes where the project lands; for an offload, how it comes back",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "part": {
+                  "type": "string",
+                  "enum": [
+                    "files",
+                    "deps",
+                    "agent-session",
+                    "secrets",
+                    "git-access",
+                    "process"
+                  ]
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "restore",
+                    "reuse",
+                    "hydrate",
+                    "resume",
+                    "handoff",
+                    "withheld",
+                    "suggest",
+                    "skip"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "description": "e.g. \"pnpm install --frozen-lockfile\", \"claude --resume <id>\""
+                }
+              },
+              "required": [
+                "part",
+                "outcome",
+                "detail"
+              ],
+              "additionalProperties": {},
+              "title": "ArrivalItem"
+            }
+          },
+          "estimate": {
+            "type": "object",
+            "properties": {
+              "uploadBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "downloadBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "freeBytesNeeded": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": {}
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+            "description": "After this, --plan <id> no longer runs it"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "fingerprint",
+          "include",
+          "strip",
+          "findings",
+          "phases",
+          "estimate",
+          "expiresAt"
+        ],
+        "additionalProperties": {},
+        "title": "Plan"
+      },
+      "examples": [
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--dry-run"
+          ],
+          "summary": "Plan offloading a project"
+        }
+      ]
+    },
+    {
       "name": "root add",
       "summary": "Add a root, optionally with this device's folder for it; the global --store sets its store",
       "usage": "plainport root add <key> [<path>] [--label <value>] [--create]",
@@ -1125,11 +1537,25 @@
   ],
   "findings": [
     {
+      "code": "catalog.event-skipped",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed"
+    },
+    {
       "code": "command.cancelled",
       "severity": "block",
       "allowable": false,
       "exitCode": 130,
       "summary": "The person answering the prompts cancelled; nothing was written"
+    },
+    {
+      "code": "command.unavailable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "This build registers the command but cannot run it for real yet; its --dry-run preview works"
     },
     {
       "code": "command.unknown",
@@ -1202,6 +1628,20 @@
       "summary": "A value crossing an edge did not match its schema"
     },
     {
+      "code": "deps.ambiguous",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A package folder holds lockfiles of more than one package manager and no packageManager field says which to use"
+    },
+    {
+      "code": "deps.no-lockfile",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A package folder has no lockfile for its package manager, so onload would resolve fresh dependency versions"
+    },
+    {
       "code": "device.invalid",
       "severity": "block",
       "allowable": false,
@@ -1216,11 +1656,130 @@
       "summary": "This device has no identity yet; plainport init creates it"
     },
     {
+      "code": "env.docker-mount",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A running container bind-mounts the project folder or a folder inside it; offloading would pull files from under it"
+    },
+    {
+      "code": "fs.dataless",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A file is an iCloud or Dropbox placeholder (dataless): reading it triggers a download or fails"
+    },
+    {
+      "code": "fs.link-outside",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A symlink points outside the project; the link is stored, its target is not"
+    },
+    {
+      "code": "fs.unreadable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "plainport cannot read some files or folders in the project, so a snapshot would be incomplete"
+    },
+    {
+      "code": "git.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A git command plainport runs to read the repository's state failed; the message is git's"
+    },
+    {
+      "code": "git.in-progress",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A rebase, merge, cherry-pick, revert or bisect is in progress; it restores exactly as it is"
+    },
+    {
+      "code": "git.is-worktree",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The folder is a linked git worktree or submodule: its .git is only a pointer to a repository elsewhere"
+    },
+    {
+      "code": "git.locked",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "The repository's index.lock exists: a git process is running or crashed"
+    },
+    {
+      "code": "git.nested-repos",
+      "severity": "info",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Repositories inside the project (nested clones and submodules) travel as plain files, their own .git included"
+    },
+    {
+      "code": "git.unpushed",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy"
+    },
+    {
+      "code": "git.unpushed-required",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "requirePushed is set, and commits, branches or stashes exist only in this copy of the repository; push them first"
+    },
+    {
+      "code": "git.worktrees",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Linked worktrees of this repository live outside the folder; offloading would orphan them"
+    },
+    {
       "code": "internal.unexpected",
       "severity": "block",
       "allowable": false,
       "exitCode": 1,
       "summary": "A bug: an exception escaped a command; the message names it"
+    },
+    {
+      "code": "plan.expired",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The approved plan is more than an hour old; plan again with --dry-run"
+    },
+    {
+      "code": "plan.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No saved plan has this id on this device"
+    },
+    {
+      "code": "proc.cwd",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "Another process has its working directory inside the project folder"
+    },
+    {
+      "code": "proc.cwd-shell",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "The shell or agent that started plainport has its working directory inside the project folder"
+    },
+    {
+      "code": "proc.open-files",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A process holds files open inside the project folder (an editor, a dev server, an agent)"
     },
     {
       "code": "process.cancelled",
@@ -1447,6 +2006,34 @@
       "summary": "The root has no folder on this device; plainport root bind gives it one"
     },
     {
+      "code": "store.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A read or write in the store failed (permissions, a full disk, an I/O error); the message names the key and the error"
+    },
+    {
+      "code": "store.identity-changed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced"
+    },
+    {
+      "code": "store.key-exists",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A create-only write found the key already there; the existing value is left as it was"
+    },
+    {
+      "code": "store.unreachable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 9,
+      "summary": "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved"
+    },
+    {
       "code": "stub.invalid",
       "severity": "block",
       "allowable": false,
@@ -1466,6 +2053,13 @@
       "allowable": false,
       "exitCode": 2,
       "summary": "The arguments or options do not match the command's declared arguments"
+    },
+    {
+      "code": "strip.kept",
+      "severity": "info",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept"
     },
     {
       "code": "tool.missing",
