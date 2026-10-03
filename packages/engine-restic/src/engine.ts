@@ -384,13 +384,18 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
   const linkTargets = async (
     snapshot: string,
     links: readonly EntryMeta[],
+    entries: number,
     ctx: RunContext | undefined,
   ): Promise<Result<Map<string, string>>> => {
-    const long = new LongListingReader(new Set(links.map((link) => `/${link.path}`)));
-    const listed = await lines("ls", ["-l", snapshot], ctx, (line) => long.line(line));
+    const reader = new LongListingReader(new Set(links.map((link) => `/${link.path}`)));
+    const listed = await lines("ls", ["-l", snapshot], ctx, (line) => reader.line(line));
     if (!listed.ok) return listed;
+    const long = reader.end();
+    // ls -l prints names and targets raw; its records are trusted only when there are exactly as many as
+    // ls --json listed entries (fix r2 N1). Otherwise every symlink is read with cat tree.
+    const trusted = long.reliable && long.records === entries;
     const targets = new Map<string, string>();
-    for (const [path, target] of long.end()) targets.set(path.slice(1), target);
+    if (trusted) for (const [path, target] of long.targets) targets.set(path.slice(1), target);
 
     const folders = new Map<string, EntryMeta[]>();
     for (const link of links) {
@@ -399,10 +404,19 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       const folder = slash === -1 ? "" : link.path.slice(0, slash);
       folders.set(folder, [...(folders.get(folder) ?? []), link]);
     }
-    if (folders.size > TREE_LOOKUPS)
-      return outputInvalid(
-        `restic's ls -l left the targets of symlinks in ${folders.size} folders unclear, more than the ${TREE_LOOKUPS} folders plainport reads one by one`,
+    if (folders.size > TREE_LOOKUPS) {
+      const unclear = [...folders.values()].flat().map((link) => link.path);
+      const why = trusted
+        ? "their names or targets hold line breaks or ' -> ', which restic's ls -l prints as they are"
+        : "some name or link target in the snapshot holds a line break that restic's ls -l prints as it is, so its listing cannot be matched line by line";
+      return fail(
+        finding("restic.symlinks-unclear", {
+          message: `the targets of ${unclear.length} symlinks in ${folders.size} folders cannot be read in one pass: ${why}; plainport reads at most ${TREE_LOOKUPS} folders one by one`,
+          fix: "rename the symlinks (or their targets) that hold line breaks or ' -> ' in their names (the first are listed), then offload again",
+          paths: unclear.slice(0, 10),
+        }),
       );
+    }
     for (const [folder, inFolder] of folders) {
       const read = await capture("cat", ["tree", `${snapshot}:/${folder}`], ctx);
       if (!read.ok) return read;
@@ -558,7 +572,7 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       if (!header.ok) return header;
 
       if (links.length > 0) {
-        const targets = await linkTargets(id.value, links, ctx);
+        const targets = await linkTargets(id.value, links, count + links.length, ctx);
         if (!targets.ok) return targets;
         for (const link of links) {
           const target = targets.value.get(link.path);

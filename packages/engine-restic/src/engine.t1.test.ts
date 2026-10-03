@@ -86,6 +86,7 @@ describeT1("restic engine: the real restic on a temp repository", () => {
     symlinkSync("../README.md", join(src, "sub", "up-link"));
     symlinkSync("c -> d", join(src, "sub", "a -> b"));
     symlinkSync("tar\nget ", join(src, "sub", "new\nline"));
+    symlinkSync("tar\r", join(src, "sub", "cr-link"));
     const found = await toolPath(host, "restic", { env: {} });
     if (!found.ok) throw new Error(found.finding.message);
     resticPath = found.value.path;
@@ -141,6 +142,7 @@ describeT1("restic engine: the real restic on a temp repository", () => {
       // ls -l separates name and target with " -> " and prints newlines as they are: neither confuses it.
       expect(entries.find((entry) => entry.path === "sub/a -> b")?.linkTarget).toBe("c -> d");
       expect(entries.find((entry) => entry.path === "sub/new\nline")?.linkTarget).toBe("tar\nget ");
+      expect(entries.find((entry) => entry.path === "sub/cr-link")?.linkTarget).toBe("tar\r");
       expect(entries.find((entry) => entry.path === "run.sh")?.mode).toBe(0o755);
       expect(entries.find((entry) => entry.path === "sub/deeper/data.bin")?.size).toBe(6);
 

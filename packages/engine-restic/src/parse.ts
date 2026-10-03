@@ -256,30 +256,56 @@ export class ListingReader {
 const LONG_ENTRY =
   /^([dalTLDpSugct?]+|-)[-r][-w][-x][-r][-w][-x][-r][-w][-x] +\d+ +\d+ +\d+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d (\/.*)$/s;
 
+/** What `ls -l` told about the wanted symlinks. */
+export interface LongListing {
+  /** The target of each wanted symlink that one record placed without doubt. */
+  targets: Map<string, string>;
+  /** How many entry records the listing had. The caller compares it with the entries of `ls --json`: a target
+   * holding a line break and an entry-like line adds a record, and an entry line that does not look like one
+   * (a year that is not four digits) takes one away, so a count that differs means records were mis-split. */
+  records: number;
+  /** False when a record grew past its bound: the format is not what this reader knows. */
+  reliable: boolean;
+}
+
+/** A path and a link target are each at most PATH_MAX (4096) bytes; the fields before them are short. */
+const MAX_RECORD_CHARS = 2 * 4096 + 256;
+
 /**
  * Reads `ls -l <id>` line by line and finds the targets of the wanted symlinks (paths with their leading "/").
  * Every way a symlink record can split at " -> " that names a wanted path is a candidate; a path given two
- * different targets is ambiguous, and ambiguous or missing paths are left for another way (cat tree).
+ * different targets is ambiguous. Ambiguous or missing paths, and every path when the listing is not to be
+ * trusted (see LongListing), are left for another way (cat tree).
  */
 export class LongListingReader {
   private record: string | undefined;
+  private records = 0;
+  private reliable = true;
   private readonly found = new Map<string, string | null>();
 
-  constructor(private readonly wanted: ReadonlySet<string>) {}
+  constructor(
+    private readonly wanted: ReadonlySet<string>,
+    private readonly maxRecordChars = MAX_RECORD_CHARS,
+  ) {}
 
   line(raw: string): void {
     if (LONG_ENTRY.test(raw)) {
       this.flush();
+      this.records++;
       this.record = raw;
-    } else if (this.record !== undefined) this.record += `\n${raw}`;
+    } else if (this.record !== undefined) {
+      if (this.record.length + 1 + raw.length > this.maxRecordChars) {
+        this.reliable = false;
+        this.record = undefined;
+      } else this.record += `\n${raw}`;
+    }
   }
 
-  /** The target of each wanted symlink that one record placed without doubt. */
-  end(): Map<string, string> {
+  end(): LongListing {
     this.flush();
     const targets = new Map<string, string>();
     for (const [path, target] of this.found) if (target !== null) targets.set(path, target);
-    return targets;
+    return { targets, records: this.records, reliable: this.reliable };
   }
 
   private flush(): void {

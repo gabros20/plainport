@@ -129,7 +129,9 @@ export interface Engine {
   /**
    * Hands every entry of a snapshot below its root to onEntry, one at a time (symlinks last, once their targets
    * are known). What onEntry received counts only when the Result is ok: a listing that cannot be shown whole
-   * fails, after some entries may already have been handed over.
+   * fails, after some entries may already have been handed over. onEntry runs inside the engine's output
+   * handling: if it throws, that is a bug, so the engine stops restic and `entries` rejects with that error
+   * instead of returning a Result.
    */
   entries(
     snapshot: string,

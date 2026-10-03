@@ -369,10 +369,8 @@ describe("restic engine: entries", () => {
 
   test("a symlink ls -l cannot place is read with one cat tree of its folder", async () => {
     const long = fixture("ls-long");
-    const stdout = long.stdout
-      .split("\n")
-      .filter((line) => !line.includes("odd"))
-      .join("\n");
+    // Same number of records, but none names the symlink.
+    const stdout = long.stdout.replace("/sub/odd -> name -> x -> y", "/sub/other -> x -> y");
     const { host, engine } = setup([fixture("ls"), edited(long, { stdout }), fixture("cat-tree-sub")]);
     const { seen, onEntry } = collect();
     value(await engine.entries(BACKUP_ID, onEntry));
@@ -383,10 +381,12 @@ describe("restic engine: entries", () => {
 
   test("two ls -l lines that give one symlink different targets fall back to cat tree", async () => {
     const long = fixture("ls-long");
+    // The same number of records, one of them forged to give the symlink a second target.
     const forged = long.stdout.replace(
-      "/sub/odd -> name -> x -> y\n",
-      "/sub/odd -> name -> x -> y\nLrwxr-xr-x   501    20      0 2026-10-03 04:05:49 /sub/odd -> name -> other\n",
+      /-rw-r--r-- .* \/sub\/b\n/,
+      "Lrwxr-xr-x   501    20      0 2026-10-03 04:05:49 /sub/odd -> name -> other\n",
     );
+    expect(forged).not.toBe(long.stdout);
     const { host, engine } = setup([
       fixture("ls"),
       edited(long, { stdout: forged }),
@@ -415,7 +415,11 @@ describe("restic engine: entries", () => {
     const long: string[] = ["snapshot x of [/] at … filtered by []:"];
     for (let folder = 0; folder < 2000; folder++) {
       json.push(node(`/d${folder}`, "dir"));
-      for (let file = 0; file < 50; file++) json.push(node(`/d${folder}/f${file}`, "file"));
+      long.push(`drwxr-xr-x   501    20      0 2026-10-03 04:05:49 /d${folder}`);
+      for (let file = 0; file < 50; file++) {
+        json.push(node(`/d${folder}/f${file}`, "file"));
+        long.push(`-rw-r--r--   501    20      1 2026-10-03 04:05:49 /d${folder}/f${file}`);
+      }
       json.push(node(`/d${folder}/.bin`, "symlink"));
       long.push(`Lrwxr-xr-x   501    20      0 2026-10-03 04:05:49 /d${folder}/.bin -> ../t${folder}`);
     }
@@ -434,31 +438,6 @@ describe("restic engine: entries", () => {
     expect(listed.count).toBe(2000 * 52);
     expect(count).toBe(2000 * 52);
     expect(links).toBe(2000);
-    expect(host.calls).toHaveLength(3);
-  });
-
-  test("more unplaceable symlink folders than the budget fail before any cat tree runs", async () => {
-    const recorded = fixture("ls");
-    const header = recorded.stdout.split("\n")[0];
-    const lines = [header ?? ""];
-    for (let folder = 0; folder < 40; folder++)
-      lines.push(
-        JSON.stringify({
-          name: "l",
-          type: "symlink",
-          path: `/d${folder}/l`,
-          mode: 134218221,
-          mtime: "2026-10-03T04:05:49+02:00",
-          message_type: "node",
-          struct_type: "node",
-        }),
-      );
-    const { host, engine } = setup([
-      edited(recorded, { stdout: `${lines.join("\n")}\n` }),
-      edited(fixture("ls-long"), { stdout: "snapshot x:\n" }),
-    ]);
-    const result = failure(await engine.entries(BACKUP_ID, () => {}));
-    expect(result.finding.code).toBe("restic.output-invalid");
     expect(host.calls).toHaveLength(3);
   });
 
@@ -724,24 +703,111 @@ describe("restic tags: the codec keeps every tag restic would change (D26, fix r
 });
 
 describe("restic ls -l records", () => {
+  const read = (wanted: string[], lines: string[], maxRecordChars?: number) => {
+    const reader = new LongListingReader(new Set(wanted), maxRecordChars);
+    for (const line of ["snapshot 0 of [/] filtered by []:", ...lines]) reader.line(line);
+    return reader.end();
+  };
+  const entry = (mode: string, path: string) => `${mode}   501    20      0 2026-10-03 04:08:59 ${path}`;
+
   test("a plain file's line (type written as -) ends the symlink record before it", () => {
-    const reader = new LongListingReader(new Set(["/l", "/n\nl"]));
-    for (const line of [
-      "snapshot 0 of [/] filtered by []:",
-      "Lrwxr-xr-x   501    20      0 2026-10-03 04:08:59 /l -> ../README.md",
-      "-rw-r--r--   501    20     38 2026-10-03 04:08:59 /weird",
-      "Lrwxr-xr-x   501    20      0 2026-10-03 04:08:59 /n",
-      "l -> t",
-      "x ",
-      // Go writes setuid as a type letter (u), never as an s in the permission bits.
-      "urwxr-xr-x   501    20     38 2026-10-03 04:08:59 /setuid",
-    ])
-      reader.line(line);
-    expect(reader.end()).toEqual(
+    const listing = read(
+      ["/l", "/n\nl"],
+      [
+        entry("Lrwxr-xr-x", "/l -> ../README.md"),
+        entry("-rw-r--r--", "/weird"),
+        entry("Lrwxr-xr-x", "/n"),
+        "l -> t",
+        "x ",
+        // Go writes setuid as a type letter (u), never as an s in the permission bits.
+        entry("urwxr-xr-x", "/setuid"),
+      ],
+    );
+    expect(listing.targets).toEqual(
       new Map([
         ["/l", "../README.md"],
         ["/n\nl", "t\nx "],
       ]),
     );
+    expect(listing.records).toBe(4);
+    expect(listing.reliable).toBe(true);
+  });
+
+  test("a target holding a line break and an entry-like line adds a record: the count exposes it (N1)", () => {
+    // The symlink /s points at "x\n-rw-r--r-- … /zz": its record ends early and a forged plain-file record follows.
+    const listing = read(["/s"], [entry("Lrwxr-xr-x", "/s -> x"), entry("-rw-r--r--", "/zz")]);
+    expect(listing.targets.get("/s")).toBe("x");
+    expect(listing.records).toBe(2); // ls --json listed one entry, so the caller distrusts this listing
+  });
+
+  test("a line that does not look like an entry (a year that is not four digits) joins the previous record and is counted out (N1)", () => {
+    const listing = read(
+      ["/s"],
+      [entry("Lrwxr-xr-x", "/s -> t"), "-rw-r--r--   501    20      0 10000-01-01 00:00:00 /far"],
+    );
+    expect(listing.records).toBe(1); // two entries in ls --json: the caller distrusts this listing
+  });
+
+  test("a carriage return ending a target is kept (N1, N2)", () => {
+    expect(read(["/c"], [entry("Lrwxr-xr-x", "/c -> tar\r")]).targets.get("/c")).toBe("tar\r");
+  });
+
+  test("a record that grows past its bound makes the listing unreliable instead of growing on (N4)", () => {
+    const listing = read(["/s"], [entry("Lrwxr-xr-x", "/s -> t"), ...Array(50).fill("x".repeat(100))], 1_000);
+    expect(listing.reliable).toBe(false);
+  });
+});
+
+describe("restic engine: entries cross-checks ls -l against ls --json (fix r2 N1, N6)", () => {
+  test("a record count that differs from the listing's sends every symlink to cat tree", async () => {
+    const long = fixture("ls-long");
+    // One extra entry-like line (as a target with a line break could forge) and a wrong target for /link.
+    const forged = long.stdout.replace(
+      "/link -> a.txt\n",
+      "/link -> wrong\n-rw-r--r--   501    20      0 2026-10-03 04:05:49 /forged\n",
+    );
+    const { host, engine } = setup([
+      fixture("ls"),
+      edited(long, { stdout: forged }),
+      fixture("cat-tree"),
+      fixture("cat-tree-sub"),
+    ]);
+    const seen: EntryMeta[] = [];
+    value(await engine.entries(BACKUP_ID, (entry) => seen.push(entry)));
+    expect(seen.find((entry) => entry.path === "link")?.linkTarget).toBe("a.txt");
+    expect(seen.find((entry) => entry.path === "sub/odd -> name")?.linkTarget).toBe("x -> y");
+    expect(host.calls.slice(3).map((call) => call.args?.at(-1))).toEqual([
+      `${BACKUP_ID}:/`,
+      `${BACKUP_ID}:/sub`,
+    ]);
+  });
+
+  test("too many unclear symlink folders is restic.symlinks-unclear, naming symlinks and a fix", async () => {
+    const recorded = fixture("ls");
+    const header = recorded.stdout.split("\n")[0];
+    const lines = [header ?? ""];
+    for (let folder = 0; folder < 40; folder++)
+      lines.push(
+        JSON.stringify({
+          name: "l",
+          type: "symlink",
+          path: `/d${folder}/l`,
+          mode: 134218221,
+          mtime: "2026-10-03T04:05:49+02:00",
+          message_type: "node",
+          struct_type: "node",
+        }),
+      );
+    const { host, engine } = setup([
+      edited(recorded, { stdout: `${lines.join("\n")}\n` }),
+      edited(fixture("ls-long"), { stdout: "snapshot x:\n" }),
+    ]);
+    const result = failure(await engine.entries(BACKUP_ID, () => {}));
+    expect(result.finding.code).toBe("restic.symlinks-unclear");
+    expect(result.exitCode).toBe(6);
+    expect(result.finding.paths?.slice(0, 2)).toEqual(["d0/l", "d1/l"]);
+    expect(result.finding.paths?.length).toBeLessThanOrEqual(10);
+    expect(result.finding.fix).toContain("rename");
+    expect(host.calls).toHaveLength(3);
   });
 });
