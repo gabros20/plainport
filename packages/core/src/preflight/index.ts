@@ -292,12 +292,14 @@ export const unpushedFinding = (git: GitFacts): Finding | undefined => {
     ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
     ...(stashes > 0 ? [stashText] : []),
   ];
+  /** One commit or one stash, and nothing else, takes a singular verb. */
+  const one = unpushed.commits + stashes === 1;
   const remote = git.remotes[0] ?? "origin";
   const besides = unpushedBesides(git);
   if (git.remotes.length === 0) {
     if (what.length === 0) return undefined;
     return finding("git.unpushed", {
-      message: `the repository has no remote, so its ${andList(what)} exist only in this folder`,
+      message: `the repository has no remote, so its ${andList(what)} ${one ? "exists" : "exist"} only in this folder`,
       fix: [
         "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
         ...besides,
@@ -307,7 +309,7 @@ export const unpushedFinding = (git: GitFacts): Finding | undefined => {
   if (!git.remoteBranches) {
     if (what.length === 0) return undefined;
     return finding("git.unpushed", {
-      message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} are not known to be on a remote`,
+      message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} ${one ? "is" : "are"} not known to be on a remote`,
       fix: [
         `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
         ...besides,

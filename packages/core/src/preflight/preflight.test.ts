@@ -777,6 +777,23 @@ describe("preflight: the git.unpushed finding, by case (q1)", () => {
       ["git push -u origin release", "git switch -c <branch>"],
     ],
     ["only a stash", { stashes: 2 }, "2 stashes exist only in this folder", ["git stash list"]],
+    [
+      "no remote, one commit: the verb agrees",
+      {
+        remotes: [],
+        remoteBranches: false,
+        unpushed: { commits: 1, branches: [{ name: "main", commits: 1 }], detachedHead: 0 },
+        localOnly: ["main"],
+      },
+      "the repository has no remote, so its 1 commit exists only in this folder",
+      ["git remote add origin <url>"],
+    ],
+    [
+      "remote never fetched, one stash: the verb agrees",
+      { remoteBranches: false, stashes: 1 },
+      "none of the branches of origin have been fetched, so its 1 stash is not known to be on a remote",
+      ["git fetch origin"],
+    ],
   ];
   for (const [name, over, message, fixes] of cases) {
     test(name, () => {
