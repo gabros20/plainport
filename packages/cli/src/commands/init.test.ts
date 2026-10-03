@@ -472,3 +472,37 @@ describe("init: secrets stay references (fix wave r1)", () => {
     expect(managed()).toMatchObject({ stores: { local: { secret: "file:~/secrets/ssd.key" } } });
   });
 });
+
+describe("init: secrets stay references (fix wave r2)", () => {
+  test("a literal --store-secret is refused at the argument boundary, never echoed: no --yes, --dry-run, --json", async () => {
+    box.dir("work");
+    for (const extra of [[], ["--dry-run"], ["--json"], ["--yes"], ["--yes", "--json"]]) {
+      const run = await init([
+        "--root",
+        "work=~/work",
+        "--store-path",
+        "~/ssd",
+        "--store-secret",
+        "hunter2",
+        ...extra,
+      ]);
+      expect(run.code).toBe(2);
+      expect(`${run.out}${run.err}`).not.toContain("hunter2");
+    }
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+
+  test("--store-secret for a store already set up, without --store-path, is refused with the exact fix", async () => {
+    box.dir("work");
+    expect(
+      (await init(["--root", "work=~/work", "--store-path", "~/ssd", "--device", "mbp", "--yes"])).code,
+    ).toBe(0);
+    box.file("secrets/ssd.key", "k\n");
+    const run = await init(["--store-secret", "file:~/secrets/ssd.key", "--yes", "--json"]);
+    expect(run.code).toBe(2);
+    expect(envelope(run.out).error).toMatchObject({
+      finding: { code: "usage.invalid" },
+      hint: "plainport init --store-path ~/ssd --store-secret file:~/secrets/ssd.key --yes",
+    });
+  });
+});

@@ -125,7 +125,9 @@ export const init = defineCommand({
     "store-path": z.string().min(1).optional().meta({
       description: "A local folder for the store, e.g. on an external disk; --store names it (default local)",
     }),
-    "store-secret": z.string().optional().meta({
+    // A reference, checked at the argument boundary, so a password typed here by mistake is refused before any
+    // message or re-run hint could repeat it (AGENTS.md rule 9).
+    "store-secret": SecretRefSchema.optional().meta({
       description:
         "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD",
     }),
@@ -294,12 +296,20 @@ export const init = defineCommand({
         : { kind: "bind", key: r.key, path: r.path },
     );
     const secret = args["store-secret"];
-    if (secret !== undefined && !SecretRefSchema.safeParse(secret).success) {
+    if (secret !== undefined && storePath === undefined) {
+      // The reference belongs to the store it is recorded with: never applied silently to one already set up.
+      const named = ctx.store ?? config.defaultStore;
+      const existing = named === undefined ? undefined : config.stores[named];
       return fail(
         finding("usage.invalid", {
-          message:
-            "--store-secret is not a secret reference (its value is not shown: it may be the password itself)",
-          fix: "pass where the password is, never the password: --store-secret env:<VARIABLE> or file:<path>",
+          message: "--store-secret is recorded with --store-path; pass the store's path too",
+          fix: [
+            "plainport init",
+            `--store-path ${existing !== undefined && "path" in existing ? word(existing.path) : "<path>"}`,
+            ...(ctx.store === undefined ? [] : [`--store ${word(ctx.store)}`]),
+            `--store-secret ${word(secret)}`,
+            "--yes",
+          ].join(" "),
         }),
       );
     }
