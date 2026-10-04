@@ -19,12 +19,14 @@
     "contract": "bun scripts/contract.ts",
     "secrets": "bun scripts/secrets.ts",
     "hooks": "bun scripts/install-hooks.ts",
-    "check:version": "bun scripts/check-version.ts"
+    "check:version": "bun scripts/check-version.ts",
+    "eval:agent": "bun evals/agent-smoke/run.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/bun": "1.4.2",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "zod": "4.6.5"
   }
 }
