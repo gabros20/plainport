@@ -41,6 +41,7 @@ import { testHost } from "../testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
+import { settledOffload } from "../testing/settle.ts";
 import { ulid } from "../ulid.ts";
 import { runDehydrate, runHydrate } from "./hydrate.ts";
 import { openSaga } from "./journaled.ts";
@@ -220,13 +221,11 @@ const value = <T>(
   return result.value;
 };
 
-/** Offloads the web project (or another folder) and waits for its trash to be deleted. */
+/** Offloads the web project (or another folder) and waits until its detached delete has finished (trash, claim, journal). */
 const offload = async (path = "web") => {
   const done = value(await runOffload(offloadDeps(), { project: await ref(`work:${path}`) }));
-  if (done.keepUntil === undefined)
-    // The detached delete may be slow on a loaded runner: up to 30 s.
-    for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", done.op)); i++)
-      await Bun.sleep(25);
+  // The detached delete may be slow on a loaded runner: up to 30 s.
+  if (done.keepUntil === undefined) await settledOffload(box.paths, done);
   return done;
 };
 
@@ -1029,8 +1028,7 @@ describe("onload: preflight refusals change nothing", () => {
     expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
     // Offloaded from there: the stub stands beside it, the registry keeps the override.
     const off = value(await runOffload(offloadDeps(), { project: await ref() }));
-    for (let i = 0; i < 400 && existsSync(join(box.home, "elsewhere/.plainport-trash", off.op)); i++)
-      await Bun.sleep(25);
+    await settledOffload(box.paths, off);
     expect(existsSync(`${elsewhere}.plainport`)).toBe(true);
     expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
     // A plain onload lands there again, and the registry still says so.

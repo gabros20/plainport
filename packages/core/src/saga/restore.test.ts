@@ -24,6 +24,7 @@ import { testHost } from "../testing/host.ts";
 import { captureTree, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
+import { settledOffload } from "../testing/settle.ts";
 import { ulid } from "../ulid.ts";
 import { runOffload } from "./offload.ts";
 import { runOnload } from "./onload.ts";
@@ -111,8 +112,9 @@ const deps = (host: HostPorts = testHost()): RestoreDeps => ({
   log: () => {},
 });
 
-const offload = async () =>
-  value(
+/** Offloads web and waits until its detached delete has finished (trash, claim, journal), so later state is stable. */
+const offload = async () => {
+  const done = value(
     await runOffload(
       {
         host: testHost(),
@@ -130,6 +132,9 @@ const offload = async () =>
       { project: await ref() },
     ),
   );
+  if (done.keepUntil === undefined) await settledOffload(box.paths, done);
+  return done;
+};
 
 const onload = async () =>
   value(
