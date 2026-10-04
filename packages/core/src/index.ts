@@ -29,6 +29,7 @@ export type * from "./ports/ecosystem.ts";
 export type * from "./ports/engine.ts";
 export {
   type Clock,
+  FAULT_STEP,
   type FaultPlan,
   faultSeam,
   type HostPorts,

@@ -30,6 +30,17 @@ export const buildPlan = (root: string, options: { outfile?: string; target?: st
   return { ok: true, builds: [build] };
 };
 
+/**
+ * The compile command for one build. Every build defines the crash matrix's hook off, so the composition root's test
+ * folds to false and the bundler drops the hook (packages/cli/src/test-hooks.ts, D67).
+ */
+export const buildCommand = (bun: string, root: string, { outfile, target }: Build): string[] => {
+  const command = [bun, "build", "--compile", join(root, "packages/cli/src/main.ts"), "--outfile", outfile];
+  command.push("--define", "globalThis.PLAINPORT_TEST_HOOKS=false");
+  if (target !== undefined) command.push(`--target=${target}`);
+  return command;
+};
+
 if (import.meta.main) {
   const root = resolve(import.meta.dir, "..");
   const { values } = parseArgs({
@@ -41,17 +52,12 @@ if (import.meta.main) {
     console.error(`bun run build: ${plan.message}`);
     process.exit(2);
   }
-  for (const { outfile, target } of plan.builds) {
-    const command = [
-      process.execPath,
-      "build",
-      "--compile",
-      join(root, "packages/cli/src/main.ts"),
-      "--outfile",
-      outfile,
-    ];
-    if (target !== undefined) command.push(`--target=${target}`);
-    const build = Bun.spawnSync(command, { cwd: root, stdout: "inherit", stderr: "inherit" });
-    if (build.exitCode !== 0) process.exit(build.exitCode ?? 1);
+  for (const build of plan.builds) {
+    const ran = Bun.spawnSync(buildCommand(process.execPath, root, build), {
+      cwd: root,
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if (ran.exitCode !== 0) process.exit(ran.exitCode ?? 1);
   }
 }

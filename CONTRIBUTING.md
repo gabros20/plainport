@@ -46,6 +46,28 @@ If nothing is found, plainport stops with finding `tool.missing` and exit code 6
 The fix it prints depends on the case: run `bun scripts/fetch-tools.ts` (source and development builds),
 reinstall plainport (release builds), or put the tool in `PLAINPORT_TOOLS_DIR` or unset it.
 
+### The crash matrix
+
+`test/crash-matrix/` kills both sagas at every journal step and after every side effect, runs `recover` and checks
+the six invariants (ADR-0017). Its rows come from the sagas' exported steps, seams and branches, so a new step adds
+rows by itself; a new branch must say how each variant reaches it. The in-process variant runs in `bun test` (T0);
+the SIGKILL subprocess variant runs in `bun run test:t1` and, on macOS, puts the project on a case-sensitive APFS
+disk image it makes with `hdiutil` and deletes afterwards.
+
+The subprocess variant drives the compiled binary through a test hook, not configuration: `PLAINPORT_TEST_FAULT_AT`
+(with `PLAINPORT_TEST_FAULT_OCCURRENCE`) makes it SIGKILL itself at a step, and `PLAINPORT_TEST_PAUSE_AT` with
+`PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed. Only a binary compiled with
+`--define globalThis.PLAINPORT_TEST_HOOKS=true` reads them; the matrix builds its own. `scripts/build.ts` (so
+`bun run build` and every release) defines it false, the hook is compiled out, and `scripts/build.test.ts` checks the
+release binary holds none of these names (D67). In a matrix build, `PLAINPORT_TRIPWIRE_REAL_HOME` must name the real
+home and `HOME` lie outside it, and the pause file must lie under `HOME` and pass the home guard
+(`packages/cli/src/test-hooks.ts`).
+
+Two more knobs for the matrix itself: `PLAINPORT_CRASH_PARALLEL` sets how many subprocess rows run at once (default 6,
+3 under CI, never more than the cores), and `PLAINPORT_CRASH_MATRIX_DAMAGE=1` runs every row of both variants with
+harm done after recover (a deleted `.env` or stub) and passes only if each row reports it, which proves the checks
+still bite.
+
 ## Definition of Done
 
 A task's review checks every line. A "no" sends it back.

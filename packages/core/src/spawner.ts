@@ -120,7 +120,8 @@ const awaitClaim = async (
 /**
  * HostPorts.deleteTrashDetached on POSIX (D47): /bin/sh in a new session (setsid), every stream on /dev/null, never
  * waited for. It first claims the trash as its own (trash-claim.ts, D64: its pid, written by itself), makes the trash
- * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal. This resolves ok only
+ * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal (D67: a crash between them leaves a journal whose trash is gone, which
+ * housekeeping and gc close; never a claim no journal leads to). This resolves ok only
  * once the claim is there (or the child already finished), polled through `io`, so a caller holding the project's
  * lock releases it only after any other deleter can see the claim. A child that exits without its claim is
  * fs.write-failed; one that has not claimed within CLAIM_WAIT_MS (a disk that hangs) is killed first, so no deleter

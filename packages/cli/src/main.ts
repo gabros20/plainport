@@ -15,6 +15,7 @@ import { clackPrompter } from "./prompt.ts";
 import type { CommandContext, Ports, Registry } from "./registry.ts";
 import { type IO, Output } from "./render.ts";
 import { localStores } from "./stores.ts";
+import { testFaultPlan } from "./test-hooks.ts";
 
 export type { IO } from "./render.ts";
 
@@ -143,8 +144,13 @@ if (import.meta.main) {
     stderr: (text) => process.stderr.write(text),
     isTTY: process.stdin.isTTY === true,
   };
-  // One host for the whole invocation: SIGINT and SIGTERM stop every child it runs before plainport exits 130.
-  const host = createMacosHost({ guard: guardFromEnv(process.env) });
+  // One host for the whole invocation: SIGINT and SIGTERM stop every child it runs before plainport exits 130. Its
+  // faults are the crash matrix's: the define folds this test to false in every release build, which drops the hook
+  // (test-hooks.ts, D67).
+  const guard = guardFromEnv(process.env);
+  const faults =
+    globalThis.PLAINPORT_TEST_HOOKS === true ? await testFaultPlan(process.env, guard) : undefined;
+  const host = createMacosHost({ guard, ...(faults === undefined ? {} : { faults }) });
   const argv = process.argv.slice(2);
   // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
   const cancellation = new Cancellation();

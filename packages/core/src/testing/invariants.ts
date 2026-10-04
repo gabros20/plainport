@@ -1,6 +1,7 @@
-// The invariants DESIGN.md "Testing and fault injection" asserts after every saga test, 1 to 3 here (4 and 5 are the
-// fold's, tested there; 6 is prune's). The saga tests call it after each run, and the crash matrix (Task 15) after
-// each recover:
+// The invariants DESIGN.md "Testing and fault injection" asserts after every saga test. invariantViolations checks 1
+// to 3 on a device; the saga tests call it after each run, and the crash matrix (Task 15) after each recover.
+// catalogInvariantViolations checks 4 to 6 on a store's events and its repository's snapshots, which the crash
+// matrix asserts on the event set each crash and recover leave (the fold's own property tests cover any history):
 //
 // 1. A project folder is deleted only if its snapshot was verified and committed. For a folder that is gone (deleted,
 //    or renamed into the trash), the deleted copy's own snapshot (the op its stub, its journal or the registry names)
@@ -13,12 +14,17 @@
 //    <root>/.plainport-staging/ belongs to an operation whose journal is open and unfinished, or released with a
 //    keepLocalFor deadline still ahead. A released trash with no deadline is deleted by a detached process after the
 //    command returns, so this waits up to `settleMs` for it.
+// 4. Folding the same events in any order (and with copies, as a union of stores gives) yields the same state.
+// 5. At most one lease: the fold names at most one per project, and no onload operation wrote two onloaded events.
+// 6. Nothing but prune --yes deletes a snapshot (M1 has no prune: no snapshot the repository held is ever gone), and
+//    nothing discards a snapshot an offloaded or checkpointed event names (D28: discarding is for failed uploads).
 //
 // Used only by tests.
 
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
-import { foldCatalog } from "../catalog/fold.ts";
+import type { CatalogEvent } from "../catalog/events.ts";
+import { type CatalogState, foldCatalog } from "../catalog/fold.ts";
 import { readEvents, storeEventLog } from "../catalog/log.ts";
 import { type Journal, JournalSchema, journalFile } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -239,4 +245,96 @@ export const captureTree = (dir: string): TreeCapture => {
   };
   walk("");
   return out;
+};
+
+export interface CatalogInvariantSubject {
+  /** Every event the store holds. */
+  events: readonly CatalogEvent[];
+  /** The engine ids of every snapshot the repository was seen to hold before (after the crash, say). */
+  snapshotsBefore: Iterable<string>;
+  /** The engine ids of the snapshots it holds now. */
+  snapshotsNow: Iterable<string>;
+  /** How many shuffled orders invariant 4 folds besides the reversed one. Default 6. */
+  shuffles?: number;
+  /** The fold under test; foldCatalog by default (a test of this helper passes a broken one). */
+  fold?: (events: readonly CatalogEvent[]) => CatalogState;
+}
+
+/** A small seeded generator (mulberry32), so a failing order can be reproduced from the seed in the message. */
+const seeded = (seed: number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+const shuffled = <T>(list: readonly T[], seed: number): T[] => {
+  const random = seeded(seed);
+  const out = [...list];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [out[i], out[j]] = [out[j] as T, out[i] as T];
+  }
+  return out;
+};
+
+/** JSON with every object's keys sorted: the same state reads the same whatever order its maps were built in. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+      : v,
+  );
+
+/** Every invariant 4–6 violation, as sentences; none means all hold. */
+export const catalogInvariantViolations = (subject: CatalogInvariantSubject): string[] => {
+  const problems: string[] = [];
+  const fold = subject.fold ?? foldCatalog;
+  const { events } = subject;
+  const state = fold(events);
+  const expected = canonical(state);
+
+  // 4
+  const orders: [string, CatalogEvent[]][] = [
+    ["reversed", [...events].reverse()],
+    ["doubled", [...events, ...[...events].reverse()]],
+  ];
+  for (let seed = 1; seed <= (subject.shuffles ?? 6); seed++)
+    orders.push([`shuffle ${seed}`, shuffled(events, seed)]);
+  for (const [name, order] of orders)
+    if (canonical(fold(order)) !== expected)
+      problems.push(`invariant 4: folding the events ${name} gives another state`);
+
+  // 5: the fold's lease is one by its schema; what a crash could add is a second onloaded event for one onload.
+  const onloads = new Map<string, Set<string>>();
+  for (const e of events)
+    if (e.type === "onloaded") onloads.set(e.op, (onloads.get(e.op) ?? new Set()).add(e.id));
+  for (const [op, ids] of onloads)
+    if (ids.size > 1) problems.push(`invariant 5: the onload ${op} wrote ${ids.size} onloaded events`);
+  for (const [id, project] of Object.entries(state.projects))
+    if (project.status === "shelved" && project.lease !== null)
+      problems.push(`invariant 5: the project ${id} is shelved, yet ${project.lease.device} holds its lease`);
+
+  // 6
+  const now = new Set(subject.snapshotsNow);
+  for (const id of new Set(subject.snapshotsBefore))
+    if (!now.has(id)) problems.push(`invariant 6: the repository no longer holds ${id}`);
+  /** Snapshot ids and their stored restic ids, mapped to the type of the event that made them. */
+  const made = new Map<string, string>();
+  for (const e of events)
+    if (e.type === "offloaded" || e.type === "checkpointed") {
+      made.set(e.snapshot, e.type);
+      for (const stored of Object.values(e.stored)) made.set(stored, e.type);
+    }
+  for (const e of events) {
+    if (e.type !== "snapshot-discarded") continue;
+    const by = [e.snapshot, ...Object.values(e.stored)]
+      .map((id) => made.get(id))
+      .find((t) => t !== undefined);
+    if (by !== undefined)
+      problems.push(
+        `invariant 6: ${e.snapshot} is discarded although ${by === "offloaded" ? "an" : "a"} ${by} event names it`,
+      );
+  }
+  return problems;
 };
