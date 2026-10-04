@@ -11,11 +11,11 @@ import { appendEvent, type CatalogEvent, readEvents, storeEventLog } from "../ca
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { readJournals } from "../journal/index.ts";
-import { readStagingRecords } from "../recover/staging.ts";
 import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { readStagingRecords } from "../recover/staging.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { setUpStore } from "../store.ts";

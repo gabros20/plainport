@@ -11,7 +11,7 @@
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
-import { assertSystemError, type LocalIo } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, journalFile, readJournals } from "../journal/index.ts";
 import { acquireLock, type LockHolder, liveHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -236,7 +236,20 @@ export const withProjectLock = async <T>(
       );
     }
     const own = held[0] as (typeof held)[number];
-    return await body({ stillHeld: () => own.stillHeld() }, open[0]);
+    // A lock file that cannot be read cannot be shown to be this run's: it reads as lost, so the body stops before
+    // its next change, and the reason is said (AGENTS.md rule 7).
+    const stillHeld = async (): Promise<boolean> => {
+      try {
+        return await own.stillHeld();
+      } catch (error) {
+        ctx.log(
+          "warn",
+          `the lock ${own.path} could not be read (${systemErrorCode(error)}), so this run cannot show it still holds it; it stops before its next change`,
+        );
+        return false;
+      }
+    };
+    return await body({ stillHeld }, open[0]);
   } finally {
     for (const lock of held.reverse()) {
       try {

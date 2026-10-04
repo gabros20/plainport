@@ -48,3 +48,56 @@ describe("roots: registry.json", () => {
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v: 1, projects: {} });
   });
 });
+
+describe("roots: registry.json under a failing lock file (I9, rule 7)", () => {
+  const eio = () => Object.assign(new Error("EIO: injected"), { code: "EIO" });
+  const lockFile = () => `${box.paths.registryFile}.lock`;
+
+  test("a lock file that cannot be re-read before the write is its write failure: nothing written, nothing thrown", async () => {
+    let broken = false;
+    const failing = {
+      ...io,
+      fs: {
+        ...io.fs,
+        readText: async (path: string) => {
+          if (broken && path === lockFile()) throw eio();
+          return io.fs.readText(path);
+        },
+      },
+    };
+    const result = await updateRegistry(failing, box.paths, (registry) => {
+      broken = true;
+      registry.projects["01ARYZ6S410000000000000000"] = entry;
+      return ok(registry);
+    });
+    expect(result.ok ? "written" : result.finding.code).toBe("config.write-failed");
+    expect(existsSync(box.paths.registryFile)).toBe(false);
+    // The lock left behind is this process's, from a finished acquisition: the next update breaks it as stale.
+    broken = false;
+    const again = await updateRegistry(io, box.paths, (registry) => ok(registry), { timeoutMs: 1_000 });
+    expect(again.ok).toBe(true);
+  });
+
+  test("a lock file that cannot be removed after the write keeps the write's success", async () => {
+    const failing = {
+      ...io,
+      fs: {
+        ...io.fs,
+        unlink: async (path: string) => {
+          if (path === lockFile()) throw eio();
+          return io.fs.unlink(path);
+        },
+      },
+    };
+    const result = await updateRegistry(failing, box.paths, (registry) => {
+      registry.projects["01ARYZ6S410000000000000000"] = entry;
+      return ok(registry);
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(readFileSync(box.paths.registryFile, "utf8")).projects).toEqual({
+      "01ARYZ6S410000000000000000": entry,
+    });
+    const again = await updateRegistry(io, box.paths, (registry) => ok(registry), { timeoutMs: 1_000 });
+    expect(again.ok).toBe(true);
+  });
+});
