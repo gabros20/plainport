@@ -59,7 +59,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; sync the store or run plainport doctor",
+      "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; connect or sync the store that holds every snapshot",
   },
   "command.cancelled": {
     severity: "block",
@@ -665,7 +665,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 4,
     summary:
-      "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport history lists its snapshots",
+      "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport status <project> names its head",
   },
   "toolchain.mismatch": {
     severity: "warn",

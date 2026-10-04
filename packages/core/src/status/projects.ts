@@ -568,13 +568,15 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     };
   if (p.conditions.includes("incomplete"))
     return {
-      command: "plainport doctor",
-      reason: "the catalog misses snapshots: connect the store that holds every snapshot, or run doctor",
+      command: `plainport restore ${address} --snapshot <id> --to <path>`,
+      reason:
+        "the catalog misses snapshots: connect the store that holds every snapshot; meanwhile restore reads a snapshot it holds side by side",
     };
   if (p.state === "conflicted")
     return {
-      command: `plainport resolve ${address}`,
-      reason: `the catalog holds a fork (M2); plainport restore ${address} --snapshot <id> --to <path> reads either copy`,
+      command: `plainport restore ${address} --snapshot <id> --to <path>`,
+      reason:
+        "the catalog holds a fork: restore reads either copy side by side (settling which copy wins arrives in M2)",
     };
   if (p.trash.some((t) => t.due && !t.deleting))
     return { command: "plainport gc", reason: "a released trash is due and nothing is deleting it" };

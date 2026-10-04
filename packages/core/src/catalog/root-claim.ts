@@ -54,7 +54,7 @@ const partial = () =>
   fail(
     finding("store.failed", {
       message: `the store's root claim ${ROOT_CLAIM_KEY} is empty or partial: another plainport offload is writing it, or one stopped while writing it; nothing was written`,
-      fix: "wait for any plainport offload to this store to finish (on this device or another), then re-run; if it stays like this, run plainport doctor",
+      fix: `wait for any plainport offload to this store to finish (on this device or another), then re-run; if it stays like this, check ${ROOT_CLAIM_KEY} in the store`,
       paths: [ROOT_CLAIM_KEY],
     }),
   );

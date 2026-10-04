@@ -291,7 +291,7 @@ export const hydrateProject = async (
     if (untrusted.length > 0)
       deps.log(
         "info",
-        `${address}'s .plainport.toml asks to run ${untrusted.join(", ")}; it is code from the repository, and this version of plainport never runs it (plainport trust arrives later), so it was skipped`,
+        `${address}'s .plainport.toml asks to run ${untrusted.join(", ")}; it is code from the repository, and this version of plainport never runs it (trusting a project arrives in a later milestone), so it was skipped`,
       );
   }
   const env = installEnv(deps.env, secrets);

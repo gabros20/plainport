@@ -272,7 +272,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       fail(
         finding("journal.pending", {
           message: `${read.unreadable.join(", ")} ${read.unreadable.length === 1 ? "is a journal" : "are journals"} this version of plainport cannot read; ${read.unreadable.length === 1 ? "it was" : "they were"} left as ${read.unreadable.length === 1 ? "it is" : "they are"}`,
-          fix: "run the plainport that wrote it (plainport recover), or plainport doctor",
+          fix: "run plainport recover with the plainport version that wrote it",
           paths: read.unreadable,
         }),
       ),
@@ -657,13 +657,13 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       return fail(
         finding("catalog.head-moved", {
           message: `${journal.project.address} is conflicted in the catalog, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
-          fix: `plainport resolve ${shellWord(journal.project.address)} settles which copy wins, then run plainport recover`,
+          fix: `plainport restore ${shellWord(journal.project.address)} --snapshot <id> --to <path> reads either copy side by side; once the conflict is settled (M2), plainport recover finishes this offload`,
         }),
       );
     return fail(
       finding("catalog.incomplete", {
         message: `the catalog of ${journal.project.address} ${missing.length === 0 ? "has no single head" : `names snapshots it does not hold (${missing.join(", ")})`}, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
-        fix: "connect the store that holds them, or run plainport doctor, then run plainport recover",
+        fix: "connect the store that holds them, then run plainport recover",
       }),
     );
   }
@@ -711,7 +711,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     return fail(
       finding("store.failed", {
         message: `the offloaded event ${id} of ${journal.project.address} is not readable on store ${journal.store.name}; the folder was not touched`,
-        fix: "check the store (plainport doctor), then run plainport recover",
+        fix: "check that the store is connected and readable, then run plainport recover",
       }),
     );
   }

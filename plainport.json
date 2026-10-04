@@ -2643,7 +2643,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)"
               },
               "reason": {
                 "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
@@ -2815,7 +2815,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)"
               },
               "reason": {
                 "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
@@ -4164,7 +4164,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 6,
-      "summary": "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; sync the store or run plainport doctor"
+      "summary": "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; connect or sync the store that holds every snapshot"
     },
     {
       "code": "command.cancelled",
@@ -4822,7 +4822,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 4,
-      "summary": "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport history lists its snapshots"
+      "summary": "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport status <project> names its head"
     },
     {
       "code": "toolchain.mismatch",

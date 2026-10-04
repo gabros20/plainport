@@ -1245,7 +1245,7 @@ describe("onload: preflight refusals change nothing", () => {
     await expectShelvedUntouched();
   });
 
-  test("a conflicted head refuses with catalog.head-moved (exit 8) and names plainport resolve", async () => {
+  test("a conflicted head refuses with catalog.head-moved (exit 8) and names restore, which exists (I1)", async () => {
     const off = await offload();
     const id = await projectId();
     const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
@@ -1269,7 +1269,9 @@ describe("onload: preflight refusals change nothing", () => {
       );
     const result = await onload();
     expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([8, "catalog.head-moved"]);
-    expect(!result.ok && result.finding.fix).toContain("plainport resolve");
+    expect(!result.ok && result.finding.fix).toContain(
+      "plainport restore work:web --snapshot <id> --to <path>",
+    );
     await expectShelvedUntouched();
   });
 

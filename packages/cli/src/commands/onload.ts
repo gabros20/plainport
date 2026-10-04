@@ -34,7 +34,7 @@ const HydrateReportSchema = z.looseObject({
   ),
   untrusted: z.array(z.string()).meta({
     description:
-      "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)",
+      "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)",
   }),
   reason: z.string().optional().meta({
     description:
@@ -167,7 +167,7 @@ export const onload = defineCommand({
       ...(hydrate.untrusted.length === 0
         ? []
         : [
-            `skipped   ${hydrate.untrusted.join(", ")} from .plainport.toml (untrusted: runs only after plainport trust)`,
+            `skipped   ${hydrate.untrusted.join(", ")} from .plainport.toml (untrusted: this version never runs it)`,
           ]),
     ].join("\n");
   },

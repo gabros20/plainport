@@ -389,7 +389,7 @@ const sweepStaging = async (
         fail(
           finding("journal.pending", {
             message: `${read.unreadable.join(", ")} cannot be read by this version of plainport and may own a staging folder, so no staging folder without a known owner was removed`,
-            fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run plainport gc",
+            fix: "run plainport recover with the plainport version that wrote it, then re-run plainport gc",
             paths: read.unreadable,
           }),
         ),

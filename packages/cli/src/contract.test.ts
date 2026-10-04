@@ -439,6 +439,56 @@ describe("contract round trip: every command's --json failures match the publish
   });
 });
 
+/** The non-test TypeScript sources under packages/, comment lines left out. */
+const sources = (): { file: string; text: string }[] => {
+  const out: { file: string; text: string }[] = [];
+  const packages = join(repoRoot, "packages");
+  for (const pkg of readdirSync(packages)) {
+    const src = join(packages, pkg, "src");
+    if (!existsSync(src)) continue;
+    for (const entry of readdirSync(src, { withFileTypes: true, recursive: true })) {
+      const file = join(entry.parentPath, entry.name);
+      if (!entry.isFile() || !file.endsWith(".ts") || file.endsWith(".test.ts") || file.includes("/testing"))
+        continue;
+      const text = readFileSync(file, "utf8")
+        .split("\n")
+        .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+        .join("\n");
+      out.push({ file: file.slice(repoRoot.length + 1), text });
+    }
+  }
+  return out;
+};
+
+describe("what plainport tells people to run exists (I1)", () => {
+  test("no fix, next step or catalogue summary names a command DESIGN plans but this build does not have", () => {
+    const registered = new Set(REGISTRY.map((c) => c.name.split(" ")[0] as string));
+    const groupWords = new Set(REGISTRY.filter((c) => c.name.includes(" ")).map((c) => c.name.split(" ")[0]));
+    // Every command DESIGN.md names in code: those this build lacks must not be offered as a step to take.
+    const design = readFileSync(join(repoRoot, "docs/DESIGN.md"), "utf8");
+    const planned = new Set(
+      [...design.matchAll(/`plainport ([a-z][a-z-]*)/g)]
+        .map((m) => m[1] as string)
+        .filter((word) => !registered.has(word)),
+    );
+    expect(planned.has("doctor") && planned.has("resolve")).toBe(true);
+    const named: string[] = [];
+    for (const { file, text } of sources()) {
+      for (const m of text.matchAll(/\bplainport ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?/g)) {
+        const [, first = "", second] = m;
+        if (planned.has(first)) named.push(`${file}: plainport ${first}`);
+        else if (
+          groupWords.has(first) &&
+          second !== undefined &&
+          !REGISTRY.some((c) => c.name === `${first} ${second}`)
+        )
+          named.push(`${file}: plainport ${first} ${second}`);
+      }
+    }
+    expect(named).toEqual([]);
+  });
+});
+
 describe("version and help", () => {
   test("plainport version and --version print the baked-in version", async () => {
     expect((await capture(["version"], REGISTRY)).out).toBe(`plainport ${VERSION}\n`);

@@ -57,7 +57,7 @@ export const headCheck = (
       kind: "incomplete",
       finding: finding("catalog.incomplete", {
         message: `the catalog names ${plural(project.missing.length, "snapshot")} of ${address} it does not hold (${project.missing.join(", ")}), so its head is unknown; nothing was offloaded`,
-        fix: "connect the store that holds them, or run plainport doctor",
+        fix: "connect the store that holds them, then re-run",
       }),
     };
   }
@@ -67,7 +67,7 @@ export const headCheck = (
       kind: "incomplete",
       finding: finding("catalog.incomplete", {
         message: `this copy of ${address} came from snapshot ${base}, which the store's catalog does not hold`,
-        fix: "check that the root's store is the one the project was onloaded from, or run plainport doctor",
+        fix: "check that the root's store is the one the project was onloaded from, then re-run",
       }),
     };
   }
@@ -75,7 +75,7 @@ export const headCheck = (
     kind: "moved" as const,
     finding: finding("catalog.head-moved", {
       message: `${address} ${detail}; nothing local was deleted`,
-      fix: `plainport resolve ${shellWord(address)} settles which copy wins (M2); until then keep this folder`,
+      fix: `keep this folder; plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side (settling which copy wins arrives in M2)`,
     }),
   });
   if (project.conflicts.length > 0 || project.head === null) return moved("is conflicted in the catalog");
