@@ -12,7 +12,9 @@ The *why* behind decisions lives in the ADRs (`docs/adr/`); this file records *w
 - `scripts/install` installs plainport from a checkout as ADR-0020 lays it out: a read-only
   `~/.local/share/plainport/versions/<version>/` with restic and rclone beside the binary, a `current` link,
   `~/.local/bin/plainport` through it, and `--rollback` to the previous version (`--prefix` overrides `~/.local`).
-  An installed build looks for its tools only beside itself, even a `-dev` one, and its fix says to reinstall.
+  It keeps only the current and previous versions, refuses a release from a dirty tree and checks restic and
+  rclone against `tools.lock.json`. An installed build looks for its tools only beside itself, even a `-dev` one,
+  and its fix says to reinstall.
 - `bun scripts/gate-m1.ts`: the M1 gate. It round-trips pinned public demo projects through offload and onload
   (`--no-hydrate`) in a temp root and reports byte identity, the git checks and a performance baseline.
 - Development guardrails: Biome (`bun run lint`), gitleaks (`bun run secrets`, through Docker), a pre-commit

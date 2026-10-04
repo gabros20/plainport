@@ -1,3 +1,8 @@
 #!/bin/sh
 # Installs plainport from this checkout (ADR-0020); see scripts/install.ts for the flags.
-exec bun "$(dirname "$0")/install.ts" "$@"
+here="$(dirname "$0")"
+command -v bun >/dev/null 2>&1 || {
+  echo "scripts/install: bun not found; install Bun $(cat "$here/../.bun-version" 2>/dev/null) first (https://bun.sh)" >&2
+  exit 1
+}
+exec bun "$here/install.ts" "$@"

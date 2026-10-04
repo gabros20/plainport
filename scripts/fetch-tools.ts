@@ -121,6 +121,20 @@ const isCurrent = (binary: string, pin: Pin | undefined, version: string, archiv
   }
 };
 
+/**
+ * Whether the tools in one target folder (`.tools/<os>-<arch>/`) are the ones the lock pins: each pin names the
+ * lock's version and archive, and the binary still hashes to the pin. One line per tool that is not; scripts/install
+ * checks this before it bundles them.
+ */
+export const pinnedProblems = (folder: string, lock: Lock, target: Target): string[] =>
+  TOOL_NAMES.flatMap((name) => {
+    const tool = lock.tools[name];
+    const pin = readPin(join(folder, `.${name}.pin`));
+    return isCurrent(join(folder, name), pin, tool.version, tool.targets[target].sha256)
+      ? []
+      : [`${name} in ${folder} is not the ${tool.version} tools.lock.json pins`];
+  });
+
 // Unpacks the binary from a verified archive into `out`. Returns an error message, or undefined on success.
 const unpack = (
   format: LockTool["format"],

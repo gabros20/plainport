@@ -50,12 +50,15 @@ reinstall plainport (release and installed builds), or put the tool in `PLAINPOR
 ### Installing from a checkout
 
 `scripts/install` (after `bun scripts/fetch-tools.ts`) builds the binary and installs it as ADR-0020 lays it out:
-`~/.local/share/plainport/versions/<version>/` holds `plainport`, `restic` and `rclone`, read-only;
-`~/.local/share/plainport/current` points at the active version and `~/.local/bin/plainport` points through it. A dev
-build installs as `<version>+<UTC build time>.<commit>`, so each install is its own rollback point; an installed version
-is activated again rather than rebuilt, and none is ever deleted. `scripts/install --rollback` makes the previous
-version current again. `--prefix <dir>` replaces `~/.local`; `--tools <dir>` bundles other restic and rclone binaries.
-Tests use only temp prefixes.
+`~/.local/share/plainport/versions/<version>/` holds `plainport`, `restic`, `rclone` and `build.json` (the commit),
+read-only; `~/.local/share/plainport/current` points at the active version and `~/.local/bin/plainport` points
+through it. A release installs as `<version>` and only from a clean tree; a dev build installs as
+`<version>+<UTC build time>.<commit>[.dirty]`. A version already installed from the same commit is activated again
+rather than rebuilt; one installed from another commit is refused. After an install only `current` and `previous` (the
+rollback target) are kept, and an install first sweeps the `.staging-*` folders and `.tmp-*` links an interrupted
+one left. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
+and skips that check. `scripts/install --rollback` makes the previous version current again; `--prefix <dir>`
+replaces `~/.local`. Tests use only temp prefixes.
 
 ### The crash matrix
 
