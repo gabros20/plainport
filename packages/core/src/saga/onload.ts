@@ -396,7 +396,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
             ? `offload it on that device first, or set onload.leases = "warn" to onload it here anyway`
             : `offload it on that device first, or keep in mind that two copies now exist`,
       });
-      if (config.onload.leases === "strict") return fail({ ...held, severity: "block" }, 8);
+      if (config.onload.leases === "strict") return fail(held, 8);
       report(held);
     }
 

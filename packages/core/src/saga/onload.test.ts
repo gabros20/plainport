@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import type { StreamEvent } from "@plainport/contract";
+import { FINDINGS, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { FIXTURES, GOLDEN_CASES } from "../../../eco-node/src/testing.ts";
@@ -1295,6 +1295,8 @@ describe("onload: preflight refusals change nothing", () => {
     config('[onload]\nleases = "strict"');
     const strict = await onload();
     expect(!strict.ok && [strict.exitCode, strict.finding.code]).toEqual([8, "lease.held"]);
+    // Its severity is the catalogue's, whatever the mode: the exit code says it refused (N6).
+    expect(!strict.ok && strict.finding.severity).toBe(FINDINGS["lease.held"].severity);
     await expectShelvedUntouched();
 
     config();
