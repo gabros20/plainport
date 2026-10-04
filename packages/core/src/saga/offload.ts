@@ -791,6 +791,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           files: verified.files,
           bytes: verified.bytes,
           strippedBytes: verified.prepared.plan.strip.reduce((sum, s) => sum + s.bytes, 0),
+          stripped: verified.prepared.plan.strip.length,
           ecosystems: verified.prepared.ecosystems,
         },
       };

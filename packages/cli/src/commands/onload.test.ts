@@ -314,6 +314,49 @@ describe("onload: the command", () => {
     await expectInvariants();
   });
 
+  /** The store's offloaded event of `snapshot`, edited in place by `edit`. */
+  const editEvent = (snapshot: string, edit: (event: { stats: Record<string, unknown> }) => void) => {
+    const folder = join(ssd(), "meta/v1/events");
+    for (const name of readdirSync(folder)) {
+      const event = JSON.parse(readFileSync(join(folder, name), "utf8"));
+      if (event.type !== "offloaded" || event.snapshot !== snapshot) continue;
+      edit(event);
+      writeFileSync(join(folder, name), `${JSON.stringify(event)}\n`);
+      return event;
+    }
+    throw new Error(`no offloaded event of ${snapshot}`);
+  };
+  const stateAfterNoHydrate = async () => {
+    expect((await cli(["onload", "work:web", "--no-hydrate"])).code).toBe(0);
+    return envelope((await cli(["status", "work:web", "--json"])).out).data.state;
+  };
+
+  test("a fresh offload that stripped nothing records stats.stripped 0 (D73)", async () => {
+    rmSync(join(dir(), "node_modules"), { recursive: true });
+    const snapshot = await offloaded();
+    expect(editEvent(snapshot, () => {}).stats).toMatchObject({ stripped: 0, strippedBytes: 0 });
+  });
+
+  test("an event without stats.stripped (an older writer, or recover's rebuilt fork) stays restored-unhydrated (D73)", async () => {
+    rmSync(join(dir(), "node_modules"), { recursive: true });
+    const snapshot = await offloaded();
+    // The shape recover writes for a lost fork event: what was stripped is unknown.
+    editEvent(snapshot, (event) => {
+      delete event.stats.stripped;
+      event.stats.ecosystems = [];
+    });
+    expect(await stateAfterNoHydrate()).toBe("restored-unhydrated");
+  });
+
+  test("a strip set of only empty folders and zero-byte files still counts as stripped: restored-unhydrated (D73)", async () => {
+    rmSync(join(dir(), "node_modules"), { recursive: true });
+    box.dir("work/web/node_modules/.bin");
+    box.file("work/web/node_modules/.package-lock.json", "");
+    const snapshot = await offloaded();
+    expect(editEvent(snapshot, () => {}).stats).toMatchObject({ stripped: 1, strippedBytes: 0 });
+    expect(await stateAfterNoHydrate()).toBe("restored-unhydrated");
+  });
+
   test("a project whose offload stripped its dependencies stays restored-unhydrated after --no-hydrate (C4)", async () => {
     await offloaded();
     expect((await cli(["onload", "work:web", "--no-hydrate"])).code).toBe(0);

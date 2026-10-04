@@ -52,6 +52,12 @@ const snapshotFields = {
     files: z.int().nonnegative(),
     bytes: z.int().nonnegative(),
     strippedBytes: z.int().nonnegative(),
+    /**
+     * How many paths the strip set left out (D73): 0 says for certain that nothing was, so the restored files are the
+     * whole folder. Absent when that is not known (an event recover rebuilt for a lost fork, D52); strippedBytes alone
+     * cannot tell, since a strip set of empty folders or zero-byte files sums to 0 too.
+     */
+    stripped: z.int().nonnegative().optional(),
     ecosystems: z.array(z.string().min(1)),
   }),
 };

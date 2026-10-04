@@ -395,6 +395,8 @@ describe("recover: an offload, at every journal step", () => {
       snapshot: journal.op,
       stored: { ssd: journal.verified },
     });
+    // What was stripped is not known any more: the rebuilt event says nothing of it (D73), so it reads as unknown.
+    expect(fork?.type === "offloaded" && fork.stats.stripped).toBeUndefined();
     expect(foldCatalog(await storeEvents()).projects[journal.project.id]?.status).toBe("conflicted");
     await expectLocalUntouched();
     await expectInvariants();

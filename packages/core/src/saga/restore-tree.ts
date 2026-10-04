@@ -91,8 +91,8 @@ export interface SnapshotTotals {
   bytes: number;
   /** The project folder's own mode, from the offloaded event (D55). */
   rootMode?: number;
-  /** What the offload stripped, from its event; absent when the event cannot be read. */
-  strippedBytes?: number;
+  /** How many paths the offload stripped, from its event (D73); absent when the event cannot be read or does not say. */
+  stripped?: number;
 }
 
 /**
@@ -185,7 +185,7 @@ export const checkSnapshot = async (options: {
     files,
     bytes,
     ...(rootMode === undefined ? {} : { rootMode }),
-    ...(made === undefined ? {} : { strippedBytes: made.stats.strippedBytes }),
+    ...(made?.stats.stripped === undefined ? {} : { stripped: made.stats.stripped }),
   });
 };
 

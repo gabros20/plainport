@@ -157,6 +157,11 @@
               "minimum": 0,
               "maximum": 9007199254740991
             },
+            "stripped": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
             "ecosystems": {
               "type": "array",
               "items": {
@@ -375,6 +380,11 @@
               "maximum": 9007199254740991
             },
             "strippedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "stripped": {
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991

@@ -781,7 +781,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       }
       if (there.value !== "ours") {
         // The journal does not hold the event's totals: they are read again from the snapshot's listing. What was
-        // stripped is not known any more, so the event records none.
+        // stripped is not known any more: strippedBytes is 0 and stats.stripped is left out, which reads as unknown
+        // (D73), so an onload of it with --no-hydrate stays restored-unhydrated.
         let files = 0;
         let bytes = 0;
         const listed = await store.engine.entries(
