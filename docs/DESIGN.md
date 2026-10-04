@@ -1203,13 +1203,31 @@ plainport is judged by one property, never losing a project, so the test suite i
 | Round trip | Offload then onload reproduces the original minus stripped paths | Tree-hash comparison in macOS CI |
 | Agent contract | `--json` output and exit codes stay stable | JSON Schema validation and snapshot tests |
 
+## Stack
+
+What M1 built and confirmed. The ADRs say why (ADR-0004, ADR-0005, ADR-0006, ADR-0020); versions are pinned in `package.json`, `bun.lock` and `tools.lock.json`.
+
+| Layer | Choice |
+| --- | --- |
+| Runtime | TypeScript on Bun (1.3.14, pinned in `.bun-version`), compiled with `bun build --compile`. No native modules. macOS is the M1 host; CI also builds on Ubuntu, and the tool lock pins Linux and Intel builds too |
+| Commands | A typed command registry: Zod argument and output schemas, a risk class and a handler per command. `util.parseArgs` parses; help, completions, `plainport.json` and the JSON Schemas are generated from it |
+| Schemas | Zod 4 at every edge, exported as JSON Schema into `schemas/` |
+| Config | TOML via `smol-toml`: `config.toml` is read, `managed.toml` is written |
+| Snapshots | restic 0.19.1, bundled and pinned with checksums. rclone 1.75.1 is bundled and pinned too, but M1 reaches stores only through the local file-system blob store; rclone carries catalog events from M2 |
+| Git and remote | The system's git, as installed, for scans and preflight. OpenSSH, also as installed, arrives with SFTP stores and peers (M2, M3) |
+| Prompts | `@clack/prompts`, only for `plainport init` in an interactive terminal |
+| Checks | `tsgo` for types, Biome for format and lint, gitleaks through Docker, a pre-commit hook |
+| Tests | `bun test` with fast-check; tier T0 with fakes and the in-process crash matrix, tier T1 with real restic and rclone and the SIGKILL crash matrix |
+
+Not yet in the stack: `age` and `age-plugin-se` (the secrets envelope, M3), `@noble/ciphers` (sealed catalog events, M2 on bucket stores) and Ink for the TUI (M6, re-check OpenTUI then).
+
 ## Build plan
 
 Build in six milestones, each closed by a gate you can test. Frontends come last, because by then the plan and event contract they render is settled.
 
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
-| **M1 · Local core** (start here) | Core, journal and recover · restic engine · Node plugin · external-SSD store<br>CLI: `init`, roots, `offload`, `onload`, `status`, `ls` · `--dry-run`, `--json` envelope, exit codes, risk classes | Crash matrix green; round trips byte-identical on your own projects |
+| **M1 · Local core** (start here) | Core, journal and recover · restic engine · Node plugin · external-SSD store<br>CLI: `init`, roots, `offload`, `onload`, `status`, `ls` · `--dry-run`, `--json` envelope, exit codes, risk classes | Crash matrix green; round trips byte-identical on five pinned public demo projects, without installs (the owner's own projects were not used, to spare disk) |
 | **M2 · Remote stores** | SFTP NAS and S3-compatible stores · catalog events through rclone · Keychain secrets<br>Leases, head check, conflicted state, `plainport resolve` | The two-Mac race ends in conflicted, never in lost work |
 | **M3 · Machines** | Devices and pairing · root bindings per device · append-only peer stores · `plainport move`<br>Secrets envelope and key adapters · warm return and clone adoption · offsite replication | A project moves MacBook → Mac mini → VPS → MacBook with git state intact |
 | **M4 · Agent-ready** | `plainport serve --stdio` · published `plainport.json` contract · attach to detached jobs<br>Agent adapters (Claude Code, Codex) · agent kit · handoff notes · arrival plans | An agent runs offload and onload unattended from `--json` alone |

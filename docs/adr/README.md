@@ -49,3 +49,4 @@ Each record uses plainkeep's shape so the two projects read alike:
 | [0019](0019-delivery-milestones-orchestrate.md) | Delivery: milestone plans run with `/orchestrate`, a release per gate | Accepted |
 | [0020](0020-versioning-release-install.md) | Versioning, release and install, the plainkeep way | Accepted |
 | [0021](0021-factory-floor.md) | The factory floor: guardrails that make agent-built code trustworthy | Accepted |
+| [0022](0022-run-decisions-in-m1.md) | Run decisions carried into M1 | Proposed (owner reviews the flagged ones) |
