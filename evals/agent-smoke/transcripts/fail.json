@@ -4,19 +4,29 @@
   "agentExitCode": 0,
   "fixtureIntact": true,
   "agentIssues": ["The refusal never says how to confirm."],
-  "observations": [{ "afterCall": 2, "project": "work:fixture", "state": "local" }],
+  "observations": [
+    {
+      "afterCall": 2,
+      "project": "work:fixture",
+      "state": "local"
+    }
+  ],
   "calls": [
     {
       "argv": ["offload", "fixture", "--json"],
       "exitCode": 3,
-      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"offload\",\"error\":{\"code\":3,\"message\":\"Needs confirmation\",\"finding\":{\"code\":\"risk.needs-yes\"}}}\n",
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"offload\",\"error\":{\"code\":3,\"message\":\"Needs confirmation\",\"finding\":{\"code\":\"risk.needs-yes\",\"severity\":\"block\",\"allowable\":false,\"message\":\"Needs confirmation\"}}}\n",
       "stderr": ""
     },
     {
       "argv": ["onload", "fixture", "--json"],
       "exitCode": 6,
-      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"onload\",\"error\":{\"code\":6,\"message\":\"\"}}\n",
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"onload\",\"error\":{\"code\":6,\"message\":\"Blocked without a next step.\"}}\n",
       "stderr": ""
     }
-  ]
+  ],
+  "finalObservation": {
+    "project": "work:fixture",
+    "state": "local"
+  }
 }

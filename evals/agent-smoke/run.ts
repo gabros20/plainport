@@ -1,14 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { posixSpawner, runProcess } from "../../packages/core/src/index.ts";
 import { buildCommand } from "../../scripts/build.ts";
 import { hashTree } from "../../test/crash-matrix/fixture.ts";
+import { statusEvidence } from "./observation.ts";
 import { agentArgs, sandboxEnv } from "./sandbox.ts";
 import { CallSchema, ObservationSchema, scoreTranscript, type Transcript } from "./scorer.ts";
+import { cleanupSession, prepareSessionCleanup } from "./session.ts";
 
 const RecordedCall = CallSchema.extend({
   startedAt: z.number(),
@@ -21,14 +23,31 @@ export function agentIssues(lines: string[]): string[] {
   const issues: string[] = [];
   let found = false;
   const inspect = (text: string) => {
-    const match = text.match(/\{\s*"contractIssues"\s*:\s*\[[\s\S]*?\]\s*\}/g);
-    for (const object of match ?? []) {
+    const starts: number[] = [];
+    let quoted = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index++) {
+      const char = text[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"' && starts.length > 0) quoted = true;
+      if (char === "{") starts.push(index);
+      if (char !== "}" || starts.length === 0) continue;
+      const start = starts.pop() as number;
       try {
-        const parsed = z.object({ contractIssues: z.array(z.string()) }).parse(JSON.parse(object));
-        found = true;
-        issues.push(...parsed.contractIssues);
+        const parsed = z
+          .object({ contractIssues: z.array(z.string()) })
+          .safeParse(JSON.parse(text.slice(start, index + 1)));
+        if (parsed.success) {
+          found = true;
+          issues.push(...parsed.data.contractIssues);
+        }
       } catch {
-        /* Other agent text is kept in the raw transcript. */
+        // Other prose is retained in the raw transcript.
       }
     }
   };
@@ -57,6 +76,7 @@ export async function runEvalWith(
   executeProcess: typeof runProcess,
   rawDir: string,
   temporaryParent = tmpdir(),
+  agentHome = homedir(),
 ) {
   const repo = resolve(import.meta.dir, "../..");
   const area = mkdtempSync(join(temporaryParent, "plainport-agent-smoke-"));
@@ -65,6 +85,8 @@ export async function runEvalWith(
   const cancel = () => abort.abort();
   process.on("SIGINT", cancel);
   process.on("SIGTERM", cancel);
+  let sessionCleanup: ReturnType<typeof prepareSessionCleanup> | undefined;
+  const cleanedAgentPaths: string[] = [];
   const raw: string[] = [];
   let rawBytes = 0;
   const issues: string[] = [];
@@ -76,6 +98,7 @@ export async function runEvalWith(
     agentIssues: issues,
     calls: [],
     observations: [],
+    observationIssues: [],
   };
   // Never serialize this password. Config and the recorder settings contain only its env reference.
   const password = randomBytes(32).toString("hex");
@@ -84,7 +107,16 @@ export async function runEvalWith(
     const path = `${join(area, "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`;
     const tools = process.env.PLAINPORT_TOOLS_DIR || join(repo, `.tools/${process.platform}-${process.arch}`);
     const env = sandboxEnv(area, path, tools);
-    for (const dir of ["bin", "tmp", "calls", "store", "work", "home/.config/plainport"])
+    for (const dir of [
+      "bin",
+      "tmp",
+      "calls",
+      "store",
+      "work",
+      "home/.config/plainport",
+      "codex-state",
+      "codex-log",
+    ])
       mkdirSync(join(area, dir), { recursive: true });
     const project = join(area, "work/fixture");
     cpSync(join(import.meta.dir, "project"), project, { recursive: true });
@@ -143,9 +175,10 @@ export async function runEvalWith(
               entry[1] !== undefined && !entry[0].startsWith("PLAINPORT_"),
           ),
         );
+        if (agent === "claude") sessionCleanup = prepareSessionCleanup(agentHome, area);
         const result = await executeProcess(posixSpawner, {
           command: agent,
-          args: agentArgs(agent),
+          args: agentArgs(agent, area),
           cwd: area,
           env: { ...agentEnv, PATH: path, PLAINPORT_EVAL_AREA: area, PLAINPORT_STORE_PASSWORD: password },
           stdin: readFileSync(join(import.meta.dir, "prompt.md"), "utf8"),
@@ -169,6 +202,9 @@ export async function runEvalWith(
         transcript.agentExitCode = result.ok ? result.value.exitCode : result.exitCode;
         if (!result.ok) issues.push(`${result.finding.message} ${result.finding.fix ?? ""}`);
         issues.push(...agentIssues(raw.map((line) => JSON.parse(line).text)));
+        const final = statusEvidence(await execute(binary, ["status", "work:fixture", "--json"]));
+        transcript.finalObservation = final.observation;
+        transcript.observationIssues.push(...final.issues);
       }
     }
     try {
@@ -196,13 +232,23 @@ export async function runEvalWith(
     } catch (error) {
       issues.push(`Call evidence could not be read: ${String(error)}`);
     }
+    if (sessionCleanup) {
+      try {
+        cleanedAgentPaths.push(...cleanupSession(sessionCleanup));
+      } catch (error) {
+        issues.push(`Agent session cleanup failed: ${String(error)}`);
+      }
+    }
     rmSync(area, { recursive: true, force: true });
   }
   // These are the only retained artifacts. They hold no config, environment dump or repository password.
   mkdirSync(rawDir, { recursive: true });
   const score = scoreTranscript(transcript);
   writeFileSync(join(rawDir, `${stem}.agent.jsonl`), `${raw.join("\n")}\n`);
-  writeFileSync(join(rawDir, `${stem}.json`), redact(JSON.stringify({ ...transcript, score }, null, 2)));
+  writeFileSync(
+    join(rawDir, `${stem}.json`),
+    redact(JSON.stringify({ ...transcript, cleanedAgentPaths, score }, null, 2)),
+  );
   console.log(JSON.stringify({ ...score, transcript: join(rawDir, `${stem}.json`) }, null, 2));
   return score.passed ? 0 : 1;
 }

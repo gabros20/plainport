@@ -4,7 +4,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { posixSpawner, runProcess } from "../../packages/core/src/index.ts";
-import { lastEnvelope, type Observation } from "./scorer.ts";
+import { statusEvidence } from "./observation.ts";
 
 if (import.meta.main) {
   const area = process.env.PLAINPORT_EVAL_AREA;
@@ -53,21 +53,11 @@ if (import.meta.main) {
     const stderr = result.ok
       ? result.value.stderr.text
       : `${result.finding.message}\n${result.finding.fix ?? ""}`;
-    const observations: Omit<Observation, "afterCall">[] = [];
-    // Read after every invocation, including a refusal: state evidence is independent of the agent's claims.
-    if (!abort.signal.aborted) {
-      const state = await execute(["status", "work:fixture", "--json"]);
-      if (state.ok && state.value.exitCode === 0) {
-        const text = new TextDecoder().decode(state.value.captured);
-        const parsed = lastEnvelope(text);
-        if (parsed.success && parsed.data.ok) {
-          const data = JSON.parse(text.trim().split("\n").at(-1) ?? "").data;
-          if (data.address === "work:fixture" && typeof data.state === "string")
-            observations.push({ project: data.address, state: data.state });
-        }
-      }
-    }
-    const issues: string[] = [];
+    const evidence = !abort.signal.aborted
+      ? statusEvidence(await execute(["status", "work:fixture", "--json"]))
+      : { issues: ["Status observation was cancelled."] };
+    const observations = evidence.observation ? [evidence.observation] : [];
+    const issues: string[] = [...evidence.issues];
     if (!result.ok) issues.push(`${result.finding.message} ${result.finding.fix ?? ""}`);
     if (result.ok && result.value.stderr.droppedBytes > 0)
       issues.push("Call stderr exceeded its recording limit.");

@@ -25,7 +25,7 @@ export function sandboxEnv(area: string, path: string, tools: string): Record<st
   };
 }
 
-export function agentArgs(agent: "claude" | "codex"): string[] {
+export function agentArgs(agent: "claude" | "codex", area?: string): string[] {
   return agent === "claude"
     ? [
         "-p",
@@ -53,6 +53,16 @@ export function agentArgs(agent: "claude" | "codex"): string[] {
         "workspace-write",
         "--ignore-user-config",
         "--ignore-rules",
+        ...(area
+          ? [
+              "-c",
+              `sqlite_home=${JSON.stringify(join(area, "codex-state"))}`,
+              "-c",
+              `log_dir=${JSON.stringify(join(area, "codex-log"))}`,
+              "-c",
+              'history.persistence="none"',
+            ]
+          : []),
         "-",
       ];
 }

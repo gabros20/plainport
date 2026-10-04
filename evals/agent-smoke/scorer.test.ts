@@ -29,7 +29,6 @@ test("scorer reports every missing fix, hint and confusing message in a failed r
     "refusal.missing-hint",
     "refusal.missing-fix",
     "refusal.missing-hint",
-    "message.confusing",
     "agent.confusing",
     "lifecycle.not-shelved",
     "lifecycle.not-local",
@@ -82,11 +81,12 @@ test("scorer reports calls that bypass JSON and malformed event lines", () => {
   ).toContain("output.invalid-event");
 });
 
-test("scorer requires the last observed fixture state to stay local", () => {
+test("scorer requires the final independent fixture state to stay local", () => {
   const transcript = recorded("pass") as Record<string, unknown>;
   expect(
     scoreTranscript({
       ...transcript,
+      finalObservation: { project: "work:fixture", state: "shelved" },
       observations: [
         { afterCall: 1, project: "work:fixture", state: "shelved" },
         { afterCall: 2, project: "work:fixture", state: "local" },
@@ -94,4 +94,69 @@ test("scorer requires the last observed fixture state to stay local", () => {
       ],
     }).returnedLocal,
   ).toBe(false);
+});
+
+test("scorer recognizes a human help finding and fix, but never substitutes stderr for JSON", () => {
+  const transcript = recorded("pass") as { calls: Record<string, unknown>[] };
+  const refusal = {
+    argv: ["help", "nonexistent"],
+    exitCode: 4,
+    stdout: "",
+    stderr: "plainport: command.unknown: unknown command: nonexistent\nfix: plainport help\n",
+  };
+  expect(
+    scoreTranscript({ ...transcript, calls: [...transcript.calls, refusal] }).refusalsMissingFix,
+  ).toEqual([]);
+  expect(scoreTranscript({ ...transcript, calls: [...transcript.calls, refusal] }).contractIssues).toEqual(
+    [],
+  );
+  expect(
+    scoreTranscript({
+      ...transcript,
+      calls: [...transcript.calls, { ...refusal, stderr: "fix: plainport help\n" }],
+    }).refusalsMissingFix,
+  ).toEqual([6]);
+  expect(
+    scoreTranscript({
+      ...transcript,
+      calls: [...transcript.calls, { ...refusal, argv: ["help", "nonexistent", "--json"] }],
+    }).refusalsMissingFix,
+  ).toEqual([6]);
+});
+
+test("scorer uses the public envelope schema", () => {
+  const transcript = recorded("pass") as { calls: Record<string, unknown>[] };
+  for (const envelope of [
+    { plainport_json: 1, ok: true, verb: "onload" },
+    { plainport_json: 1, ok: true, verb: "onload", data: {}, error: { code: 6, message: "oops" } },
+  ]) {
+    expect(
+      scoreTranscript({
+        ...transcript,
+        calls: [
+          ...transcript.calls,
+          { argv: ["onload", "--json"], exitCode: 0, stdout: JSON.stringify(envelope), stderr: "" },
+        ],
+      }).contractIssues.map((issue) => issue.code),
+    ).toContain("output.invalid-json");
+  }
+});
+
+test("scorer judges final local only from independent final status", () => {
+  const transcript = recorded("pass") as Record<string, unknown>;
+  expect(scoreTranscript({ ...transcript, finalObservation: undefined }).returnedLocal).toBe(false);
+  expect(
+    scoreTranscript({ ...transcript, finalObservation: { project: "work:fixture", state: "shelved" } })
+      .returnedLocal,
+  ).toBe(false);
+});
+
+test("scorer accepts final independent local evidence after shelving without earlier local evidence", () => {
+  const transcript = recorded("pass") as Record<string, unknown>;
+  expect(
+    scoreTranscript({
+      ...transcript,
+      observations: [{ afterCall: 5, project: "work:fixture", state: "shelved" }],
+    }).returnedLocal,
+  ).toBe(true);
 });

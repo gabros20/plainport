@@ -36,3 +36,26 @@ test("harness keeps reported confusion from Claude and Codex without scoring too
   expect(agentIssues([JSON.stringify({ type: "result", result: '{"contractIssues":[]}' })])).toEqual([]);
   expect(agentIssues([])).toEqual(["Agent did not supply its final contractIssues list."]);
 });
+
+test("harness parses complete JSON issue objects with delimiters inside strings", () => {
+  for (const text of [
+    'Done.\n```json\n{"contractIssues":["The response ended in ]} without a hint", "quote: \\" { }"]}\n```',
+    'Earlier {"other": true}. Final {"contractIssues":["The response ended in ]} without a hint", "quote: \\" { }"]}',
+  ])
+    expect(agentIssues([JSON.stringify({ type: "result", result: text })])).toEqual([
+      "The response ended in ]} without a hint",
+      'quote: " { }',
+    ]);
+});
+
+test("Codex retains login home but directs runtime databases and logs into the temporary area", () => {
+  const args = agentArgs("codex", "/tmp/plainport-agent-smoke-unique");
+  expect(args).toContain('sqlite_home="/tmp/plainport-agent-smoke-unique/codex-state"');
+  expect(args).toContain('log_dir="/tmp/plainport-agent-smoke-unique/codex-log"');
+  expect(args).toContain('history.persistence="none"');
+});
+
+test("harness finds the final JSON object after prose with an unmatched brace", () => {
+  const text = 'The help mentioned { placeholders.\n```json\n{"contractIssues":["Missing hint"]}\n```';
+  expect(agentIssues([JSON.stringify({ type: "result", result: text })])).toEqual(["Missing hint"]);
+});

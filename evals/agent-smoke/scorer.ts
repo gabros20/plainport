@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { StreamLineSchema } from "../../packages/contract/src/index.ts";
+import { EnvelopeSchema, StreamLineSchema } from "../../packages/contract/src/index.ts";
 
 export const CallSchema = z.object({
   argv: z.array(z.string()),
@@ -21,6 +21,8 @@ export const TranscriptSchema = z.object({
   agentIssues: z.array(z.string()),
   calls: z.array(CallSchema),
   observations: z.array(ObservationSchema),
+  finalObservation: ObservationSchema.omit({ afterCall: true }).optional(),
+  observationIssues: z.array(z.string()).default([]),
 });
 export type Call = z.infer<typeof CallSchema>;
 export type Observation = z.infer<typeof ObservationSchema>;
@@ -31,27 +33,17 @@ export interface ContractIssue {
   call?: number;
 }
 
-const Envelope = z
-  .object({
-    plainport_json: z.literal(1),
-    ok: z.boolean(),
-    verb: z.string(),
-    error: z
-      .object({
-        code: z.number().int(),
-        message: z.string(),
-        hint: z.string().optional(),
-        finding: z.object({ code: z.string(), fix: z.string().optional() }).optional(),
-      })
-      .optional(),
-  })
-  .passthrough();
+/** The human renderer emits a finding followed by its actionable fix or re-run line. */
+export function humanFinding(stderr: string) {
+  const match = stderr.match(/^plainport: ([a-z][a-z0-9.-]*): ([^\n]+)\n(?:fix: |re-run: )([^\n]+)$/m);
+  return match?.[3]?.trim() ? { code: match[1], message: match[2], fix: match[3].trim() } : undefined;
+}
 
 export function lastEnvelope(stdout: string) {
   try {
-    return Envelope.safeParse(JSON.parse(stdout.trim().split("\n").at(-1) ?? ""));
+    return EnvelopeSchema.safeParse(JSON.parse(stdout.trim().split("\n").at(-1) ?? ""));
   } catch {
-    return Envelope.safeParse(undefined);
+    return EnvelopeSchema.safeParse(undefined);
   }
 }
 
@@ -79,11 +71,12 @@ export function scoreTranscript(input: unknown) {
         issue("output.invalid-event", "A stdout line before the envelope is not a valid event.", number);
       }
     }
-    if (failed && (!parsed.success || !parsed.data.error?.finding?.fix?.trim())) {
+    const human = isHelp && !call.argv.includes("--json") ? humanFinding(call.stderr) : undefined;
+    if (failed && (!parsed.success || !parsed.data.error?.finding?.fix?.trim()) && !human?.fix) {
       refusalsMissingFix.push(number);
       issue("refusal.missing-fix", "Refusal has no finding with a non-empty fix.", number);
     }
-    if (failed && (!parsed.success || !parsed.data.error?.hint?.trim()))
+    if (failed && (!parsed.success || !parsed.data.error?.hint?.trim()) && !human?.fix)
       issue("refusal.missing-hint", "Refusal has no next-step hint.", number);
     if (call.argv.includes("--json") && !parsed.success)
       issue("output.invalid-json", "The final stdout line is not an envelope.", number);
@@ -95,16 +88,20 @@ export function scoreTranscript(input: unknown) {
     }
     if (call.exitCode === null) issue("call.interrupted", "Call did not produce an exit code.", number);
   }
+  for (const message of transcript.observationIssues) issue("observation.invalid", message);
+  if (!transcript.finalObservation)
+    issue("observation.final-missing", "Final independent status is missing.");
   for (const message of transcript.agentIssues) issue("agent.confusing", message);
   let shelvedAt: number | undefined;
-  let returnedLocal = false;
   for (const observation of transcript.observations) {
     if (observation.project !== transcript.project || observation.afterCall > transcript.calls.length)
       continue;
     if (observation.state === "shelved" && shelvedAt === undefined) shelvedAt = observation.afterCall;
-    returnedLocal =
-      observation.state === "local" && shelvedAt !== undefined && observation.afterCall > shelvedAt;
   }
+  const returnedLocal =
+    shelvedAt !== undefined &&
+    transcript.finalObservation?.project === transcript.project &&
+    transcript.finalObservation.state === "local";
   const reachedShelved = shelvedAt !== undefined;
   if (!reachedShelved) issue("lifecycle.not-shelved", "No observation shows the fixture shelved.");
   if (!returnedLocal) issue("lifecycle.not-local", "No later observation shows the fixture local.");
