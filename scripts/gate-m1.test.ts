@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { macOnlyTests, onMac } from "../test/platform.ts";
 import { describeT1 } from "../test/tiers.ts";
 import { buildCommand } from "./build.ts";
 import {
@@ -21,6 +22,7 @@ import {
   nulList,
   parseProjects,
   parseTimeL,
+  platformProblem,
   runGate,
   stripProblems,
 } from "./gate-m1.ts";
@@ -124,6 +126,13 @@ test("nulList reads git's -z output, so names git would quote (é, newlines) com
   expect(nulList("")).toEqual([]);
 });
 
+test("the gate refuses to run off macOS in M1, naming why and when that changes", () => {
+  expect(platformProblem("darwin")).toBeUndefined();
+  const linux = platformProblem("linux");
+  expect(linux).toContain("macOS only");
+  expect(linux).toContain("M3");
+});
+
 describe("stripProblems: the gate checks plainport's strip set itself (I1)", () => {
   const facts = {
     tracked: ["README.md", "package.json", "src/a.ts", "gate-commit.txt", "gate-staged.txt"],
@@ -189,12 +198,17 @@ const makeRemote = (work: string): { url: string; sha: string } => {
   return { url: `file://${remote}`, sha: git("rev-parse", "HEAD") };
 };
 
+// macOS only in M1: the binary has only the macOS host, whose preflight refuses on Linux (no BSD find -flags, no
+// lsof), and the gate refuses to run there; host-linux arrives with M3 (Machines) and lifts this, as for the crash
+// matrix's SIGKILL variant.
 describeT1("gate-m1 on a fixture project", () => {
+  const macTest = macOnlyTests();
   let report: GateReport;
   let sha: string;
   const work = join(scratch, "t1");
 
   beforeAll(async () => {
+    if (!onMac) return;
     const remote = makeRemote(work);
     sha = remote.sha;
     report = await runGate({
@@ -204,7 +218,7 @@ describeT1("gate-m1 on a fixture project", () => {
     });
   }, 300_000);
 
-  test("round-trips byte-identically, minus the stripped folders", () => {
+  macTest("round-trips byte-identically, minus the stripped folders", () => {
     expect(report.ok).toBe(true);
     const [result] = report.projects;
     expect(result?.problems).toEqual([]);
@@ -215,18 +229,21 @@ describeT1("gate-m1 on a fixture project", () => {
     expect(result?.stateAfter).toBe("restored-unhydrated");
   });
 
-  test("brings back the stash, the unpushed commit, the index, the edit, the untracked file and .env", () => {
-    const git = report.projects[0]?.git;
-    expect(git?.after).toEqual(git?.before);
-    expect(git?.before.head).not.toBe(sha);
-    expect(git?.before.unpushed).toBe(1);
-    expect(git?.before.stashes).toHaveLength(1);
-    expect(git?.before.staged).toEqual(["gate-staged.txt"]);
-    expect(git?.before.modified).toEqual(["README.md"]);
-    expect(git?.before.untracked).toEqual(["gate-untracked.txt"]);
-  });
+  macTest(
+    "brings back the stash, the unpushed commit, the index, the edit, the untracked file and .env",
+    () => {
+      const git = report.projects[0]?.git;
+      expect(git?.after).toEqual(git?.before);
+      expect(git?.before.head).not.toBe(sha);
+      expect(git?.before.unpushed).toBe(1);
+      expect(git?.before.stashes).toHaveLength(1);
+      expect(git?.before.staged).toEqual(["gate-staged.txt"]);
+      expect(git?.before.modified).toEqual(["README.md"]);
+      expect(git?.before.untracked).toEqual(["gate-untracked.txt"]);
+    },
+  );
 
-  test("records the performance baseline and deletes its temp root", () => {
+  macTest("records the performance baseline and deletes its temp root", () => {
     const result = report.projects[0];
     for (const run of [result?.offload, result?.onload]) {
       expect(run?.wallMs).toBeGreaterThan(0);
@@ -241,12 +258,15 @@ describeT1("gate-m1 on a fixture project", () => {
 });
 
 // The gate's FAIL side (I2): a plainport that loses work after a good onload, a commit that does not exist, a Ctrl-C.
+// macOS only in M1, for the same reason (host-linux arrives with M3).
 describeT1("gate-m1 fails when work is lost, and cleans up after itself", () => {
+  const macTest = macOnlyTests();
   const work = join(scratch, "t1-fail");
   let remote: { url: string; sha: string };
   let real: string;
 
   beforeAll(() => {
+    if (!onMac) return;
     remote = makeRemote(work);
     real = join(work, "real", "plainport");
     const built = Bun.spawnSync(
@@ -280,52 +300,68 @@ describeT1("gate-m1 fails when work is lost, and cleans up after itself", () => 
     runGate({ projects: [{ name: "fixture", url: remote.url, sha }], tmp: work, binary, log: () => {} });
   const leftovers = () => readdirSync(work).filter((n) => n.startsWith("plainport-gate-"));
 
-  test("a .env lost after the onload fails the gate", async () => {
-    const report = await gate(shim("drop-env", "rm .env"));
-    expect(report.ok).toBe(false);
-    expect(report.projects[0]?.problems).toContain("missing .env");
-    expect(leftovers()).toEqual([]);
-  }, 180_000);
+  macTest(
+    "a .env lost after the onload fails the gate",
+    async () => {
+      const report = await gate(shim("drop-env", "rm .env"));
+      expect(report.ok).toBe(false);
+      expect(report.projects[0]?.problems).toContain("missing .env");
+      expect(leftovers()).toEqual([]);
+    },
+    180_000,
+  );
 
-  test("a stash lost after the onload fails the gate", async () => {
-    const report = await gate(
-      shim("drop-stash", "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git update-ref -d refs/stash"),
-    );
-    expect(report.ok).toBe(false);
-    expect(report.projects[0]?.problems.some((p) => p.startsWith("git differs"))).toBe(true);
-    expect(leftovers()).toEqual([]);
-  }, 180_000);
+  macTest(
+    "a stash lost after the onload fails the gate",
+    async () => {
+      const report = await gate(
+        shim("drop-stash", "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git update-ref -d refs/stash"),
+      );
+      expect(report.ok).toBe(false);
+      expect(report.projects[0]?.problems.some((p) => p.startsWith("git differs"))).toBe(true);
+      expect(leftovers()).toEqual([]);
+    },
+    180_000,
+  );
 
-  test("a commit the remote does not have fails the clone cleanly and removes the temp root", async () => {
-    const report = await gate(real, "0".repeat(40));
-    expect(report.ok).toBe(false);
-    expect(report.projects[0]?.problems[0]).toStartWith("git fetch");
-    expect(existsSync(report.root)).toBe(false);
-    expect(leftovers()).toEqual([]);
-  }, 60_000);
+  macTest(
+    "a commit the remote does not have fails the clone cleanly and removes the temp root",
+    async () => {
+      const report = await gate(real, "0".repeat(40));
+      expect(report.ok).toBe(false);
+      expect(report.projects[0]?.problems[0]).toStartWith("git fetch");
+      expect(existsSync(report.root)).toBe(false);
+      expect(leftovers()).toEqual([]);
+    },
+    60_000,
+  );
 
-  test("Ctrl-C removes the temp root and exits 130", async () => {
-    const tmp = join(work, "sigint");
-    mkdirSync(tmp, { recursive: true });
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dir, "gate-m1.ts"),
-        "--projects",
-        `${remote.url}@${remote.sha}`,
-        "--binary",
-        real,
-        "--min-free-gb",
-        "0",
-      ],
-      { env: { ...process.env, TMPDIR: tmp }, stdout: "pipe", stderr: "pipe" },
-    );
-    const deadline = Date.now() + 60_000;
-    while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
-    expect(readdirSync(tmp)).toHaveLength(1);
-    await Bun.sleep(300);
-    child.kill("SIGINT");
-    expect(await child.exited).toBe(130);
-    expect(readdirSync(tmp)).toEqual([]);
-  }, 120_000);
+  macTest(
+    "Ctrl-C removes the temp root and exits 130",
+    async () => {
+      const tmp = join(work, "sigint");
+      mkdirSync(tmp, { recursive: true });
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, "gate-m1.ts"),
+          "--projects",
+          `${remote.url}@${remote.sha}`,
+          "--binary",
+          real,
+          "--min-free-gb",
+          "0",
+        ],
+        { env: { ...process.env, TMPDIR: tmp }, stdout: "pipe", stderr: "pipe" },
+      );
+      const deadline = Date.now() + 60_000;
+      while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
+      expect(readdirSync(tmp)).toHaveLength(1);
+      await Bun.sleep(300);
+      child.kill("SIGINT");
+      expect(await child.exited).toBe(130);
+      expect(readdirSync(tmp)).toEqual([]);
+    },
+    120_000,
+  );
 });
