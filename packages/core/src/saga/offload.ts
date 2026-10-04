@@ -288,8 +288,8 @@ export interface OffloadOutcome {
   localCopy: "deleted" | "kept" | "waiting";
   /** Absent when config says stub = false. */
   stub?: string;
-  /** Where the folder waits to be deleted. */
-  trash: string;
+  /** Where the folder is kept or waits to be deleted; absent when localCopy is deleted (D77). */
+  trash?: string;
   /** keepLocalFor: the trash is kept until then. */
   keepUntil?: string;
 }
@@ -853,7 +853,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         ...(freed ? {} : { freedBy: keepUntil === undefined ? "plainport recover" : "plainport gc" }),
         localCopy: freed ? "deleted" : keepUntil === undefined ? "waiting" : "kept",
         ...(stub === undefined ? {} : { stub }),
-        trash,
+        // A deleted local copy's trash is already going, so it is not named (D77).
+        ...(freed ? {} : { trash }),
         ...(keepUntil === undefined ? {} : { keepUntil }),
       });
     };

@@ -122,9 +122,9 @@ const OffloadOutputSchema = z.union([
     }),
     store: z.string(),
     stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
-    trash: z.string().meta({
+    trash: z.string().optional().meta({
       description:
-        "Where the folder was moved: kept there, or waiting there for recover; with localCopy deleted it is already being deleted and is soon gone",
+        "Where the folder was moved: kept there, or waiting there for recover. Absent when localCopy is deleted: it is already being deleted (D77)",
     }),
     localCopy: z.enum(["deleted", "kept", "waiting"]).optional().meta({
       description:

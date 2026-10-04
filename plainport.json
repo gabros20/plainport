@@ -1533,8 +1533,8 @@
                 "type": "string"
               },
               "trash": {
-                "type": "string",
-                "description": "Where the folder was moved: kept there, or waiting there for recover; with localCopy deleted it is already being deleted and is soon gone"
+                "description": "Where the folder was moved: kept there, or waiting there for recover. Absent when localCopy is deleted: it is already being deleted (D77)",
+                "type": "string"
               },
               "localCopy": {
                 "description": "deleted: keepLocalFor is 0 and the folder's detached delete has started, so nothing is kept (freedBytes has it). kept: offload.keepLocalFor keeps it until keepUntil, and onload renames it back. waiting: the delete could not start; plainport recover deletes it",
@@ -1558,8 +1558,7 @@
               "project",
               "snapshot",
               "freedBytes",
-              "store",
-              "trash"
+              "store"
             ],
             "additionalProperties": {}
           },

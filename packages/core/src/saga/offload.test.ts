@@ -1142,8 +1142,8 @@ describe("offload: fix wave r1", () => {
       deleteTrashDetached: async () => fail(finding("process.spawn-failed", { message: "no sh today" })),
     };
     const result = value(await runOffload(deps({}, host), { project: await ref() }));
-    expect(result.freedBytes).toBe(0);
-    expect(existsSync(join(result.trash, "web/src/main.ts"))).toBe(true);
+    expect([result.freedBytes, result.localCopy]).toEqual([0, "waiting"]);
+    expect(existsSync(join(result.trash as string, "web/src/main.ts"))).toBe(true);
     expect(journalNow().step).toBe("offload.release.delete");
     expect(logs.join("\n")).toContain("plainport recover");
     // Invariants 1 and 2 hold; 3 holds once recover has deleted the trash (Task 14).
@@ -1679,7 +1679,11 @@ describe("offload: fix wave r3 (D50)", () => {
     // A lost release.trash write leaves the journal at committed, with no trash: recover derives it.
     const atCommitted = seen.get("offload.committed") as OffloadJournal;
     expect(atCommitted.trash).toBeUndefined();
-    expect(saga.offloadTrashOf(atCommitted)).toBe(result.trash);
+    // The result names no trash once its delete has started (D77); the journal named it.
+    expect(result.trash).toBeUndefined();
+    expect(saga.offloadTrashOf(atCommitted)).toBe(
+      (seen.get("offload.release.trash") as OffloadJournal).trash as string,
+    );
     await expectInvariants();
   });
 

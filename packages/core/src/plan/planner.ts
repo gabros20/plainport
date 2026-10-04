@@ -331,11 +331,12 @@ export const prepareOffload = async (
   for (const [path, size] of gitFolders) consider({ path, bytes: size });
 
   const gitignored = await gitignoredFiles(host, req.dir, ctx, repos, included);
-  // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71).
+  // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71). With an empty
+  // strip set there is nothing to install back, and onload installs nothing (D73), so there is no arrival step (D77).
   const keepLocalFor = config.offload.keepLocalFor;
   const reusable = durationMs(keepLocalFor) > 0;
   const arrival: ArrivalItem[] =
-    steps.length === 0
+    steps.length === 0 || strip.value.entries.length === 0
       ? []
       : keepDeps
         ? [{ part: "deps", outcome: "restore", detail: "installed dependencies travel in the snapshot" }]
