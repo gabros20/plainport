@@ -131,3 +131,21 @@ export const systemErrorCode = (error: unknown): string => {
   if (code !== undefined && /^E[A-Z0-9]+$/.test(code)) return code;
   throw error;
 };
+
+/**
+ * Runs `make` (a folder or file made inside `holder`) after making the holder, where the holder is one another
+ * operation removes by rmdir once it is empty (`.plainport-trash`, `.plainport-staging`; no lock serializes two
+ * projects' operations in one root). An rmdir that lands between the holder and what `make` puts in it (mkdir -p
+ * makes them in two steps) fails `make` with ENOENT: the holder is made again and `make` retried, up to three
+ * tries. Anything else is thrown as it is.
+ */
+export const makeInHolder = async <T>(io: LocalIo, holder: string, make: () => Promise<T>): Promise<T> => {
+  for (let tries = 1; ; tries++) {
+    try {
+      await io.fs.mkdirp(holder);
+      return await make();
+    } catch (error) {
+      if (tries === 3 || systemErrorCode(error) !== "ENOENT") throw error;
+    }
+  }
+};

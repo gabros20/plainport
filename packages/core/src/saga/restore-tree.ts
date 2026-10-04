@@ -4,11 +4,11 @@
 // space the restore needs (fs.no-space); restoreVerified restores into the staging folder and compares the staged tree
 // with the listing (verify.mismatch). Neither swaps anything into place: the caller renames the staging folder.
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Phase, type Result, shellWord } from "@plainport/contract";
 import { CatalogEventSchema } from "../catalog/events.ts";
 import { STORE_EVENTS_PREFIX } from "../catalog/log.ts";
-import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, type LocalIo, makeInHolder, systemErrorCode } from "../io.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
 import { scanTree } from "../scan/walk.ts";
@@ -58,9 +58,10 @@ export const producedBy = async (store: BlobStore, event: string) => {
 const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Result<boolean>> => {
   const probe = join(folder, `.plainport-case-${op.toLowerCase()}`);
   try {
-    // Made again here: another onload may have removed the holder it found empty since this one made it.
-    await io.fs.mkdirp(folder);
-    await io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true });
+    // Another onload may remove the holder once it finds it empty: makeInHolder makes it again.
+    await makeInHolder(io, folder, () =>
+      io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true }),
+    );
   } catch (error) {
     return unreadable(folder, error, "whether its volume ignores case is unknown; nothing was restored");
   }
@@ -210,7 +211,7 @@ export const restoreVerified = async (options: {
   const { io, staging, ctx } = options;
   options.phase("restore", "start");
   try {
-    await io.fs.mkdirp(staging);
+    await makeInHolder(io, dirname(staging), () => io.fs.mkdirp(staging));
   } catch (error) {
     return writeFailed(error, `making ${staging}`, false, staging);
   }

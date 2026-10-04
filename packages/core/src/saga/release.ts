@@ -18,7 +18,7 @@
 import { basename, dirname, join } from "node:path";
 import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { readDevice } from "../device.ts";
-import { type LocalIo, systemErrorCode } from "../io.ts";
+import { type LocalIo, makeInHolder, systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -236,15 +236,8 @@ export const releaseOffload = async (
       );
     }
     try {
-      // An empty holder another operation removes between mkdirp's two mkdirs (removeEmptyTrashHolder): make it again.
-      for (let tries = 1; ; tries++) {
-        try {
-          await io.fs.mkdirp(trash);
-          break;
-        } catch (error) {
-          if (tries === 3 || systemErrorCode(error) !== "ENOENT") throw error;
-        }
-      }
+      // The holder another operation may remove once it is empty (removeEmptyTrashHolder): makeInHolder.
+      await makeInHolder(io, dirname(trash), () => io.fs.mkdirp(trash));
       // The new folders' own entries, so a power loss cannot orphan the trash (D24).
       await io.fs.syncDir(dirname(trash));
       await io.fs.syncDir(dirname(dirname(trash)));

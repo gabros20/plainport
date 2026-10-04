@@ -14,6 +14,7 @@ export {
   type LinkStat,
   type LocalFs,
   type LocalIo,
+  makeInHolder,
   type ProcessInfo,
   systemErrorCode,
 } from "./io.ts";

@@ -1038,13 +1038,8 @@ export const finishOnload = async (
     if (!swapped.ok) return swapped;
     // The staging holder this onload's folder left empty goes (rmdir: it stays while another onload uses it, and the
     // next onload makes it again). Only plainport's own holder, and never a failure: an empty one left is harmless.
-    if (journal.staging !== undefined && basename(dirname(journal.staging)) === STAGING_DIR) {
-      try {
-        await removeHolderIfEmpty(io, dirname(journal.staging));
-      } catch (error) {
-        assertSystemError(error);
-      }
-    }
+    if (journal.staging !== undefined && basename(dirname(journal.staging)) === STAGING_DIR)
+      await removeHolderIfEmpty(io, dirname(journal.staging));
   }
 
   // The stub goes only while it is this project's; anything else at the path is never touched (D47).

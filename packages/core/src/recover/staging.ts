@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
 import { writeAtomic } from "../atomic.ts";
-import { errorCode, type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, errorCode, type LocalIo, systemErrorCode } from "../io.ts";
 import type { PlainportPaths } from "../paths.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
 
@@ -127,14 +127,14 @@ export const readStagingRecords = async (io: LocalIo, paths: PlainportPaths): Pr
 
 /**
  * Removes a shared holder (`.plainport-staging`) only when it is empty, by rmdir, which leaves it in place as soon as
- * another operation has put its own folder there.
+ * another operation has put its own folder there (ENOTEMPTY), or another removed it first (ENOENT). It never fails the
+ * operation: an empty holder left behind is harmless, and the creating side copes with one removed (makeInHolder).
  */
 export const removeHolderIfEmpty = async (io: LocalIo, holder: string): Promise<void> => {
   try {
     await io.fs.rmdir(holder);
   } catch (error) {
-    const code = systemErrorCode(error);
-    if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "ENOENT") throw error;
+    assertSystemError(error);
   }
 };
 
