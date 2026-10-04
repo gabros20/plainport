@@ -566,7 +566,7 @@ describe("recover: releaseOffload's guards (Task 12 quality r3)", () => {
     );
     await expect(
       releaseOffload(
-        { host, paths: box.paths, saga, clock: () => new Date(), log: () => {}, stores: [] },
+        { host, paths: box.paths, saga, clock: () => new Date(), log: () => {}, stores: async () => ok([]) },
         { at: new Date().toISOString(), bytes: 1 },
       ),
     ).rejects.toThrow(/committed/);

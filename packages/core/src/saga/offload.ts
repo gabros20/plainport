@@ -100,7 +100,7 @@ import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
-import { localStores } from "../store-overlap.ts";
+import { localStores, type ProtectedStore } from "../store-overlap.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
@@ -433,8 +433,11 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
-  // The local stores release never moves a folder holding (D83).
-  const stores = localStores(loaded.value.config, paths.home);
+  // The local stores release never moves a folder holding (D83), read again right before the rename (F2).
+  const stores = async (): Promise<Result<ProtectedStore[]>> => {
+    const now = await deps.loader.load({ env: deps.env, root: ref.root });
+    return now.ok ? ok(localStores(now.value.config, paths.home)) : now;
+  };
   const storeName =
     req.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
   if (storeName === undefined) {

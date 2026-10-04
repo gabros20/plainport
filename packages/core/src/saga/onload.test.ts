@@ -1792,13 +1792,31 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
       const { second } = await hideNewest(bytes);
       const before = engine.repository.snapshots.map((s) => s.info.id);
       const result = value(await onload({ snapshot: second.op }));
-      expect(result).toMatchObject({ snapshot: second.op });
+      // Under doubt the fold's head is older than what was restored: S2 itself is the copy's next base (D43, F1).
+      expect(result).toMatchObject({ snapshot: second.op, over: second.op });
       expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
       expect(existsSync(`${dir}.plainport`)).toBe(false);
       expect((await storeEvents()).filter((e) => e.type === "onloaded").at(-1)).toMatchObject({
         base: second.op,
+        over: second.op,
       });
+      expect(value(await readRegistry(testHost(), box.paths)).projects[await projectId()]?.base).toBe(
+        second.op,
+      );
       await expectAllInvariants(before);
+    });
+
+    test(`a ${kind} newest event: once S2 reads again, the next offload after --snapshot <S2> builds on S2, no fork`, async () => {
+      const { second, reveal } = await hideNewest(bytes);
+      value(await onload({ snapshot: second.op }));
+      reveal();
+      writeFileSync(join(dir, "src/main.ts"), "export const main = 3;\n");
+      const third = await offload();
+      const offloaded = (await storeEvents()).find((e) => e.type === "offloaded" && e.snapshot === third.op);
+      expect(offloaded).toMatchObject({ base: second.op });
+      const project = foldCatalog(await storeEvents()).projects[await projectId()];
+      expect(project).toMatchObject({ head: third.op, conflicts: [], status: "shelved" });
+      await expectInvariants();
     });
   }
 

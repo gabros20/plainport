@@ -730,9 +730,6 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       if (!read.ok) return pending(journal, read);
       facts = read.value;
     }
-    // The stores no released folder may hold (D83): without the configuration, nothing is moved.
-    const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
-    if (!loaded.ok) return pending(journal, loaded);
     const saga = openSaga<OffloadJournal, OffloadStep>(sagaContext("offload"), journal);
     // The journal is past the commit, or the event was found on the store: committed either way.
     saga.commit();
@@ -744,7 +741,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         clock,
         log: deps.log,
         stillHeld: lock.stillHeld,
-        stores: localStores(loaded.value.config, paths.home),
+        // The stores no released folder may hold (D83), read right before the rename; without them nothing moves.
+        stores: async () => {
+          const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
+          return loaded.ok ? ok(localStores(loaded.value.config, paths.home)) : loaded;
+        },
       },
       facts,
     );

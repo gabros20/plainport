@@ -9,7 +9,7 @@ import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { ConfigLayer, ResolvedConfig } from "./config/schema.ts";
 import type { LocalIo } from "./io.ts";
 import { expandHome } from "./paths.ts";
-import { canonicalPath, overlapOf } from "./roots/canonical.ts";
+import { canonicalPath, overlapByIdentity } from "./roots/canonical.ts";
 
 /** A local store's folder: what no project may hold or lie inside. */
 export interface ProtectedStore {
@@ -54,7 +54,9 @@ export const storeOverlap = async (
   for (const store of stores) {
     const canon = await canonicalPath(io, store.root, home);
     if (!canon.ok) return canon;
-    const relation = overlapOf(canon.value, project.value);
+    const related = await overlapByIdentity(io, canon.value, project.value);
+    if (!related.ok) return related;
+    const relation = related.value;
     if (relation === undefined || (relation === "inside" && options.storesInsideAllowed === true)) continue;
     const how =
       relation === "same"

@@ -54,10 +54,11 @@ export interface ReleaseContext {
   stillHeld?(): Promise<boolean>;
   paths: PlainportPaths;
   /**
-   * Every local store's folder (store-overlap.ts): the folder, or its copy in the trash, is never moved or deleted while
-   * it holds one or lies inside one (D83).
+   * Every local store's folder (store-overlap.ts), read from the configuration when asked, right before the rename:
+   * the folder, or its copy in the trash, is never moved or deleted while it holds one or lies inside one (D83). A store
+   * configured by hand after the plan is caught (F2); a configuration that cannot be read moves nothing.
    */
-  stores: readonly ProtectedStore[];
+  stores(): Promise<Result<readonly ProtectedStore[]>>;
   /** The offload's saga, committed: its journal says what to release and how. */
   saga: Saga<OffloadJournal>;
   clock(): Date;
@@ -159,7 +160,9 @@ export const releaseOffload = async (
   // A store inside the folder (or the folder inside a store) would be renamed and deleted with it (D83): nothing
   // moves and no delete starts; the journal stays, and recover asks again once the store is moved.
   if (atDir || inTrash) {
-    const overlap = await storeOverlap(io, rc.paths.home, atDir ? folder : moved, rc.stores);
+    const stores = await rc.stores();
+    if (!stores.ok) return stores;
+    const overlap = await storeOverlap(io, rc.paths.home, atDir ? folder : moved, stores.value);
     if (!overlap.ok)
       return fail({
         ...overlap.finding,

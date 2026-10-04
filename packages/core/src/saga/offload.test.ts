@@ -2413,7 +2413,7 @@ describe("offload: fix wave q2", () => {
         host,
         paths: box.paths,
         saga: resumed,
-        stores: [],
+        stores: async () => ok([]),
         clock: () => new Date(),
         log: () => {},
         ...(over.stillHeld === undefined ? {} : { stillHeld: over.stillHeld }),
@@ -2552,6 +2552,50 @@ describe("offload: a store inside the project is never offloaded with it (D83)",
     const result = await offload({ allow: ["store.inside-project"] });
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
     await expectBothSurvive(join(dir, "node_modules/.archive"));
+  });
+
+  test.skipIf(process.platform !== "darwin")(
+    "a store spelled through an alias realpath leaves apart is the same folder by identity and refuses (F3)",
+    async () => {
+      box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+      const firm = `/System/Volumes/Data${realpathSync(join(dir, "node_modules/.archive"))}`;
+      storeAt(firm);
+      const real = testHost({ faults: { onStep: capture } });
+      const host: HostPorts = {
+        ...real,
+        fs: {
+          ...real.fs,
+          realpath: async (path) =>
+            path.startsWith("/System/Volumes/Data/") ? path : real.fs.realpath(path),
+        },
+      };
+      const result = await runOffload(deps({}, host), { project: await ref() });
+      expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+      await expectBothSurvive(join(dir, "node_modules/.archive"));
+    },
+  );
+
+  test("a store configured by hand after the plan is caught by the live release, which re-reads the stores (F2)", async () => {
+    const archive = join(dir, "node_modules/.archive");
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step !== "offload.committed") return;
+          box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+          config('[stores.archive]\nkind = "local"\npath = "~/work/web/node_modules/.archive"');
+        },
+      },
+    });
+    const result = await runOffload(deps({}, host), { project: await ref() });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    expect(readFileSync(join(archive, "data/snap"), "utf8")).toBe("repository bytes");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+    // The snapshot is committed; the journal stays for recover, which refuses the same way until the store moves.
+    expect((await readJournals(testHost(), box.paths)).journals.map((j) => j.step)).toEqual([
+      "offload.committed",
+    ]);
   });
 
   test("a project inside the store refuses too", async () => {

@@ -16,7 +16,7 @@ export {
   rootKeyFrom,
   type SkippedCandidate,
 } from "./candidates.ts";
-export { type CanonicalPath, canonicalPath, overlapOf } from "./canonical.ts";
+export { type CanonicalPath, canonicalPath, overlapByIdentity, overlapOf } from "./canonical.ts";
 export {
   bindingPath,
   displayPath,
