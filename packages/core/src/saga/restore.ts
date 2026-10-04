@@ -27,12 +27,13 @@ import { catalogReader } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
+import { removeEmptyHolder, rmdirIfEmpty } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { removeHolderIfEmpty, removeStagingRecord, writeStagingRecord } from "../recover/staging.ts";
+import { removeStagingRecord, writeStagingRecord } from "../recover/staging.ts";
 import { readRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
@@ -239,7 +240,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     // Only this restore's own folder goes, then the shared holder if, and only if, it is empty (rmdir).
     try {
       await io.fs.removeTree(staging);
-      await removeHolderIfEmpty(io, holder);
+      await removeEmptyHolder(io, holder, STAGING_DIR);
       await removeStagingRecord(io, paths, op);
     } catch (error) {
       assertSystemError(error);
@@ -317,7 +318,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       const code = systemErrorCode(error);
       if (code === "ENOTEMPTY" || code === "EEXIST") return occupied();
       // Its own empty folder goes again; anything in it stays.
-      await removeHolderIfEmpty(io, to);
+      await rmdirIfEmpty(io, to);
       return writeFailed(error, `moving ${staging} to ${to}`, false, to);
     }
     // The rename landed: the copy is there whatever the flush says.

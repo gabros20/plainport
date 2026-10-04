@@ -35,7 +35,7 @@
 //
 // An injected fault (InjectedFault) is a simulated crash: nothing here catches it.
 
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -54,6 +54,7 @@ import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
+import { removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -69,7 +70,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { noteStagingHolder, removeHolderIfEmpty } from "../recover/staging.ts";
+import { noteStagingHolder } from "../recover/staging.ts";
 import { type ProjectRegistry, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
@@ -79,7 +80,7 @@ import { ulid } from "../ulid.ts";
 import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
 import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
-import { offloadTrashOf, removeEmptyTrashHolder, rootFolderOf } from "./release.ts";
+import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { checkSnapshot, kindAt, producedBy, restoreVerified, unreadable } from "./restore-tree.ts";
 
 /** Every journal step, in the order a run reaches them; the crash matrix enumerates its rows from this list. */
@@ -1023,7 +1024,7 @@ export const finishOnload = async (
       // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
       try {
         await io.fs.removeTree(dirname(journal.reuse.folder));
-        await removeEmptyTrashHolder(io, dirname(journal.reuse.folder));
+        await removeEmptyHolder(io, dirname(dirname(journal.reuse.folder)), TRASH_DIR);
         await removeJournal(io, paths, journal.reuse.op);
       } catch (error) {
         assertSystemError(error);
@@ -1038,8 +1039,7 @@ export const finishOnload = async (
     if (!swapped.ok) return swapped;
     // The staging holder this onload's folder left empty goes (rmdir: it stays while another onload uses it, and the
     // next onload makes it again). Only plainport's own holder, and never a failure: an empty one left is harmless.
-    if (journal.staging !== undefined && basename(dirname(journal.staging)) === STAGING_DIR)
-      await removeHolderIfEmpty(io, dirname(journal.staging));
+    if (journal.staging !== undefined) await removeEmptyHolder(io, dirname(journal.staging), STAGING_DIR);
   }
 
   // The stub goes only while it is this project's; anything else at the path is never touched (D47).

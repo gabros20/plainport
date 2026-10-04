@@ -18,6 +18,7 @@
 import { dirname, join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
+import { removeEmptyHolder } from "../holder.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -35,15 +36,10 @@ import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
-import { offloadTrashOf, removeEmptyTrashHolder, rootFolderOf } from "../saga/release.ts";
+import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "../saga/release.ts";
 import { trashClaim, trashClaimFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
-import {
-  notedStagingHolders,
-  readStagingRecords,
-  removeHolderIfEmpty,
-  removeStagingRecord,
-} from "./staging.ts";
+import { notedStagingHolders, readStagingRecords, removeStagingRecord } from "./staging.ts";
 
 export interface TrashDeps {
   host: HostPorts;
@@ -153,7 +149,7 @@ export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => 
       if (systemErrorCode(error) !== "ENOENT") throw error;
     }
   }
-  await removeEmptyTrashHolder(io, trash);
+  await removeEmptyHolder(io, dirname(trash), TRASH_DIR);
 };
 
 const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
@@ -407,7 +403,7 @@ const sweepStaging = async (
       if (owners.has(name) || recorded.has(staging)) continue;
       try {
         await io.fs.removeTree(staging);
-        await removeHolderIfEmpty(io, holder);
+        await removeEmptyHolder(io, holder, STAGING_DIR);
       } catch (error) {
         problems.push(writeFailed(error, `removing the abandoned staging folder ${staging}`, false, staging));
         continue;
@@ -444,7 +440,7 @@ const sweepStaging = async (
       async () => {
         try {
           await io.fs.removeTree(record.staging);
-          await removeHolderIfEmpty(io, dirname(record.staging));
+          await removeEmptyHolder(io, dirname(record.staging), STAGING_DIR);
           await removeStagingRecord(io, paths, record.op);
         } catch (error) {
           return writeFailed(error, `removing ${record.staging}`, false, record.staging);

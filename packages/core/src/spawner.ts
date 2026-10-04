@@ -160,7 +160,7 @@ export const posixDeleteTrash = async (
           'c="$1.claim"',
           `printf '{"v":1,"device":"%s","pid":%s,"bootedAt":%s,"startedAt":"%s"}\\n' "$3" "$$" "$4" "$5" > "$c.tmp" && mv -f -- "$c.tmp" "$c" || exit 1`,
           'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$c" && rm -f -- "$2" || exit 1',
-          // The trash holder, only when that left it empty (removeEmptyTrashHolder).
+          // The trash holder, only when that left it empty (holder.ts, removeEmptyHolder).
           'rmdir -- "$(dirname -- "$1")" 2>/dev/null; exit 0',
         ].join("\n"),
         "plainport-trash",

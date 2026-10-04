@@ -6,6 +6,7 @@ export * from "./catalog/index.ts";
 export * from "./config/index.ts";
 export * from "./device.ts";
 export { type GuardPolicy, guardedFs, PATH_REFUSED, PathGuard, PathRefused } from "./guard.ts";
+export { type HolderName, makeInHolder, removeEmptyHolder, rmdirIfEmpty } from "./holder.ts";
 export {
   type DirEntry,
   errorCode,
@@ -14,7 +15,6 @@ export {
   type LinkStat,
   type LocalFs,
   type LocalIo,
-  makeInHolder,
   type ProcessInfo,
   systemErrorCode,
 } from "./io.ts";
