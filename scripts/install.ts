@@ -231,7 +231,12 @@ const sweep = (paths: Layout, notices: string[]): void => {
  * pruned folder loses the restic beside it; that takes two installs during one plainport run, and recover settles
  * the operation it stops (CONTRIBUTING.md).
  */
-const prune = (paths: Layout, keep: ReadonlySet<string>, notices: string[]): string[] => {
+const prune = (
+  paths: Layout,
+  keep: ReadonlySet<string>,
+  notices: string[],
+  remove: (path: string) => void,
+): string[] => {
   const pruned: string[] = [];
   let names: string[] = [];
   try {
@@ -244,7 +249,7 @@ const prune = (paths: Layout, keep: ReadonlySet<string>, notices: string[]): str
       continue;
     }
     try {
-      removeInstall(path);
+      remove(path);
       pruned.push(name);
     } catch (error) {
       notices.push(`prune of ${name} failed: ${(error as Error).message}`);
@@ -304,6 +309,8 @@ export const installVersion = (
   version: string,
   stage: (dir: string) => void,
   build?: { commit: string },
+  /** Test seam: how a pruned version is removed (default removeInstall), so a failed removal can be injected. */
+  seams: { remove?: (path: string) => void } = {},
 ): Outcome<Installed> => {
   const paths = layout(prefix);
   const problem = linkProblem(paths);
@@ -355,7 +362,12 @@ export const installVersion = (
     }
     // The install has succeeded; from here on a failure is a notice. What current and previous name is never pruned.
     const keep = new Set([version, previous, linkedVersion(paths.current), linkedVersion(paths.previous)]);
-    const pruned = prune(paths, new Set([...keep].filter((v): v is string => v !== undefined)), notices);
+    const pruned = prune(
+      paths,
+      new Set([...keep].filter((v): v is string => v !== undefined)),
+      notices,
+      seams.remove ?? removeInstall,
+    );
     return { ok: true, version, previous, reused, pruned, notices };
   });
 };
