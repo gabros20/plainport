@@ -94,8 +94,11 @@ export interface GateOptions {
    * operation on one runs while this one changes the folder that holds or contains it.
    */
   related?: readonly { id: string; address: string }[];
-  /** An interrupted operation of this project the caller takes over instead of refusing (onload's staging). */
-  resume?(journal: Journal): boolean;
+  /**
+   * An interrupted operation the caller takes over or settles instead of refusing: onload's staging (`own`, this
+   * project's), or every one for recover and gc. A nested project's (`own` false) is never handed to the body.
+   */
+  resume?(journal: Journal, own: boolean): boolean;
 }
 
 /** A registered project and its effective folder on this device: its override, else its root's place for it. */
@@ -219,17 +222,28 @@ export const withProjectLock = async <T>(
       return fail(
         finding("journal.pending", {
           message: `${unreadable} is a journal this version of plainport cannot read, so it may be an interrupted operation of ${journals.owners[unreadable]?.address ?? project.address}; nothing new was started`,
-          fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run",
+          fix: "run plainport recover with the plainport version that wrote it, then re-run",
           paths: [unreadable],
         }),
       );
     }
+    // The project's own interrupted operations, and those of the projects nested with it (D53): either changes the
+    // folders this operation is about to touch.
+    const nestedIds = new Set((options.related ?? []).map((r) => r.id));
     const open = journals.journals.filter((j) => j.project.id === project.id && holdsProjectBack(j));
-    const [blocking] = open.filter((j) => options.resume?.(j) !== true);
+    const nestedOpen = journals.journals.filter((j) => nestedIds.has(j.project.id) && holdsProjectBack(j));
+    const [blocking] = [
+      ...open.filter((j) => options.resume?.(j, true) !== true),
+      ...nestedOpen.filter((j) => options.resume?.(j, false) !== true),
+    ];
     if (blocking !== undefined) {
+      const whose =
+        blocking.project.id === project.id
+          ? project.address
+          : `${blocking.project.address}, which is nested with ${project.address} (D53)`;
       return fail(
         finding("journal.pending", {
-          message: `an ${blocking.kind} of ${project.address} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
+          message: `an ${blocking.kind} of ${whose} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
           fix: "plainport recover finishes or rolls it back, then re-run",
           paths: [journalFile(paths, blocking.op)],
         }),

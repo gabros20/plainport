@@ -49,7 +49,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader } from "../catalog/head.ts";
+import { type CatalogRead, catalogReader, headUncertain } from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
@@ -328,13 +328,17 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   const gate = { io, paths, clock, log: deps.log };
   return withProjectLock(gate, { id, address: ref.address }, (lock, resumed) => onloadLocked(lock, resumed), {
     related: nested,
-    // An onload that stopped before its swap is taken over, never refused (DESIGN step 3).
-    resume: (j) => j.kind === "onload" && BEFORE_SWAP.has(j.step),
+    // An onload of this project that stopped before its swap is taken over, never refused (DESIGN step 3).
+    resume: (j, own) => own && j.kind === "onload" && BEFORE_SWAP.has(j.step),
   });
 
   async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
     const state = await catalog();
     if (!state.ok) return state;
+    // A newer snapshot this device knows of that no readable event names (D86): only a snapshot asked for by name goes
+    // on, and the stub that names the newer one stays.
+    const doubt = doubtOf(state.value);
+    if (doubt !== undefined && req.snapshot === undefined) return fail(doubt);
     const project = state.value.projects[id];
     if (project === undefined) {
       return fail(finding("project.not-found", notInStore()));
@@ -402,7 +406,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
 
     const occupied = await occupiedBy(project, over);
     if (occupied !== undefined) return occupied;
-    const stubPath = ref.dir === undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
+    const stubPath = ref.dir === undefined || doubt !== undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
     const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
     const placed = await landingChecks(rootFolder);
     if (!placed.ok) return placed;
@@ -511,13 +515,22 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     return hydrate(result.value, stripped);
   }
 
+  /** catalog.head-uncertain when the read may lack the event naming the stub's or the registry's snapshot (D86). */
+  function doubtOf(read: CatalogRead): Finding | undefined {
+    const known = [stub?.ok ? stub.value.snapshot : undefined, registered.ok ? registered.value.projects[id]?.base : undefined];
+    return headUncertain(read, id, known, ref.address, {
+      what: "nothing was restored",
+      instead: `to go on anyway, name the snapshot: plainport onload ${shellWord(ref.address)} --snapshot <id> (the stub that names the newer one stays)`,
+    });
+  }
+
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
   function headOf(project: CatalogProject): Result<string> {
     if (project.missing.length > 0) {
       return fail(
         finding("catalog.incomplete", {
           message: `the catalog names ${plural(project.missing.length, "snapshot")} of ${ref.address} it does not hold (${project.missing.join(", ")}), so its head is unknown; nothing was restored`,
-          fix: `connect the store that holds them (plainport store replicate syncs them), or run plainport doctor; plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads a snapshot side by side meanwhile`,
+          fix: `connect the store that holds them, then re-run; plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads a snapshot side by side meanwhile`,
         }),
       );
     }
@@ -525,7 +538,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       return fail(
         finding("catalog.head-moved", {
           message: `${ref.address} is conflicted in the catalog: two copies were offloaded from the same snapshot (${project.conflicts.map((c) => c.join(" and ")).join("; ")}); nothing was restored`,
-          fix: `plainport resolve ${shellWord(ref.address)} settles which copy wins (M2); plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either side by side`,
+          fix: `plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side (settling which copy wins arrives in M2)`,
         }),
       );
     }
@@ -783,6 +796,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           `re-run plainport onload ${shellWord(ref.address)} once the store answers; it takes over the restored copy`,
         ),
       );
+    const doubtNow = req.snapshot === undefined ? doubtOf(fresh.value) : undefined;
+    if (doubtNow !== undefined) return saga.keep(fail(doubtNow));
     const project = fresh.value.projects[id];
     const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);

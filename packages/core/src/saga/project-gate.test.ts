@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
 import type { LocalIo } from "../io.ts";
+import { writeJournal } from "../journal/index.ts";
 import { nodeLocalIo } from "../node-io.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { withProjectLock } from "./project-gate.ts";
@@ -52,5 +53,75 @@ describe("project gate: a lock file that fails I/O (I9)", () => {
     const again = await withProjectLock(gate, { id: ID, address: "work:web" }, async () => ok("again"));
     expect(again.ok ? again.value : again.finding.code).toBe("again");
     expect(existsSync(lockFile)).toBe(false);
+  });
+});
+
+describe("project gate: nested projects' interrupted operations (N1, D53)", () => {
+  const INNER = "01ARYZ6S420000000000000000";
+  const OP = "01ARYZ6S430000000000000000";
+  const gate = () => ({ io: nodeLocalIo, paths: box.paths, clock: () => new Date(), log: () => {} });
+  const innerJournal = async (step: "offload.verified" | "offload.release.delete") => {
+    const at = "2026-10-04T12:00:00.000Z";
+    const dir = join(box.home, "work/web/inner");
+    await writeJournal(nodeLocalIo, box.paths, {
+      v: 1,
+      op: OP,
+      kind: "offload",
+      step,
+      startedAt: at,
+      updatedAt: at,
+      pid: 999_999,
+      host: "elsewhere",
+      project: { id: INNER, address: "work:web/inner", root: "work", rootId: INNER, path: "web/inner", dir },
+      store: { name: "ssd", id: INNER },
+      attempts: [],
+      history: [],
+    });
+  };
+  const related = [{ id: INNER, address: "work:web/inner" }];
+
+  test("an interrupted operation of a nested project holds the outer one back (journal.pending)", async () => {
+    await innerJournal("offload.verified");
+    let ran = false;
+    const result = await withProjectLock(
+      gate(),
+      { id: ID, address: "work:web" },
+      async () => {
+        ran = true;
+        return ok(undefined);
+      },
+      { related },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "journal.pending"]);
+    if (!result.ok) expect(result.finding.message).toContain("work:web/inner, which is nested with work:web");
+    expect(ran).toBe(false);
+  });
+
+  test("a resume that takes only its own project's journals never takes a nested one's", async () => {
+    await innerJournal("offload.verified");
+    const result = await withProjectLock(gate(), { id: ID, address: "work:web" }, async () => ok(undefined), {
+      related,
+      resume: (_, own) => own,
+    });
+    expect(result.ok ? 0 : result.finding.code).toBe("journal.pending");
+  });
+
+  test("recover and gc (resume everything) still run, and a nested journal is never handed over as resumed", async () => {
+    await innerJournal("offload.verified");
+    const result = await withProjectLock(
+      gate(),
+      { id: ID, address: "work:web" },
+      async (_, resumed) => ok(resumed),
+      { related, resume: () => true },
+    );
+    expect(result.ok ? result.value : result.finding.code).toBeUndefined();
+  });
+
+  test("a nested project's released trash (release.delete) holds nothing back", async () => {
+    await innerJournal("offload.release.delete");
+    const result = await withProjectLock(gate(), { id: ID, address: "work:web" }, async () => ok("ran"), {
+      related,
+    });
+    expect(result.ok ? result.value : result.finding.code).toBe("ran");
   });
 });
