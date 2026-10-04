@@ -109,12 +109,9 @@ export const onload = defineCommand({
     project: z
       .string()
       .meta({ description: "An address (root:path), a unique name, a path or its .plainport stub" }),
-    to: z
-      .string()
-      .optional()
-      .meta({
-        description: "Land it in this folder instead of its root's place; always restored from the store",
-      }),
+    to: z.string().optional().meta({
+      description: "Land it in this folder instead of its root's place; always restored from the store",
+    }),
     snapshot: z.string().optional().meta({
       description:
         "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy",
