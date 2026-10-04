@@ -104,6 +104,40 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
     }
   });
 
+  test("a delete that claimed, deleted and then failed on the journal before the first poll still started (Linux CI)", async () => {
+    // The poller looks only once the child is done: its claim came and went with the trash, and it exited 1 on the
+    // journal it could not remove. That delete ran; it is no failure to claim.
+    const journalDir = join(box.home, "state/journal");
+    chmodSync(journalDir, 0o555);
+    const real = testHost();
+    let first = true;
+    const slow = {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: async (path: string) => {
+          if (first && path === trashClaimFile(trash)) {
+            first = false;
+            for (let i = 0; i < 500 && existsSync(trash); i++) await Bun.sleep(10);
+            await Bun.sleep(200);
+          }
+          return real.fs.lstat(path);
+        },
+      },
+    };
+    try {
+      const started = await posixDeleteTrash(slow, trash, journal, DEVICE);
+      expect(started.ok ? "ok" : started.finding.message).toBe("ok");
+      expect([existsSync(trash), existsSync(trashClaimFile(trash)), existsSync(journal)]).toEqual([
+        false,
+        false,
+        true,
+      ]);
+    } finally {
+      chmodSync(journalDir, 0o755);
+    }
+  });
+
   test("a claim it cannot write fails the start, and nothing is deleted", async () => {
     mkdirSync(join(box.home, "work/.plainport-trash"), { recursive: true });
     chmodSync(join(box.home, "work/.plainport-trash"), 0o555);
