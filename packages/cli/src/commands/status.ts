@@ -82,6 +82,10 @@ export const ProjectStatusSchema = z
           due: z
             .boolean()
             .meta({ description: "Past its keepUntil (or none): gc deletes it when nothing is deleting it" }),
+          refused: FindingSchema.optional().meta({
+            description:
+              "The delete guard's last refusal of it (delete.guard-refused, D87): why it stays and the way out; gc tries again",
+          }),
         }),
       )
       .meta({
@@ -175,7 +179,7 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     lines.push(
       row(
         "trash",
-        `${t.path} ${t.deleting ? "being deleted" : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
+        `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
       ),
     );
   if (p.next !== undefined) lines.push(row("next", `${p.next.command}  (${p.next.reason})`));

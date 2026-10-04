@@ -158,6 +158,7 @@ export const posixDeleteTrash = async (
     self: readonly string[];
     paths: PlainportPaths;
     env: Env;
+    keepUntil?: string;
     passEnv?: Readonly<Record<string, string>>;
   },
 ): Promise<Result<{ pid: number }>> => {
@@ -173,7 +174,7 @@ export const posixDeleteTrash = async (
       [
         ...launch.self,
         TRASH_DELETE_WORD,
-        trashDeletePayload(trash, journal, device, launch.paths, launch.env),
+        trashDeletePayload(trash, journal, device, launch.paths, launch.env, launch.keepUntil),
       ],
       {
         cwd: "/",

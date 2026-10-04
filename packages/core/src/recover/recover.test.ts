@@ -2681,3 +2681,75 @@ describe("D87: one guarded deleter (astra r2 findings 1, 3, 4, 5)", () => {
     expect(trashes()).toEqual([]);
   });
 });
+
+describe("round 3 minors: a refused detached delete is said, and keeps its deadline (r3 #4, #5)", () => {
+  const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({
+    host: testHost(),
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...over,
+  });
+  const plantStore = (at: string) => {
+    mkdirSync(join(at, "meta/v1"), { recursive: true });
+    writeFileSync(join(at, "meta/v1/store.json"), '{"v":1}\n');
+  };
+  const childDone = async (trash: string) => {
+    for (let i = 0; i < 600 && existsSync(`${trash}.claim`); i++) await Bun.sleep(25);
+    for (let i = 0; i < 200 && !existsSync(`${trash}.refused`) && existsSync(trash); i++) await Bun.sleep(25);
+  };
+  const views = async () =>
+    value(
+      await projectViews({
+        io: testHost(),
+        paths: box.paths,
+        env: env(),
+        device,
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+      }),
+    );
+
+  test("#4: the refusing child leaves <op>.refused; housekeeping, status and gc name the reason and the way out", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const trash = join(box.home, "work/.plainport-trash", (journal as OffloadJournal).op);
+    plantStore(join(trash, "web/.next/archive"));
+    const later = () => new Date(Date.parse((journal as OffloadJournal).keepUntil as string) + 1000);
+    await housekeeping(trashDeps({ now: later }), { deleteDue: true });
+    await childDone(trash);
+    expect(readFileSync(`${trash}.refused`, "utf8")).toContain("delete.guard-refused");
+    const notices = (await housekeeping(trashDeps({ now: later }), { deleteDue: true })).notices.join("\n");
+    expect(notices).toContain(`the trash ${trash}`);
+    expect(notices).toContain("is a store plainport made");
+    expect(notices).toContain("plainport gc");
+    const web = (await views()).projects.find((p) => p.address === "work:web");
+    expect(web?.trash[0]?.refused?.code).toBe("delete.guard-refused");
+    expect(web?.next?.reason).toContain("was not deleted");
+    const gc = await collectTrash(trashDeps({ now: later }), { early: false });
+    expect(gc.ok ? 0 : gc.finding.fix).toContain("mv ");
+    // Moved out, as the fix says: gc deletes it, and the note goes with the trash.
+    renameSync(join(trash, "web/.next/archive"), join(box.home, "kept-store"));
+    value(await collectTrash(trashDeps({ now: later }), { early: false }));
+    expect(existsSync(trash)).toBe(false);
+    expect(existsSync(`${trash}.refused`)).toBe(false);
+  });
+
+  test("#5: a refused detached delete puts back the deadline housekeeping took off, so onload renames the trash back", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const op = (journal as OffloadJournal).op;
+    const keepUntil = (journal as OffloadJournal).keepUntil as string;
+    const trash = join(box.home, "work/.plainport-trash", op);
+    plantStore(join(trash, "web/.next/archive"));
+    const later = () => new Date(Date.parse(keepUntil) + 1000);
+    await housekeeping(trashDeps({ now: later }), { deleteDue: true });
+    await childDone(trash);
+    const [after] = (await journals()) as OffloadJournal[];
+    expect([after?.op, after?.step, after?.keepUntil]).toEqual([op, "offload.release.delete", keepUntil]);
+    expect(existsSync(join(trash, "web/src/main.ts"))).toBe(true);
+  });
+});

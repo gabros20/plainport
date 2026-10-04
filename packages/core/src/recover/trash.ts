@@ -38,7 +38,7 @@ import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, notAProject, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "../saga/release.ts";
-import { trashClaim, trashClaimFile } from "../trash-claim.ts";
+import { noteRefusal, readRefusal, trashClaim, trashClaimFile, trashRefusedFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
 import { notedStagingHolders, readStagingRecords, removeStagingRecord } from "./staging.ts";
 
@@ -130,15 +130,19 @@ export const removeTrash = async (ctx: DeleteGuardContext, trash: string): Promi
   const { io } = ctx;
   // The one guard before every recursive delete (D87): a refusal is the caller's to report, and nothing goes.
   const guarded = await deleteGuard(ctx, trash);
-  if (!guarded.ok) return guarded;
+  if (!guarded.ok) {
+    // The note lets status and housekeeping say why the trash stays, between this run and the next.
+    await noteRefusal(io, trash, guarded.finding);
+    return guarded;
+  }
   try {
     await io.fs.removeTree(trash);
   } catch (error) {
     systemErrorCode(error);
     if (await stillThere(io, trash)) throw error;
   }
-  // The claim, and a temporary one a delete killed while claiming left behind.
-  for (const file of [trashClaimFile(trash), `${trashClaimFile(trash)}.tmp`]) {
+  // The claim, a temporary one a delete killed while claiming left behind, and an earlier refusal's note.
+  for (const file of [trashClaimFile(trash), `${trashClaimFile(trash)}.tmp`, trashRefusedFile(trash)]) {
     try {
       await io.fs.unlink(file);
     } catch (error) {
@@ -534,6 +538,15 @@ export const housekeeping = async (
       continue;
     }
     if (!released(journal) || reused.has(journal.op)) continue;
+    // A trash the delete guard refused (D87, r3 #4): said at the start of every command, with the reason and the way
+    // out, and never handed to a detached delete again here; plainport gc runs the guard again.
+    const refusal = await readRefusal(io, itemOf(journal).trash);
+    if (refusal !== undefined) {
+      done.notices.push(
+        `the trash ${itemOf(journal).trash} of ${journal.project.address}'s offload ${journal.op} was not deleted: ${refusal.message}; ${refusal.fix ?? "plainport gc says why"}`,
+      );
+      continue;
+    }
     const due = journal.keepUntil === undefined || Date.parse(journal.keepUntil) <= clock().getTime();
     if (!due) continue;
     // Its trash already gone, and no live delete about to close the journal: finished (D67). A write command closes the
@@ -614,8 +627,19 @@ export const housekeeping = async (
         const detached = await host.deleteTrashDetached(item.trash, journalFile(paths, now.op), self, {
           paths,
           env: deps.env,
+          // Put back by the child if its guard refuses, so the trash is renamed back again (r3 #5).
+          keepUntil: now.keepUntil,
         });
-        if (!detached.ok) return detached;
+        if (!detached.ok) {
+          // No child is left running (it never started, was stopped, or refused): the deadline goes back, under the
+          // lock, so the trash keeps the state it had (r3 #5); writing it twice after a refusal is harmless.
+          try {
+            await writeJournal(io, paths, now);
+          } catch (error) {
+            assertSystemError(error);
+          }
+          return detached;
+        }
         done.started.push(item);
         return ok(undefined);
       },

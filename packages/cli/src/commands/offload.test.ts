@@ -392,7 +392,7 @@ describe("offload: a real run", () => {
   test("human output names the snapshot, what was freed and the stub", async () => {
     const run = await cli(["offload", "work:web", "--yes"]);
     expect(run.code).toBe(0);
-    expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; freed [0-9.]+ KB\n/);
+    expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; freeing [0-9.]+ KB\n/);
     expect(run.out).toContain(`stub      ${dir()}.plainport`);
     await expectInvariants();
   });
@@ -436,12 +436,16 @@ describe("offload: a real run", () => {
     // The trash path is marked as already being deleted, not kept (C1), and is not named: it is soon gone (D77).
     expect(data.localCopy).toBe("deleted");
     expect(data).not.toHaveProperty("trash");
+    // Honest about what is known when it returns: the delete started, and its guard may still refuse (r3 #4).
+    expect(data.deleteStarted).toBe(true);
   });
 
-  test("the human result without keepLocalFor says the local copy is deleted, not kept (C1)", async () => {
+  test("the human result without keepLocalFor says the local copy is being deleted, checked first (C1, r3 #4)", async () => {
     const run = await cli(["offload", "work:web", "--yes"]);
     expect(run.code).toBe(0);
-    expect(run.out).toContain("\ndeleted   the local copy (keepLocalFor is 0, so nothing is kept)\n");
+    expect(run.out).toContain(
+      "\ndeleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept\n",
+    );
     expect(run.out).not.toContain(".plainport-trash");
   });
 

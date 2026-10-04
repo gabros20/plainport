@@ -50,6 +50,7 @@ import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/projec
 import { offloadTrashOf } from "../saga/release.ts";
 import { resolveSecret, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
+import { readRefusal } from "../trash-claim.ts";
 
 export interface ViewDeps {
   io: LocalIo;
@@ -129,7 +130,15 @@ export type ProjectStatus = {
   /** Every open journal of it, oldest first (the order recover settles them in). */
   journals: JournalView[];
   /** Released offloads' trash awaiting deletion: until keepUntil, or while its detached delete runs (D64). */
-  trash: { op: string; path: string; keepUntil?: string; deleting: boolean; due: boolean }[];
+  trash: {
+    op: string;
+    path: string;
+    keepUntil?: string;
+    deleting: boolean;
+    due: boolean;
+    /** The delete guard's last refusal of it (D87, r3 #4): why it stays, and the way out. */
+    refused?: Finding;
+  }[];
   /** Journals this version cannot read that name it, or name no project (journal-unreadable). */
   unreadableJournals?: string[];
   /** What to do next, when anything is to be done. */
@@ -475,6 +484,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         deleting: (await claimedReason(io, at, device.id)) !== undefined,
         due: j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime(),
       });
+      const refused = await readRefusal(io, at);
+      if (refused !== undefined) (trash.at(-1) as ProjectStatus["trash"][number]).refused = refused;
     }
 
     // Its local details (status): the offload's read-only planning, as --dry-run makes it, saving no plan.
@@ -577,6 +588,12 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
       command: `plainport restore ${address} --snapshot <id> --to <path>`,
       reason:
         "the catalog holds a fork: restore reads either copy side by side (settling which copy wins arrives in M2)",
+    };
+  const refused = p.trash.find((t) => t.refused !== undefined && !t.deleting);
+  if (refused?.refused !== undefined)
+    return {
+      command: "plainport gc",
+      reason: `the trash ${refused.path} was not deleted: ${refused.refused.message}; ${refused.refused.fix ?? "fix what the message names"}`,
     };
   if (p.trash.some((t) => t.due && !t.deleting))
     return { command: "plainport gc", reason: "a released trash is due and nothing is deleting it" };

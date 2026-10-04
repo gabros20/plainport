@@ -10,11 +10,13 @@
 
 import { dirname } from "node:path";
 import { z } from "zod";
+import { writeAtomic } from "./atomic.ts";
 import { deleteGuard } from "./delete-guard.ts";
 import { removeEmptyHolder } from "./holder.ts";
 import { errorCode, type LocalIo } from "./io.ts";
+import { JournalSchema } from "./journal/index.ts";
 import type { Env, PlainportPaths } from "./paths.ts";
-import { trashClaimFile } from "./trash-claim.ts";
+import { noteRefusal, trashClaimFile, trashRefusedFile } from "./trash-claim.ts";
 
 /** The argv word the detached child runs under. */
 export const TRASH_DELETE_WORD = "__delete-trash";
@@ -34,6 +36,11 @@ export const TrashDeletePayloadSchema = z.strictObject({
   paths: z.looseObject({ home: Abs, configFile: Abs, stateDir: Abs }),
   /** What the guard's configuration read and root listing need: HOME at least. */
   env: z.record(z.string(), z.string()),
+  /**
+   * The deadline housekeeping took off the journal before starting this delete: put back on a refusal, so the trash
+   * is renamed back by an onload again, as it was before (r3 #5).
+   */
+  keepUntil: z.iso.datetime().optional(),
 });
 export type TrashDeletePayload = z.infer<typeof TrashDeletePayloadSchema>;
 
@@ -43,11 +50,30 @@ export const trashDeletePayload = (
   device: string,
   paths: PlainportPaths,
   env: Env,
+  keepUntil?: string,
 ): string => {
   const kept: Record<string, string> = {};
   for (const name of ["HOME", "PLAINPORT_STORE"])
     if (env[name] !== undefined) kept[name] = env[name] as string;
-  return JSON.stringify({ trash, journal, device, paths, env: kept });
+  return JSON.stringify({
+    trash,
+    journal,
+    device,
+    paths,
+    env: kept,
+    ...(keepUntil === undefined ? {} : { keepUntil }),
+  });
+};
+
+/** Puts the deadline back on the released journal (r3 #5); the claim still stands, so nobody else writes it now. */
+const restoreDeadline = async (io: LocalIo, journalPath: string, keepUntil: string): Promise<void> => {
+  try {
+    const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalPath)));
+    if (!parsed.success || parsed.data.kind !== "offload" || parsed.data.keepUntil !== undefined) return;
+    await writeAtomic(io, journalPath, `${JSON.stringify({ ...parsed.data, keepUntil }, null, 2)}\n`);
+  } catch {
+    // Without its deadline the trash waits for gc, which runs the guard again: nothing is lost.
+  }
 };
 
 const unlinkIfThere = async (io: LocalIo, path: string): Promise<boolean> => {
@@ -88,6 +114,10 @@ export const runTrashDelete = async (io: LocalIo, payloadText: string | undefine
   }
   const guarded = await deleteGuard({ io, paths, env: payload.env }, trash);
   if (!guarded.ok) {
+    // Nobody waits for this process: the note tells housekeeping, gc and status why the trash stays (r3 #4), and the
+    // journal gets back the deadline housekeeping took off (r3 #5), both before the claim goes.
+    await noteRefusal(io, trash, guarded.finding);
+    if (payload.keepUntil !== undefined) await restoreDeadline(io, journal, payload.keepUntil);
     await unlinkIfThere(io, claim);
     return TRASH_DELETE_EXIT.refused;
   }
@@ -98,6 +128,7 @@ export const runTrashDelete = async (io: LocalIo, payloadText: string | undefine
   }
   // Trash, then claim, then journal (D67): a crash between them never leaves a claim no journal leads to.
   if (!(await unlinkIfThere(io, claim))) return TRASH_DELETE_EXIT.failed;
+  await unlinkIfThere(io, trashRefusedFile(trash));
   if (!(await unlinkIfThere(io, journal))) return TRASH_DELETE_EXIT.failed;
   await removeEmptyHolder(io, dirname(trash), ".plainport-trash");
   return TRASH_DELETE_EXIT.done;
