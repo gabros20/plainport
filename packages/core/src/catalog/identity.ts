@@ -162,7 +162,7 @@ export const identityChanged = (expected: string, found: string | null, where: s
         found === null
           ? `the store has no identity file (${STORE_IDENTITY_KEY}), so it is not the store ${expected} this device knows; nothing was synced`
           : `the ${where} belongs to store ${found}, not the store ${expected} this device knows; nothing was synced`,
-      fix: "check that the store's path in config.toml points at the right disk; if the store really changed, set it up again with plainport init",
+      fix: "check that the store's path in config.toml points at the disk this device set up under that name; plainport never moves a name to another store, so a different store needs a new name: plainport init --store-path <path> --store <new-name> --yes",
       paths: [STORE_IDENTITY_KEY],
     }),
   );

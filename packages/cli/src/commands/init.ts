@@ -10,10 +10,12 @@ import { basename } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import {
   ConfigLoader,
+  checkStorePin,
   DeviceNameSchema,
   deviceNameFrom,
   displayPath,
   ensureDevice,
+  expandHome,
   type RootCandidate,
   type RootChange,
   RootKeySchema,
@@ -328,6 +330,23 @@ export const init = defineCommand({
       made.device = await ensureDevice(ctx.io, paths, { role: "owner", name, clock: ctx.clock });
       return made.device;
     };
+    // A name already pinned to a store id on this device (D85) is never moved to another store: --store-path is
+    // checked against the pin before managed.toml changes. A path that cannot be reached yet is recorded as before
+    // (store.setup-pending), and setup checks the pin once it is mounted; until then no command uses the store.
+    if (store !== undefined) {
+      const existing = config.stores[store.name];
+      const path = expandHome(store.path, paths.home, ctx.cwd);
+      const secretRef =
+        store.secret ?? (existing !== undefined && "secret" in existing ? existing.secret : undefined);
+      const pin = await checkStorePin(ctx.io, {
+        paths,
+        env: ctx.env,
+        name: store.name,
+        store: { kind: "local", path, ...(secretRef === undefined ? {} : { secret: secretRef }) },
+        opener: ctx.stores,
+      });
+      if (!pin.ok && pin.finding.code !== "store.unreachable") return pin;
+    }
     const writes = changes.length > 0 || store !== undefined;
     if (writes) {
       const written = await writeRoots(ctx.io, paths, {

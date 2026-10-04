@@ -10,10 +10,15 @@
 // its identity file meta/v1/store.json is created once, its restic repository is created when it has none, and this
 // device records the store's id under its name in registry.json. Every step is idempotent, so `plainport init` can
 // run again to finish a setup that stopped half way.
+//
+// The id recorded under a name is a pin (D85): once a name has an id, setup only finishes that same store. A store
+// that answers with another id, or with none (a swapped disk, a changed path), is refused with store.identity-changed
+// before anything is written: no folder, no identity file, no repository, no registry change. A new store needs a
+// new name.
 
 import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import { ensureStoreIdentity } from "./catalog/identity.ts";
+import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
@@ -120,54 +125,110 @@ export interface SetUpStoreOptions {
   mint: () => string;
 }
 
+type SetUpOptions = Omit<SetUpStoreOptions, "mint">;
+
+/** Whether `path` is a folder: undefined when nothing is there. */
+const folderAt = async (io: LocalIo, path: string): Promise<boolean | undefined> => {
+  try {
+    return (await io.fs.stat(path)).kind === "dir";
+  } catch (error) {
+    const code = systemErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
+};
+
+const unreachableAt = (name: string, root: string, detail: string) =>
+  fail(
+    finding("store.unreachable", {
+      message: `store ${name} at ${root} cannot be set up: ${detail}`,
+      fix: "mount the disk that holds it (or fix stores.<name>.path), then run plainport init --yes",
+      paths: [root],
+    }),
+  );
+
+const openWithSecret = async (io: LocalIo, options: SetUpOptions): Promise<Result<OpenedStore>> => {
+  const password = await resolveSecret(
+    io,
+    options.env,
+    options.paths.home,
+    options.name,
+    secretRefOf(options.store),
+  );
+  if (!password.ok) return password;
+  return options.opener.open(options.name, options.store, password.value);
+};
+
+/**
+ * The id `options.name` is pinned to on this device, checked against the store `options.store` points at (D85):
+ * null when the name has no id yet, store.identity-changed when the store there carries another id or none. Reads
+ * only: it never makes a folder or writes to the store or the registry.
+ */
+export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise<Result<string | null>> => {
+  const { name, store, paths } = options;
+  if (store.kind !== "local") return unsupported(name, store);
+  const registry = await readRegistry(io, paths);
+  if (!registry.ok) return registry;
+  const pinned = registry.value.stores?.[name];
+  if (pinned === undefined) return ok(null);
+  const root = storeRoot(store, paths.home);
+  const parent = dirname(root);
+  if ((await folderAt(io, parent)) !== true)
+    return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
+  const here = await folderAt(io, root);
+  if (here === false) return unreachableAt(name, root, `${root} is not a folder`);
+  const changed = (found: string | null) => {
+    const refused = identityChanged(pinned, found, `store at ${root}`);
+    return fail({
+      ...refused.finding,
+      message: `store ${name} is pinned on this device to ${pinned}: ${refused.finding.message}`,
+      fix: `point stores.${name}.path back at the disk this device set up as ${name}; to use the store at ${root}, give it a new name: plainport init --store-path ${root} --store <new-name> --yes`,
+      paths: [root],
+    });
+  };
+  if (here === undefined) return changed(null);
+  const reached = await openWithSecret(io, options);
+  if (!reached.ok) return reached;
+  const identity = await readStoreIdentity(reached.value.blob);
+  if (!identity.ok) return identity;
+  return identity.value === pinned ? ok(pinned) : changed(identity.value);
+};
+
 /** Sets a store up (see above): store.unreachable when the folder that should hold it is missing. */
 export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promise<Result<StoreSetup>> => {
   const { name, store, paths } = options;
   if (store.kind !== "local") return unsupported(name, store);
+  const pin = await checkStorePin(io, options);
+  if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
   const parent = dirname(root);
-  const isFolder = async (path: string): Promise<boolean | undefined> => {
-    try {
-      return (await io.fs.stat(path)).kind === "dir";
-    } catch (error) {
-      const code = systemErrorCode(error);
-      if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-      throw error;
-    }
-  };
-  const unreachable = (detail: string) =>
-    fail(
-      finding("store.unreachable", {
-        message: `store ${name} at ${root} cannot be set up: ${detail}`,
-        fix: "mount the disk that holds it (or fix stores.<name>.path), then run plainport init --yes",
-        paths: [root],
-      }),
-    );
-  if ((await isFolder(parent)) !== true)
-    return unreachable(`${parent} is not a folder (a disk not mounted?)`);
-  const here = await isFolder(root);
-  if (here === false) return unreachable(`${root} is not a folder`);
+  if ((await folderAt(io, parent)) !== true)
+    return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
+  const here = await folderAt(io, root);
+  if (here === false) return unreachableAt(name, root, `${root} is not a folder`);
   if (here === undefined) await io.fs.mkdirp(root);
 
-  const password = await resolveSecret(io, options.env, paths.home, name, secretRefOf(store));
-  if (!password.ok) return password;
-  const opened = await options.opener.open(name, store, password.value);
-  if (!opened.ok) return opened;
-  const identity = await ensureStoreIdentity(opened.value.blob, options.mint);
+  const open = await openWithSecret(io, options);
+  if (!open.ok) return open;
+  const identity = await ensureStoreIdentity(open.value.blob, options.mint);
   if (!identity.ok) return identity;
 
   let repositoryCreated = false;
-  const listed = await opened.value.engine.list({ tags: ["plainport"] });
+  const listed = await open.value.engine.list({ tags: ["plainport"] });
   if (!listed.ok) {
     if (listed.finding.code !== "restic.repo-missing") return listed;
-    const made = await opened.value.engine.init();
+    const made = await open.value.engine.init();
     if (!made.ok) return made;
     repositoryCreated = true;
   }
 
   let recorded = false;
   const updated = await updateRegistry(io, paths, (registry) => {
-    recorded = registry.stores?.[name] !== identity.value.id;
+    const current = registry.stores?.[name];
+    // Another init may have pinned the name since the check: the pin stands (D85).
+    if (current !== undefined && current !== identity.value.id)
+      return identityChanged(current, identity.value.id, `store at ${root}`);
+    recorded = current === undefined;
     return ok(
       recorded ? { ...registry, stores: { ...registry.stores, [name]: identity.value.id } } : registry,
     );
