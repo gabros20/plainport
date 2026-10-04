@@ -31,11 +31,10 @@ const RootInfo = z.looseObject({
     .meta({ description: "This device's folder, absolute; absent when unbound here" }),
   state: z.enum(["ok", "unbound", "missing", "unavailable"]),
   source: z.enum(["config", "managed", "both"]).meta({ description: "Which config file defines the root" }),
-  projects: z
-    .number()
-    .int()
-    .nonnegative()
-    .meta({ description: "Projects registered under it on this device" }),
+  projects: z.number().int().nonnegative().meta({
+    description:
+      "Projects registered under it on this device. offload also takes an unregistered project folder under the root as it is (offload <root>:<folder>); root scan lists and registers them",
+  }),
 });
 
 export const rootList = defineCommand({
@@ -44,6 +43,7 @@ export const rootList = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: [],
   args: z.strictObject({}),
   output: z.looseObject({
@@ -71,7 +71,14 @@ export const rootList = defineCommand({
         .join("  ")
         .trimEnd(),
     );
-    return [...lines, ...findingLines(data.findings)].join("\n");
+    // Registering is not needed to offload (agent smoke): say so where a root shows none.
+    const unregistered = data.roots
+      .filter((r) => r.projects === 0 && r.state === "ok")
+      .map(
+        (r) =>
+          `${r.key}: no project registered yet; plainport offload ${r.key}:<folder> works on any project folder under it without registering it first, and plainport root scan ${r.key} lists and registers them`,
+      );
+    return [...lines, ...unregistered, ...findingLines(data.findings)].join("\n");
   },
   handler: async (_args, ctx) => {
     const paths = ctx.paths();
@@ -114,6 +121,7 @@ export const rootAdd = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key", "path"],
   args: z.strictObject({
     key,
@@ -158,6 +166,7 @@ export const rootBind = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key", "path"],
   args: z.strictObject({
     key,
@@ -196,10 +205,11 @@ export const rootBind = defineCommand({
 
 export const rootScan = defineCommand({
   name: "root scan",
-  summary: "Find every project under a root's folder here and register the new ones",
+  summary: "List and register the project folders under a root; offload takes an unregistered one as it is",
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key"],
   args: z.strictObject({ key }),
   output: z.looseObject({

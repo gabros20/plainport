@@ -4,10 +4,11 @@
 // space the restore needs (fs.no-space); restoreVerified restores into the staging folder and compares the staged tree
 // with the listing (verify.mismatch). Neither swaps anything into place: the caller renames the staging folder.
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Phase, type Result, shellWord } from "@plainport/contract";
 import { CatalogEventSchema } from "../catalog/events.ts";
 import { STORE_EVENTS_PREFIX } from "../catalog/log.ts";
+import { makeInHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
@@ -58,7 +59,11 @@ export const producedBy = async (store: BlobStore, event: string) => {
 const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Result<boolean>> => {
   const probe = join(folder, `.plainport-case-${op.toLowerCase()}`);
   try {
-    await io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true });
+    // Another onload may remove the holder once it finds it empty (D72): makeInHolder makes it again.
+    const made = await makeInHolder(io, folder, probe, () =>
+      io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true }),
+    );
+    if (!made.ok) return made;
   } catch (error) {
     return unreadable(folder, error, "whether its volume ignores case is unknown; nothing was restored");
   }
@@ -86,6 +91,8 @@ export interface SnapshotTotals {
   bytes: number;
   /** The project folder's own mode, from the offloaded event (D55). */
   rootMode?: number;
+  /** How many paths the offload stripped, from its event (D73); absent when the event cannot be read or does not say. */
+  stripped?: number;
 }
 
 /**
@@ -174,7 +181,12 @@ export const checkSnapshot = async (options: {
       }),
     );
   }
-  return ok({ files, bytes, ...(rootMode === undefined ? {} : { rootMode }) });
+  return ok({
+    files,
+    bytes,
+    ...(rootMode === undefined ? {} : { rootMode }),
+    ...(made?.stats.stripped === undefined ? {} : { stripped: made.stats.stripped }),
+  });
 };
 
 /**
@@ -201,7 +213,8 @@ export const restoreVerified = async (options: {
   const { io, staging, ctx } = options;
   options.phase("restore", "start");
   try {
-    await io.fs.mkdirp(staging);
+    const made = await makeInHolder(io, dirname(staging), staging, () => io.fs.mkdirp(staging));
+    if (!made.ok) return made;
   } catch (error) {
     return writeFailed(error, `making ${staging}`, false, staging);
   }

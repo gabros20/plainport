@@ -9,6 +9,7 @@
         "@types/bun": "1.4.2",
         "@typescript/native-preview": "7.0.0-dev.20260707.2",
         "ajv": "8.20.0",
+        "zod": "4.6.5",
       },
     },
     "packages/blob-fs": {

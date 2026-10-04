@@ -88,6 +88,102 @@ describe("version and help", () => {
     expect((await capture(["--help"], REGISTRY)).out).toBe(help.out);
   });
 
+  test("help is a short overview: commands grouped with their risk class, and where the machine contract is (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out.length).toBeLessThan(4096);
+    for (const heading of ["Projects:", "Recovery and cleanup:", "Roots:", "Setup and info:"])
+      expect(help.out).toContain(`\n${heading}\n`);
+    // Every command is listed once, under one group.
+    for (const c of REGISTRY) expect(help.out.split(`\n  ${c.name.padEnd(9)}  ${c.risk}`)).toHaveLength(2);
+    expect(help.out).toContain("plainport help <command>");
+    expect(help.out).toContain("plainport help --json");
+    expect(help.out).toContain("plainport.json");
+  });
+
+  test("help's summaries: offload names the kept copy, and ls, root list and root scan say offload needs no registering (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out).not.toContain("free its folder");
+    expect(help.out).toMatch(
+      /offload +confirm +Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it\n/,
+    );
+    expect(help.out).toMatch(
+      /root scan +safe_write +List and register the project folders under a root; offload takes an unregistered one as it is\n/,
+    );
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    const rootList = manifest.commands.find((c: { name: string }) => c.name === "root list");
+    expect(JSON.stringify(rootList.output)).toContain("offload also takes an unregistered project folder");
+  });
+
+  test("help onload says when it reuses the kept copy, how to restore from the store, and how --snapshot, --to and --no-hydrate interact (agent smoke)", async () => {
+    const help = (await capture(["help", "onload"], REGISTRY)).out;
+    expect(help).toMatch(
+      /--to <value> +Land it in this folder instead of its root's place; always restored from the store\n/,
+    );
+    expect(help).toMatch(
+      /--snapshot <value> +Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy\n/,
+    );
+    expect(help).toContain("a reused kept copy has its dependencies either way\n");
+    expect(help).toContain(
+      "plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
+    );
+  });
+
+  test("help onload says the install usually needs the network, what a failed install leaves, and that --no-hydrate keeps the tree as stored (C3)", async () => {
+    const help = (await capture(["help", "onload"], REGISTRY)).out;
+    expect(help).toMatch(
+      /--no-hydrate +Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way\n/,
+    );
+    expect(help).toContain(
+      "the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
+    );
+  });
+
+  test("the footer names exactly the commands whose registry entry accepts a plan (quality r1 minor 6)", async () => {
+    const fake = await capture(["help"], FAKE_REGISTRY);
+    expect(fake.out.replaceAll("\n", " ")).toContain(
+      "ship also takes --plan <id> from its --dry-run instead.",
+    );
+    expect(fake.out).not.toMatch(/(show|write|root add|stream|boom|fragile) also takes --plan/);
+    for (const c of REGISTRY) {
+      const info = JSON.parse((await capture(["help", ...c.name.split(" "), "--json"], REGISTRY)).out).data
+        .commands[0];
+      expect(info.acceptsPlan).toBe(c.acceptsPlan);
+    }
+  });
+
+  test("help groups come from each registry entry's group, and the real registry leaves no command under Other (quality r1 minor 7)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out).not.toContain("\nOther:\n");
+    const fake = await capture(["help"], FAKE_REGISTRY);
+    expect(fake.out).toMatch(/\nRoots:\n {2}root add /);
+    for (const c of REGISTRY) {
+      const info = JSON.parse((await capture(["help", ...c.name.split(" "), "--json"], REGISTRY)).out).data
+        .commands[0];
+      expect(["projects", "recovery", "roots", "setup"]).toContain(c.group);
+      expect(info.group).toBe(c.group);
+    }
+  });
+
+  test("help says that --plan <id> stands in for --yes, in the listing, the global option and the command (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out.replaceAll("\n", " ")).toContain(
+      "read and safe_write commands run freely; confirm commands need --yes. offload also takes --plan <id> from its --dry-run instead.",
+    );
+    expect(help.out).toMatch(/--yes +Allow a confirm-class command to run; --plan <id> stands in for it/);
+    const offload = await capture(["help", "offload"], REGISTRY);
+    expect(offload.out).toContain("Risk: confirm (needs --yes, or --plan <id> from a --dry-run)");
+    expect(offload.out).toMatch(
+      /--plan <value> +Run the plan a --dry-run saved, by its id, instead of --yes/,
+    );
+    expect(offload.out).toMatch(
+      /plainport offload work:clients\/acme\/web --dry-run +Plan offloading a project; --plan <id> then runs that plan, instead of --yes/,
+    );
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    expect(manifest.globalOptions.find((o: { name: string }) => o.name === "yes").summary).toContain(
+      "--plan <id> stands in for it",
+    );
+  });
+
   test("help <command> and <command> --help show the command, its risk class and dry-run support", async () => {
     const one = await capture(["help", "version"], REGISTRY);
     expect(one.code).toBe(0);
@@ -132,6 +228,8 @@ describe("generated contract files", () => {
         "usage",
         "risk",
         "dryRun",
+        "acceptsPlan",
+        "group",
         "positionals",
         "options",
         "arguments",

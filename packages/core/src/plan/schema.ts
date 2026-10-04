@@ -57,6 +57,10 @@ export const ArrivalItemSchema = outputObject({
   part: z.enum(["files", "deps", "agent-session", "secrets", "git-access", "process"]),
   outcome: z.enum(["restore", "reuse", "hydrate", "resume", "handoff", "withheld", "suggest", "skip"]),
   detail: z.string().meta({ description: 'e.g. "pnpm install --frozen-lockfile", "claude --resume <id>"' }),
+  note: z.string().optional().meta({
+    description:
+      "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+  }),
 }).meta({ title: "ArrivalItem" });
 export type ArrivalItem = z.infer<typeof ArrivalItemSchema>;
 
@@ -76,10 +80,34 @@ export const PlanSchema = outputObject({
     files: z.int().nonnegative(),
     bytes,
     largest: z.array(SizedPathSchema).meta({ description: "The ten largest included files, largest first" }),
+    gitignored: outputObject({
+      files: z.int().nonnegative(),
+      paths: z.array(z.string()).meta({ description: "The first 20, sorted" }),
+      incomplete: z.literal(true).optional().meta({
+        description:
+          "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+      }),
+    })
+      .optional()
+      .meta({
+        description:
+          "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
+      }),
   }),
   strip: z.array(StripEntrySchema),
   findings: z.array(FindingSchema),
   phases: z.array(PhaseSchema),
+  next: outputObject({
+    command: z
+      .string()
+      .meta({ description: "The exact command, e.g. plainport offload work:web --plan <id>" }),
+    reason: z.string(),
+  })
+    .optional()
+    .meta({
+      description:
+        "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+    }),
   arrival: z.array(ArrivalItemSchema).optional().meta({
     description: "What each part becomes where the project lands; for an offload, how it comes back",
   }),

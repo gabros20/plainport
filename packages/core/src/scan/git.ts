@@ -144,6 +144,7 @@ const git = async (
   dir: string,
   ctx: GitContext,
   args: readonly string[],
+  input: { stdin?: Uint8Array; noneExit?: number } = {},
 ): Promise<Result<Uint8Array>> => {
   let real: string;
   try {
@@ -172,9 +173,13 @@ const git = async (
     capture: { maxBytes: CAPTURE_BYTES },
     idleTimeoutMs: 120_000,
     timeoutMs: 600_000,
+    ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
     ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   if (!ran.ok) return ran;
+  // An exit code that means "nothing matched" (check-ignore's 1) is an empty answer, not a failure.
+  if (input.noneExit !== undefined && ran.value.exitCode === input.noneExit && ran.value.signal === null)
+    return ok(new Uint8Array());
   return capturedOutput(ran.value, gitFailed(args, dir));
 };
 
@@ -527,4 +532,22 @@ export const gitTracked = async (
   }
   if (undecodable) for (const path of paths) if (path.includes("\uFFFD")) tracked.add(path);
   return ok(tracked);
+};
+
+/**
+ * Which of `paths` (relative to the repository at `repo`) git ignores, by git's own rules: every .gitignore,
+ * .git/info/exclude and the user's core.excludesFile. Tracked files are never ignored, as git sees it. One
+ * `git check-ignore --stdin -z` call; exit 1 means none.
+ */
+export const gitIgnored = async (
+  host: HostPorts,
+  repo: string,
+  ctx: GitContext,
+  paths: readonly string[],
+): Promise<Result<Set<string>>> => {
+  if (paths.length === 0) return ok(new Set());
+  const stdin = new TextEncoder().encode(paths.map((p) => `${p}\0`).join(""));
+  const out = await git(host, repo, ctx, ["check-ignore", "--stdin", "-z"], { stdin, noneExit: 1 });
+  if (!out.ok) return out;
+  return ok(new Set(records(out.value, NUL)));
 };

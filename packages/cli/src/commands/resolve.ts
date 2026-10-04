@@ -49,13 +49,25 @@ export const knownProjects = async (
   return ok({ paths, device, set: read.value });
 };
 
-/** project.not-found for a project neither this device nor any catalog knows. */
-export const notKnown = (address: string) =>
+/**
+ * project.not-found for a project neither this device nor any catalog knows. A project folder found under a root
+ * (not registered yet) is named as such: offload takes it as it is, so the fix does not make registering look needed.
+ */
+export const notKnown = (ref: ProjectRef) =>
   fail(
-    finding("project.not-found", {
-      message: `neither this device nor the catalog of any store it set up knows ${address}`,
-      fix: "plainport ls lists the projects; plainport root scan <root> registers a root's projects",
-    }),
+    finding(
+      "project.not-found",
+      ref.match === "boundary" && ref.dir !== undefined
+        ? {
+            message: `${ref.dir} is a project folder under root ${ref.root} that this device has not registered or offloaded yet, so it has no status`,
+            fix: `plainport offload ${shellWord(ref.address)} --dry-run plans offloading it as it is (offload needs no registration); plainport root scan ${shellWord(ref.root)} registers the root's projects so ls and status show them`,
+            paths: [ref.dir],
+          }
+        : {
+            message: `neither this device nor the catalog of any store it set up knows ${ref.address}`,
+            fix: "plainport ls lists the projects; plainport root scan <root> registers a root's projects",
+          },
+    ),
   );
 
 /** A project the views know, as core's operations take it. */

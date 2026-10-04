@@ -280,6 +280,12 @@ export interface OffloadOutcome {
   store: string;
   /** Bytes freed now: the whole folder once its deletion has started, 0 while the trash is kept or waits. */
   freedBytes: number;
+  /** Bytes the local copy still holds in the trash: the whole folder while it is kept or waits, else 0. */
+  keptBytes: number;
+  /** With keptBytes: what frees them, plainport gc once keepUntil has passed, or plainport recover. */
+  freedBy?: string;
+  /** The folder moved to `trash`: deleted (its detached delete has started), kept (keepLocalFor) or waiting (recover). */
+  localCopy: "deleted" | "kept" | "waiting";
   /** Absent when config says stub = false. */
   stub?: string;
   /** Where the folder waits to be deleted. */
@@ -785,6 +791,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           files: verified.files,
           bytes: verified.bytes,
           strippedBytes: verified.prepared.plan.strip.reduce((sum, s) => sum + s.bytes, 0),
+          stripped: verified.prepared.plan.strip.length,
           ecosystems: verified.prepared.ecosystems,
         },
       };
@@ -842,6 +849,9 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         snapshot: op,
         store: store.name,
         freedBytes: freed ? verified.prepared.tree.bytes : 0,
+        keptBytes: freed ? 0 : verified.prepared.tree.bytes,
+        ...(freed ? {} : { freedBy: keepUntil === undefined ? "plainport recover" : "plainport gc" }),
+        localCopy: freed ? "deleted" : keepUntil === undefined ? "waiting" : "kept",
         ...(stub === undefined ? {} : { stub }),
         trash,
         ...(keepUntil === undefined ? {} : { keepUntil }),

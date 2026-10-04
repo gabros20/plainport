@@ -373,7 +373,8 @@ describe("onload: the round trip", () => {
     // Nothing is left open: no journal, no lock, no staging.
     expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
     expect(existsSync(join(box.paths.locksDir, `${id}.lock`))).toBe(false);
-    expect(readdirSync(join(box.home, "work/.plainport-staging"))).toEqual([]);
+    // The staging holder it left empty goes too (C2).
+    expect(existsSync(join(box.home, "work/.plainport-staging"))).toBe(false);
     await expectInvariants();
   });
 
@@ -987,9 +988,8 @@ describe("onload: preflight refusals change nothing", () => {
     expect(existsSync(`${dir}.plainport`)).toBe(false);
     const id = await projectId();
     expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.override).toBe(elsewhere);
-    // The staging holder stays beside the landing place, empty: another onload there may be using it.
-    expect(readdirSync(join(box.home, "elsewhere")).sort()).toEqual([".plainport-staging", "web"]);
-    expect(readdirSync(join(box.home, "elsewhere/.plainport-staging"))).toEqual([]);
+    // The staging holder beside the landing place goes once empty (C2); it stays only while another onload uses it.
+    expect(readdirSync(join(box.home, "elsewhere")).sort()).toEqual(["web"]);
     await expectInvariants("web", elsewhere);
   });
 

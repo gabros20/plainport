@@ -188,6 +188,7 @@ export const status = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().optional().meta({
@@ -207,7 +208,7 @@ export const status = defineCommand({
     if (!known.ok) return known;
     const named = await resolveKnown(ctx, known.value, args.project ?? ".", "status");
     if (!named.ok) return named;
-    if (named.value.known === undefined) return notKnown(named.value.ref.address);
+    if (named.value.known === undefined) return notKnown(named.value.ref);
     // Only this project's view is built, with its local details (D64 quality: views are lazy).
     for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
     return ok(await known.value.set.view(named.value.known.id, { detail: true }));
@@ -227,6 +228,7 @@ export const ls = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: [],
   args: z.strictObject({
     root: z.string().optional().meta({ description: "Only this root's projects" }),
@@ -258,9 +260,10 @@ export const ls = defineCommand({
       (path) => `${path}: a journal this version of plainport cannot read; plainport recover reports it`,
     );
     if (data.projects.length === 0)
-      return ["no projects yet: plainport root scan <root> registers a root's projects", ...unreadable].join(
-        "\n",
-      );
+      return [
+        "no projects yet: plainport offload <root>:<folder> works on any project folder under a root without registering it first; plainport root scan <root> lists and registers a root's projects",
+        ...unreadable,
+      ].join("\n");
     const width = Math.max(...data.projects.map((p) => p.address.length));
     const stale = data.stores.filter((s) => s.stale);
     return [

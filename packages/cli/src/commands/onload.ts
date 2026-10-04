@@ -36,6 +36,10 @@ const HydrateReportSchema = z.looseObject({
     description:
       "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)",
   }),
+  reason: z.string().optional().meta({
+    description:
+      "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
+  }),
 });
 
 const OnloadOutputSchema = z
@@ -52,8 +56,23 @@ const OnloadOutputSchema = z
     store: z.string(),
     dir: z.string().meta({ description: "Where the project now is" }),
     restored: z.enum(["restore", "reuse"]).meta({
-      description: "restore: from the store; reuse: the same head's folder renamed back from the trash",
+      description:
+        "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused). To restore from the store instead, plainport gc --now --yes deletes the kept copy first; --to and an older --snapshot always restore from the store",
     }),
+    reused: z
+      .looseObject({
+        from: z
+          .string()
+          .meta({ description: "The trash folder renamed back: <root>/.plainport-trash/<op>/<name>" }),
+        offload: z
+          .string()
+          .meta({ description: "The offload that released it; its trash and journal are gone now" }),
+        reason: z
+          .string()
+          .meta({ description: "Why it was renamed back instead of restored from the store" }),
+      })
+      .optional()
+      .meta({ description: "Only with restored: reuse" }),
     files: z.int().nonnegative(),
     bytes: z.int().nonnegative(),
     hydrate: HydrateReportSchema,
@@ -85,21 +104,36 @@ export const onload = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z
       .string()
       .meta({ description: "An address (root:path), a unique name, a path or its .plainport stub" }),
-    to: z.string().optional().meta({ description: "Land it in this folder instead of its root's place" }),
-    snapshot: z.string().optional().meta({ description: "Restore this older snapshot instead of the head" }),
-    "no-hydrate": z
-      .boolean()
-      .optional()
-      .meta({ description: "Restore the files without installing dependencies" }),
+    to: z.string().optional().meta({
+      description: "Land it in this folder instead of its root's place; always restored from the store",
+    }),
+    snapshot: z.string().optional().meta({
+      description:
+        "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy",
+    }),
+    "no-hydrate": z.boolean().optional().meta({
+      description:
+        "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way",
+    }),
   }),
   output: OnloadOutputSchema,
   examples: [
-    { argv: ["onload", "work:clients/acme/api"], summary: "Bring a shelved project back" },
+    {
+      argv: ["onload", "work:clients/acme/api"],
+      summary:
+        "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
+    },
+    {
+      argv: ["onload", "work:clients/acme/api", "--no-hydrate"],
+      summary:
+        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
+    },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],
       summary: "Land it elsewhere, files only",
@@ -107,7 +141,13 @@ export const onload = defineCommand({
   ],
   human: (data) => {
     const from = `${data.project} from snapshot ${data.snapshot} into ${data.dir}`;
-    const { hydrate } = data;
+    const { hydrate, reused } = data;
+    if (reused !== undefined && data.exitCode === 0) {
+      return [
+        `onloaded ${data.project} into ${data.dir}: renamed back from ${reused.from}, not restored from the store (${reused.reason})`,
+        "dependencies came back with the folder, so nothing was installed",
+      ].join("\n");
+    }
     if (data.exitCode === 10) {
       const failed = hydrate.steps.find((s) => !s.ok);
       return `restored ${from}; ${failed?.command ?? "the install"} failed, so its dependencies are not installed: plainport hydrate ${data.project} retries`;
@@ -118,7 +158,9 @@ export const onload = defineCommand({
         : hydrate.status === "reused"
           ? "its folder came back from the trash with its dependencies"
           : hydrate.status === "skipped"
-            ? `dependencies not installed: plainport hydrate ${data.project} installs them`
+            ? hydrate.reason !== undefined
+              ? `nothing installed: ${hydrate.reason}`
+              : `dependencies not installed: plainport hydrate ${data.project} installs them`
             : "nothing to install";
     return [
       `onloaded ${from}; ${deps}`,
@@ -171,6 +213,7 @@ export const hydrate = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().meta({ description: "An address (root:path), a unique name, a path or ." }),
@@ -223,6 +266,7 @@ export const dehydrate = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().meta({ description: "An address (root:path), a unique name, a path or ." }),

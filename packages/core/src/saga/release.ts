@@ -18,6 +18,7 @@
 import { basename, dirname, join } from "node:path";
 import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { readDevice } from "../device.ts";
+import { makeInHolder } from "../holder.ts";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -25,7 +26,7 @@ import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
 import { placeStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
-import { type Saga, writeFailed } from "./journaled.ts";
+import { type Saga, withFix, writeFailed } from "./journaled.ts";
 import { unchanged } from "./verify.ts";
 
 export const TRASH_DIR = ".plainport-trash";
@@ -221,7 +222,13 @@ export const releaseOffload = async (
       );
     }
     try {
-      await io.fs.mkdirp(trash);
+      // The holder another operation may remove once it is empty (D72): makeInHolder makes it again.
+      const made = await makeInHolder(io, dirname(trash), trash, () => io.fs.mkdirp(trash));
+      if (!made.ok)
+        return withFix(
+          made,
+          "plainport recover finishes the release once the other plainport operations in this root have finished",
+        );
       // The new folders' own entries, so a power loss cannot orphan the trash (D24).
       await io.fs.syncDir(dirname(trash));
       await io.fs.syncDir(dirname(dirname(trash)));

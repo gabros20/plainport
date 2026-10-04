@@ -54,6 +54,7 @@ import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
+import { removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -79,7 +80,7 @@ import { ulid } from "../ulid.ts";
 import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
 import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
-import { offloadTrashOf, rootFolderOf } from "./release.ts";
+import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { checkSnapshot, kindAt, producedBy, restoreVerified, unreadable } from "./restore-tree.ts";
 
 /** Every journal step, in the order a run reaches them; the crash matrix enumerates its rows from this list. */
@@ -204,6 +205,8 @@ export type OnloadOutcome = {
   dir: string;
   /** restore: restored from the store; reuse: the same head's folder renamed back from the trash. */
   restored: "restore" | "reuse";
+  /** With reuse: the trash folder renamed back, the offload that released it, and why it was not restored. */
+  reused?: { from: string; offload: string; reason: string };
   /** Files and bytes the snapshot holds. */
   files: number;
   bytes: number;
@@ -420,6 +423,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     let files = 0;
     let bytes = 0;
     let rootMode: number | undefined;
+    let stripped: number | undefined;
     if (reuse === undefined) {
       try {
         // A --to landing's holder is noted first, so gc finds a staging folder whose journal a lost write dropped.
@@ -446,6 +450,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       files = listed.value.files;
       bytes = listed.value.bytes;
       rootMode = listed.value.rootMode;
+      stripped = listed.value.stripped;
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
       const produced = await producedBy(store.blob, made.event);
@@ -503,7 +508,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       return swapAndCommit(saga, lock, files, bytes);
     });
     if (!result.ok) return result;
-    return hydrate(result.value);
+    return hydrate(result.value, stripped);
   }
 
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
@@ -854,6 +859,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       store: journal.store.name,
       dir: target,
       restored: journal.reuse === undefined ? "restore" : "reuse",
+      ...(journal.reuse === undefined
+        ? {}
+        : {
+            reused: {
+              from: journal.reuse.folder,
+              offload: journal.reuse.op,
+              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+            },
+          }),
       files,
       bytes,
       hydrate: { status: "none", steps: [], untrusted: [] },
@@ -861,18 +875,46 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   }
 
   /** Agent state (later milestones), the toolchain and the frozen install (DESIGN steps 6 to 8). */
-  async function hydrate(outcome: OnloadOutcome): Promise<Result<OnloadOutcome>> {
+  async function hydrate(
+    outcome: OnloadOutcome,
+    stripped: number | undefined,
+  ): Promise<Result<OnloadOutcome>> {
     phase("agents", "skip");
     if (outcome.restored === "reuse") {
       phase("toolchain", "skip");
       phase("hydrate", "skip");
       phase("hooks", "skip");
-      return ok({ ...outcome, hydrate: { status: "reused", steps: [], untrusted: [] } });
+      return ok({
+        ...outcome,
+        hydrate: {
+          status: "reused",
+          steps: [],
+          untrusted: [],
+          reason:
+            "the folder came back with the dependencies it had when it was offloaded, so nothing was installed",
+        },
+      });
     }
     if (req.hydrate === false || !config.onload.hydrate) {
       phase("toolchain", "skip");
       phase("hydrate", "skip");
       phase("hooks", "skip");
+      // An offload whose event says it stripped nothing (stats.stripped 0, D73) left nothing to put back: the restored
+      // files are the whole folder, so the project is local, not restored-unhydrated (C4). Unknown is not nothing.
+      if (stripped === 0) {
+        const marked = await markHydrated(host, paths, id, true);
+        if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
+        return ok({
+          ...outcome,
+          hydrate: {
+            status: "skipped",
+            steps: [],
+            untrusted: [],
+            reason:
+              "the offload stripped nothing, so the restored files are the whole folder as it was: nothing to install back",
+          },
+        });
+      }
       deps.log(
         "info",
         `${ref.address} was restored without its dependencies; plainport hydrate ${shellWord(ref.address)} installs them`,
@@ -982,6 +1024,7 @@ export const finishOnload = async (
       // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
       try {
         await io.fs.removeTree(dirname(journal.reuse.folder));
+        await removeEmptyHolder(io, dirname(dirname(journal.reuse.folder)), TRASH_DIR);
         await removeJournal(io, paths, journal.reuse.op);
       } catch (error) {
         assertSystemError(error);
@@ -994,6 +1037,9 @@ export const finishOnload = async (
     }
     const swapped = await saga.step("onload.swapped");
     if (!swapped.ok) return swapped;
+    // The staging holder this onload's folder left empty goes (rmdir: it stays while another onload uses it, and the
+    // next onload makes it again). Only plainport's own holder, and never a failure: an empty one left is harmless.
+    if (journal.staging !== undefined) await removeEmptyHolder(io, dirname(journal.staging), STAGING_DIR);
   }
 
   // The stub goes only while it is this project's; anything else at the path is never touched (D47).

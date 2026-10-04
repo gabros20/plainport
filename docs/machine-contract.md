@@ -299,6 +299,7 @@ release does not change it.
   "plainport_json": 1,
   "globalOptions": [{"name": "json", "type": "boolean", "summary": "…"}, {"name": "store", "type": "string", "summary": "…"}],
   "commands": [{"name": "help", "summary": "…", "usage": "plainport help [<command...>]", "risk": "read", "dryRun": false,
+                "acceptsPlan": false, "group": "setup",
                 "positionals": [{"name": "command", "summary": "…", "required": false, "variadic": true}],
                 "options": [{"name": "allow", "type": "string", "multiple": true, "summary": "…"}],
                 "arguments": {"…": "JSON Schema"}, "output": {"…": "JSON Schema"}, "plan": null,
@@ -315,13 +316,17 @@ release does not change it.
 | `globalOptions` | The global flags, in DESIGN.md order; `type` is `boolean` or `string` |
 | `commands[].risk` | The command's risk class (§4); an option that raises it carries its own `risk` in `options` |
 | `commands[].dryRun` | Whether `--dry-run` previews (§6); otherwise it is refused with exit 2 |
+| `commands[].acceptsPlan` | Whether `--plan <id>`, the id its `--dry-run` printed, stands in for `--yes` |
+| `commands[].group` | Where human `help` lists it: `projects`, `recovery`, `roots` or `setup` (an open set) |
 | `commands[].options[]` | `type` is `boolean` (a flag) or `string` (takes a value); `multiple` is true when the option repeats (`--allow a --allow b`); `risk` appears only on an option that raises the command's class |
 | `commands[].arguments` | The strict JSON Schema of the parsed arguments: positional names and option names as keys |
 | `commands[].output` | The open JSON Schema of the success envelope's `data` on a real run |
 | `commands[].plan` | The open JSON Schema of `data` under `--dry-run` (the plan, §6); `null` when the command has no dry run |
 
 `plainport help --json` returns the same command entries without `arguments`, `output` and `plan`; `help <command>`
-adds `topic`, the command asked about. `plainport --help`, `plainport <command> --help` and a bare `plainport`
+adds `topic`, the command asked about. Human `plainport help` is a short overview: the commands by group, each with
+its risk class and one-line summary, the global options, and pointers to `help <command>`, `--json`,
+`help --json` and `plainport.json`; it never prints the machine contract itself. `plainport --help`, `plainport <command> --help` and a bare `plainport`
 are `help`; `plainport --version` is `version`.
 
 `bun run contract` also writes `completions/_plainport` (zsh, for a folder on `$fpath`) and

@@ -6,6 +6,7 @@ The *why* behind decisions lives in the ADRs (`docs/adr/`); this file records *w
 ## [Unreleased]
 
 ### Added
+- Opt-in headless agent smoke eval (`bun run eval:agent`) with isolated plainport state, call transcripts and contract issue scoring.
 - Bun workspace scaffold: `packages/{core,contract,cli,engine-restic,blob-fs,eco-node,host-macos}`.
 - `plainport --version` prints the version baked into the binary from `VERSION`.
 - Development guardrails: Biome (`bun run lint`), gitleaks (`bun run secrets`, through Docker), a pre-commit

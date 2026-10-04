@@ -21,6 +21,7 @@ import { type Ports, positionalsOf } from "../registry.ts";
 import { localStores } from "../stores.ts";
 import { capture, fakeEngineHooks, fakeRepositoryAt, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
+import { renderPlan } from "./offload.ts";
 
 let box: Sandbox;
 const NOW = new Date("2026-10-03T12:00:00Z");
@@ -114,12 +115,108 @@ describe("offload: dry run", () => {
     });
   });
 
+  test("--dry-run --json carries next: the exact command that runs the plan, as the human plan prints it (agent smoke)", async () => {
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.next).toEqual({
+      command: `plainport offload work:web --plan ${data.id}`,
+      reason: `runs this plan instead of --yes, until ${data.expiresAt}, while the folder still matches it`,
+    });
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    const id = /plan {6}([0-9A-Z]{26}) /.exec(human.out)?.[1] ?? "";
+    expect(human.out).toContain(`→ plainport offload work:web --plan ${id}\n`);
+  });
+
   test("the dry run changes nothing in the project and saves its plan under plans/", async () => {
     const run = await cli(["offload", "work:web", "--dry-run", "--json"]);
     const { id } = envelope(run.out).data;
     expect(existsSync(join(box.paths.plansDir, `${id}.json`))).toBe(true);
     expect(existsSync(join(box.home, "work/web/node_modules/vite/index.js"))).toBe(true);
     expect(existsSync(join(box.home, "work/web.plainport"))).toBe(false);
+  });
+
+  /** The project as a git repository, with git's own environment kept inside the sandbox. */
+  const gitRepo = () => {
+    const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(git.exitCode).toBe(0);
+  };
+
+  test("gitignored files travel: git says which, .git/info/exclude included; the plan names them in --json and the human plan (agent smoke, AGENTS rule 2)", async () => {
+    gitRepo();
+    box.file("work/web/.git/info/exclude", ".env\n");
+    box.file("work/web/.gitignore", "node_modules/\ndist/\n*.sqlite\n");
+    box.file("work/web/.env", "TOKEN=op://vault/item\n");
+    box.file("work/web/data/dev.sqlite", "db");
+    box.file("work/web/data/.gitignore", "!keep.sqlite\n");
+    box.file("work/web/data/keep.sqlite", "kept by a negation");
+    const json = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    const data = envelope(json.out).data;
+    expect(PlanSchema.safeParse(data).success).toBe(true);
+    expect(data.include.gitignored).toEqual({ files: 2, paths: [".env", "data/dev.sqlite"] });
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(
+      "  ignored   .env · data/dev.sqlite: gitignored, and they travel; only what a plugin declares regenerable is stripped\n",
+    );
+  });
+
+  test("a folder that is not a git repository has no gitignored list, whatever its .gitignore says", async () => {
+    box.file("work/web/.gitignore", ".env\n");
+    box.file("work/web/.env", "TOKEN=op://vault/item\n");
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.include.gitignored).toBeUndefined();
+  });
+
+  test("a gitignored list git could not complete says so, in the human plan too (quality r1 minor 5)", () => {
+    const plan = PlanSchema.parse({
+      id: ulid(NOW.getTime()),
+      kind: "offload",
+      project: { address: "work:web", root: "work", path: "web", dir: "/w/web", store: "local" },
+      fingerprint: "sha256:x",
+      include: {
+        files: 1,
+        bytes: 1,
+        largest: [],
+        gitignored: { files: 1, paths: [".env"], incomplete: true },
+      },
+      strip: [],
+      findings: [],
+      phases: [],
+      estimate: { uploadBytes: 1 },
+      expiresAt: NOW.toISOString(),
+    });
+    expect(renderPlan(plan)).toContain(
+      "  ignored   .env: gitignored, and they travel; only what a plugin declares regenerable is stripped (incomplete: git could not be asked in every repository, so more may travel)\n",
+    );
+  });
+
+  test("a plan without gitignored files says nothing about them", async () => {
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.include.gitignored).toBeUndefined();
+  });
+
+  test("help offload says gitignored files such as .env travel (agent smoke)", async () => {
+    const run = await cli(["help", "offload"]);
+    expect(run.out).toContain(
+      "gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
+    );
+  });
+
+  test("with keepLocalFor, the arrival step says the install is skipped when onload renames the kept copy back (D71)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.arrival).toEqual([
+      {
+        part: "deps",
+        outcome: "hydrate",
+        detail: "npm ci",
+        note: "skipped when onload renames back the local copy kept for 24h (keepLocalFor), which still has its dependencies",
+      },
+    ]);
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(
+      "  arrival   npm ci at onload; skipped when onload renames back the local copy kept for 24h (keepLocalFor), which still has its dependencies\n",
+    );
   });
 
   const lockedRepo = () => {
@@ -154,6 +251,8 @@ describe("offload: dry run", () => {
     });
     expect(PlanSchema.safeParse(env.data).success).toBe(true);
     expect(env.data.findings.map((f: { code: string }) => f.code)).toContain("git.locked");
+    // A blocked plan has nothing to run: no next.
+    expect(env.data.next).toBeUndefined();
   });
 
   test("--allow applies to a dry run (D50): an allowed blocker leaves an approvable plan the same --allow runs", async () => {
@@ -295,6 +394,59 @@ describe("offload: a real run", () => {
     expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; freed [0-9.]+ KB\n/);
     expect(run.out).toContain(`stub      ${dir()}.plainport`);
     await expectInvariants();
+  });
+
+  test("with keepLocalFor nothing is freed yet: the result names the bytes kept, until when, and that gc frees them (agent smoke)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(run.code).toBe(0);
+    const data = envelope(run.out).data;
+    const until = new Date(NOW.getTime() + 24 * 3_600_000).toISOString();
+    expect(data).toMatchObject({
+      freedBytes: 0,
+      keptBytes: 615_970,
+      keepUntil: until,
+      freedBy: "plainport gc",
+    });
+    const schema = REGISTRY.find((c) => c.name === "offload")?.output;
+    expect(schema?.safeParse(data).success).toBe(true);
+    await expectInvariants();
+  });
+
+  test("the human result of a kept copy says what stays on disk and when gc frees it (agent smoke)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const run = await cli(["offload", "work:web", "--yes"]);
+    expect(run.code).toBe(0);
+    const until = new Date(NOW.getTime() + 24 * 3_600_000).toISOString();
+    expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; nothing freed yet\n/);
+    expect(run.out).toMatch(
+      new RegExp(
+        `\nkept {6}${box.home}/work/\\.plainport-trash/[0-9A-Z]{26} \\(616 KB\\) until ${until}; plainport gc frees it then \\(plainport gc --now --yes frees it early\\)\n`,
+      ),
+    );
+  });
+
+  test("without keepLocalFor the folder is freed now: keptBytes is 0 and no freedBy", async () => {
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    const data = envelope(run.out).data;
+    expect(data.freedBytes).toBe(615_970);
+    expect(data.keptBytes).toBe(0);
+    expect(data.freedBy).toBeUndefined();
+    // The trash path is marked as already being deleted, not kept (C1).
+    expect(data.localCopy).toBe("deleted");
+  });
+
+  test("the human result without keepLocalFor says the local copy is deleted, not kept (C1)", async () => {
+    const run = await cli(["offload", "work:web", "--yes"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("\ndeleted   the local copy (keepLocalFor is 0, so nothing is kept)\n");
+    expect(run.out).not.toContain(".plainport-trash");
+  });
+
+  test("with keepLocalFor the local copy is kept (C1)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const data = envelope((await cli(["offload", "work:web", "--yes", "--json"])).out).data;
+    expect(data.localCopy).toBe("kept");
   });
 
   test("a fresh plan id stands in for --yes; once the hour is over it no longer does", async () => {

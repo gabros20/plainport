@@ -125,19 +125,6 @@ export const readStagingRecords = async (io: LocalIo, paths: PlainportPaths): Pr
   return records;
 };
 
-/**
- * Removes a shared holder (`.plainport-staging`) only when it is empty, by rmdir, which leaves it in place as soon as
- * another operation has put its own folder there.
- */
-export const removeHolderIfEmpty = async (io: LocalIo, holder: string): Promise<void> => {
-  try {
-    await io.fs.rmdir(holder);
-  } catch (error) {
-    const code = systemErrorCode(error);
-    if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "ENOENT") throw error;
-  }
-};
-
 /** The JSON Schemas of the staging record and holder note, published in schemas/ by `bun run contract`. */
 export const stagingJsonSchemas = (): Record<
   "staging-record" | "staging-holder",

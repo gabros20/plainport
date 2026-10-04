@@ -46,6 +46,7 @@ export const formatBytes = (bytes: number): string => {
 const LABEL = 10;
 const row = (label: string, text: string): string => `  ${label.padEnd(LABEL)}${text}`;
 const SHOWN_LARGEST = 3;
+const SHOWN_IGNORED = 5;
 
 /** The plan as DESIGN.md "CLI design" shows it: target, totals, strip set, largest files, findings, the plan id. */
 export const renderPlan = (plan: Plan): string => {
@@ -63,6 +64,20 @@ export const renderPlan = (plan: Plan): string => {
     const largest = plan.include.largest.slice(0, SHOWN_LARGEST);
     lines.push(row("largest", largest.map((l) => `${l.path} ${formatBytes(l.bytes)}`).join(" · ")));
   }
+  // Gitignored does not mean disposable (AGENTS.md rule 2): say plainly that these travel.
+  const ignored = plan.include.gitignored;
+  if (ignored !== undefined) {
+    const more = ignored.files - SHOWN_IGNORED;
+    lines.push(
+      row(
+        "ignored",
+        `${ignored.paths.length === 0 ? "none found" : ignored.paths.slice(0, SHOWN_IGNORED).join(" · ")}${more > 0 ? ` and ${more} more` : ""}: gitignored, and they travel; only what a plugin declares regenerable is stripped${ignored.incomplete === true ? " (incomplete: git could not be asked in every repository, so more may travel)" : ""}`,
+      ),
+    );
+  }
+  // An install that may not run at onload says so (D71).
+  for (const a of plan.arrival ?? [])
+    if (a.note !== undefined) lines.push(row("arrival", `${a.detail} at onload; ${a.note}`));
   const blocker = planBlocker(plan);
   const allowed = new Set(plan.options?.allow ?? []);
   for (const f of plan.findings) {
@@ -94,15 +109,30 @@ const OffloadOutputSchema = z.union([
     project: z.string(),
     snapshot: z.string(),
     freedBytes: z.int().nonnegative().meta({
-      description: "Bytes freed now: 0 while the trash is kept (keepLocalFor) or waits for recover",
+      description:
+        "Bytes freed now: the whole folder once its detached delete has started; 0 while the local copy is kept (offload.keepLocalFor) or waits for recover, and then keptBytes has them",
+    }),
+    keptBytes: z.int().nonnegative().optional().meta({
+      description:
+        "Bytes the local copy still holds in the trash: the whole folder while it is kept or waits for recover, else 0. They are freed by freedBy",
+    }),
+    freedBy: z.string().optional().meta({
+      description:
+        "With keptBytes: what frees them. plainport gc once keepUntil has passed (a write command's housekeeping also hands a due trash to a detached delete; plainport gc --now --yes frees it early), or plainport recover when the delete could not start",
     }),
     store: z.string(),
     stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
-    trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
-    keepUntil: z.iso
-      .datetime()
-      .optional()
-      .meta({ description: "keepLocalFor: the trash is kept until then" }),
+    trash: z.string().meta({
+      description:
+        "Where the folder was moved: kept there, or waiting there for recover; with localCopy deleted it is already being deleted and is soon gone",
+    }),
+    localCopy: z.enum(["deleted", "kept", "waiting"]).optional().meta({
+      description:
+        "deleted: keepLocalFor is 0 and the folder's detached delete has started, so nothing is kept (freedBytes has it). kept: offload.keepLocalFor keeps it until keepUntil, and onload renames it back. waiting: the delete could not start; plainport recover deletes it",
+    }),
+    keepUntil: z.iso.datetime().optional().meta({
+      description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
+    }),
   }),
   z
     .looseObject({
@@ -126,10 +156,12 @@ const OffloadOutputSchema = z.union([
 
 export const offload = defineCommand({
   name: "offload",
-  summary: "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
+  summary:
+    "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
   risk: "confirm",
   dryRun: { plan: PlanSchema, human: renderPlan },
   acceptsPlan: true,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z
@@ -137,18 +169,24 @@ export const offload = defineCommand({
       .min(1)
       .max(1, "one project per offload until bulk offload lands (D38)")
       .meta({ description: "An address (root:path), a unique name, a path, . or a stub; one for now" }),
-    plan: z.string().optional().meta({ description: "Run a plan a --dry-run saved, instead of --yes" }),
-    "keep-deps": z
-      .boolean()
-      .optional()
-      .meta({ description: "Keep installed dependencies (node_modules) in the snapshot" }),
+    plan: z.string().optional().meta({
+      description:
+        "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)",
+    }),
+    "keep-deps": z.boolean().optional().meta({
+      description:
+        "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
+    }),
     allow: z.array(z.string()).optional().meta({
       description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
     }),
   }),
   output: OffloadOutputSchema,
   examples: [
-    { argv: ["offload", "work:clients/acme/web", "--dry-run"], summary: "Plan offloading a project" },
+    {
+      argv: ["offload", "work:clients/acme/web", "--dry-run"],
+      summary: "Plan offloading a project; --plan <id> then runs that plan, instead of --yes",
+    },
     { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
   ],
   human: (data) => {
@@ -157,14 +195,17 @@ export const offload = defineCommand({
       return data.kind === "diverged-after-commit"
         ? `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}, now its head; the folder changed after the commit, so it stays here with its edits, and the next offload builds on that snapshot`
         : `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
+    const kept = data.keptBytes === undefined ? "" : ` (${formatBytes(data.keptBytes)})`;
     return [
-      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; freed ${formatBytes(data.freedBytes)}`,
+      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : `freed ${formatBytes(data.freedBytes)}`}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
       ...(data.keepUntil !== undefined
-        ? [`kept      ${data.trash} until ${data.keepUntil}`]
-        : data.freedBytes === 0
-          ? [`trash     ${data.trash} waits for plainport recover to delete it`]
-          : []),
+        ? [
+            `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
+          ]
+        : data.localCopy === "waiting"
+          ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
+          : ["deleted   the local copy (keepLocalFor is 0, so nothing is kept)"]),
     ].join("\n");
   },
   handler: async (args, ctx) => {
@@ -246,9 +287,11 @@ export const offload = defineCommand({
       onFinding: (f) => ctx.output.emit({ type: "finding", op, finding: f }),
     });
     if (!planned.ok) return planned;
+    let saved = true;
     try {
       await savePlan(ctx.io, paths, planned.value, now);
     } catch (error) {
+      saved = false;
       // The preview stands without its file; only --plan <id> cannot find it.
       ctx.output.log(
         "warn",
@@ -258,6 +301,18 @@ export const offload = defineCommand({
     // A plan with blockers its --allow leaves (D50) is a refusal that still shows the plan (D38): exit 6, the plan as
     // data (D14).
     const blocker = planBlocker(planned.value);
-    return blocker === undefined ? ok(planned.value) : failWith(blocker, planned.value, 6);
+    if (blocker !== undefined) return failWith(blocker, planned.value, 6);
+    // The command that runs it, as the human plan prints it (agent smoke).
+    return ok(
+      saved
+        ? {
+            ...planned.value,
+            next: {
+              command: planCommand(planned.value),
+              reason: `runs this plan instead of --yes, until ${planned.value.expiresAt}, while the folder still matches it`,
+            },
+          }
+        : planned.value,
+    );
   },
 });

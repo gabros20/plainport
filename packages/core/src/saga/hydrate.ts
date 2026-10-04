@@ -65,6 +65,8 @@ export type HydrateReport = {
   steps: HydrateStepReport[];
   /** What the project file asks to run that M1 never runs, untrusted (D54): hydrate.command, hooks.<name>. */
   untrusted: string[];
+  /** Why nothing was installed, when the status is reused. */
+  reason?: string;
 };
 
 export interface HydrateDeps {

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "project": "work:fixture",
+  "agentExitCode": 0,
+  "fixtureIntact": true,
+  "agentIssues": [],
+  "calls": [
+    {
+      "argv": ["help"],
+      "exitCode": 0,
+      "stdout": "plainport help\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["offload", "work:fixture", "--json"],
+      "exitCode": 3,
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"offload\",\"error\":{\"code\":3,\"message\":\"offload needs confirmation\",\"hint\":\"re-run: plainport offload work:fixture --json --yes\",\"finding\":{\"code\":\"risk.needs-yes\",\"fix\":\"plainport offload work:fixture --json --yes\",\"severity\":\"block\",\"allowable\":false,\"message\":\"offload needs confirmation\"}}}\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["offload", "work:fixture", "--json", "--yes"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"offload\",\"data\":{}}\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["status", "work:fixture", "--json"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"status\",\"data\":{\"address\":\"work:fixture\",\"state\":\"shelved\"}}\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["onload", "work:fixture", "--json"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"onload\",\"data\":{\"project\":\"work:fixture\",\"restored\":\"restore\"}}\n",
+      "stderr": ""
+    }
+  ],
+  "observations": [
+    {
+      "afterCall": 3,
+      "project": "work:fixture",
+      "state": "shelved"
+    },
+    {
+      "afterCall": 5,
+      "project": "work:fixture",
+      "state": "local"
+    }
+  ],
+  "finalObservation": {
+    "project": "work:fixture",
+    "state": "local"
+  }
+}

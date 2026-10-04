@@ -168,6 +168,13 @@ describe("ls: every project with its state", () => {
     expect(run.out).toMatch(/^work:web\s+local\s+/m);
   });
 
+  test("an empty ls says offload needs no registering, and root scan lists the candidates (agent smoke)", async () => {
+    const run = await cli(["ls"]);
+    expect(run.out).toBe(
+      "no projects yet: plainport offload <root>:<folder> works on any project folder under a root without registering it first; plainport root scan <root> lists and registers a root's projects\n",
+    );
+  });
+
   test("an unknown --sort is a usage error (2)", async () => {
     expect((await cli(["ls", "--sort", "colour"])).code).toBe(2);
   });
@@ -199,6 +206,24 @@ describe("status: one project in detail", () => {
   test("an unknown project exits 4 (project.not-found)", async () => {
     const run = await cli(["status", "work:nothing", "--json"]);
     expect([run.code, envelope(run.out).error.finding.code]).toEqual([4, "project.not-found"]);
+  });
+
+  test("an unregistered project folder under a root: the fix names offload, which takes it as it is, and root scan (agent smoke)", async () => {
+    for (const input of ["work:web", "work/web"]) {
+      const run = await cli(["status", input, "--json"]);
+      const error = envelope(run.out).error;
+      expect([run.code, error.finding.code]).toEqual([4, "project.not-found"]);
+      expect(error.finding.message).toBe(
+        `${dir()} is a project folder under root work that this device has not registered or offloaded yet, so it has no status`,
+      );
+      expect(error.finding.fix).toBe(
+        "plainport offload work:web --dry-run plans offloading it as it is (offload needs no registration); plainport root scan work registers the root's projects so ls and status show them",
+      );
+    }
+    // The fix runs as printed.
+    expect((await cli(["offload", "work:web", "--dry-run"])).code).toBe(0);
+    expect((await cli(["root", "scan", "work"])).code).toBe(0);
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
   });
 });
 
@@ -270,9 +295,9 @@ describe("housekeeping at the start of any command (D59)", () => {
       expect(readdirSync(box.paths.journalDir)).toEqual(journal);
     }
     await cli(["root", "scan", "work"], {}, later);
-    for (let i = 0; i < 400 && readdirSync(join(box.home, "work/.plainport-trash")).length > 0; i++)
-      await Bun.sleep(25);
-    expect(readdirSync(join(box.home, "work/.plainport-trash"))).toEqual([]);
+    // The detached delete removes the trash, then the trash holder it left empty (agent smoke).
+    for (let i = 0; i < 400 && existsSync(join(box.home, "work/.plainport-trash")); i++) await Bun.sleep(25);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
     await settle();
     await expectInvariants("api");
   });
@@ -290,8 +315,20 @@ describe("gc, through the CLI", () => {
     const done = data("gc", run.out);
     expect(done.deleted).toHaveLength(1);
     expect(done.freedBytes).toBeGreaterThan(0);
+    // The trash holder it left empty goes too (agent smoke).
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
     await expectInvariants("api");
   });
+
+  test("the trash holder stays while another offload's trash is in it", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');
+    await cli(["offload", "work:api", "--yes"]);
+    const kept = readdirSync(join(box.home, "work/.plainport-trash"));
+    await cli(["offload", "work:web", "--yes"]);
+    const onload = await cli(["onload", "work:web", "--json"]);
+    expect([onload.code, envelope(onload.out).data.restored]).toEqual([0, "reuse"]);
+    expect(readdirSync(join(box.home, "work/.plainport-trash"))).toEqual(kept);
+  }, 30_000);
 
   test("gc deletes a trash past its deadline itself, under the lock: its own housekeeping hands it to no detached delete (D64)", async () => {
     writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "1h"\n');

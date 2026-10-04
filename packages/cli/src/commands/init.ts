@@ -116,6 +116,7 @@ export const init = defineCommand({
   risk: "confirm",
   dryRun: false,
   acceptsPlan: false,
+  group: "setup",
   positionals: [],
   args: z.strictObject({
     root: z

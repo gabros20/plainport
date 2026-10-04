@@ -22,6 +22,7 @@ const cmd = (over: Record<string, unknown> = {}): AnyCommand =>
     risk: "read",
     dryRun: false,
     acceptsPlan: false,
+    group: "setup",
     positionals: [],
     args: z.strictObject({}),
     output: z.looseObject({}),
