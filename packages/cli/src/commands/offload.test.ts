@@ -122,8 +122,18 @@ describe("offload: dry run", () => {
     expect(existsSync(join(box.home, "work/web.plainport"))).toBe(false);
   });
 
-  test("gitignored files travel: the plan names them, in --json and in the human plan (agent smoke, AGENTS rule 2)", async () => {
-    box.file("work/web/.gitignore", "node_modules/\ndist/\n.env\n*.sqlite\n");
+  /** The project as a git repository, with git's own environment kept inside the sandbox. */
+  const gitRepo = () => {
+    const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+    });
+    expect(git.exitCode).toBe(0);
+  };
+
+  test("gitignored files travel: git says which, .git/info/exclude included; the plan names them in --json and the human plan (agent smoke, AGENTS rule 2)", async () => {
+    gitRepo();
+    box.file("work/web/.git/info/exclude", ".env\n");
+    box.file("work/web/.gitignore", "node_modules/\ndist/\n*.sqlite\n");
     box.file("work/web/.env", "TOKEN=op://vault/item\n");
     box.file("work/web/data/dev.sqlite", "db");
     box.file("work/web/data/.gitignore", "!keep.sqlite\n");
@@ -136,6 +146,13 @@ describe("offload: dry run", () => {
     expect(human.out).toContain(
       "  ignored   .env · data/dev.sqlite: gitignored, and they travel; only what a plugin declares regenerable is stripped\n",
     );
+  });
+
+  test("a folder that is not a git repository has no gitignored list, whatever its .gitignore says", async () => {
+    box.file("work/web/.gitignore", ".env\n");
+    box.file("work/web/.env", "TOKEN=op://vault/item\n");
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.include.gitignored).toBeUndefined();
   });
 
   test("a plan without gitignored files says nothing about them", async () => {

@@ -1695,7 +1695,7 @@
                     "description": "The ten largest included files, largest first"
                   },
                   "gitignored": {
-                    "description": "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+                    "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
                     "type": "object",
                     "properties": {
                       "files": {
@@ -2084,7 +2084,7 @@
                 "description": "The ten largest included files, largest first"
               },
               "gitignored": {
-                "description": "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+                "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
                 "type": "object",
                 "properties": {
                   "files": {

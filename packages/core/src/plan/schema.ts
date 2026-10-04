@@ -87,7 +87,7 @@ export const PlanSchema = outputObject({
       .optional()
       .meta({
         description:
-          "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+          "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
       }),
   }),
   strip: z.array(StripEntrySchema),

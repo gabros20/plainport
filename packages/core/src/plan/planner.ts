@@ -330,7 +330,7 @@ export const prepareOffload = async (
   }
   for (const [path, size] of gitFolders) consider({ path, bytes: size });
 
-  const gitignored = await gitignoredFiles(host.fs, req.dir, included);
+  const gitignored = await gitignoredFiles(host, req.dir, ctx, repos, included);
   // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71).
   const keepLocalFor = config.offload.keepLocalFor;
   const reusable = durationMs(keepLocalFor) > 0;
