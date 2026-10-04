@@ -2,6 +2,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { resolvePaths } from "../../packages/core/src/paths.ts";
+import { commandVerb } from "./argv.ts";
 import { lastEnvelope } from "./scorer.ts";
 
 interface PollOptions {
@@ -52,7 +53,7 @@ export async function observeOffloadDeletion(
   stdout: string,
   options: PollOptions = {},
 ): Promise<string[]> {
-  if (argv[0] !== "offload" || exitCode !== 0 || argv.includes("--dry-run")) return [];
+  if (commandVerb(argv) !== "offload" || exitCode !== 0 || argv.includes("--dry-run")) return [];
   const envelope = lastEnvelope(stdout);
   const output = z.object({
     op: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/),

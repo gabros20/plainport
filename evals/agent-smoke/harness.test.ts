@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { agentIssues } from "./run.ts";
 import { agentArgs, sandboxEnv } from "./sandbox.ts";
 
@@ -59,4 +60,9 @@ test("Codex retains login home but directs runtime databases and logs into the t
 test("harness finds the final JSON object after prose with an unmatched brace", () => {
   const text = 'The help mentioned { placeholders.\n```json\n{"contractIssues":["Missing hint"]}\n```';
   expect(agentIssues([JSON.stringify({ type: "result", result: text })])).toEqual(["Missing hint"]);
+});
+
+test("harness finds final issues after an unfinished JSON string in prose", () => {
+  const line = readFileSync(new URL("transcripts/unfinished-prose.json", import.meta.url), "utf8");
+  expect(agentIssues([line])).toEqual(["Missing next-step hint"]);
 });

@@ -142,3 +142,36 @@ test("a deletion observation failure is recorded and prevents a round trip passi
   expect(scoreTranscript(transcript).passed).toBe(false);
   expect(scoreTranscript(transcript).contractIssues[0]?.code).toBe("call.evidence-incomplete");
 });
+
+test("recorder observes offload after leading global flags", async () => {
+  const area = "/tmp/plainport-eval";
+  const env = sandboxEnv(area, "/usr/bin", "/tmp/tools");
+  const op = "01JZZZZZZZZZZZZZZZZZZZZZZZ";
+  const trash = join(area, "work/.plainport-trash", op);
+  const seen: string[] = [];
+  expect(
+    await observeOffloadDeletion(
+      area,
+      env,
+      ["--config", "onload", "--json", "offload", "work:fixture", "--yes"],
+      0,
+      JSON.stringify({
+        plainport_json: 1,
+        ok: true,
+        verb: "offload",
+        data: { op, trash, project: "work:fixture" },
+      }),
+      {
+        exists: (path) => {
+          seen.push(path);
+          return false;
+        },
+      },
+    ),
+  ).toEqual([]);
+  expect(seen).toEqual([
+    trash,
+    `${trash}.claim`,
+    join(area, "home/.local/state/plainport/journal", `${op}.json`),
+  ]);
+});

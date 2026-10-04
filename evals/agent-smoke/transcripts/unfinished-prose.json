@@ -1,0 +1,4 @@
+{
+  "type": "result",
+  "result": "Broken example: {\"x\":\"unfinished\n```json\n{\"contractIssues\":[\"Missing next-step hint\"]}\n```"
+}

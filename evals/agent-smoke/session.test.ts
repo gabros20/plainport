@@ -54,3 +54,30 @@ test("session cleanup refuses paths without the unique temp prefix or outside pr
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test.each([false, true])("session cleanup keeps every guard with config override %j", (override) => {
+  const home = mkdtempSync(join(tmpdir(), "plainport-session-test-"));
+  try {
+    const area = mkdtempSync(join(home, "plainport-agent-smoke-"));
+    const config = override ? join(home, "custom-claude") : undefined;
+    const plan = prepareSessionCleanup(home, area, config);
+    const root = join(realpathSync(home), override ? "custom-claude/projects" : ".claude/projects");
+    expect(plan.root).toBe(root);
+    const neighbor = join(root, "owner");
+    mkdirSync(neighbor, { recursive: true });
+    mkdirSync(plan.path);
+    expect(cleanupSession(prepareSessionCleanup(home, area, config))).toEqual([]);
+    expect(existsSync(plan.path)).toBe(true);
+    expect(() => cleanupSession({ ...plan, path: neighbor })).toThrow();
+    expect(() => cleanupSession({ ...plan, path: join(home, "outside") })).toThrow();
+    expect(() => cleanupSession({ ...plan, prefix: "not-unique" })).toThrow();
+    expect(cleanupSession(plan)).toEqual([plan.path]);
+    expect(existsSync(neighbor)).toBe(true);
+    expect(existsSync(plan.path)).toBe(false);
+    symlinkSync(neighbor, plan.path);
+    expect(() => cleanupSession(plan)).toThrow();
+    expect(existsSync(neighbor)).toBe(true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

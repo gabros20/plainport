@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { EnvelopeSchema, StreamLineSchema } from "../../packages/contract/src/index.ts";
 
+import { commandVerb } from "./argv.ts";
+
 export const CallSchema = z.object({
   argv: z.array(z.string()),
   exitCode: z.number().int().nullable(),
@@ -68,7 +70,7 @@ export function scoreTranscript(input: unknown) {
     const parsed = lastEnvelope(call.stdout);
     const failed = call.exitCode !== 0;
     for (const message of call.issues) issue("call.evidence-incomplete", message, number);
-    const isHelp = call.argv[0] === "help" || call.argv.includes("--help");
+    const isHelp = commandVerb(call.argv) === "help" || call.argv.includes("--help");
     if (!isHelp && !call.argv.includes("--json"))
       issue("output.json-required", "Non-help call did not request --json.", number);
     if (call.argv.includes("--json")) {
@@ -120,7 +122,7 @@ export function scoreTranscript(input: unknown) {
       shelvedAt === undefined ||
       index + 1 <= shelvedAt ||
       call.exitCode !== 0 ||
-      call.argv[0] !== "onload" ||
+      commandVerb(call.argv) !== "onload" ||
       call.argv.includes("--dry-run")
     )
       return false;

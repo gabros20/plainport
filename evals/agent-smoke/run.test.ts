@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,11 +18,19 @@ import type { runProcess } from "../../packages/core/src/index.ts";
 import { runEvalWith } from "./run.ts";
 import { projectSlug } from "./session.ts";
 
-test("harness builds, initializes, records a fake agent and removes its entire sandbox", async () => {
+test.each([
+  { configOverride: false, changeRootMode: false },
+  { configOverride: true, changeRootMode: false },
+  { configOverride: false, changeRootMode: true },
+])("harness cleans sessions and checks root mode %j", async ({ configOverride, changeRootMode }) => {
   const parent = mkdtempSync(join(tmpdir(), "plainport-eval-test-"));
   let area = "";
   let sessionPath = "";
   const stages: string[] = [];
+  const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+  const config = join(realpathSync(parent), "custom-claude");
+  if (configOverride) process.env.CLAUDE_CONFIG_DIR = config;
+  else delete process.env.CLAUDE_CONFIG_DIR;
   const runner: typeof runProcess = async (_spawner, spec) => {
     area = spec.cwd;
     expect(spec.timeoutMs).toBeGreaterThan(0);
@@ -39,7 +48,13 @@ test("harness builds, initializes, records a fake agent and removes its entire s
       );
     } else if (spec.command === "claude") {
       stages.push("agent");
-      sessionPath = join(realpathSync(parent), ".claude/projects", projectSlug(area));
+      sessionPath = join(
+        configOverride ? config : join(realpathSync(parent), ".claude"),
+        "projects",
+        projectSlug(area),
+      );
+      expect(spec.env.CLAUDE_CONFIG_DIR).toBe(configOverride ? config : undefined);
+      if (changeRootMode) chmodSync(join(area, "work/fixture"), 0o700);
       mkdirSync(sessionPath, { recursive: true });
       expect(spec.args).toContain("--no-session-persistence");
       expect(spec.env.PLAINPORT_EVAL_AREA).toBe(area);
@@ -95,17 +110,24 @@ test("harness builds, initializes, records a fake agent and removes its entire s
   };
   try {
     const evidence = join(parent, "evidence");
-    expect(await runEvalWith("claude", runner, evidence, parent, parent)).toBe(0);
+    expect(await runEvalWith("claude", runner, evidence, parent, parent)).toBe(changeRootMode ? 1 : 0);
     expect(stages).toEqual(["build", "init", "agent", "final-status"]);
     expect(existsSync(area)).toBe(false);
     const saved = readdirSync(evidence).find((name) => name.endsWith(".json"));
     const transcript = JSON.parse(readFileSync(join(evidence, saved as string), "utf8"));
     expect(transcript.score.calls).toBe(2);
-    expect(transcript.score.passed).toBe(true);
+    expect(transcript.score.passed).toBe(!changeRootMode);
+    expect(transcript.fixtureIntact).toBe(!changeRootMode);
+    if (changeRootMode)
+      expect(transcript.score.contractIssues.map((issue: { code: string }) => issue.code)).toContain(
+        "fixture.changed",
+      );
     expect(transcript.cleanedAgentPaths).toEqual([sessionPath]);
     expect(existsSync(sessionPath)).toBe(false);
     expect(transcript.finalObservation).toEqual({ project: "work:fixture", state: "local" });
   } finally {
+    if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfig;
     rmSync(parent, { recursive: true, force: true });
   }
 });

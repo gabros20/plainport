@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { z } from "zod";
 import { posixSpawner, runProcess } from "../../packages/core/src/index.ts";
 import { buildCommand } from "../../scripts/build.ts";
-import { hashTree } from "../../test/crash-matrix/fixture.ts";
+import { hashEntry, hashTree } from "../../test/crash-matrix/fixture.ts";
 import { statusEvidence } from "./observation.ts";
 import { agentArgs, sandboxEnv } from "./sandbox.ts";
 import { CallSchema, ObservationSchema, scoreTranscript, type Transcript } from "./scorer.ts";
@@ -23,32 +23,23 @@ export function agentIssues(lines: string[]): string[] {
   const issues: string[] = [];
   let found = false;
   const inspect = (text: string) => {
-    const starts: number[] = [];
-    let quoted = false;
-    let escaped = false;
-    for (let index = 0; index < text.length; index++) {
-      const char = text[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === "\\") escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"' && starts.length > 0) quoted = true;
-      if (char === "{") starts.push(index);
-      if (char !== "}" || starts.length === 0) continue;
-      const start = starts.pop() as number;
-      try {
-        const parsed = z
-          .object({ contractIssues: z.array(z.string()) })
-          .safeParse(JSON.parse(text.slice(start, index + 1)));
-        if (parsed.success) {
-          found = true;
-          issues.push(...parsed.data.contractIssues);
+    // Each candidate starts fresh, so malformed prose cannot carry quote state into the final JSON.
+    for (let start = text.lastIndexOf("{"); start >= 0; start = text.lastIndexOf("{", start - 1)) {
+      for (let end = text.lastIndexOf("}"); end > start; end = text.lastIndexOf("}", end - 1)) {
+        try {
+          const parsed = z
+            .object({ contractIssues: z.array(z.string()) })
+            .safeParse(JSON.parse(text.slice(start, end + 1)));
+          if (parsed.success) {
+            found = true;
+            issues.push(...parsed.data.contractIssues);
+            return;
+          }
+        } catch {
+          // Other prose is retained in the raw transcript.
         }
-      } catch {
-        // Other prose is retained in the raw transcript.
       }
+      if (start === 0) break;
     }
   };
   for (const line of lines) {
@@ -123,6 +114,7 @@ export async function runEvalWith(
     // Generate ignored data at runtime, as ADR-0021 requires.
     writeFileSync(join(project, ".env"), "TOKEN=op://fixture/item/token\n");
     const reference = hashTree(project, ["node_modules"]);
+    reference.set("", hashEntry(project, ""));
     cpSync(join(repo, "plainport.json"), join(area, "plainport.json"));
     writeFileSync(env.PLAINPORT_CONFIG as string, `version = 1\n[offload]\nkeepLocalFor = "0"\n`);
     const binary = join(area, "plainport-real");
@@ -175,7 +167,8 @@ export async function runEvalWith(
               entry[1] !== undefined && !entry[0].startsWith("PLAINPORT_"),
           ),
         );
-        if (agent === "claude") sessionCleanup = prepareSessionCleanup(agentHome, area);
+        if (agent === "claude")
+          sessionCleanup = prepareSessionCleanup(agentHome, area, agentEnv.CLAUDE_CONFIG_DIR);
         const result = await executeProcess(posixSpawner, {
           command: agent,
           args: agentArgs(agent, area),
@@ -209,6 +202,7 @@ export async function runEvalWith(
     }
     try {
       const restored = hashTree(project, ["node_modules"]);
+      restored.set("", hashEntry(project, ""));
       transcript.fixtureIntact =
         reference.size === restored.size &&
         [...reference].every(([name, hash]) => restored.get(name) === hash);

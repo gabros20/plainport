@@ -183,3 +183,14 @@ test("scorer requires a successful fixture onload reporting restore from the sto
     expect(scoreTranscript(candidate).passed).toBe(false);
   }
 });
+
+test("scorer accepts onload after leading global flags", () => {
+  const transcript = recorded("leading-globals") as { calls: { argv: string[] }[] };
+  expect(scoreTranscript(transcript).passed).toBe(true);
+  const call = transcript.calls.at(-1);
+  if (!call) throw new Error("Missing fixture onload");
+  call.argv = ["--config", "onload", "--store=offload", "--json", "onload", "work:fixture"];
+  expect(scoreTranscript(transcript).contractIssues).toEqual([]);
+  call.argv = ["--json", "--", "onload", "work:fixture"];
+  expect(scoreTranscript(transcript).passed).toBe(false);
+});

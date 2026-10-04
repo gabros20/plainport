@@ -5,12 +5,20 @@ export function projectSlug(cwd: string): string {
   return realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-export function prepareSessionCleanup(home: string, cwd: string) {
+/** Canonicalize existing ancestors even when the override directory has not been created yet. */
+function configPath(path: string): string {
+  if (existsSync(path) || isSymlink(path)) return realpathSync(path);
+  return join(configPath(dirname(path)), basename(path));
+}
+
+export function prepareSessionCleanup(home: string, cwd: string, claudeConfigDir?: string) {
   const canonical = realpathSync(cwd);
   const prefix = basename(canonical);
   if (!/^plainport-agent-smoke-[a-zA-Z0-9]+$/.test(prefix))
     throw new Error("Session cleanup requires the unique eval temporary directory prefix.");
-  const root = resolve(realpathSync(home), ".claude/projects");
+  const root = claudeConfigDir
+    ? join(configPath(resolve(canonical, claudeConfigDir)), "projects")
+    : resolve(realpathSync(home), ".claude/projects");
   const path = join(root, projectSlug(canonical));
   return { root, path, prefix, existed: existsSync(path) || isSymlink(path) };
 }
