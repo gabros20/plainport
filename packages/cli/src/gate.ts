@@ -32,7 +32,12 @@ export interface GlobalOption {
 /** DESIGN.md "CLI design" → Global flags, in that order. */
 export const GLOBAL_OPTIONS: readonly GlobalOption[] = [
   { name: "json", type: "boolean", summary: "Print NDJSON: event lines, then exactly one final envelope" },
-  { name: "yes", type: "boolean", summary: "Allow a confirm-class command to run" },
+  {
+    name: "yes",
+    type: "boolean",
+    summary:
+      "Allow a confirm-class command to run; --plan <id> stands in for it on a command that runs a --dry-run's plan",
+  },
   { name: "no-input", type: "boolean", summary: "Never prompt; implied when stdin is not a terminal" },
   { name: "dry-run", type: "boolean", summary: "Preview only: build and print the plan, change nothing" },
   { name: "store", type: "string", summary: "Use this store instead of the default" },

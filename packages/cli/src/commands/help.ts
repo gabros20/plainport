@@ -42,28 +42,54 @@ const globalRows = (): [string, string][] =>
     o.summary,
   ]);
 
-const listing = (commands: CommandInfo[]): string =>
+/** How the human listing groups the commands, in order; a command no group names is listed under Other. */
+const GROUPS: readonly [string, (name: string) => boolean][] = [
   [
+    "Projects",
+    (name) => ["ls", "status", "offload", "onload", "hydrate", "dehydrate", "restore"].includes(name),
+  ],
+  ["Recovery and cleanup", (name) => name === "recover" || name === "gc"],
+  ["Roots", (name) => name.startsWith("root ")],
+  ["Setup and info", (name) => ["init", "help", "version"].includes(name)],
+];
+
+/** The human overview: the commands by group with their risk class, then where the full detail is. */
+const listing = (commands: CommandInfo[]): string => {
+  const rows = table(commands.map((c) => [c.name, `${c.risk.padEnd(10)}  ${c.summary}`]));
+  const grouped = new Set<number>();
+  const section = (title: string, fits: (name: string) => boolean): string[] => {
+    const lines = commands.flatMap((c, i) => {
+      if (grouped.has(i) || !fits(c.name)) return [];
+      grouped.add(i);
+      return [rows[i] as string];
+    });
+    return lines.length === 0 ? [] : ["", `${title}:`, ...lines];
+  };
+  return [
     `plainport ${VERSION}: offload, onload and move coding projects`,
     "",
     "Usage: plainport <command> [options]",
-    "",
-    "Commands:",
-    ...table(commands.map((c) => [c.name, `${c.risk.padEnd(10)}  ${c.summary}`])),
+    ...GROUPS.flatMap(([title, fits]) => section(title, fits)),
+    ...section("Other", () => true),
     "",
     "Global options:",
     ...table(globalRows()),
     "",
-    "read and safe_write commands run freely; confirm commands need --yes. --dry-run always runs as read.",
+    "read and safe_write commands run freely; confirm commands need --yes, or --plan <id> with the id their --dry-run",
+    "printed. --dry-run always runs as read.",
     "Run plainport help <command> for a command's arguments, options and examples.",
+    "For scripts and agents: add --json to any command for NDJSON with one final envelope; plainport help --json lists",
+    "the commands as data; plainport.json, generated from the same registry, is the full machine contract (every",
+    "schema, exit code and finding) and is large: read it as data, not as help.",
   ].join("\n");
+};
 
 const detail = (c: CommandInfo): string => {
   const lines = [
     `plainport ${c.name}: ${c.summary}`,
     "",
     `Usage: ${c.usage}`,
-    `Risk: ${c.risk} · --dry-run: ${c.dryRun ? "previews without changing anything" : "not supported"}`,
+    `Risk: ${c.risk}${c.risk === "confirm" ? ` (needs --yes${c.options.some((o) => o.name === "plan") ? ", or --plan <id> from a --dry-run" : ""})` : ""} · --dry-run: ${c.dryRun ? "previews without changing anything" : "not supported"}`,
   ];
   if (c.positionals.length > 0) {
     lines.push("", "Arguments:");

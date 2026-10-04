@@ -137,7 +137,10 @@ export const offload = defineCommand({
       .min(1)
       .max(1, "one project per offload until bulk offload lands (D38)")
       .meta({ description: "An address (root:path), a unique name, a path, . or a stub; one for now" }),
-    plan: z.string().optional().meta({ description: "Run a plan a --dry-run saved, instead of --yes" }),
+    plan: z.string().optional().meta({
+      description:
+        "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)",
+    }),
     "keep-deps": z
       .boolean()
       .optional()
@@ -148,7 +151,10 @@ export const offload = defineCommand({
   }),
   output: OffloadOutputSchema,
   examples: [
-    { argv: ["offload", "work:clients/acme/web", "--dry-run"], summary: "Plan offloading a project" },
+    {
+      argv: ["offload", "work:clients/acme/web", "--dry-run"],
+      summary: "Plan offloading a project; --plan <id> then runs that plan, instead of --yes",
+    },
     { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
   ],
   human: (data) => {

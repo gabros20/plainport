@@ -321,7 +321,9 @@ release does not change it.
 | `commands[].plan` | The open JSON Schema of `data` under `--dry-run` (the plan, §6); `null` when the command has no dry run |
 
 `plainport help --json` returns the same command entries without `arguments`, `output` and `plan`; `help <command>`
-adds `topic`, the command asked about. `plainport --help`, `plainport <command> --help` and a bare `plainport`
+adds `topic`, the command asked about. Human `plainport help` is a short overview: the commands by group, each with
+its risk class and one-line summary, the global options, and pointers to `help <command>`, `--json`,
+`help --json` and `plainport.json`; it never prints the machine contract itself. `plainport --help`, `plainport <command> --help` and a bare `plainport`
 are `help`; `plainport --version` is `version`.
 
 `bun run contract` also writes `completions/_plainport` (zsh, for a folder on `$fpath`) and

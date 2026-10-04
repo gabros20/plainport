@@ -88,6 +88,38 @@ describe("version and help", () => {
     expect((await capture(["--help"], REGISTRY)).out).toBe(help.out);
   });
 
+  test("help is a short overview: commands grouped with their risk class, and where the machine contract is (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out.length).toBeLessThan(4096);
+    for (const heading of ["Projects:", "Recovery and cleanup:", "Roots:", "Setup and info:"])
+      expect(help.out).toContain(`\n${heading}\n`);
+    // Every command is listed once, under one group.
+    for (const c of REGISTRY) expect(help.out.split(`\n  ${c.name.padEnd(9)}  ${c.risk}`)).toHaveLength(2);
+    expect(help.out).toContain("plainport help <command>");
+    expect(help.out).toContain("plainport help --json");
+    expect(help.out).toContain("plainport.json");
+  });
+
+  test("help says that --plan <id> stands in for --yes, in the listing, the global option and the command (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out).toContain(
+      "confirm commands need --yes, or --plan <id> with the id their --dry-run\nprinted",
+    );
+    expect(help.out).toMatch(/--yes +Allow a confirm-class command to run; --plan <id> stands in for it/);
+    const offload = await capture(["help", "offload"], REGISTRY);
+    expect(offload.out).toContain("Risk: confirm (needs --yes, or --plan <id> from a --dry-run)");
+    expect(offload.out).toMatch(
+      /--plan <value> +Run the plan a --dry-run saved, by its id, instead of --yes/,
+    );
+    expect(offload.out).toMatch(
+      /plainport offload work:clients\/acme\/web --dry-run +Plan offloading a project; --plan <id> then runs that plan, instead of --yes/,
+    );
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    expect(manifest.globalOptions.find((o: { name: string }) => o.name === "yes").summary).toContain(
+      "--plan <id> stands in for it",
+    );
+  });
+
   test("help <command> and <command> --help show the command, its risk class and dry-run support", async () => {
     const one = await capture(["help", "version"], REGISTRY);
     expect(one.code).toBe(0);
