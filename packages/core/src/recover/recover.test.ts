@@ -259,9 +259,19 @@ const waitJournalsGone = async () => {
 };
 
 /** The trash folders under the root's holder. */
+/**
+ * The trash folders under the root's holder: real folders named by an op, never a `.claim` beside one. A holder that is
+ * not there, or goes while it is read (the detached delete removes it once empty, D72), holds none.
+ */
 const trashes = (): string[] => {
-  const holder = join(box.home, "work/.plainport-trash");
-  return existsSync(holder) ? readdirSync(holder) : [];
+  try {
+    return readdirSync(join(box.home, "work/.plainport-trash"), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(e.name))
+      .map((e) => e.name);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 };
 
 const expectLocalUntouched = async () => {
