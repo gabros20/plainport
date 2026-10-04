@@ -125,6 +125,8 @@ export interface Settlement {
   crashedStep: string | undefined;
   /** The crashed operation's id. */
   crashedOp: string | undefined;
+  /** Whether its journal was still there when recover started. */
+  journalAtRecover: boolean;
   report: RecoveryReport;
   /** The report of a second recover run. */
   again: RecoveryReport;
@@ -143,7 +145,9 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
   const problems: string[] = [];
 
   // The step the crash left, and recover's outcome for it.
-  // A crash after the detached delete started races it: the delete may finish, journal and all, before recover runs.
+  // A crash after the detached delete started leaves that delete running: the variants let it finish before recover
+  // runs (the in-process one holds it until the crash's journal has been read), so recover has nothing left of it.
+  // The subprocess variant cannot hold it, so there the journal may already be gone when the crash is looked at.
   const raced = row.point === MATRIX_POINTS.raced;
   if (s.crashedStep === undefined) {
     if (!raced) problems.push(`the crash left no journal (expected one at ${row.step})`);
@@ -151,7 +155,12 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     problems.push(`the crash left the journal at ${s.crashedStep}, expected ${row.step}`);
   }
   const ops = s.report.operations.filter((o) => o.op === s.crashedOp);
-  if (s.crashedStep !== undefined) {
+  if (raced) {
+    if (s.journalAtRecover) problems.push("the detached delete had not finished when recover ran");
+    if (ops.length !== 0)
+      problems.push(`recover reported ${ops.length} operations the detached delete finished`);
+  } else if (s.crashedStep !== undefined) {
+    if (!s.journalAtRecover) problems.push(`the journal of ${s.crashedOp} vanished before recover ran`);
     if (ops.length !== 1) problems.push(`recover reported ${ops.length} operations for ${s.crashedOp}`);
     for (const op of ops) {
       if (op.step !== s.crashedStep)

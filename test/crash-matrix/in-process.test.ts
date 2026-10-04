@@ -9,7 +9,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fail, finding, type Result } from "../../packages/contract/src/index.ts";
+import { fail, finding, ok, type Result } from "../../packages/contract/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import { type Device, ensureDevice } from "../../packages/core/src/device.ts";
@@ -43,6 +43,7 @@ import {
 } from "./checks.ts";
 import {
   copyProject,
+  EXTRA_MODE,
   hashEntry,
   hashTree,
   makeProjectTemplate,
@@ -125,12 +126,13 @@ beforeEach(async () => {
   dir = join(box.home, "work/web");
   copyProject(template, dir);
   released = undefined;
+  heldDelete = undefined;
   reference = hashTree(dir);
 });
 
 afterEach(async () => {
   try {
-    chmodSync(join(dir, "src/extra.ts"), 0o644);
+    chmodSync(join(dir, "src/extra.ts"), EXTRA_MODE);
   } catch {}
   // A failed row may leave a detached delete running in the sandbox: let it finish before the sandbox goes.
   await settleJournals(box.paths).catch(() => {});
@@ -202,8 +204,23 @@ const projectId = async (): Promise<string | undefined> => {
   return Object.entries(registry.value.projects).find(([, e]) => e.path === "web")?.[0];
 };
 
+/** The detached delete a crash at MATRIX_POINTS.raced started, held until the crash has been looked at. */
+let heldDelete: (() => Promise<unknown>) | undefined;
+
 const offload = async (faults: { at?: string; occurrence?: number } = {}) => {
-  const host = testHost({ faults: { ...faults, onStep: capture } });
+  const real = testHost({ faults: { ...faults, onStep: capture } });
+  // Past the detached delete's start the real delete races the test: on a fast disk it removes the journal before
+  // the crash is read. So for that crash it is held, reported as started, and run once the crash has been read.
+  const host: HostPorts =
+    faults.at !== MATRIX_POINTS.raced
+      ? real
+      : {
+          ...real,
+          deleteTrashDetached: async (trash, journal, device) => {
+            heldDelete = () => real.deleteTrashDetached(trash, journal, device);
+            return ok({ pid: process.pid });
+          },
+        };
   return runOffload(offloadDeps(host), { project: await ref() });
 };
 
@@ -268,7 +285,7 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
     try {
       await crashOffload(row);
     } finally {
-      chmodSync(join(dir, "src/extra.ts"), 0o644);
+      chmodSync(join(dir, "src/extra.ts"), EXTRA_MODE);
     }
   },
   diverged: async (row) => {
@@ -329,6 +346,13 @@ const runRow = async (row: Row, options: RowOptions = {}) => {
   const crashedOp = crashedOperation(before, steps);
   const crashedStep = crashedOp === undefined ? undefined : steps.get(crashedOp);
   const crashLeft = crashCopyProblems(row, world(), reference);
+  if (heldDelete !== undefined) {
+    const started = await heldDelete();
+    heldDelete = undefined;
+    if (!(started as Result<unknown>).ok) throw new Error("the held detached delete did not start");
+    await settleJournals(box.paths);
+  }
+  const journalAtRecover = crashedOp !== undefined && journalSteps(box.paths).has(crashedOp);
   const report = reportOf(await recover(recoverDeps()));
   // A finished release hands its trash to a detached delete, which holds it (trash-kept) until it is done.
   await settleJournals(box.paths);
@@ -337,6 +361,7 @@ const runRow = async (row: Row, options: RowOptions = {}) => {
   const problems = await rowProblems(row, world(), {
     crashedStep,
     crashedOp,
+    journalAtRecover,
     report,
     again,
     reference,
