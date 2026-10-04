@@ -1,6 +1,6 @@
 # plainport roadmap
 
-2 October 2026 · M0 closed, M1 in progress
+4 October 2026 · M0 and M1 closed (`v0.1.0`), M2 next
 
 This is the staged delivery plan for `docs/DESIGN.md`. Each milestone is split into phases, each phase into
 tasks that `/orchestrate` can run one by one. The milestone being built has a full plan file in `docs/plans/`; later
@@ -29,8 +29,8 @@ git switch -c m1-local-core
 | Milestone | Delivers | Gate | Test tiers | ADRs it needs | Status |
 | --- | --- | --- | --- | --- | --- |
 | **M0 · Prep** | Repo, ADRs, roadmap, M1 plan, test-environment research, agent permissions, Definition of Done | Docs reviewed; ADR-0018 accepted; M1 plan approved | none | 0001–0021 | Done, 2026-10-02 |
-| **M1 · Local core** → `v0.1.0` | Factory floor; core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls`; agent eval smoke | Crash matrix green; round trips byte-identical on real projects | T0, T1 | 0003–0008, 0010, 0017, 0020, 0021 | In progress: [plan](plans/M1-local-core.md) |
-| **M2 · Remote stores** | SFTP and S3 stores; catalog events via rclone; Keychain secrets; leases, head check, conflicts, `resolve` | The two-Mac race ends in `conflicted`, never in lost work | T0–T3 | 0006, 0009, 0013 | Outline below |
+| **M1 · Local core** → `v0.1.0` | Factory floor; core, journal, recover; restic engine; Node plugin; external-SSD store; `init`, roots, `offload`, `onload`, `status`, `ls`; agent eval smoke | Crash matrix green; round trips byte-identical on five pinned public demo projects, without installs (D78) | T0, T1 | 0003–0008, 0010, 0017, 0020–0022 | Done, 2026-10-04, `v0.1.0`: [plan](plans/M1-local-core.md) |
+| **M2 · Remote stores** | SFTP and S3 stores; catalog events via rclone; Keychain secrets; leases, head check, conflicts, `resolve` | The two-Mac race ends in `conflicted`, never in lost work | T0–T3 | 0006, 0009, 0013 | Next: outline below, plan file to write |
 | **M3 · Machines** | Devices and pairing; per-device bindings; append-only peer stores; `move`; secrets envelope; warm return; offsite replication | A project moves MacBook → Mac mini → VPS → MacBook with git state intact | T0–T4 | 0010–0013, 0018 | Outline below |
 | **M4 · Agent-ready** | `serve --stdio`; published contract; `attach`; Claude Code and Codex adapters; kit; handoff notes; arrival plans | An agent runs offload and onload unattended from `--json` alone | T0–T3 | 0007, 0014, 0015 | Outline below |
 | **M5 · Hardening** | Grok Build adapter; Python and Rust plugins; `--verify full`; `prune --yes`; forget delay; `doctor --rebuild-catalog`; file-system zoo and network-fault suites | The catalog rebuilds from the repository alone | T0–T4 | 0009, 0012 | Outline below |
@@ -48,7 +48,7 @@ Tools per tier are proposed in ADR-0018, from the vault research note and live c
 | **T3 · Real hardware and buckets** | The Intel Mac mini over Tailscale (`ssh mini`); Cloudflare R2 (`weur`, conditional writes); Backblaze B2 EU Central (offsite replica, native `b2:`); per-run prefixes and scoped keys | Milestone gates | darwin-x64 build, real Tailscale latency, real bucket semantics, append-only keys |
 | **T4 · Remote VPS** | One Hetzner Cloud CX23 (x86_64, Falkenstein or Nuremberg), SSH only over Tailscale; created for the M3 gate | M3 and M5 gates | The full MacBook → mini → VPS → MacBook move |
 
-## M0 · Prep (now)
+## M0 · Prep (done)
 
 | # | Task | Output | Status |
 | --- | --- | --- | --- |
@@ -58,7 +58,7 @@ Tools per tier are proposed in ADR-0018, from the vault research note and live c
 | 0.4 | Research test hosts, sandboxes and stores (Grok lane, X bookmarks plus web) | Vault note `wiki/research/linux-test-hosts-sandboxes-and-stores-2026.md` | Done; OrbStack claims verified live on the laptop |
 | 0.5 | Fill ADR-0018 from the research; owner accepts | `docs/adr/0018-…` | Done, accepted |
 | 0.6 | SSH alias `mini` on the laptop | `~/.ssh/config` entry | Done; untested, because the mini was offline in Tailscale on 2026-10-02 |
-| 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | M1 task 2 | Planned |
+| 0.7 | Pin restic and rclone for development (`scripts/fetch-tools`, checksums in `tools.lock.json`) | M1 task 2 | Done |
 | 0.8 | Versioning, release and install the plainkeep way; factory-floor guardrails | ADR-0020, ADR-0021 | Done |
 | 0.9 | Agent permissions and Definition of Done | `.claude/settings.json`, `CONTRIBUTING.md` | Done |
 
@@ -67,7 +67,7 @@ M0 is documentation only, so it closes with a commit and no release.
 
 ## M1 · Local core
 
-Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
+Done on 2026-10-04, released as `v0.1.0`. Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 
 1. **Scaffold, factory floor and toolchain.** Bun workspace with `core`, `contract`, `cli`, `engine-restic`,
    `blob-fs`, `eco-node`, `host-macos`; the four scripts; `VERSION`, `CHANGELOG.md`, `.bun-version`; Biome,
@@ -82,10 +82,15 @@ Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
    trash release.
 6. **Onload.** Restore to staging, verify, swap, toolchain and hydrate with the Node plugin.
 7. **Status, ls, recover and the gate.** Read commands, `recover`, the crash matrix, the agent eval smoke,
-   `scripts/install`, byte-identical round trips on the owner's real projects, a performance baseline, release
-   `v0.1.0`.
+   `scripts/install`, byte-identical round trips on five pinned public demo projects, a performance baseline,
+   release `v0.1.0`.
 
-## M2 · Remote stores (outline)
+**Gate (D78):** the crash matrix is green, and offload → onload round trips of five public demo projects are
+byte-identical apart from stripped paths. The gate ran without installs (D13); one owner-run gate on a real
+project with hydration on is suggested before M2. Results and known limits: `docs/HANDOFF.md`. Run decisions:
+[ADR-0022](adr/0022-run-decisions-in-m1.md).
+
+## M2 · Remote stores (outline, next)
 
 0. **Test environments as code.** `compose.yaml` (MinIO pinned by digest, `atmoz/sftp`, `rest-server
    --append-only`, Toxiproxy), `scripts/testenv up|down`, R2 and B2 test buckets with scoped keys referenced as

@@ -6,7 +6,7 @@ import {
   errorEnvelope,
   type Failure,
   type Finding,
-  type PartialExitCode,
+  finding,
   type PlainportEvent,
   type StreamEvent,
   successEnvelope,
@@ -44,8 +44,13 @@ export class Output {
   constructor(
     private readonly io: IO,
     private readonly mode: RenderMode,
-    private readonly verb: string,
+    readonly verb: string,
   ) {}
+
+  /** Whether the output is NDJSON (--json). */
+  get json(): boolean {
+    return this.mode.json;
+  }
 
   #open(): void {
     if (this.#finished)
@@ -75,13 +80,38 @@ export class Output {
     this.io.stderr(`${level}: ${message}\n`);
   }
 
-  /** Prints the result and closes the output. Returns exit code 0. */
-  success(data: unknown, human: string): 0 {
+  /** Prints the result and closes the output. Returns exit code 0, or 1 when the result cannot be printed as JSON. */
+  success(data: unknown, human: string): 0 | 1 {
     this.#open();
+    if (this.mode.json) {
+      const line = this.#line(() => successEnvelope(this.verb, data));
+      if (line === undefined) return this.#unprintable();
+      this.#finished = true;
+      this.io.stdout(line);
+      return 0;
+    }
     this.#finished = true;
-    if (this.mode.json) this.io.stdout(`${JSON.stringify(successEnvelope(this.verb, data))}\n`);
-    else if (human !== "") this.io.stdout(human.endsWith("\n") ? human : `${human}\n`);
+    if (human !== "") this.io.stdout(human.endsWith("\n") ? human : `${human}\n`);
     return 0;
+  }
+
+  /** The envelope as one stdout line, or undefined when it cannot be serialized (a bug in the command's data). */
+  #line(build: () => unknown): string | undefined {
+    try {
+      return `${JSON.stringify(build())}\n`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The result could not be printed: an internal.unexpected envelope, with no data, takes its place (C1). */
+  #unprintable(): 1 {
+    const failure = finding("internal.unexpected", {
+      message: `${this.verb}'s result could not be printed as JSON`,
+    });
+    this.#finished = true;
+    this.io.stdout(`${JSON.stringify(errorEnvelope(this.verb, 1, failure.message, { finding: failure }))}\n`);
+    return 1;
   }
 
   /**
@@ -90,21 +120,21 @@ export class Output {
    */
   failure(failure: Failure, human?: string): Failure["exitCode"] {
     this.#open();
-    this.#finished = true;
     const hint = hintOf(failure.finding);
     if (this.mode.json) {
-      const envelope = errorEnvelope(
-        this.verb,
-        failure.exitCode as PartialExitCode,
-        failure.finding.message,
-        {
+      // Built before the output is closed, so a failure that cannot be printed still ends in an envelope.
+      const line = this.#line(() =>
+        errorEnvelope(this.verb, failure.exitCode, failure.finding.message, {
           ...(hint === undefined ? {} : { hint }),
           finding: failure.finding,
           ...(failure.data === undefined ? {} : { data: failure.data }),
-        },
+        }),
       );
-      this.io.stdout(`${JSON.stringify(envelope)}\n`);
+      if (line === undefined) return this.#unprintable();
+      this.#finished = true;
+      this.io.stdout(line);
     } else {
+      this.#finished = true;
       if (failure.data !== undefined && human !== undefined && human !== "")
         this.io.stdout(human.endsWith("\n") ? human : `${human}\n`);
       this.io.stderr(`plainport: ${failure.finding.code}: ${failure.finding.message}\n`);

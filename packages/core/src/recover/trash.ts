@@ -19,14 +19,14 @@ import { dirname, join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
 import { removeEmptyHolder } from "../holder.ts";
-import { type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
-  JournalSchema,
   journalFile,
   type OffloadJournal,
   readJournals,
   removeJournal,
+  rereadJournal,
   writeJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -35,7 +35,7 @@ import { readRegistry } from "../registry.ts";
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
-import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
+import { holdsProjectBack, notAProject, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "../saga/release.ts";
 import { trashClaim, trashClaimFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
@@ -86,17 +86,6 @@ const itemOf = (journal: OffloadJournal): TrashItem => ({
   trash: journal.trash ?? offloadTrashOf(journal),
   ...(journal.keepUntil === undefined ? {} : { keepUntil: journal.keepUntil }),
 });
-
-const reread = async (io: LocalIo, paths: PlainportPaths, op: string): Promise<Journal | undefined> => {
-  try {
-    const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalFile(paths, op))));
-    return parsed.success ? parsed.data : undefined;
-  } catch (error) {
-    if (error instanceof SyntaxError) return undefined;
-    systemErrorCode(error);
-    return undefined;
-  }
-};
 
 /** Bytes of the files below a folder, never entering a folder named in `skip`; what cannot be read counts as nothing. */
 export const treeBytes = async (
@@ -168,7 +157,13 @@ const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
  */
 const finished = async (io: LocalIo, journal: OffloadJournal): Promise<boolean> => {
   if ((await rootAway(io, journal)) !== undefined) return false;
-  return !(await stillThere(io, itemOf(journal).trash));
+  try {
+    return !(await stillThere(io, itemOf(journal).trash));
+  } catch (error) {
+    // A trash that cannot be looked at is not known to be gone: deleting it is what then says why (rule 7).
+    assertSystemError(error);
+    return false;
+  }
 };
 
 /** This device's id, which a trash claim names (D64); empty when it cannot be read, so no claim is this device's. */
@@ -258,7 +253,9 @@ export const collectTrash = async (
       { id: journal.project.id, address: journal.project.address },
       async () => {
         // Read again under the lock: an onload may have renamed the folder back, a detached delete finished it.
-        const now = await reread(io, paths, journal.op);
+        const reread = await rereadJournal(io, paths, journal.op);
+        if (!reread.ok) return reread;
+        const now = reread.value;
         if (now === undefined || !released(now)) return ok(undefined);
         let journals: Journal[];
         try {
@@ -281,6 +278,9 @@ export const collectTrash = async (
           report.kept.push({ ...itemOf(now), reason: deleting });
           return ok(undefined);
         }
+        // A registered working copy is never deleted as trash (D84).
+        const guarded = await notAProject(io, paths, deps.env, trash);
+        if (!guarded.ok) return guarded;
         // Its trash already gone (a delete killed before it closed the journal, D67): finished; the journal goes.
         if (await finished(io, now)) {
           try {
@@ -392,7 +392,7 @@ const sweepStaging = async (
         fail(
           finding("journal.pending", {
             message: `${read.unreadable.join(", ")} cannot be read by this version of plainport and may own a staging folder, so no staging folder without a known owner was removed`,
-            fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run plainport gc",
+            fix: "run plainport recover with the plainport version that wrote it, then re-run plainport gc",
             paths: read.unreadable,
           }),
         ),
@@ -401,6 +401,13 @@ const sweepStaging = async (
     for (const [holder, name] of listed) {
       const staging = join(holder, name);
       if (owners.has(name) || recorded.has(staging)) continue;
+      // A registered working copy that landed in a holder is never abandoned staging (D84).
+      const guarded = await notAProject(io, paths, deps.env, staging);
+      if (!guarded.ok) {
+        kept.push({ staging, finding: guarded.finding });
+        problems.push(guarded);
+        continue;
+      }
       try {
         await io.fs.removeTree(staging);
         await removeEmptyHolder(io, holder, STAGING_DIR);
@@ -438,6 +445,8 @@ const sweepStaging = async (
       gate,
       record.project,
       async () => {
+        const guarded = await notAProject(io, paths, deps.env, record.staging);
+        if (!guarded.ok) return guarded;
         try {
           await io.fs.removeTree(record.staging);
           await removeEmptyHolder(io, dirname(record.staging), STAGING_DIR);
@@ -520,9 +529,13 @@ export const housekeeping = async (
           { io, paths, clock, log: deps.log },
           { id: journal.project.id, address: journal.project.address },
           async () => {
-            const now = await reread(io, paths, journal.op);
+            const reread = await rereadJournal(io, paths, journal.op);
+            if (!reread.ok) return reread;
+            const now = reread.value;
             if (now === undefined || !released(now) || !(await finished(io, now))) return ok(undefined);
             if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+            const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
+            if (!guarded.ok) return guarded;
             try {
               await removeTrash(io, itemOf(now).trash);
               await removeJournal(io, paths, now.op);
@@ -551,7 +564,9 @@ export const housekeeping = async (
       gate,
       { id: journal.project.id, address: journal.project.address },
       async () => {
-        const now = await reread(io, paths, journal.op);
+        const reread = await rereadJournal(io, paths, journal.op);
+        if (!reread.ok) return reread;
+        const now = reread.value;
         if (now === undefined || !released(now) || now.keepUntil === undefined) return ok(undefined);
         // An onload may have started renaming the trash back since the journals were first read.
         let current: Journal[];
@@ -566,6 +581,9 @@ export const housekeeping = async (
         if (away !== undefined) return away;
         // A live deleter's already (D64); a dead one's is taken over by the new detached delete's claim.
         if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+        // A registered working copy is never deleted as trash (D84).
+        const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
+        if (!guarded.ok) return guarded;
         // Without a deadline the trash is no longer renamed back by an onload (it may be being deleted).
         const { keepUntil: _, ...rest } = now;
         try {

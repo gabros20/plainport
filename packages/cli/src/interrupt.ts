@@ -2,7 +2,8 @@
 // a terminal's Ctrl-C, a closed terminal or a dropped SSH session reaches plainport alone. On the first signal:
 // - if the command has already finished, nothing changes: plainport exits with the command's own code;
 // - if no child is running and no saga holds the command's cancellation, plainport exits 130 at once, as an
-//   unhandled Ctrl-C would (any run about to start is cancelled first, so none starts);
+//   unhandled Ctrl-C would (any run about to start is cancelled first, so none starts); under --json it first prints
+//   an operation.cancelled envelope in the command's place (D81), as it does whenever it exits 130 unreported;
 // - a saga that holds it is told through its AbortSignal and stops at its next safe point; plainport waits for its
 //   report however long that takes, so the exit code is the saga's own (130 only when the saga says it was
 //   cancelled; after its commit a saga may report something else) and its journal is never cut off mid-step (D52);
@@ -61,6 +62,11 @@ export interface StopOnSignalsOptions {
   settleMs?: number;
   /** The command's cancellation: aborted on the first signal; while it is held, plainport waits for the report. */
   operation?: Pick<Cancellation, "abort" | "busy">;
+  /**
+   * Called once just before plainport exits 130 without the command's report, so it can print the cancellation in
+   * the command's place (D81); `windingDown` when a second signal cut a held saga's wind-down short.
+   */
+  cancelled?: (signal: NodeJS.Signals, windingDown: boolean) => void;
   exit?: (code: number) => void;
 }
 
@@ -91,13 +97,22 @@ export const stopOnSignals = (
       // Nowhere to say it.
     }
   };
+  /** Exits 130 without the command's report, once the cancellation is printed in its place. */
+  const cancel = (signal: NodeJS.Signals, windingDown: boolean): void => {
+    try {
+      options.cancelled?.(signal, windingDown);
+    } catch {
+      // Nowhere to print it; the exit code still says it.
+    }
+    exit(130);
+  };
   const handler = (signal: NodeJS.Signals): void => {
     // Finished already: the command's own code and envelope stand, and the normal exit follows.
     if (finished !== undefined) return;
     if (stopping) {
       if (waitingForSaga) {
         say(`plainport: ${signal} again: exiting; plainport recover finishes what the operation journaled\n`);
-        exit(130);
+        cancel(signal, true);
       }
       return;
     }
@@ -108,7 +123,7 @@ export const stopOnSignals = (
     const stopped = host.stopAll();
     if (!running) {
       say(`plainport: ${signal}: exiting\n`);
-      exit(130);
+      cancel(signal, false);
       return;
     }
     say(`plainport: ${signal}: stopping child processes, then exiting\n`);
@@ -130,7 +145,7 @@ export const stopOnSignals = (
           clearTimeout(timer);
         }
       } finally {
-        if (finished === undefined) exit(130);
+        if (finished === undefined) cancel(signal, false);
         // The command reported: let the normal exit flush its envelope with its own code. Should something still
         // hold the event loop, the unref'd fallback ends it with that same code.
         else setTimeout(() => exit(finished as number), 5_000).unref();

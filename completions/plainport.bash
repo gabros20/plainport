@@ -16,6 +16,7 @@ _plainport() {
   local -a typed=()
   local i
   for ((i = 1; i < COMP_CWORD; i++)); do
+    case "${COMP_WORDS[i]}" in --store|--config) ((i++)); continue ;; esac
     [[ ${COMP_WORDS[i]} == -* ]] || typed+=("${COMP_WORDS[i]}")
   done
   local cmd="" used=0

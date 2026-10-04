@@ -15,6 +15,7 @@ import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { readStagingRecords } from "../recover/staging.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { setUpStore } from "../store.ts";
@@ -526,5 +527,82 @@ describe("restore: fix wave r2", () => {
     const result = await runRestore(deps(host), { project: await ref(), to });
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "path.occupied"]);
     expect(readdirSync(to)).toEqual([]);
+  });
+});
+
+describe("restore: release fixes (I9, rule 7)", () => {
+  test("a rename that fails on a volume that also refuses the cleanup is fs.write-failed, never a throw", async () => {
+    await offload();
+    const to = join(box.home, "old/web");
+    const warnings: string[] = [];
+    const real = testHost();
+    const eio = (what: string) => Object.assign(new Error(`EIO: ${what}`), { code: "EIO" });
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        rename: async (from, target) => {
+          if (target === to) throw eio("rename");
+          return real.fs.rename(from, target);
+        },
+        rmdir: async (path) => {
+          if (path === to) throw Object.assign(new Error("EROFS: read-only"), { code: "EROFS" });
+          return real.fs.rmdir(path);
+        },
+      },
+    };
+    const result = await runRestore(
+      { ...deps(host), log: (_level, message) => warnings.push(message) },
+      { project: await ref(), to },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
+    expect(warnings.join("\n")).toContain(`the empty folder ${to}`);
+    // The cleanup after the failure still ran: no staging folder and no staging record are left.
+    expect(existsSync(join(box.home, "old/.plainport-staging"))).toBe(false);
+    expect(await readStagingRecords(testHost(), box.paths)).toEqual([]);
+  });
+});
+
+describe("restore: a newer snapshot the catalog cannot read (D86)", () => {
+  /** S1, then S2 shelved; S2's offloaded event made unreadable and the mirror emptied. */
+  const hideNewest = async () => {
+    const first = await offload();
+    await waitTrashGone();
+    await onload();
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    await waitTrashGone();
+    const newest = (await storeEvents()).find(
+      (e) => e.type === "offloaded" && e.snapshot === second.snapshot,
+    );
+    if (newest === undefined) throw new Error("no offloaded event for the second snapshot");
+    store.data.set(`meta/v1/events/${newest.id}.json`, new TextEncoder().encode('{"v":1,"id":"'));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    return { first, second };
+  };
+
+  test("without --snapshot it refuses with catalog.head-uncertain, naming --snapshot <S2>; nothing is written", async () => {
+    const { first, second } = await hideNewest();
+    const was = await untouched();
+    const to = join(box.home, "old/web");
+    const result = await runRestore(deps(), { project: await ref(), to });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!result.ok && result.finding.message).toContain(`its head ${first.snapshot}`);
+    expect(!result.ok && result.finding.fix).toContain(
+      `plainport restore work:web --snapshot ${second.snapshot} --to <path>`,
+    );
+    expect(existsSync(to)).toBe(false);
+    expect(await untouched()).toEqual(was);
+  });
+
+  test("--snapshot <S2> restores the newer snapshot from its tag; an older one by name still restores", async () => {
+    const { first, second } = await hideNewest();
+    const newer = join(box.home, "old/web-2");
+    value(await runRestore(deps(), { project: await ref(), snapshot: second.snapshot, to: newer }));
+    expect(readFileSync(join(newer, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+    const older = join(box.home, "old/web-1");
+    value(await runRestore(deps(), { project: await ref(), snapshot: first.snapshot, to: older }));
+    expect(readFileSync(join(older, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.snapshot);
   });
 });

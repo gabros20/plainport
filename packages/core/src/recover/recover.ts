@@ -15,8 +15,11 @@
 //   offload.commit.start                    the event on the store: committed, release; not there: roll back
 //   offload.committed .. release.stub       release (releaseOffload: the D51 fingerprint guard, the derived trash)
 //   offload.release.delete                  delete the trash once keepUntil, if any, has passed
-//   onload, up to onload.verified           roll back (staging removed; the stub stays)
-//   onload.swap.start                       swapped (onloadSwapped): finish; otherwise roll back
+//   onload.restore.start, onload.restored    roll back (staging removed; the stub stays)
+//   onload.begin, onload.verified,          swapped (onloadSwapped): finish; otherwise roll back. At begin (reuse
+//   onload.swap.start                       mode) and verified the rename may have landed with swap.start's write
+//                                           lost (D24, N3); in restore mode at begin there is no staging yet, so
+//                                           nothing reads as swapped
 //   onload.swapped .. onload.committed      finish (finishOnload)
 //
 // Recovery is idempotent and never deletes a folder on the strength of a write that might be missing: it rolls back
@@ -53,12 +56,12 @@ import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
-  JournalSchema,
   journalFile,
   type OffloadJournal,
   type OnloadJournal,
   readJournals,
   removeJournal,
+  rereadJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
@@ -69,6 +72,7 @@ import type { OffloadStep } from "../saga/offload.ts";
 import { finishOnload, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
 import {
   nestedProjects,
+  notAProject,
   type ProjectLock,
   registeredFolders,
   withProjectLock,
@@ -76,6 +80,7 @@ import {
 import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
+import { localStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
@@ -192,10 +197,10 @@ export const OFFLOAD_RECOVERY = {
 } as const satisfies Record<OffloadStep, RecoveryRule>;
 
 export const ONLOAD_RECOVERY = {
-  "onload.begin": "roll-back",
+  "onload.begin": "swap-check",
   "onload.restore.start": "roll-back",
   "onload.restored": "roll-back",
-  "onload.verified": "roll-back",
+  "onload.verified": "swap-check",
   "onload.swap.start": "swap-check",
   "onload.swapped": "finish-onload",
   "onload.commit.start": "finish-onload",
@@ -272,7 +277,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       fail(
         finding("journal.pending", {
           message: `${read.unreadable.join(", ")} ${read.unreadable.length === 1 ? "is a journal" : "are journals"} this version of plainport cannot read; ${read.unreadable.length === 1 ? "it was" : "they were"} left as ${read.unreadable.length === 1 ? "it is" : "they are"}`,
-          fix: "run the plainport that wrote it (plainport recover), or plainport doctor",
+          fix: "run plainport recover with the plainport version that wrote it",
           paths: read.unreadable,
         }),
       ),
@@ -321,7 +326,15 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
             continue;
           }
           // Read again under the lock: a detached delete or the onload before it may have closed it since.
-          const now = await reread(journal.op);
+          const reread = await rereadJournal(io, paths, journal.op);
+          if (!reread.ok) {
+            // Left as it is, and it holds the project's later operations back, as any pending one does.
+            const left = pending(journal, reread);
+            held ??= left.op;
+            out.push(left);
+            continue;
+          }
+          const now = reread.value;
           if (now === undefined) continue;
           // An earlier operation of the project that stays pending holds the later ones: their order matters (an
           // onload renaming a trash back before that trash's deletion).
@@ -384,17 +397,6 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       } catch (error) {
         systemErrorCode(error);
       }
-    }
-  }
-
-  async function reread(op: string): Promise<Journal | undefined> {
-    try {
-      const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalFile(paths, op))));
-      return parsed.success ? parsed.data : undefined;
-    } catch (error) {
-      if (error instanceof SyntaxError) return undefined;
-      systemErrorCode(error);
-      return undefined;
     }
   }
 
@@ -660,13 +662,13 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       return fail(
         finding("catalog.head-moved", {
           message: `${journal.project.address} is conflicted in the catalog, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
-          fix: `plainport resolve ${shellWord(journal.project.address)} settles which copy wins, then run plainport recover`,
+          fix: `plainport restore ${shellWord(journal.project.address)} --snapshot <id> --to <path> reads either copy side by side; once the conflict is settled (M2), plainport recover finishes this offload`,
         }),
       );
     return fail(
       finding("catalog.incomplete", {
         message: `the catalog of ${journal.project.address} ${missing.length === 0 ? "has no single head" : `names snapshots it does not hold (${missing.join(", ")})`}, so whether the offload ${journal.op} committed is not known; the folder and the journal were left as they are`,
-        fix: "connect the store that holds them, or run plainport doctor, then run plainport recover",
+        fix: "connect the store that holds them, then run plainport recover",
       }),
     );
   }
@@ -714,7 +716,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     return fail(
       finding("store.failed", {
         message: `the offloaded event ${id} of ${journal.project.address} is not readable on store ${journal.store.name}; the folder was not touched`,
-        fix: "check the store (plainport doctor), then run plainport recover",
+        fix: "check that the store is connected and readable, then run plainport recover",
       }),
     );
   }
@@ -728,11 +730,22 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       if (!read.ok) return pending(journal, read);
       facts = read.value;
     }
+    // The stores no released folder may hold (D83): without the configuration, nothing is moved.
+    const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
+    if (!loaded.ok) return pending(journal, loaded);
     const saga = openSaga<OffloadJournal, OffloadStep>(sagaContext("offload"), journal);
     // The journal is past the commit, or the event was found on the store: committed either way.
     saga.commit();
     const released = await releaseOffload(
-      { host, paths, saga, clock, log: deps.log, stillHeld: lock.stillHeld },
+      {
+        host,
+        paths,
+        saga,
+        clock,
+        log: deps.log,
+        stillHeld: lock.stillHeld,
+        stores: localStores(loaded.value.config, paths.home),
+      },
       facts,
     );
     if (released.ok) {
@@ -859,6 +872,9 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       deps.log("info", `the trash ${trash} is left: ${deleting}`);
       return { op: { ...entry(journal, "trash-kept", state), trash } };
     }
+    // A registered working copy is never deleted as trash (D84).
+    const guarded = await notAProject(io, paths, deps.env, trash);
+    if (!guarded.ok) return pending(journal, guarded);
     try {
       await removeTrash(io, trash);
       await removeJournal(io, paths, journal.op);

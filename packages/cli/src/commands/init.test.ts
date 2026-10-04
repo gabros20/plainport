@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { nodeLocalIo } from "@plainport/core";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
@@ -379,6 +379,46 @@ describe("init: setting the store up (D45)", () => {
     expect(later.code).toBe(0);
     expect(envelope(later.out).data).toMatchObject({ store: { name: "local", path: missing }, findings: [] });
     expect(registry().stores.local).toBe(storeJson(missing).id);
+  });
+
+  test("a swapped disk at the pinned path is refused with store.identity-changed; nothing is written (D85)", async () => {
+    box.dir("work");
+    const base = ["--root", "work=~/work", "--store-path", "~/ssd", "--device", "mbp", "--yes", "--json"];
+    expect((await init(base)).code).toBe(0);
+    const ssd = join(box.home, "ssd");
+    const { id } = storeJson(ssd);
+    // Another disk mounted at the same path, carrying no store yet.
+    rmSync(ssd, { recursive: true });
+    box.dir("ssd");
+    const before = readFileSync(box.paths.managedFile, "utf8");
+    const run = await init(base);
+    expect(run.code).toBe(6);
+    expect(envelope(run.out).error.finding).toMatchObject({ code: "store.identity-changed" });
+    expect(existsSync(join(ssd, "meta"))).toBe(false);
+    expect(registry().stores).toEqual({ local: id });
+    expect(readFileSync(box.paths.managedFile, "utf8")).toBe(before);
+  });
+
+  test("--store-path pointing a pinned name at another store is refused before managed.toml changes (D85)", async () => {
+    box.dir("work");
+    expect(
+      (await init(["--root", "work=~/work", "--store-path", "~/ssd", "--device", "mbp", "--yes"])).code,
+    ).toBe(0);
+    const { id } = storeJson(join(box.home, "ssd"));
+    const before = readFileSync(box.paths.managedFile, "utf8");
+    box.dir("other");
+    const run = await init(["--store-path", "~/other", "--yes", "--json"]);
+    expect(run.code).toBe(6);
+    const refused = envelope(run.out).error.finding;
+    expect(refused).toMatchObject({ code: "store.identity-changed" });
+    expect(refused.fix).toContain("--store <new-name>");
+    expect(readFileSync(box.paths.managedFile, "utf8")).toBe(before);
+    expect(existsSync(join(box.home, "other/meta"))).toBe(false);
+    expect(registry().stores).toEqual({ local: id });
+    // A new name for the other disk is a new store.
+    const named = await init(["--store-path", "~/other", "--store", "archive", "--yes", "--json"]);
+    expect(named.code).toBe(0);
+    expect(registry().stores).toEqual({ local: id, archive: storeJson(join(box.home, "other")).id });
   });
 
   test("--store-secret names where the password is (file:), and is written as that reference", async () => {

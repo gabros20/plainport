@@ -151,8 +151,9 @@ export const posixDeleteTrash = async (
   const op = TRASH.exec(trash)?.[1];
   if (op === undefined || JOURNAL.exec(journal)?.[1] !== op || !isAbsolute(trash) || !isAbsolute(journal))
     throw new Error(`deleteTrashDetached: ${trash} and ${journal} are not an offload's trash and journal`);
+  let child: ReturnType<typeof Bun.spawn>;
   try {
-    const child = Bun.spawn(
+    child = Bun.spawn(
       [
         "/bin/sh",
         "-c",
@@ -179,24 +180,6 @@ export const posixDeleteTrash = async (
         detached: true,
       },
     );
-    child.unref();
-    // Until the claim is there, nothing tells another deleter that this one runs (D64).
-    const claimed = await awaitClaim(io, trash, trashClaimFile(trash), () => child.exitCode);
-    if (claimed === "claimed" || claimed === "finished") return ok({ pid: child.pid });
-    if (claimed === "timeout") {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error) {
-        systemErrorCode(error);
-      }
-    }
-    return fail(
-      finding("fs.write-failed", {
-        message: `the detached delete of ${trash} could not claim it (${claimed === "timeout" ? `no claim within ${CLAIM_WAIT_MS / 1000} s` : "its claim could not be written"}), so it was stopped before deleting anything`,
-        fix: "check that the volume is writable, then run plainport gc",
-        paths: [trashClaimFile(trash)],
-      }),
-    );
   } catch (error) {
     const code = systemErrorCode(error);
     return fail(
@@ -207,4 +190,37 @@ export const posixDeleteTrash = async (
       }),
     );
   }
+  child.unref();
+  const stop = () => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch (error) {
+      systemErrorCode(error);
+    }
+  };
+  // Until the claim is there, nothing tells another deleter that this one runs (D64).
+  let claimed: Awaited<ReturnType<typeof awaitClaim>>;
+  try {
+    claimed = await awaitClaim(io, trash, trashClaimFile(trash), () => child.exitCode);
+  } catch (error) {
+    // The claim cannot be looked at (a failing disk): the child is running and may be unclaimed, so it is stopped (N4).
+    const code = systemErrorCode(error);
+    stop();
+    return fail(
+      finding("fs.write-failed", {
+        message: `the detached delete of ${trash} was started (process ${child.pid}), but its claim could not be checked (${code}), so it was stopped`,
+        fix: "check the volume, then run plainport gc",
+        paths: [trashClaimFile(trash)],
+      }),
+    );
+  }
+  if (claimed === "claimed" || claimed === "finished") return ok({ pid: child.pid });
+  if (claimed === "timeout") stop();
+  return fail(
+    finding("fs.write-failed", {
+      message: `the detached delete of ${trash} could not claim it (${claimed === "timeout" ? `no claim within ${CLAIM_WAIT_MS / 1000} s` : "its claim could not be written"}), so it was stopped before deleting anything`,
+      fix: "check that the volume is writable, then run plainport gc",
+      paths: [trashClaimFile(trash)],
+    }),
+  );
 };

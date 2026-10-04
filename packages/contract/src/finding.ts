@@ -38,7 +38,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "The store's latest snapshot of the project is not the one this working copy came from (another copy was offloaded since, or the project is conflicted); nothing local is deleted",
+      "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted",
   },
   "catalog.event-skipped": {
     severity: "warn",
@@ -47,43 +47,52 @@ export const FINDINGS = Object.freeze({
     summary:
       "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed",
   },
+  "catalog.head-uncertain": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)",
+  },
   "catalog.incomplete": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; sync the store or run plainport doctor",
+      "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; connect or sync the store that holds every snapshot",
   },
   "command.cancelled": {
     severity: "block",
     allowable: false,
     exitCode: 130,
-    summary: "The person answering the prompts cancelled; nothing was written",
+    summary: "The person answering init's prompts cancelled; nothing was written",
   },
   "command.unknown": {
     severity: "block",
     allowable: false,
     exitCode: 4,
-    summary: "No registered command has this name; the message suggests the closest one",
+    summary:
+      "No registered command has this name; the message suggests the closest one and fix is the corrected command line",
   },
   "config.invalid": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "A config file does not parse or does not match its schema, and there is no last good copy to keep",
+      "A config file does not parse or does not match its schema, and there is no last good copy to keep; paths names the file and the message the line or key",
   },
   "config.kept-last-good": {
     severity: "warn",
     allowable: false,
     exitCode: 6,
-    summary: "A config file broke since it was last loaded; its last good contents stay in effect",
+    summary:
+      "A config file broke since it was last loaded in this process; its last good contents stay in effect",
   },
   "config.locked": {
     severity: "block",
     allowable: false,
     exitCode: 11,
-    summary: "Another process holds managed.toml.lock",
+    summary: "Another process holds managed.toml.lock; the message names its PID, host and start time",
   },
   "config.no-home": {
     severity: "block",
@@ -95,14 +104,14 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 4,
-    summary: "The config file named by --config or PLAINPORT_CONFIG does not exist",
+    summary: "The file named by --config or PLAINPORT_CONFIG does not exist",
   },
   "config.owned": {
     severity: "block",
     allowable: false,
     exitCode: 5,
     summary:
-      "config.toml sets this already and wins over managed.toml, so plainport will not write a copy it would shadow; edit config.toml",
+      "config.toml already sets this root binding or store and wins over managed.toml; fix names the key and file to edit",
   },
   "config.read-only": {
     severity: "block",
@@ -127,14 +136,14 @@ export const FINDINGS = Object.freeze({
     allowable: true,
     exitCode: 6,
     summary:
-      "A package folder holds lockfiles of more than one package manager and no packageManager field says which to use",
+      "A package folder holds lockfiles of more than one package manager and no packageManager field; onload uses the first in DESIGN's table",
   },
   "deps.no-lockfile": {
     severity: "warn",
     allowable: true,
     exitCode: 6,
     summary:
-      "A package folder has no lockfile for its package manager, so onload would resolve fresh dependency versions",
+      "A package folder has no lockfile for its package manager, so onload would install fresh versions; fix suggests --keep-deps",
   },
   "device.invalid": {
     severity: "block",
@@ -146,7 +155,7 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "This device has no identity yet; plainport init creates it",
+    summary: "This device has no identity yet; fix points at plainport init",
   },
   "env.docker-mount": {
     severity: "block",
@@ -185,7 +194,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary:
-      "A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved: permissions, a full disk, an I/O error",
+      "A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved; after a commit, fix is plainport recover",
   },
   "git.failed": {
     severity: "block",
@@ -217,7 +226,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Repositories inside the project (nested clones and submodules) travel as plain files, their own .git included",
+      "Repositories inside the project (nested clones, submodules) travel as plain files, their own .git included; paths lists them",
   },
   "git.unpushed": {
     severity: "warn",
@@ -231,7 +240,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "requirePushed is set, and commits, branches or stashes exist only in this copy of the repository; push them first",
+      "requirePushed is set and work exists only in this copy of the repository; it replaces git.unpushed (D30)",
   },
   "git.worktrees": {
     severity: "block",
@@ -250,34 +259,41 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "An earlier operation on this project was interrupted and its journal is still open; plainport recover finishes or rolls it back. From recover: a journal this version cannot read, left as it is",
+      "An earlier operation on the project was interrupted and its journal is still open; fix is plainport recover. From recover itself: a journal file this version cannot read, left as it is",
+  },
+  "path.reserved": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The path is, or lies inside, a folder plainport reserves for itself (.plainport-staging, .plainport-trash, any .plainport-*), whose contents gc deletes: it is never a project's place, a restore's landing folder or a root (D84)",
   },
   "path.stub-occupied": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "Something other than this project's stub is at <project>.plainport, where the stub would go; plainport never overwrites it",
+      "Something other than this project's stub is at <project>.plainport, where the stub would go; plainport never overwrites it (D47)",
   },
   "plan.expired": {
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "The approved plan is more than an hour old; plan again with --dry-run",
+    summary: "The saved plan is more than an hour old; fix plans again with --dry-run",
   },
   "offload.diverged-after-commit": {
     severity: "block",
     allowable: false,
     exitCode: 8,
     summary:
-      "The project folder changed after its offload was committed (found by offload right before the rename, or by recover): the snapshot is the head, the folder is kept with its edits and no stub is written, and the next offload builds on the snapshot (D51, D52)",
+      "Raised by offload (an edit between verification and the rename) and by plainport recover (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no resolve is needed. The error's data has kind: \"diverged-after-commit\", where a fork (catalog.head-moved) has kind: \"fork\" (D51, D52); from recover, data is its report, and the operation's conflict holds that kind",
   },
   "operation.cancelled": {
     severity: "block",
     allowable: false,
     exitCode: 130,
     summary:
-      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56)",
+      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56). Also the envelope of a command a signal ended before it reported, under --json: one that runs no operation, or a second signal while an operation wound down, when plainport recover settles what it journaled (D81)",
   },
   "plan.not-found": {
     severity: "block",
@@ -290,7 +306,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The folder changed since the plan was made (its fingerprint differs), or the plan is for another project; a fresh plan is saved",
+      "The folder, the options or the config changed since the approved plan was made, or the plan is for another project; a fresh plan is saved, fix names its id and the error's data is that plan (D14)",
   },
   "proc.cwd": {
     severity: "block",
@@ -314,13 +330,15 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 130,
-    summary: "A child process was cancelled; its whole process group was stopped",
+    summary:
+      "A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped",
   },
   "process.idle-timeout": {
     severity: "block",
     allowable: false,
     exitCode: 1,
-    summary: "A child process printed nothing for its idle deadline; its whole process group was stopped",
+    summary:
+      "A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output",
   },
   "process.output-incomplete": {
     severity: "block",
@@ -334,20 +352,20 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 1,
     summary:
-      "A child process printed more on stdout than its caller's capture limit; it was stopped rather than read in part",
+      "A child process printed more on stdout than its caller can take whole (a file list, a JSON document); it was stopped, never read in part",
   },
   "process.spawn-failed": {
     severity: "block",
     allowable: false,
     exitCode: 1,
-    summary:
-      "A child process could not be started: the program or its working folder is missing or not usable",
+    summary: "A child process could not be started; paths names the program and its working folder",
   },
   "process.timeout": {
     severity: "block",
     allowable: false,
     exitCode: 1,
-    summary: "A child process ran past its overall deadline; its whole process group was stopped",
+    summary:
+      "A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output",
   },
   "project.ambiguous": {
     severity: "block",
@@ -359,13 +377,21 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 11,
-    summary: "Another plainport process holds this project's lock",
+    summary:
+      "Another plainport process holds the project's lock (locks/<project>.lock), or the lock of a registered project nested with it (D53); a lock left by a dead process is broken instead",
   },
   "project.not-found": {
     severity: "block",
     allowable: false,
     exitCode: 4,
     summary: "No project matches the name, address or path",
+  },
+  "project.unregistered": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary:
+      "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)",
   },
   "registry.invalid": {
     severity: "block",
@@ -383,7 +409,8 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "registry.json exists but plainport may not read it; the file is left as it is",
+    summary:
+      "registry.json exists but plainport may not read it; fix is about permissions, and the file is left as it is",
   },
   "restic.failed": {
     severity: "block",
@@ -458,19 +485,20 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 3,
-    summary: "A confirm-class command ran without --yes or an approved --plan",
+    summary: "A confirm-class command ran without --yes or an approved --plan; fix is the exact re-run",
   },
   "root.defined-twice": {
     severity: "warn",
     allowable: false,
     exitCode: 6,
-    summary: "config.toml and managed.toml both define a root; config.toml wins key by key, so edit it there",
+    summary:
+      "config.toml and managed.toml both define a root; config.toml wins key by key, and fix says where to edit",
   },
   "root.exists": {
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "A root with this key already exists",
+    summary: "A root with this key already exists; fix is the root bind command",
   },
   "root.none": {
     severity: "block",
@@ -495,7 +523,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Two roots on this device overlap or resolve to the same real path; every project belongs to one root",
+      "Two roots on this device overlap or resolve to the same real path (symlinks resolved, case folded on case-insensitive volumes); paths names both folders",
   },
   "root.path-missing": {
     severity: "block",
@@ -514,14 +542,14 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "The root has no folder on this device; plainport root bind gives it one",
+    summary: "The root has no folder on this device; fix is plainport root bind <root> <path>",
   },
   "store.failed": {
     severity: "block",
     allowable: false,
     exitCode: 1,
     summary:
-      "A read or write in the store failed (permissions, a full disk, an I/O error); the message names the key and the error",
+      "A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error",
   },
   "store.identity-changed": {
     severity: "block",
@@ -529,6 +557,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
+  },
+  "store.inside-project": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "A local store and a project overlap (the store lies inside the project's folder, or the project inside the store), compared by real path: an offload would move the store into the trash with the folder and delete its snapshots, so setup, offload and its release refuse; move one of them (D83)",
   },
   "store.key-exists": {
     severity: "block",
@@ -541,14 +576,14 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The store has no identity this device recorded (plainport init sets a store up: its store.json, its restic repository)",
+      "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
   },
   "store.root-mismatch": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The store already holds another root's snapshots; one restic repository serves one root (ADR-0010, D48)",
+      "The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store",
   },
   "store.secret-missing": {
     severity: "block",
@@ -588,14 +623,15 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 2,
-    summary: "--dry-run was given to a command that has no preview",
+    summary:
+      "--dry-run was given to a command that has no preview; fix depends on the risk class (machine-contract §4)",
   },
   "usage.invalid": {
     severity: "block",
     allowable: false,
     exitCode: 2,
     summary:
-      "The arguments or options do not match the command's declared arguments; also restore without --snapshot when the project has no head, listing the candidate ids (D60)",
+      'The arguments or options do not match the command\'s declared arguments; fix is plainport help <command>. Also restore without --snapshot when the project has no head (incomplete or conflicted): the message lists the candidate ids (D60); and offload.verify = "full" in config, which arrives in M5 and is refused rather than downgraded (D50)',
   },
   "fs.case-collision": {
     severity: "block",
@@ -609,83 +645,82 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The landing volume has less free space than the snapshot, the dependencies recorded at offload and a 10% margin need; nothing was restored",
+      "The landing volume has less free space than the snapshot, the dependencies recorded at offload and a 10% margin need; nothing is restored",
   },
   "hydrate.failed": {
     severity: "block",
     allowable: false,
     exitCode: 10,
     summary:
-      "The files are restored but installing the dependencies failed (restored-unhydrated); the error's data names the project and snapshot, and plainport hydrate retries",
+      "The files are restored but installing the dependencies failed (restored-unhydrated). The error's data is the command's output with the install that failed (onload's also names the snapshot, D14), and fix is plainport hydrate <project>",
   },
   "lease.held": {
     severity: "warn",
     allowable: false,
     exitCode: 8,
     summary:
-      "Another device holds the project's lease (it is onloaded there); a warning, or a refusal with exit 8 when onload.leases is strict",
+      'Another device holds the project\'s lease; a warning, or a refusal with exit 8 when onload.leases = "strict"',
   },
   "path.occupied": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "Something already stands where onload or restore would put the project, which never merge into it (fix names --to <path>); or a folder stands at the project's place after its offload's release moved the project aside, and neither is touched",
+      "Something already stands where onload or restore would put the project; it never merges, and fix names --to <path> (or, for the folder offload.diverged-after-commit kept, says to keep working in it). Also from an offload's release, finished by recover, when a folder stands at the project's place after the project folder was moved aside: neither is touched and no stub is written",
   },
   "project.already-local": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The project's own onloaded copy is already on this device, so onload --to would make a second working copy; a side-by-side copy is plainport restore --snapshot <id> --to <path> (D56)",
+      "onload --to while the project's own onloaded copy is on this device: a device holds one working copy; fix names plainport restore <project> --snapshot <id> --to <path> for a side-by-side copy (D56)",
   },
   "project.nested": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The folder holds another registered project's effective folder (its --to override, else its root's place) on this device: offload the inner project first, or unregister it; onload --to refuses a landing folder inside another registered project's folder (D53)",
+      "The folder holds another registered project's effective folder (its --to override, else its root's place) on this device, so offload refuses and fix offloads the inner project first; onload --to refuses a landing folder inside another registered project's folder (D53)",
   },
   "snapshot.not-found": {
     severity: "block",
     allowable: false,
     exitCode: 4,
     summary:
-      "The catalog has no snapshot of the project with this id, or the store holds none of it; plainport history lists its snapshots",
+      "The catalog has no snapshot of the project with this id (--snapshot), or the store holds no copy of it; fix names the head or the store that holds it",
   },
   "toolchain.mismatch": {
     severity: "warn",
     allowable: false,
     exitCode: 6,
     summary:
-      "The project asks for a tool version (.nvmrc, engines, packageManager) that is not active and no version manager (mise, fnm, Volta) can activate; the install runs with what is there",
+      "The project asks for a tool version (.nvmrc, engines, packageManager) that is not active and no version manager (mise, fnm, Volta) on PATH can activate; the install runs with what is there",
   },
   "strip.kept": {
     severity: "info",
     allowable: false,
     exitCode: 6,
     summary:
-      "Paths a plugin or strip.extra proposed stay in the snapshot: git tracks them, strip.keep or strip.never protects them, they hold a repository, or dependencies are kept",
+      "Paths a plugin or strip.extra proposed stay in the snapshot; the message says why for each (git tracks it, strip.keep or strip.never matches, it holds a repository, dependencies are kept)",
   },
   "verify.changed": {
     severity: "block",
     allowable: false,
     exitCode: 7,
-    summary:
-      "Files in the project changed while the snapshot was being made, again after one retry; nothing local was deleted",
+    summary: "Files changed while the snapshot was made, again after one retry; nothing local was deleted",
   },
   "verify.mismatch": {
     severity: "block",
     allowable: false,
     exitCode: 7,
     summary:
-      "The snapshot's listing does not match the folder: at offload the scan of the project (nothing local was deleted), at onload the restored staging folder (it is removed, and the stub stays); entries, types, sizes, modes or link targets",
+      "The snapshot's listing does not match the folder (entries, types, sizes, modes or link targets): at offload the scan of the project, and nothing local was deleted; at onload the restored staging folder, which is removed while the stub stays",
   },
   "tool.missing": {
     severity: "block",
     allowable: false,
     exitCode: 6,
-    summary: "A bundled binary (restic or rclone) was not found",
+    summary: "A bundled binary (restic or rclone) was not found; paths lists every place searched",
   },
 } as const satisfies Record<string, FindingSpec>);
 

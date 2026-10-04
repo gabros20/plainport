@@ -93,6 +93,12 @@ describe("findings", () => {
       "process.timeout": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "project.ambiguous": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },
       "project.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "project.unregistered": {
+        severity: "block",
+        allowable: false,
+        exitCode: 4,
+        summary: expect.any(String),
+      },
       "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "registry.unreadable": {
@@ -112,6 +118,12 @@ describe("findings", () => {
       "root.unbound": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "store.identity-changed": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "store.inside-project": {
         severity: "block",
         allowable: false,
         exitCode: 6,
@@ -169,8 +181,15 @@ describe("findings", () => {
       "plan.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "catalog.head-moved": { severity: "block", allowable: false, exitCode: 8, summary: expect.any(String) },
       "catalog.incomplete": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "catalog.head-uncertain": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "fs.cross-volume": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "fs.write-failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "path.reserved": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "path.stub-occupied": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "journal.pending": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "offload.diverged-after-commit": {

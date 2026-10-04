@@ -89,7 +89,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import { type PlanBoundary, type PreparedOffload, prepareOffload } from "../plan/planner.ts";
 import type { Plan } from "../plan/schema.ts";
 import { planBlocker, planCommand } from "../plan/schema.ts";
-import { readPlan, savePlan } from "../plan/store.ts";
+import { prunePlans, readPlan, savePlan } from "../plan/store.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
@@ -100,6 +100,7 @@ import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
+import { localStores } from "../store-overlap.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
@@ -288,8 +289,8 @@ export interface OffloadOutcome {
   localCopy: "deleted" | "kept" | "waiting";
   /** Absent when config says stub = false. */
   stub?: string;
-  /** Where the folder waits to be deleted. */
-  trash: string;
+  /** Where the folder is kept or waits to be deleted; absent when localCopy is deleted (D77). */
+  trash?: string;
   /** keepLocalFor: the trash is kept until then. */
   keepUntil?: string;
 }
@@ -427,9 +428,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const located = await locate(io, ref);
   if (!located.ok) return located;
   const folder = located.value;
+  // Long-expired plans go with a real run, never with a dry run, which writes only its plan file (N5).
+  await prunePlans(io, paths, clock(), req.plan);
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
+  // The local stores release never moves a folder holding (D83).
+  const stores = localStores(loaded.value.config, paths.home);
   const storeName =
     req.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
   if (storeName === undefined) {
@@ -610,7 +615,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       let saved = planBlocker(fresh.value.plan) === undefined;
       if (saved) {
         try {
-          await savePlan(io, paths, fresh.value.plan, clock());
+          await savePlan(io, paths, fresh.value.plan);
         } catch (error) {
           assertSystemError(error);
           saved = false;
@@ -837,7 +842,15 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
       phase("release", "start");
       const released = await releaseOffload(
-        { host, paths, saga, clock, log: deps.log, stillHeld: lock.stillHeld },
+        {
+          host,
+          paths,
+          saga,
+          clock,
+          log: deps.log,
+          stillHeld: lock.stillHeld,
+          stores,
+        },
         { at: event.at, bytes: verified.bytes },
       );
       if (!released.ok) return released;
@@ -853,7 +866,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         ...(freed ? {} : { freedBy: keepUntil === undefined ? "plainport recover" : "plainport gc" }),
         localCopy: freed ? "deleted" : keepUntil === undefined ? "waiting" : "kept",
         ...(stub === undefined ? {} : { stub }),
-        trash,
+        // A deleted local copy's trash is already going, so it is not named (D77).
+        ...(freed ? {} : { trash }),
         ...(keepUntil === undefined ? {} : { keepUntil }),
       });
     };

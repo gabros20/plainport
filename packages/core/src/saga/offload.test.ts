@@ -23,6 +23,7 @@ import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
+import { PathRefused } from "../guard.ts";
 import { journalFile, type OffloadJournal, OffloadJournalSchema, readJournals } from "../journal/index.ts";
 import { prepareOffload } from "../plan/planner.ts";
 import { listPlans, savePlan } from "../plan/store.ts";
@@ -624,7 +625,7 @@ describe("offload: approved plans", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     return prepared.plan;
   };
 
@@ -1019,7 +1020,7 @@ describe("offload: fix wave r1", () => {
         keepDeps: true,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     const without = await offload({ plan: prepared.plan.id });
     expect(without.ok ? 0 : [without.exitCode, without.finding.code]).toEqual([6, "plan.stale"]);
     expect(without.ok ? undefined : without.data).toMatchObject({
@@ -1046,7 +1047,7 @@ describe("offload: fix wave r1", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     config('[strip]\nextra = ["src"]');
     const result = await offload({ plan: prepared.plan.id });
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
@@ -1142,8 +1143,8 @@ describe("offload: fix wave r1", () => {
       deleteTrashDetached: async () => fail(finding("process.spawn-failed", { message: "no sh today" })),
     };
     const result = value(await runOffload(deps({}, host), { project: await ref() }));
-    expect(result.freedBytes).toBe(0);
-    expect(existsSync(join(result.trash, "web/src/main.ts"))).toBe(true);
+    expect([result.freedBytes, result.localCopy]).toEqual([0, "waiting"]);
+    expect(existsSync(join(result.trash as string, "web/src/main.ts"))).toBe(true);
     expect(journalNow().step).toBe("offload.release.delete");
     expect(logs.join("\n")).toContain("plainport recover");
     // Invariants 1 and 2 hold; 3 holds once recover has deleted the trash (Task 14).
@@ -1421,7 +1422,7 @@ describe("offload: fix wave r2", () => {
         ...over,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     return prepared.plan;
   };
 
@@ -1429,6 +1430,13 @@ describe("offload: fix wave r2", () => {
     const approved = await approve();
     store = memoryBlobStore({ createIfAbsent: true });
     engine = fakeEngine();
+    // init never moves a pinned name to another store (D85): the device forgot the old pin before setting this one up.
+    value(
+      await updateRegistry(testHost(), box.paths, (registry) => {
+        const { ssd: _, ...stores } = registry.stores ?? {};
+        return ok({ ...registry, stores });
+      }),
+    );
     value(
       await setUpStore(testHost(), {
         paths: box.paths,
@@ -1679,7 +1687,11 @@ describe("offload: fix wave r3 (D50)", () => {
     // A lost release.trash write leaves the journal at committed, with no trash: recover derives it.
     const atCommitted = seen.get("offload.committed") as OffloadJournal;
     expect(atCommitted.trash).toBeUndefined();
-    expect(saga.offloadTrashOf(atCommitted)).toBe(result.trash);
+    // The result names no trash once its delete has started (D77); the journal named it.
+    expect(result.trash).toBeUndefined();
+    expect(saga.offloadTrashOf(atCommitted)).toBe(
+      (seen.get("offload.release.trash") as OffloadJournal).trash as string,
+    );
     await expectInvariants();
   });
 
@@ -1767,7 +1779,7 @@ describe("offload: fix wave r3 (D50)", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     const listed = await listPlans(testHost(), box.paths, new Date());
     expect(listed.map((p) => p.id)).toContain(prepared.plan.id);
     value(await offload({ plan: prepared.plan.id, allow: ["git.locked"] }));
@@ -2372,7 +2384,7 @@ describe("offload: fix wave q2", () => {
     );
     expect(prepared.plan.fp).toBe(2);
     const { fp: _, ...older } = prepared.plan;
-    await savePlan(testHost(), box.paths, older, new Date());
+    await savePlan(testHost(), box.paths, older);
     const result = await offload({ plan: older.id });
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
     expect(engine.calls).toHaveLength(0);
@@ -2401,6 +2413,7 @@ describe("offload: fix wave q2", () => {
         host,
         paths: box.paths,
         saga: resumed,
+        stores: [],
         clock: () => new Date(),
         log: () => {},
         ...(over.stillHeld === undefined ? {} : { stillHeld: over.stillHeld }),
@@ -2460,5 +2473,109 @@ describe("offload: fix wave q2", () => {
     );
     expect(order).toEqual(["lock", "scan", "rename"]);
     await expectInvariants();
+  });
+});
+
+describe("offload: long-expired plans go with a real run, never with a dry run (N5)", () => {
+  test("a real offload removes a plan expired more than an hour ago", async () => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(Date.now() - 3 * 86_400_000),
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
+      }),
+    );
+    await savePlan(testHost(), box.paths, prepared.plan);
+    const file = join(box.paths.plansDir, `${prepared.plan.id}.json`);
+    expect(existsSync(file)).toBe(true);
+    value(await offload());
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe("offload: a preflight lookup that throws (task 17 concern 2)", () => {
+  test("blocks with the check's code and leaves no journal for recover", async () => {
+    const result = await runOffload(
+      deps({
+        checks: {
+          ...quietChecks,
+          dockerMounts: async () => {
+            throw new PathRefused("stat", "/Users/someone/.local/bin/docker", "/Users/someone");
+          },
+        },
+      }),
+      { project: await ref() },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "env.docker-mount"]);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+});
+
+describe("offload: a store inside the project is never offloaded with it (D83)", () => {
+  const storeAt = (path: string) =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "local"',
+        `path = "${path}"`,
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+  const expectBothSurvive = async (archive: string) => {
+    await expectUntouched();
+    expect(readFileSync(join(archive, "data/snap"), "utf8")).toBe("repository bytes");
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+  };
+
+  test("a store under stripped output refuses (store.inside-project, 6); the source and the repository survive", async () => {
+    box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+    storeAt("~/work/web/node_modules/.archive");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    expect(engine.calls).toHaveLength(0);
+    await expectBothSurvive(join(dir, "node_modules/.archive"));
+  });
+
+  test("the comparison is by real path: a store reached through a symlink into the project refuses too", async () => {
+    box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+    symlinkSync(join(dir, "node_modules"), join(box.home, "alias"));
+    storeAt("~/alias/.archive");
+    const result = await offload({ allow: ["store.inside-project"] });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    await expectBothSurvive(join(dir, "node_modules/.archive"));
+  });
+
+  test("a project inside the store refuses too", async () => {
+    box.file("work/web/data/snap", "repository bytes");
+    storeAt("~/work");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    await expectBothSurvive(dir);
+  });
+
+  test("setting up a store inside a registered project's folder refuses, and makes no folder", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try registers the project" })),
+    };
+    expect((await offload()).ok).toBe(false);
+    const result = await setUpStore(testHost(), {
+      paths: box.paths,
+      env: { PLAINPORT_STORE_PASSWORD: "pw" },
+      name: "inner",
+      store: { kind: "local", path: "~/work/web/.store" },
+      opener,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : result.finding.code).toBe("store.inside-project");
+    expect(existsSync(join(dir, ".store"))).toBe(false);
   });
 });

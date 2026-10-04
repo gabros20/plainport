@@ -104,9 +104,9 @@ export const checkSnapshot = async (options: {
   io: LocalIo;
   engine: Engine;
   store: BlobStore;
-  /** This store's restic id for the snapshot, and the event that made it. */
+  /** This store's restic id for the snapshot, and the event that made it (absent when it cannot be read, D86). */
   stored: string;
-  event: string;
+  event?: string;
   ctx: RunContext;
   op: string;
   nearest: string;
@@ -160,7 +160,7 @@ export const checkSnapshot = async (options: {
     }
   }
   // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
-  const made = await producedBy(options.store, options.event);
+  const made = options.event === undefined ? undefined : await producedBy(options.store, options.event);
   const stripped = options.dependencies === false ? 0 : (made?.stats.strippedBytes ?? 0);
   const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
   // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore

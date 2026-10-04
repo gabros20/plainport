@@ -25,6 +25,7 @@ import type { PlainportPaths } from "../paths.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
+import { type ProtectedStore, storeOverlap } from "../store-overlap.ts";
 import { placeStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
 import { type Saga, withFix, writeFailed } from "./journaled.ts";
 import { unchanged } from "./verify.ts";
@@ -52,6 +53,11 @@ export interface ReleaseContext {
   /** Re-checks the project's lock right before the rename (lock.ts's known limit); absent, it is not re-checked. */
   stillHeld?(): Promise<boolean>;
   paths: PlainportPaths;
+  /**
+   * Every local store's folder (store-overlap.ts): the folder, or its copy in the trash, is never moved or deleted while
+   * it holds one or lies inside one (D83).
+   */
+  stores: readonly ProtectedStore[];
   /** The offload's saga, committed: its journal says what to release and how. */
   saga: Saga<OffloadJournal>;
   clock(): Date;
@@ -149,6 +155,17 @@ export const releaseOffload = async (
     atDir = await exists(rc, folder);
   } catch (error) {
     return writeFailed(error, `looking for ${folder} and ${moved}`, true, folder);
+  }
+  // A store inside the folder (or the folder inside a store) would be renamed and deleted with it (D83): nothing
+  // moves and no delete starts; the journal stays, and recover asks again once the store is moved.
+  if (atDir || inTrash) {
+    const overlap = await storeOverlap(io, rc.paths.home, atDir ? folder : moved, rc.stores);
+    if (!overlap.ok)
+      return fail({
+        ...overlap.finding,
+        message: `${overlap.finding.message}; the snapshot ${op} is committed and nothing was moved or deleted`,
+        fix: `${overlap.finding.fix?.replace(/, then re-run$/, "") ?? "move the store"}, then run plainport recover`,
+      });
   }
   // A folder at the project's place after it was moved aside is something else: never released, never stubbed over.
   if (inTrash && atDir) {

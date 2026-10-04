@@ -34,7 +34,7 @@ const HydrateReportSchema = z.looseObject({
   ),
   untrusted: z.array(z.string()).meta({
     description:
-      "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)",
+      "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)",
   }),
   reason: z.string().optional().meta({
     description:
@@ -132,7 +132,7 @@ export const onload = defineCommand({
     {
       argv: ["onload", "work:clients/acme/api", "--no-hydrate"],
       summary:
-        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
+        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them",
     },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],
@@ -167,7 +167,7 @@ export const onload = defineCommand({
       ...(hydrate.untrusted.length === 0
         ? []
         : [
-            `skipped   ${hydrate.untrusted.join(", ")} from .plainport.toml (untrusted: runs only after plainport trust)`,
+            `skipped   ${hydrate.untrusted.join(", ")} from .plainport.toml (untrusted: this version never runs it)`,
           ]),
     ].join("\n");
   },

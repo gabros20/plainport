@@ -13,6 +13,8 @@ import {
   eventMirrorDir,
   FOLD_VERSION,
   foldCatalog,
+  headCheck,
+  headUncertain,
   type LoadedCatalog,
   loadCatalog,
   MIRROR_FILE_KEY,
@@ -575,5 +577,68 @@ describe("catalog: loadCatalog, the one read path (D43, D45)", () => {
     expect(completed.cached).toBe(false);
     expect(completed.findings).toEqual([]);
     expect(completed.state.projects[PROJECT]?.snapshots[event.snapshot]).toBeDefined();
+  });
+});
+
+describe("catalog: a fold that left out events is uncertain (D86)", () => {
+  const known = idAt(502);
+  const ids = (n: number) => offloaded(n).id;
+
+  for (const [kind, bytes] of [
+    ["malformed", () => '{"v":1,"id":"'],
+    ["unsupported", (id: string) => ({ v: 1, id, type: "merged", at: "2026-10-03T12:00:00.000Z" })],
+  ] as const) {
+    test(`a ${kind} newest event, with no cache and an empty mirror: uncertain names it, from the cache too`, async () => {
+      const store = await initStore();
+      const mirror = memoryBlobStore();
+      await appendEvent(storeEventLog(store), offloaded(1));
+      store.data.set(`meta/v1/events/${ids(2)}.json`, encode(bytes(ids(2))));
+      const first = await load(store, mirror);
+      expect(first.uncertain).toEqual([ids(2)]);
+      expect(first.state.projects[PROJECT]?.head).toBe(offloaded(1).snapshot);
+      const again = await load(store, mirror);
+      expect(again.uncertain).toEqual([ids(2)]);
+      // The head the fold shows is older than the snapshot this device knows: head-dependent defaults refuse.
+      const doubt = headUncertain(
+        { ...again.state, uncertain: again.uncertain },
+        PROJECT,
+        [known],
+        "work:web",
+        { what: "nothing was restored", instead: (newest) => `restore ${newest}` },
+      );
+      expect(doubt).toMatchObject({
+        newest: known,
+        finding: {
+          code: "catalog.head-uncertain",
+          severity: "block",
+          fix: expect.stringContaining(`restore ${known}`),
+        },
+      });
+      expect(
+        headCheck({ ...again.state, uncertain: again.uncertain }, PROJECT, known, "work:web"),
+      ).toMatchObject({
+        kind: "incomplete",
+        finding: { code: "catalog.head-uncertain" },
+      });
+    });
+  }
+
+  test("a known snapshot a readable event names, or a file not named as an event, leaves the head certain", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(store), offloaded(1));
+    await appendEvent(storeEventLog(store), { ...offloaded(2), base: offloaded(1).snapshot });
+    store.data.set(`meta/v1/events/${ids(3)}.json`, encode("{bad"));
+    const read = await load(store, mirror);
+    expect(read.uncertain).toEqual([ids(3)]);
+    const state = { ...read.state, uncertain: read.uncertain };
+    const said = { what: "nothing was restored", instead: (newest: string) => `restore ${newest}` };
+    expect(headUncertain(state, PROJECT, [known, offloaded(1).snapshot], "work:web", said)).toBeUndefined();
+    expect(headUncertain(state, PROJECT, [undefined], "work:web", said)).toBeUndefined();
+    store.data.delete(`meta/v1/events/${ids(3)}.json`);
+    mirror.data.set("events/notes.txt", encode("not an event"));
+    const stray = await load(store, mirror);
+    expect(stray.findings.map((f) => f.code)).toEqual(["catalog.event-skipped"]);
+    expect(stray.uncertain).toEqual([]);
   });
 });

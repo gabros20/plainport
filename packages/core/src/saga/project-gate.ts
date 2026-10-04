@@ -11,7 +11,7 @@
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
-import { assertSystemError, type LocalIo } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, journalFile, readJournals } from "../journal/index.ts";
 import { acquireLock, type LockHolder, liveHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -94,8 +94,11 @@ export interface GateOptions {
    * operation on one runs while this one changes the folder that holds or contains it.
    */
   related?: readonly { id: string; address: string }[];
-  /** An interrupted operation of this project the caller takes over instead of refusing (onload's staging). */
-  resume?(journal: Journal): boolean;
+  /**
+   * An interrupted operation the caller takes over or settles instead of refusing: onload's staging (`own`, this
+   * project's), or every one for recover and gc. A nested project's (`own` false) is never handed to the body.
+   */
+  resume?(journal: Journal, own: boolean): boolean;
 }
 
 /** A registered project and its effective folder on this device: its override, else its root's place for it. */
@@ -171,6 +174,32 @@ export const nestedProjects = async (
 };
 
 /**
+ * project.nested when `path`, something gc, housekeeping or recover is about to delete from a holder, is, holds or lies
+ * inside a registered project's effective folder: a working copy is never deleted as staging or trash (D84). A
+ * registry that cannot be read refuses too (fail closed).
+ */
+export const notAProject = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  env: Env,
+  path: string,
+): Promise<Result<void>> => {
+  const folders = await registeredFolders(io, paths, env);
+  if (!folders.ok) return folders;
+  const nested = await nestedProjects(io, paths, folders.value, { folder: path });
+  if (!nested.ok) return nested;
+  const [project] = nested.value;
+  if (project === undefined) return ok(undefined);
+  return fail(
+    finding("project.nested", {
+      message: `${path} ${project.same ? "is" : project.inside ? "holds" : "lies inside"} ${project.address}'s folder (${project.folder}), a registered working copy, so it was not deleted (D84)`,
+      fix: `move ${project.folder} out of plainport's .plainport-* holder by hand (it is your working copy, not plainport's), then re-run`,
+      paths: [path, project.folder],
+    }),
+  );
+};
+
+/**
  * Runs `body` holding the project's lock and its nested projects' (options.related), once no interrupted operation
  * of the project is open; an open one `options.resume` accepts is handed to the body instead.
  */
@@ -219,24 +248,48 @@ export const withProjectLock = async <T>(
       return fail(
         finding("journal.pending", {
           message: `${unreadable} is a journal this version of plainport cannot read, so it may be an interrupted operation of ${journals.owners[unreadable]?.address ?? project.address}; nothing new was started`,
-          fix: "run the plainport that wrote it (plainport recover), or plainport doctor, then re-run",
+          fix: "run plainport recover with the plainport version that wrote it, then re-run",
           paths: [unreadable],
         }),
       );
     }
+    // The project's own interrupted operations, and those of the projects nested with it (D53): either changes the
+    // folders this operation is about to touch.
+    const nestedIds = new Set((options.related ?? []).map((r) => r.id));
     const open = journals.journals.filter((j) => j.project.id === project.id && holdsProjectBack(j));
-    const [blocking] = open.filter((j) => options.resume?.(j) !== true);
+    const nestedOpen = journals.journals.filter((j) => nestedIds.has(j.project.id) && holdsProjectBack(j));
+    const [blocking] = [
+      ...open.filter((j) => options.resume?.(j, true) !== true),
+      ...nestedOpen.filter((j) => options.resume?.(j, false) !== true),
+    ];
     if (blocking !== undefined) {
+      const whose =
+        blocking.project.id === project.id
+          ? project.address
+          : `${blocking.project.address}, which is nested with ${project.address} (D53)`;
       return fail(
         finding("journal.pending", {
-          message: `an ${blocking.kind} of ${project.address} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
+          message: `an ${blocking.kind} of ${whose} (${blocking.op}) was interrupted at ${blocking.step}; nothing new was started`,
           fix: "plainport recover finishes or rolls it back, then re-run",
           paths: [journalFile(paths, blocking.op)],
         }),
       );
     }
     const own = held[0] as (typeof held)[number];
-    return await body({ stillHeld: () => own.stillHeld() }, open[0]);
+    // A lock file that cannot be read cannot be shown to be this run's: it reads as lost, so the body stops before
+    // its next change, and the reason is said (AGENTS.md rule 7).
+    const stillHeld = async (): Promise<boolean> => {
+      try {
+        return await own.stillHeld();
+      } catch (error) {
+        ctx.log(
+          "warn",
+          `the lock ${own.path} could not be read (${systemErrorCode(error)}), so this run cannot show it still holds it; it stops before its next change`,
+        );
+        return false;
+      }
+    };
+    return await body({ stillHeld }, open[0]);
   } finally {
     for (const lock of held.reverse()) {
       try {

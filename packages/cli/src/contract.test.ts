@@ -1,14 +1,43 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: these strings are shell code, where ${…} is shell syntax.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { contractJsonSchemas, parseJsonLines, RISK_CLASSES } from "@plainport/contract";
+import {
+  contractJsonSchemas,
+  type FailureExitCode,
+  FINDINGS,
+  finding,
+  parseJsonLines,
+  RISK_CLASSES,
+} from "@plainport/contract";
+import { acquireLock, resolvePaths } from "@plainport/core";
 import Ajv2020 from "ajv/dist/2020";
+import { testHost } from "../../core/src/testing/host.ts";
 import { REGISTRY } from "./commands/index.ts";
-import { generateFiles, staleFiles, writeFiles } from "./generate.ts";
-import type { Registry } from "./registry.ts";
-import { capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
+import {
+  FINDINGS_BEGIN,
+  FINDINGS_END,
+  findingsTable,
+  generateFiles,
+  staleFiles,
+  writeFiles,
+} from "./generate.ts";
+import type { AnyCommand, Ports, Registry } from "./registry.ts";
+import { type Captured, capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
+
+type ExampleHome = Awaited<ReturnType<typeof exampleHome>>;
+
 import { VERSION } from "./version.ts";
 
 const repoRoot = join(import.meta.dir, "../../..");
@@ -63,6 +92,408 @@ describe("contract round trip: every command's --json output matches its declare
     "fake",
     FAKE_REGISTRY.filter((c) => c.name !== "help"),
   );
+});
+
+/** One way to make a command fail: what it is run with, the exit code and finding code it must end with, and whether
+ * the envelope carries data (D14). `setup` prepares the example home and may return ports to run with and the
+ * arguments, when they depend on what it made (a plan id). */
+interface FailureCase {
+  argv: string[];
+  exit: FailureExitCode;
+  code: string;
+  data: boolean;
+  setup?: (home: ExampleHome) => Promise<{ ports?: Partial<Ports>; argv?: string[] } | undefined>;
+}
+
+const pathsOf = (home: ExampleHome) => {
+  const paths = resolvePaths(home.ports.env, { cwd: home.home });
+  if (!paths.ok) throw new Error(paths.finding.message);
+  return paths.value;
+};
+
+/** Offloads work:clients/acme/web with a crash planned at `step` (an in-process fault: the run throws). */
+const crashOffloadAt = async (home: ExampleHome, step: string): Promise<void> => {
+  const run = await capture(["offload", "work:clients/acme/web", "--yes"], REGISTRY, {
+    ports: { ...home.ports, system: testHost({ faults: { at: step } }) },
+  });
+  if (run.code !== 1) throw new Error(`the crash at ${step} did not happen: exit ${run.code}, ${run.err}`);
+};
+
+const keepLocalFor = (home: ExampleHome, value: string): void =>
+  writeFileSync(pathsOf(home).configFile, `version = 1\n[offload]\nkeepLocalFor = "${value}"\n`);
+
+/** Every registered command's failures, at least one each, run through the same checks as the examples. */
+const FAILURES: Record<string, FailureCase[]> = {
+  help: [{ argv: ["help", "nosuch"], exit: 4, code: "command.unknown", data: false }],
+  init: [{ argv: ["init", "--nosuch"], exit: 2, code: "usage.invalid", data: false }],
+  ls: [
+    { argv: ["ls", "--dry-run"], exit: 2, code: "usage.dry-run-unsupported", data: false },
+    {
+      argv: ["ls"],
+      exit: 6,
+      code: "config.invalid",
+      data: false,
+      setup: async (home) => {
+        writeFileSync(pathsOf(home).configFile, "version = [\n");
+        return undefined;
+      },
+    },
+  ],
+  status: [
+    { argv: ["status", "work:nosuch"], exit: 4, code: "project.not-found", data: false },
+    { argv: ["status", "work:clients/acme/web"], exit: 4, code: "project.unregistered", data: false },
+  ],
+  offload: [
+    { argv: ["offload", "work:clients/acme/web"], exit: 3, code: "risk.needs-yes", data: false },
+    {
+      argv: ["offload", "work:clients/acme/web", "--dry-run"],
+      exit: 6,
+      code: "git.locked",
+      data: true,
+      setup: async (home) => {
+        writeFileSync(join(home.home, "work/clients/acme/web/.git/index.lock"), "");
+        return undefined;
+      },
+    },
+    { argv: ["offload", "work:nosuch", "--yes"], exit: 4, code: "project.not-found", data: false },
+    {
+      // A real run's data is the fresh plan (D14): the union branch a dry run never reaches.
+      argv: ["offload", "work:clients/acme/web", "--plan", "<id>"],
+      exit: 6,
+      code: "plan.stale",
+      data: true,
+      setup: async (home) => {
+        const dry = await capture(["offload", "work:clients/acme/web", "--dry-run", "--json"], REGISTRY, {
+          ports: home.ports,
+        });
+        const id: string = JSON.parse(dry.out.trimEnd().split("\n").at(-1) ?? "").data.id;
+        writeFileSync(join(home.home, "work/clients/acme/web/changed.txt"), "since the plan\n");
+        return {
+          ports: { plans: { approved: () => true } },
+          argv: ["offload", "work:clients/acme/web", "--plan", id],
+        };
+      },
+    },
+    {
+      // Committed, then changed before the rename: exit 8 with offload's conflict data (D51, D52).
+      argv: ["offload", "work:clients/acme/web", "--yes"],
+      exit: 8,
+      code: "offload.diverged-after-commit",
+      data: true,
+      setup: async (home) => {
+        const web = join(home.home, "work/clients/acme/web");
+        writeFileSync(join(web, "main.ts"), "export const main = 1;\n");
+        return {
+          ports: {
+            system: testHost({
+              faults: {
+                onStep: (step) => {
+                  if (step === "offload.committed")
+                    writeFileSync(join(web, "main.ts"), "export const main = 2;\n");
+                },
+              },
+            }),
+          },
+        };
+      },
+    },
+  ],
+  onload: [
+    { argv: ["onload", "work:nosuch"], exit: 4, code: "project.not-found", data: false },
+    {
+      argv: ["onload", "work:clients/acme/api", "--to", "~/personal"],
+      exit: 6,
+      code: "path.occupied",
+      data: false,
+    },
+    {
+      // Restored, but the install fails: exit 10 with onload's output as data (D14).
+      argv: ["onload", "work:clients/acme/app"],
+      exit: 10,
+      code: "hydrate.failed",
+      data: true,
+      setup: async (home) => {
+        const app = join(home.home, "work/clients/acme/app");
+        mkdirSync(join(app, "node_modules/left-pad"), { recursive: true });
+        writeFileSync(join(app, "package.json"), `${JSON.stringify({ name: "app", version: "1.0.0" })}\n`);
+        writeFileSync(
+          join(app, "package-lock.json"),
+          `${JSON.stringify({ name: "app", version: "1.0.0", lockfileVersion: 3, packages: {} })}\n`,
+        );
+        writeFileSync(join(app, "node_modules/left-pad/index.js"), "module.exports = 1;\n");
+        const offloaded = await capture(["offload", "work:clients/acme/app", "--yes"], REGISTRY, {
+          ports: home.ports,
+        });
+        if (offloaded.code !== 0) throw new Error(offloaded.err);
+        // An npm that always fails, first on PATH.
+        const bin = join(home.home, "bin");
+        mkdirSync(bin);
+        writeFileSync(join(bin, "npm"), "#!/bin/sh\necho 'npm: no network' >&2\nexit 1\n", { mode: 0o755 });
+        return { ports: { env: { ...home.ports.env, PATH: `${bin}:${home.ports.env.PATH}` } } };
+      },
+    },
+  ],
+  hydrate: [{ argv: ["hydrate", "work:nosuch"], exit: 4, code: "project.not-found", data: false }],
+  dehydrate: [{ argv: ["dehydrate", "work:nosuch"], exit: 4, code: "project.not-found", data: false }],
+  restore: [
+    {
+      argv: ["restore", "work:clients/acme/api", "--to", "~/personal"],
+      exit: 6,
+      code: "path.occupied",
+      data: false,
+    },
+    {
+      argv: ["restore", "work:clients/acme/api", "--snapshot", "nosuch", "--to", "~/copy"],
+      exit: 4,
+      code: "snapshot.not-found",
+      data: false,
+    },
+  ],
+  recover: [
+    {
+      argv: ["recover"],
+      exit: 8,
+      code: "offload.diverged-after-commit",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        writeFileSync(join(home.home, "work/clients/acme/web/edited.txt"), "after the crash\n");
+        return undefined;
+      },
+    },
+    {
+      // C1: the SSD is unplugged; the report still arrives as data.
+      argv: ["recover"],
+      exit: 9,
+      code: "store.unreachable",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.commit.appended");
+        renameSync(join(home.home, "store"), join(home.home, "store-unplugged"));
+        return undefined;
+      },
+    },
+    {
+      // C1: another process holds the project's lock.
+      argv: ["recover"],
+      exit: 11,
+      code: "project.locked",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        const paths = pathsOf(home);
+        for (const name of readdirSync(paths.journalDir)) {
+          const journal = JSON.parse(readFileSync(join(paths.journalDir, name), "utf8"));
+          const held = await acquireLock(testHost(), join(paths.locksDir, `${journal.project.id}.lock`), {
+            timeoutMs: 0,
+            held: () => finding("project.locked", { message: "held" }),
+          });
+          if (!held.ok) throw new Error(held.finding.message);
+        }
+        return undefined;
+      },
+    },
+    {
+      // C1: Ctrl-C before recover settled anything.
+      argv: ["recover"],
+      exit: 130,
+      code: "operation.cancelled",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        const controller = new AbortController();
+        controller.abort();
+        return { ports: { cancellation: { signal: controller.signal, hold: () => () => {} } } };
+      },
+    },
+    {
+      argv: ["recover"],
+      exit: 6,
+      code: "journal.pending",
+      data: true,
+      setup: async (home) => {
+        const paths = pathsOf(home);
+        mkdirSync(paths.journalDir, { recursive: true });
+        writeFileSync(join(paths.journalDir, "01J9Z6K2ZZZZZZZZZZZZZZZZZZ.json"), "{not json");
+        return undefined;
+      },
+    },
+  ],
+  gc: [
+    { argv: ["gc", "--now"], exit: 3, code: "risk.needs-yes", data: false },
+    {
+      // C1: a kept trash that cannot be deleted (its holder is read-only).
+      argv: ["gc", "--now", "--yes"],
+      exit: 1,
+      code: "fs.write-failed",
+      data: true,
+      setup: async (home) => {
+        keepLocalFor(home, "1h");
+        const offloaded = await capture(["offload", "work:clients/acme/web", "--yes"], REGISTRY, {
+          ports: home.ports,
+        });
+        if (offloaded.code !== 0) throw new Error(offloaded.err);
+        const holder = join(home.home, "work/.plainport-trash");
+        chmodSync(holder, 0o500);
+        readOnly.push(holder);
+        return undefined;
+      },
+    },
+  ],
+  "root add": [{ argv: ["root", "add", "work", "~/personal"], exit: 6, code: "root.exists", data: false }],
+  "root bind": [
+    { argv: ["root", "bind", "nosuch", "~/personal"], exit: 4, code: "root.not-found", data: false },
+  ],
+  "root list": [
+    { argv: ["root", "list", "--dry-run"], exit: 2, code: "usage.dry-run-unsupported", data: false },
+  ],
+  "root scan": [{ argv: ["root", "scan", "nosuch"], exit: 4, code: "root.not-found", data: false }],
+  version: [{ argv: ["version", "extra"], exit: 2, code: "usage.invalid", data: false }],
+};
+
+/** Folders a setup made read-only, made writable again after the test so its home can be removed. */
+const readOnly: string[] = [];
+const unlock = (): void => {
+  for (const dir of readOnly.splice(0)) if (existsSync(dir)) chmodSync(dir, 0o755);
+};
+
+/**
+ * Checks a failed --json run the way roundTrip checks a success: the stream rule (parseJsonLines with the command's
+ * declared schema), the published envelope schema, the published output or plan schema for any data, the exit code
+ * equal to error.code, and the finding's severity and allowable as its catalogue entry says.
+ */
+const checkFailure = (
+  command: AnyCommand | undefined,
+  argv: readonly string[],
+  run: Captured,
+  expected: { exit: number; code: string; data: boolean },
+): void => {
+  const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+  const checkEnvelope = ajv.compile(contractJsonSchemas().envelope);
+  const dry = argv.includes("--dry-run");
+  const schema =
+    command === undefined
+      ? undefined
+      : dry && command.dryRun !== false
+        ? command.dryRun.plan
+        : command.output;
+  const parsed = parseJsonLines(run.out, schema);
+  if (!parsed.ok)
+    throw new Error(`${argv.join(" ")}: ${parsed.finding.message}\nstdout: ${run.out}\nstderr: ${run.err}`);
+  const envelope = JSON.parse(run.out.trimEnd().split("\n").at(-1) ?? "");
+  expect(checkEnvelope(envelope) ? [] : checkEnvelope.errors).toEqual([]);
+  expect({
+    argv,
+    exit: run.code,
+    ok: envelope.ok,
+    errorCode: envelope.error?.code,
+    finding: envelope.error?.finding?.code,
+    data: envelope.data !== undefined,
+  }).toEqual({
+    argv,
+    exit: expected.exit,
+    ok: false,
+    errorCode: expected.exit,
+    finding: expected.code,
+    data: expected.data,
+  });
+  const spec = FINDINGS[expected.code as keyof typeof FINDINGS];
+  expect({ severity: envelope.error.finding.severity, allowable: envelope.error.finding.allowable }).toEqual({
+    severity: spec.severity,
+    allowable: spec.allowable,
+  });
+  if (envelope.data !== undefined && command !== undefined) {
+    const published = manifest.commands.find((c: { name: string }) => c.name === command.name);
+    const checkData = ajv.compile(dry ? published.plan : published.output);
+    expect(checkData(envelope.data) ? [] : checkData.errors).toEqual([]);
+  }
+};
+
+describe("contract round trip: every command's --json failures match the published envelope (I10, C1)", () => {
+  test("every registered command has at least one failure case", () => {
+    expect(REGISTRY.map((c) => c.name).filter((name) => (FAILURES[name] ?? []).length === 0)).toEqual([]);
+  });
+  for (const command of REGISTRY) {
+    for (const failure of FAILURES[command.name] ?? []) {
+      test(`${command.name}: ${failure.argv.join(" ")} --json exits ${failure.exit} (${failure.code}) with a valid envelope`, async () => {
+        const home = await exampleHome();
+        try {
+          const prepared = await failure.setup?.(home);
+          const ports = { ...home.ports, ...prepared?.ports };
+          const argv = prepared?.argv ?? failure.argv;
+          const run = await capture([...argv, "--json"], REGISTRY, { ports });
+          checkFailure(command, argv, run, failure);
+          // Human mode exits the same.
+          if (failure.setup === undefined)
+            expect((await capture(failure.argv, REGISTRY, { ports })).code).toBe(failure.exit);
+        } finally {
+          unlock();
+          home.cleanup();
+        }
+      }, 30_000);
+    }
+  }
+
+  test("an unknown command and a handler's bug end in a valid failure envelope", async () => {
+    checkFailure(undefined, ["nosuch"], await capture(["nosuch", "--json"], REGISTRY), {
+      exit: 4,
+      code: "command.unknown",
+      data: false,
+    });
+    const boom = FAKE_REGISTRY.find((c) => c.name === "boom");
+    const run = await capture(["boom", "--json"]);
+    checkFailure(boom, ["boom"], run, { exit: 1, code: "internal.unexpected", data: false });
+  });
+});
+
+/** The non-test TypeScript sources under packages/, comment lines left out. */
+const sources = (): { file: string; text: string }[] => {
+  const out: { file: string; text: string }[] = [];
+  const packages = join(repoRoot, "packages");
+  for (const pkg of readdirSync(packages)) {
+    const src = join(packages, pkg, "src");
+    if (!existsSync(src)) continue;
+    for (const entry of readdirSync(src, { withFileTypes: true, recursive: true })) {
+      const file = join(entry.parentPath, entry.name);
+      if (!entry.isFile() || !file.endsWith(".ts") || file.endsWith(".test.ts") || file.includes("/testing"))
+        continue;
+      const text = readFileSync(file, "utf8")
+        .split("\n")
+        .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+        .join("\n");
+      out.push({ file: file.slice(repoRoot.length + 1), text });
+    }
+  }
+  return out;
+};
+
+describe("what plainport tells people to run exists (I1)", () => {
+  test("no fix, next step or catalogue summary names a command DESIGN plans but this build does not have", () => {
+    const registered = new Set(REGISTRY.map((c) => c.name.split(" ")[0] as string));
+    const groupWords = new Set(REGISTRY.filter((c) => c.name.includes(" ")).map((c) => c.name.split(" ")[0]));
+    // Every command DESIGN.md names in code: those this build lacks must not be offered as a step to take.
+    const design = readFileSync(join(repoRoot, "docs/DESIGN.md"), "utf8");
+    const planned = new Set(
+      [...design.matchAll(/`plainport ([a-z][a-z-]*)/g)]
+        .map((m) => m[1] as string)
+        .filter((word) => !registered.has(word)),
+    );
+    expect(planned.has("doctor") && planned.has("resolve")).toBe(true);
+    const named: string[] = [];
+    for (const { file, text } of sources()) {
+      for (const m of text.matchAll(/\bplainport ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?/g)) {
+        const [, first = "", second] = m;
+        if (planned.has(first)) named.push(`${file}: plainport ${first}`);
+        else if (
+          groupWords.has(first) &&
+          second !== undefined &&
+          !REGISTRY.some((c) => c.name === `${first} ${second}`)
+        )
+          named.push(`${file}: plainport ${first} ${second}`);
+      }
+    }
+    expect(named).toEqual([]);
+  });
 });
 
 describe("version and help", () => {
@@ -279,6 +710,71 @@ describe("generated contract files", () => {
   });
 });
 
+describe("the finding table in docs/machine-contract.md §5 (I2)", () => {
+  test("is generated from the catalogue: one row per code, with its severity, allowable, exit code and summary", () => {
+    const doc = readFileSync(join(repoRoot, "docs/machine-contract.md"), "utf8");
+    const rows = doc
+      .split("\n")
+      .flatMap(
+        (line) =>
+          /^\| `([a-z][a-z0-9.-]*)` \| (info|warn|block) \| (yes|no) \| (\d+) \| (.*) \|$/.exec(line) ?? [],
+      )
+      .filter((_, i) => i % 6 === 1);
+    expect(rows.sort()).toEqual(Object.keys(FINDINGS).sort());
+    expect(findingsTable()).toContain(
+      `| \`project.unregistered\` | block | no | 4 | ${FINDINGS["project.unregistered"].summary} |`,
+    );
+    expect(doc).toContain(`${FINDINGS_BEGIN}\n${findingsTable()}\n${FINDINGS_END}`);
+  });
+
+  test("staleFiles reports the doc when its table drifts, and writeFiles puts it back", () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-doc-"));
+    try {
+      writeFiles(root, REGISTRY);
+      mkdirSync(join(root, "docs"));
+      const doc = join(root, "docs/machine-contract.md");
+      writeFileSync(doc, `# x\n\n${FINDINGS_BEGIN}\n| old |\n${FINDINGS_END}\n\nafter\n`);
+      expect(staleFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(writeFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(readFileSync(doc, "utf8")).toBe(
+        `# x\n\n${FINDINGS_BEGIN}\n${findingsTable()}\n${FINDINGS_END}\n\nafter\n`,
+      );
+      expect(staleFiles(root, REGISTRY)).toEqual([]);
+      writeFileSync(doc, "# no markers\n");
+      expect(staleFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(() => writeFiles(root, REGISTRY)).toThrow(/markers/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the envelopes the doc shows (§1, §2) validate against the published envelope and their command's output (N8)", () => {
+    const doc = readFileSync(join(repoRoot, "docs/machine-contract.md"), "utf8");
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    const checkEnvelope = ajv.compile(contractJsonSchemas().envelope);
+    const shown = [...doc.matchAll(/^\{"plainport_json": ?1.*\}$/gm)].map((m) => JSON.parse(m[0]));
+    expect(shown.length).toBeGreaterThanOrEqual(4);
+    for (const envelope of shown) {
+      expect(checkEnvelope(envelope) ? [] : checkEnvelope.errors).toEqual([]);
+      if (envelope.data === undefined) continue;
+      const published = manifest.commands.find((c: { name: string }) => c.name === envelope.verb);
+      const checkData = ajv.compile(published.output);
+      expect(checkData(envelope.data) ? [] : checkData.errors).toEqual([]);
+    }
+  });
+
+  test("every finding code the sources emit is in the catalogue", () => {
+    const codes = new Set<string>();
+    for (const { text } of sources())
+      for (const m of text.matchAll(
+        /(?:\bcode: |finding\(|fail\(finding\()"([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+)"/g,
+      ))
+        codes.add(m[1] as string);
+    expect(codes.size).toBeGreaterThan(50);
+    expect([...codes].filter((code) => !Object.hasOwn(FINDINGS, code))).toEqual([]);
+  });
+});
+
 describe("writeFiles", () => {
   test("writes every generated file, rewrites stale ones and deletes extras only inside the generated folders", () => {
     const root = mkdtempSync(join(tmpdir(), "plainport-write-"));
@@ -342,6 +838,38 @@ describe("completions", () => {
     },
   );
 
+  test.skipIf(shellSkip("zsh"))("zsh completion finds the command after a global option's value (N7)", () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-zsh-"));
+    try {
+      const script = join(root, "_plainport");
+      writeFileSync(
+        script,
+        (generateFiles(REGISTRY).get("completions/_plainport") ?? "").replace(/_plainport "\$@"\n$/, ""),
+      );
+      const complete = (line: string) => {
+        const words = line.split(" ");
+        const probe = [
+          // Stand-ins for the completion system: print what would be offered.
+          "compadd() { [[ $1 == -- ]] && shift; print -l -- $@ }",
+          "_describe() { local name=$4; print -l -- ${${(P)name}%%:*} }",
+          "_files() { print FILES }",
+          `source ${script}`,
+          `words=(${words.map((w) => `'${w}'`).join(" ")})`,
+          `CURRENT=${words.length}`,
+          "_plainport",
+        ].join("\n");
+        const run = Bun.spawnSync(["zsh", "-f", "-c", probe], { stdout: "pipe", stderr: "pipe" });
+        expect(run.stderr.toString()).toBe("");
+        return run.stdout.toString().split("\n").filter(Boolean);
+      };
+      expect(complete("plainport --store mini gc --no")).toContain("--now");
+      expect(complete("plainport --store mini gc ")).toEqual(["FILES"]);
+      expect(complete("plainport --config ~/c.toml he")).toContain("help");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(shellSkip("bash"))(
     "bash completion completes commands, command groups, help's argument and options",
     () => {
@@ -388,6 +916,11 @@ describe("completions", () => {
         expect(complete(FAKE_REGISTRY, "plainport root ")).toEqual(["add"]);
         expect(complete(FAKE_REGISTRY, "plainport help root a")).toEqual(["add"]);
         expect(complete(FAKE_REGISTRY, "plainport write web --ad")).toEqual(["--adopt"]);
+        // N7: the value of a global option that takes one is not the command.
+        expect(complete(REGISTRY, "plainport --store mini gc --no")).toEqual(["--now", "--no-input"]);
+        expect(complete(REGISTRY, "plainport --config ~/c.toml --store mini he")).toEqual(["help"]);
+        expect(complete(REGISTRY, "plainport --store=mini gc --no")).toEqual(["--now", "--no-input"]);
+        expect(complete(FAKE_REGISTRY, "plainport --store mini root ")).toEqual(["add"]);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

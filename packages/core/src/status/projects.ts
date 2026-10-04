@@ -233,8 +233,16 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
   try {
     opened = await readJournals(io, paths);
   } catch (error) {
-    systemErrorCode(error);
-    opened = { journals: [], unreadable: [], owners: {} };
+    // A journal folder that cannot be listed may hold any project's interrupted operation: never "no journals".
+    const code = systemErrorCode(error);
+    findings.push(
+      finding("fs.unreadable", {
+        message: `the journal folder ${paths.journalDir} cannot be read (${code}), so interrupted operations cannot be shown`,
+        fix: `check that you can read ${paths.journalDir}, then plainport recover`,
+        paths: [paths.journalDir],
+      }),
+    );
+    opened = { journals: [], unreadable: [paths.journalDir], owners: {} };
   }
   const journals = opened.journals;
 
@@ -560,13 +568,15 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     };
   if (p.conditions.includes("incomplete"))
     return {
-      command: "plainport doctor",
-      reason: "the catalog misses snapshots: connect the store that holds every snapshot, or run doctor",
+      command: `plainport restore ${address} --snapshot <id> --to <path>`,
+      reason:
+        "the catalog misses snapshots: connect the store that holds every snapshot; meanwhile restore reads a snapshot it holds side by side",
     };
   if (p.state === "conflicted")
     return {
-      command: `plainport resolve ${address}`,
-      reason: `the catalog holds a fork (M2); plainport restore ${address} --snapshot <id> --to <path> reads either copy`,
+      command: `plainport restore ${address} --snapshot <id> --to <path>`,
+      reason:
+        "the catalog holds a fork: restore reads either copy side by side (settling which copy wins arrives in M2)",
     };
   if (p.trash.some((t) => t.due && !t.deleting))
     return { command: "plainport gc", reason: "a released trash is due and nothing is deleting it" };

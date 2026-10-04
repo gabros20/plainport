@@ -7,7 +7,15 @@
 // does (Task 12); the subprocess variant (subprocess.test.ts) crashes every row with a real SIGKILL for that.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "../../packages/contract/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
@@ -437,6 +445,55 @@ describe("crash matrix, in-process: a crash while the upload runs", () => {
     const later = await offload();
     expect(later.ok ? later.value.op : later.finding.code).not.toBe(crashedOp);
     expect(await laterHeadProblems(world(), await projectId(), crashedOp, reference, "kept")).toEqual([]);
+  }, 30_000);
+});
+
+// The swap's rename landed but its onload.swap.start write was lost (D24, N3): the journal still says the step
+// before it, onload.verified (restore) or onload.begin (reuse). recover must ask the world, as at swap.start, and
+// finish the onload: the folder in place, the stub gone, the onloaded event written, never a roll-back that leaves a
+// stub beside a folder.
+describe("crash matrix, in-process: a lost onload.swap.start write (N3)", () => {
+  /** Crashes right after the rename, then puts the journal back at the step before swap.start, as a lost write would. */
+  const lostSwapStart = (before: "onload.verified" | "onload.begin") => async () => {
+    await crashOnload("onload.swap.renamed");
+    const names = readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+    const onload = names
+      .map((n) => join(box.paths.journalDir, n))
+      .find((f) => JSON.parse(readFileSync(f, "utf8")).kind === "onload");
+    if (onload === undefined) throw new Error("the crash left no onload journal");
+    const journal = JSON.parse(readFileSync(onload, "utf8"));
+    expect(journal.step).toBe("onload.swap.start");
+    writeFileSync(onload, `${JSON.stringify({ ...journal, step: before }, null, 2)}\n`);
+  };
+
+  test("onload.verified · the rename landed, swap.start lost: recover finishes the onload", async () => {
+    const row = plainRowAt("onload.verified");
+    const { problems, crashedOp } = await runRow(row, {
+      crash: async () => {
+        await shelve();
+        await lostSwapStart("onload.verified")();
+      },
+    });
+    expect(problems).toEqual([]);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(existsSync(join(dir, "src"))).toBe(true);
+    expect(crashedOp).toBeDefined();
+  }, 30_000);
+
+  test("onload.begin · reuse: the trash renamed back, swap.start lost: recover finishes the onload", async () => {
+    // onload.begin is one step for both modes, so its row is the plain one; the crash is the reuse run's.
+    const row = plainRowAt("onload.begin");
+    const { problems } = await runRow(row, {
+      crash: async () => {
+        config('[offload]\nkeepLocalFor = "1h"');
+        const done = await offload();
+        if (!done.ok) throw new Error(`${done.finding.code}: ${done.finding.message}`);
+        await lostSwapStart("onload.begin")();
+      },
+    });
+    expect(problems).toEqual([]);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
   }, 30_000);
 });
 

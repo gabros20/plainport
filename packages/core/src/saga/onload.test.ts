@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import type { StreamEvent } from "@plainport/contract";
+import { FINDINGS, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { FIXTURES, GOLDEN_CASES } from "../../../eco-node/src/testing.ts";
@@ -30,6 +30,7 @@ import { type Journal, type OnloadJournal, readJournals } from "../journal/index
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { recover } from "../recover/recover.ts";
 import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
@@ -38,7 +39,12 @@ import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { makeGitFixture } from "../testing/git-fixture.ts";
 import { testHost } from "../testing/host.ts";
-import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
+import {
+  captureTree,
+  catalogInvariantViolations,
+  invariantViolations,
+  type TreeCapture,
+} from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { settledOffload } from "../testing/settle.ts";
@@ -1245,7 +1251,7 @@ describe("onload: preflight refusals change nothing", () => {
     await expectShelvedUntouched();
   });
 
-  test("a conflicted head refuses with catalog.head-moved (exit 8) and names plainport resolve", async () => {
+  test("a conflicted head refuses with catalog.head-moved (exit 8) and names restore, which exists (I1)", async () => {
     const off = await offload();
     const id = await projectId();
     const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
@@ -1269,7 +1275,9 @@ describe("onload: preflight refusals change nothing", () => {
       );
     const result = await onload();
     expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([8, "catalog.head-moved"]);
-    expect(!result.ok && result.finding.fix).toContain("plainport resolve");
+    expect(!result.ok && result.finding.fix).toContain(
+      "plainport restore work:web --snapshot <id> --to <path>",
+    );
     await expectShelvedUntouched();
   });
 
@@ -1295,6 +1303,8 @@ describe("onload: preflight refusals change nothing", () => {
     config('[onload]\nleases = "strict"');
     const strict = await onload();
     expect(!strict.ok && [strict.exitCode, strict.finding.code]).toEqual([8, "lease.held"]);
+    // Its severity is the catalogue's, whatever the mode: the exit code says it refused (N6).
+    expect(!strict.ok && strict.finding.severity).toBe(FINDINGS["lease.held"].severity);
     await expectShelvedUntouched();
 
     config();
@@ -1708,4 +1718,155 @@ describe("onload: case collisions on hdiutil images", () => {
     },
     60_000,
   );
+});
+
+describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
+  /** Two offloads, S1 then S2; S2's offloaded event is then replaced by `bytes` and this device's mirror is emptied. */
+  const hideNewest = async (bytes: (id: string) => string) => {
+    const first = await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    const newest = (await storeEvents()).find((e) => e.type === "offloaded" && e.snapshot === second.op);
+    if (newest === undefined) throw new Error("no offloaded event for the second snapshot");
+    const key = `meta/v1/events/${newest.id}.json`;
+    const original = store.data.get(key) as Uint8Array;
+    store.data.set(key, new TextEncoder().encode(bytes(newest.id)));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    /** The event readable again, as after an upgrade or a sync. */
+    const reveal = () => {
+      store.data.set(key, original);
+      mirror = memoryBlobStore({ createIfAbsent: true });
+    };
+    return { first, second, hidden: newest.id, reveal };
+  };
+  const malformed = () => '{"v":1,"id":"';
+  const unsupported = (id: string) =>
+    `${JSON.stringify({ v: 1, id, type: "merged", at: new Date().toISOString() })}\n`;
+
+  const expectStillShelved = async (second: { op: string }) => {
+    expect(existsSync(dir)).toBe(false);
+    expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+    expect(engine.restores).toHaveLength(1);
+  };
+
+  /** Invariants 1–3 on this device, and 4–6 on the store's events and snapshots. */
+  const expectAllInvariants = async (before: string[]) => {
+    await expectInvariants();
+    expect(
+      catalogInvariantViolations({
+        events: await storeEvents(),
+        snapshotsBefore: before,
+        snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  };
+
+  for (const [kind, bytes] of [
+    ["malformed", malformed],
+    ["unsupported", unsupported],
+  ] as const) {
+    test(`a ${kind} newest event: the default onload refuses with catalog.head-uncertain, naming --snapshot <S2>`, async () => {
+      const { first, second, hidden } = await hideNewest(bytes);
+      const result = await onload();
+      expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+      if (result.ok) return;
+      expect(result.finding.message).toContain(second.op);
+      expect(result.finding.message).toContain(hidden);
+      expect(result.finding.message).toContain(`its head ${first.op}`);
+      expect(result.finding.fix).toContain(`plainport onload work:web --snapshot ${second.op}`);
+      await expectStillShelved(second);
+    });
+
+    test(`a ${kind} newest event: --snapshot with the older head refuses the same way`, async () => {
+      const { first, second } = await hideNewest(bytes);
+      const result = await onload({ snapshot: first.op });
+      expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+      expect(!result.ok && result.finding.fix).toContain(`--snapshot ${second.op}`);
+      await expectStillShelved(second);
+    });
+
+    test(`a ${kind} newest event: --snapshot <S2> restores S2 from its tag and removes its stub; invariants hold`, async () => {
+      const { second } = await hideNewest(bytes);
+      const before = engine.repository.snapshots.map((s) => s.info.id);
+      const result = value(await onload({ snapshot: second.op }));
+      expect(result).toMatchObject({ snapshot: second.op });
+      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+      expect(existsSync(`${dir}.plainport`)).toBe(false);
+      expect((await storeEvents()).filter((e) => e.type === "onloaded").at(-1)).toMatchObject({
+        base: second.op,
+      });
+      await expectAllInvariants(before);
+    });
+  }
+
+  for (const step of ONLOAD_STEPS) {
+    test(`--snapshot <S2> under doubt, crashed at ${step}: recover settles it and invariants 1–6 hold`, async () => {
+      const { second, reveal } = await hideNewest(malformed);
+      const before = engine.repository.snapshots.map((s) => s.info.id);
+      const crash = testHost({ faults: { at: step } });
+      await expect(onload({ snapshot: second.op, hydrate: false }, {}, crash)).rejects.toBeInstanceOf(
+        InjectedFault,
+      );
+      const recovered = await recover({
+        host: testHost(),
+        paths: box.paths,
+        device,
+        env: env(),
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+        log: () => {},
+      });
+      expect(recovered.ok ? [] : [recovered.finding.code]).toEqual([]);
+      // Either way the project ends whole: S2 in place without its stub (invariants hold even while its event is
+      // unreadable), or rolled back and still shelved under S2's stub, exactly the state the doubt began in, whose
+      // invariants hold once S2's event reads again.
+      if (existsSync(dir)) {
+        expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+        expect(existsSync(`${dir}.plainport`)).toBe(false);
+        await expectAllInvariants(before);
+      } else {
+        expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
+        expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+      }
+      reveal();
+      await expectAllInvariants(before);
+    });
+  }
+
+  test("a skipped event that leaves the known snapshot named does not stop the default onload", async () => {
+    await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    store.data.set(`meta/v1/events/${ulid()}.json`, new TextEncoder().encode(malformed()));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const result = value(await onload());
+    expect(result).toMatchObject({ snapshot: second.op });
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+  });
+
+  test("offload of a copy whose base no readable event names refuses with catalog.head-uncertain, not a fork", async () => {
+    await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    value(await onload());
+    // Every event that names this copy's base (its offload, and the onload that restored it) is unreadable now: the
+    // fold shows the first snapshot as the head, which without D86 reads as "the head moved" and commits a fork.
+    for (const e of await storeEvents())
+      if (e.type !== "root-created" && e.type !== "root-bound" && JSON.stringify(e).includes(second.op))
+        store.data.set(`meta/v1/events/${e.id}.json`, new TextEncoder().encode(malformed()));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const before = (await storeEvents()).length;
+    const tree = treeOf(dir);
+    const result = await runOffload(offloadDeps(), { project: await ref() });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!result.ok && result.finding.message).toContain(second.op);
+    expect(treeOf(dir)).toEqual(tree);
+    expect(await storeEvents()).toHaveLength(before);
+  });
 });

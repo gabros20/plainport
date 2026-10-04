@@ -3,9 +3,10 @@
 // root, so an rmdir can land between another operation making the holder and making its folder in it; the creating
 // side makes the holder again (makeInHolder), and the removing side never fails an operation (removeEmptyHolder).
 
-import { basename } from "node:path";
+import { basename, sep } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { assertSystemError, type LocalIo, systemErrorCode } from "./io.ts";
+import { canonicalPath } from "./roots/canonical.ts";
 
 export type HolderName = ".plainport-staging" | ".plainport-trash";
 
@@ -61,4 +62,35 @@ export const rmdirIfEmpty = async (io: LocalIo, path: string): Promise<void> => 
     const code = systemErrorCode(error);
     if (code !== "ENOTEMPTY" && code !== "EEXIST" && code !== "ENOENT") throw error;
   }
+};
+
+/** The reserved name a path goes through (a segment named .plainport-*, the holders and any later one), if any. */
+const reservedSegment = (path: string): string | undefined =>
+  path.split(sep).find((segment) => segment.startsWith(".plainport-"));
+
+/**
+ * path.reserved when `path` is, or lies inside, a folder plainport reserves (.plainport-staging, .plainport-trash, any
+ * .plainport-*), as given or by its real path: gc deletes what it finds there, so it is never a project's place or a
+ * root (D84).
+ */
+export const notReserved = async (
+  io: LocalIo,
+  path: string,
+  home: string,
+  what: string,
+): Promise<Result<void>> => {
+  let segment = reservedSegment(path);
+  if (segment === undefined) {
+    const canon = await canonicalPath(io, path, home);
+    if (!canon.ok) return canon;
+    segment = reservedSegment(canon.value.real);
+  }
+  if (segment === undefined) return ok(undefined);
+  return fail(
+    finding("path.reserved", {
+      message: `${path} lies in ${segment}, a folder plainport reserves for its own staging and trash, which gc deletes; it cannot be ${what}`,
+      fix: "choose a folder outside every .plainport-* folder, then re-run",
+      paths: [path],
+    }),
+  );
 };

@@ -20,6 +20,7 @@ import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree, type TreeScan } from "../scan/walk.ts";
+import { localStores, storeOverlap } from "../store-overlap.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { gitignoredFiles } from "./gitignored.ts";
@@ -231,6 +232,10 @@ export const prepareOffload = async (
   const { manifest } = tree;
 
   const findings: Finding[] = [...loaded.value.findings, ...report.findings];
+  // A store the folder holds, or lies inside, would go into the trash with it (D83): never allowable.
+  const home = req.loader.paths.home;
+  const overlap = await storeOverlap(host, home, req.dir, localStores(config, home));
+  if (!overlap.ok) findings.push(overlap.finding);
   for (const f of scanFindings(scanned.value)) {
     findings.push(f.code === "git.unpushed" && config.offload.requirePushed ? required(f) : f);
   }
@@ -331,11 +336,12 @@ export const prepareOffload = async (
   for (const [path, size] of gitFolders) consider({ path, bytes: size });
 
   const gitignored = await gitignoredFiles(host, req.dir, ctx, repos, included);
-  // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71).
+  // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71). With an empty
+  // strip set there is nothing to install back, and onload installs nothing (D73), so there is no arrival step (D77).
   const keepLocalFor = config.offload.keepLocalFor;
   const reusable = durationMs(keepLocalFor) > 0;
   const arrival: ArrivalItem[] =
-    steps.length === 0
+    steps.length === 0 || strip.value.entries.length === 0
       ? []
       : keepDeps
         ? [{ part: "deps", outcome: "restore", detail: "installed dependencies travel in the snapshot" }]

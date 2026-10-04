@@ -1,14 +1,15 @@
 // One locked read-change-write of a file plainport owns (managed.toml, registry.json, later the kit ledger): take
 // the file's lock, delete temporary files a crashed writer left beside it, read the current contents, apply the
 // change, check the result, re-check the lock is still ours, and replace the file atomically. A refusal from the
-// read, the change or the check writes nothing; the lock is always released. An exception thrown by the change is
-// a bug: the lock is released and it propagates.
+// read, the change or the check writes nothing; the lock is always released, and a release that fails with an I/O
+// error leaves a lock file the next writer breaks as stale (AGENTS.md rule 7: it is no exception). An exception
+// thrown by the change is a bug: the lock is released and it propagates.
 
 import { basename, dirname, join } from "node:path";
 import { type Failure, type Finding, fail, type Result } from "@plainport/contract";
 import { TEMP_SUFFIX, writeAtomic } from "./atomic.ts";
-import { errorCode, type LocalIo } from "./io.ts";
-import { acquireLock, type LockOptions } from "./lock.ts";
+import { assertSystemError, errorCode, type LocalIo } from "./io.ts";
+import { acquireLock, type HeldLock, type LockOptions } from "./lock.ts";
 
 export interface LockedFile<T> {
   file: string;
@@ -60,26 +61,56 @@ export const updateLockedFile = async <T>(
   }
   if (!lock.ok) return lock;
   const held = lock.value;
+  let result: Result<T>;
   try {
-    try {
-      await removeOrphans(io, spec.file);
-    } catch (error) {
-      return spec.writeFailed(spec.file, error);
-    }
-    const current = await spec.read();
-    if (!current.ok) return current;
-    const changed = await change(structuredClone(current.value));
-    if (!changed.ok) return changed;
-    const next = spec.check(changed.value);
-    if (!next.ok) return next;
-    if (!(await held.stillHeld())) return fail(spec.takenOver);
-    try {
-      await writeAtomic(io, spec.file, spec.encode(next.value));
-    } catch (error) {
-      return spec.writeFailed(spec.file, error);
-    }
-    return next;
-  } finally {
-    await held.release();
+    result = await underLock(io, spec, change, held);
+  } catch (error) {
+    await releaseQuietly(held);
+    throw error;
   }
+  // The file is written (or refused) by now: a lock file that cannot be removed is broken as stale by the next writer.
+  await releaseQuietly(held);
+  return result;
+};
+
+/** Releases the lock; an I/O error leaves the lock file, which the next writer breaks once this process is gone. */
+const releaseQuietly = async (held: HeldLock): Promise<void> => {
+  try {
+    await held.release();
+  } catch (error) {
+    assertSystemError(error);
+  }
+};
+
+const underLock = async <T>(
+  io: LocalIo,
+  spec: LockedFile<T>,
+  change: (current: T) => Result<T> | Promise<Result<T>>,
+  held: HeldLock,
+): Promise<Result<T>> => {
+  try {
+    await removeOrphans(io, spec.file);
+  } catch (error) {
+    return spec.writeFailed(spec.file, error);
+  }
+  const current = await spec.read();
+  if (!current.ok) return current;
+  const changed = await change(structuredClone(current.value));
+  if (!changed.ok) return changed;
+  const next = spec.check(changed.value);
+  if (!next.ok) return next;
+  // A lock file that cannot be read cannot be shown to be ours: nothing is written.
+  let ours: boolean;
+  try {
+    ours = await held.stillHeld();
+  } catch (error) {
+    return spec.writeFailed(spec.lockFile, error);
+  }
+  if (!ours) return fail(spec.takenOver);
+  try {
+    await writeAtomic(io, spec.file, spec.encode(next.value));
+  } catch (error) {
+    return spec.writeFailed(spec.file, error);
+  }
+  return next;
 };

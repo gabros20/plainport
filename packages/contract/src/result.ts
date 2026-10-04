@@ -9,7 +9,8 @@ export type Failure = {
   ok: false;
   exitCode: FailureExitCode;
   finding: Finding;
-  /** A useful result that still stands (D14): only with exit 6 (a blocked dry run's plan), 8 or 10. */
+  /** A useful result that still stands (D14): a blocked dry run's plan (6), a kept snapshot (8), a restore not
+   * hydrated (10), recover's and gc's report (any code). */
   data?: unknown;
 };
 export type Result<T> = Ok<T> | Failure;

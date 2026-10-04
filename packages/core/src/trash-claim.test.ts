@@ -146,3 +146,31 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
     expect([existsSync(join(trash, "web/a.txt")), existsSync(journal)]).toEqual([true, true]);
   });
 });
+
+describe("the detached delete when its claim cannot be looked at (N4)", () => {
+  test("a claim lstat that fails with EIO is fs.write-failed, not process.spawn-failed, and the child is stopped", async () => {
+    const real = testHost();
+    let pid: number | undefined;
+    const io = {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: async (path: string) => {
+          if (path === trashClaimFile(trash))
+            throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+          return real.fs.lstat(path);
+        },
+      },
+    };
+    const started = await posixDeleteTrash(io, trash, journal, DEVICE);
+    expect(started.ok ? "started" : started.finding.code).toBe("fs.write-failed");
+    if (!started.ok) {
+      expect(started.finding.message).toContain("but its claim could not be checked (EIO)");
+      pid = Number(/process (\d+)/.exec(started.finding.message)?.[1] ?? Number.NaN);
+    }
+    // Whatever the child got to, it is not left running: no unclaimed deleter outlives the call for long.
+    await Bun.sleep(50);
+    expect(Number.isInteger(pid)).toBe(true);
+    expect(await real.proc.isAlive(pid as number)).toBe(false);
+  });
+});

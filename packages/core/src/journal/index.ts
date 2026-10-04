@@ -10,8 +10,10 @@
 // instead of trusting the journal's last word.
 
 import { join } from "node:path";
+import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
 import { writeAtomic } from "../atomic.ts";
+import { DurationSchema } from "../config/schema.ts";
 import { errorCode, type LocalIo, systemErrorCode } from "../io.ts";
 import type { PlainportPaths } from "../paths.ts";
 import { RelativePathSchema, RootKeySchema } from "../registry.ts";
@@ -63,7 +65,7 @@ export const OffloadJournalSchema = z
       })
       .optional(),
     /** How release goes, decided with the plan, so recovery repeats it whatever the config says by then. */
-    release: z.strictObject({ keepLocalFor: z.string(), stub: z.boolean() }).optional(),
+    release: z.strictObject({ keepLocalFor: DurationSchema, stub: z.boolean() }).optional(),
     /** The head moved under this copy: the event (`event`) keeps the snapshot as a fork, and nothing is released. */
     diverged: z.literal(true).optional(),
     /** Every snapshot restic wrote for this operation, in order: a retry after an edit makes a second. */
@@ -207,6 +209,39 @@ export const readJournals = async (io: LocalIo, paths: PlainportPaths): Promise<
     }
   }
   return { journals, unreadable, owners };
+};
+
+/**
+ * One journal read again, under its project's lock: undefined when it is gone (closed since) or no longer one this
+ * version reads; fs.unreadable when the file cannot be read, so the caller leaves it as it is and says so (rule 7).
+ */
+export const rereadJournal = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  op: string,
+): Promise<Result<Journal | undefined>> => {
+  const path = journalFile(paths, op);
+  let text: string;
+  try {
+    text = await io.fs.readText(path);
+  } catch (error) {
+    const code = systemErrorCode(error);
+    if (code === "ENOENT") return ok(undefined);
+    return fail(
+      finding("fs.unreadable", {
+        message: `the journal ${path} cannot be read (${code}), so its operation was left as it is`,
+        fix: `check that you can read ${path}, then re-run`,
+        paths: [path],
+      }),
+    );
+  }
+  try {
+    const parsed = JournalSchema.safeParse(JSON.parse(text));
+    return ok(parsed.success ? parsed.data : undefined);
+  } catch (error) {
+    if (error instanceof SyntaxError) return ok(undefined);
+    throw error;
+  }
 };
 
 /** JSON Schemas for the journal, published in schemas/ by `bun run contract`. */

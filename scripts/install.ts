@@ -13,7 +13,8 @@
 // from another commit is refused. Each switch of current or previous is one atomic symlink replace. After an install,
 // every version it made but current and previous is pruned; an install first sweeps what an interrupted one left (its
 // own .staging-* folders and .tmp-* links, by name). Both judge every entry by lstat and never follow a link; anything
-// they did not make is left alone with a notice. An mkdir lock keeps installs and rollbacks one at a time. The
+// they did not make is left alone with a notice; prune removes build.json last, so a failed prune is retried. An
+// mkdir lock holding its pid keeps installs and rollbacks one at a time, and a stale one is taken over. The
 // bundled restic and rclone must be the ones tools.lock.json pins (their pin files from `bun scripts/fetch-tools.ts`);
 // --tools skips that check and says so.
 //
@@ -32,6 +33,7 @@ import {
   readFileSync,
   readlinkSync,
   renameSync,
+  rmdirSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -82,6 +84,11 @@ export const planName = (options: {
   now?: Date;
 }): Outcome<{ name: string }> => {
   const { version, dirty, now } = options;
+  if (!SEMVER.test(version))
+    return {
+      ok: false,
+      message: `VERSION holds ${JSON.stringify(version)}, which is not SemVer; write X.Y.Z or X.Y.Z-<pre-release> (such as 0.2.0-rc.1) into VERSION`,
+    };
   const release = !version.endsWith("-dev");
   if (release && options.commit === undefined)
     return {
@@ -121,13 +128,23 @@ const linkedVersion = (path: string): string | undefined => {
 
 export type InstallState = { current: string | undefined; previous: string | undefined; versions: string[] };
 
-/** A release (`0.1.0`) or a dev build (`0.1.0-dev+20261004123456.abc1234[.dirty]`), as versionName names them. */
-const VERSION_NAME = /^\d+\.\d+\.\d+(-dev\+\d{14}\.[0-9a-z]+(\.dirty)?)?$/;
+/** A SemVer version as VERSION holds it: `X.Y.Z`, or `X.Y.Z-<pre-release>` such as `0.2.0-rc.1` or `0.1.0-dev`. */
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
+/** What versionName appends to a -dev version: `+<UTC build time>.<commit>[.dirty]`. */
+const DEV_BUILD = /^\d{14}\.[0-9a-z]+(\.dirty)?$/;
+
+/** Whether a folder name is one versionName gives: any SemVer version, or a -dev one with its build suffix. */
+export const isVersionName = (name: string): boolean => {
+  const plus = name.indexOf("+");
+  if (plus === -1) return SEMVER.test(name);
+  const version = name.slice(0, plus);
+  return SEMVER.test(version) && version.endsWith("-dev") && DEV_BUILD.test(name.slice(plus + 1));
+};
 
 /** Whether versions/<name> is a version this installer made: a real folder (never a link), named as it names them,
  * holding the build.json it writes. Nothing else under versions/ is ever pruned or listed as installed. */
 const isOwnVersion = (versions: string, name: string): boolean => {
-  if (!VERSION_NAME.test(name)) return false;
+  if (!isVersionName(name)) return false;
   try {
     const dir = lstatSync(join(versions, name));
     return dir.isDirectory() && lstatSync(join(versions, name, "build.json")).isFile();
@@ -187,6 +204,14 @@ const TEMP_LINK = (name: string) => new RegExp(`^${name.replace(".", "\\.")}\\.t
  * with such a name, or that can't be removed, is left alone with a notice.
  */
 const sweep = (paths: Layout, notices: string[]): void => {
+  // An entry may vanish between readdir and lstat; it is then nothing to sweep.
+  const stat = (path: string) => {
+    try {
+      return lstatSync(path);
+    } catch {
+      return undefined;
+    }
+  };
   const names = (dir: string): string[] => {
     try {
       return readdirSync(dir);
@@ -196,7 +221,9 @@ const sweep = (paths: Layout, notices: string[]): void => {
   };
   for (const name of names(paths.versions).filter((n) => STAGING.test(n))) {
     const path = join(paths.versions, name);
-    if (!lstatSync(path).isDirectory()) {
+    const entry = stat(path);
+    if (entry === undefined) continue;
+    if (!entry.isDirectory()) {
       notices.push(`left alone: ${path} (not a staging folder scripts/install made)`);
       continue;
     }
@@ -213,7 +240,9 @@ const sweep = (paths: Layout, notices: string[]): void => {
   for (const [dir, patterns] of links)
     for (const name of names(dir).filter((n) => patterns.some((p) => p.test(n)))) {
       const path = join(dir, name);
-      if (!lstatSync(path).isSymbolicLink()) {
+      const entry = stat(path);
+      if (entry === undefined) continue;
+      if (!entry.isSymbolicLink()) {
         notices.push(`left alone: ${path} (not a link scripts/install made)`);
         continue;
       }
@@ -258,26 +287,89 @@ const prune = (
   return pruned;
 };
 
-/** One install or rollback at a time: an mkdir lock in share/plainport, released when the call ends. */
-const withLock = <T>(paths: Layout, run: () => Outcome<T>): Outcome<T> => {
+/** What a Ctrl-C must clean up: the lock this process holds and the staging folder it fills (main's handlers). */
+export const active: { lock?: string; staging?: string } = {};
+
+/** Whether the process a lock names is gone (ESRCH); a pid we may not signal (EPERM) is alive. */
+const pidGone = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+};
+
+/** A lock with no pid file is stale once it is this old: mkdir and the pid write are microseconds apart. */
+const NO_PID_STALE_MS = 60_000;
+
+/**
+ * One install or rollback at a time: an mkdir lock in share/plainport holding the owner's pid, released when the call
+ * ends. A lock whose pid is gone, or that has no pid file and is a minute old, is taken over with a notice; a live
+ * one is refused with the exact command that removes it.
+ */
+const withLock = <T>(paths: Layout, notices: string[], run: () => Outcome<T>): Outcome<T> => {
   const lock = join(paths.share, ".install.lock");
+  const take = (): "taken" | "held" => {
+    try {
+      mkdirSync(lock);
+      return "taken";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return "held";
+      throw error;
+    }
+  };
   try {
     mkdirSync(paths.share, { recursive: true });
-    mkdirSync(lock);
+    if (take() === "held") {
+      let pid: number | undefined;
+      try {
+        pid = Number.parseInt(readFileSync(join(lock, "pid"), "utf8").trim(), 10);
+      } catch {}
+      let age = 0;
+      try {
+        age = Date.now() - lstatSync(lock).mtimeMs;
+      } catch {}
+      const stale =
+        pid !== undefined && Number.isInteger(pid) && pid > 0
+          ? pidGone(pid) && `pid ${pid} is gone`
+          : age >= NO_PID_STALE_MS && "it names no pid and is over a minute old";
+      if (!stale)
+        return {
+          ok: false,
+          message: `another scripts/install is running${pid === undefined ? "" : ` (pid ${pid})`}; if none is, run: rm -r '${lock}'`,
+        };
+      rmSync(lock, { recursive: true, force: true });
+      if (take() === "held")
+        return { ok: false, message: `another scripts/install took ${lock} just now; run again` };
+      notices.push(`took over a stale lock: ${stale} (${lock})`);
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST")
-      return {
-        ok: false,
-        message: `another scripts/install is running (${lock} exists); if none is, remove that folder and run again`,
-      };
     return { ok: false, message: `taking ${lock} failed: ${(error as Error).message}` };
   }
+  active.lock = lock;
   try {
     writeFileSync(join(lock, "pid"), `${process.pid}\n`);
     return run();
   } finally {
     rmSync(lock, { recursive: true, force: true });
+    active.lock = undefined;
   }
+};
+
+/**
+ * Removes one installed version so that a failure partway leaves it recognisably the installer's: everything else
+ * first, build.json last, then the folder. A retry (the next install's prune) finishes it. `rm` is a test seam.
+ */
+export const removeVersion = (
+  path: string,
+  rm: (path: string) => void = (p) => rmSync(p, { recursive: true, force: true }),
+): void => {
+  if (!lstatSync(path).isDirectory()) throw new Error(`${path} is not a folder`);
+  makeWritable(path);
+  for (const name of readdirSync(path)) if (name !== "build.json") rm(join(path, name));
+  rm(join(path, "build.json"));
+  rmdirSync(path);
 };
 
 /** The commit a version folder was built from (its build.json), if it says. */
@@ -309,14 +401,14 @@ export const installVersion = (
   version: string,
   stage: (dir: string) => void,
   build?: { commit: string },
-  /** Test seam: how a pruned version is removed (default removeInstall), so a failed removal can be injected. */
+  /** Test seam: how a pruned version or a failed staging folder is removed, so a failed removal can be injected. */
   seams: { remove?: (path: string) => void } = {},
 ): Outcome<Installed> => {
   const paths = layout(prefix);
   const problem = linkProblem(paths);
   if (problem !== undefined) return { ok: false, message: problem };
-  return withLock(paths, (): Outcome<Installed> => {
-    const notices: string[] = [];
+  const notices: string[] = [];
+  return withLock(paths, notices, (): Outcome<Installed> => {
     try {
       mkdirSync(paths.versions, { recursive: true });
       mkdirSync(join(paths.prefix, "bin"), { recursive: true });
@@ -337,6 +429,7 @@ export const installVersion = (
       let staging: string | undefined;
       try {
         staging = mkdtempSync(join(paths.versions, ".staging-"));
+        active.staging = staging;
         stage(staging);
         writeFileSync(
           join(staging, "build.json"),
@@ -345,10 +438,17 @@ export const installVersion = (
         for (const name of readdirSync(staging)) chmodSync(join(staging, name), 0o555);
         // A folder moves only while writable (its .. changes), so it turns read-only once in place.
         renameSync(staging, dir);
+        active.staging = undefined;
         chmodSync(dir, 0o555);
       } catch (error) {
-        if (staging !== undefined) removeInstall(staging);
-        return { ok: false, message: `staging ${version} failed: ${(error as Error).message}` };
+        let cleanup = "";
+        try {
+          if (staging !== undefined) (seams.remove ?? removeInstall)(staging);
+        } catch (removal) {
+          cleanup = `; removing its staging folder failed: ${(removal as Error).message} (the next install sweeps it)`;
+        }
+        active.staging = undefined;
+        return { ok: false, message: `staging ${version} failed: ${(error as Error).message}${cleanup}` };
       }
     }
     const current = linkedVersion(paths.current);
@@ -366,7 +466,7 @@ export const installVersion = (
       paths,
       new Set([...keep].filter((v): v is string => v !== undefined)),
       notices,
-      seams.remove ?? removeInstall,
+      seams.remove ?? ((path) => removeVersion(path)),
     );
     return { ok: true, version, previous, reused, pruned, notices };
   });
@@ -376,7 +476,7 @@ export const installVersion = (
 export const rollback = (prefix: string): Outcome<{ from: string; to: string }> => {
   const paths = layout(prefix);
   if (!existsSync(paths.share)) return { ok: false, message: `nothing is installed under ${paths.share}` };
-  return withLock(paths, () => rollbackLocked(prefix));
+  return withLock(paths, [], () => rollbackLocked(prefix));
 };
 
 const rollbackLocked = (prefix: string): Outcome<{ from: string; to: string }> => {
@@ -396,6 +496,14 @@ const rollbackLocked = (prefix: string): Outcome<{ from: string; to: string }> =
   return { ok: true, from: current, to: previous };
 };
 
+/** Makes a real folder and every real folder under it writable. Dirent types come from the folder itself, so a link
+ * is never a directory here and is never followed. */
+const makeWritable = (dir: string): void => {
+  chmodSync(dir, 0o755);
+  for (const entry of readdirSync(dir, { withFileTypes: true }))
+    if (entry.isDirectory()) makeWritable(join(dir, entry.name));
+};
+
 /**
  * Removes an install tree or staging folder, read-only folders included. Every entry is judged by lstat: a link is
  * unlinked, never followed, chmodded or read through, so nothing outside the tree changes.
@@ -411,13 +519,7 @@ export const removeInstall = (path: string): void => {
     unlinkSync(path);
     return;
   }
-  const writable = (dir: string): void => {
-    chmodSync(dir, 0o755);
-    // Dirent types come from the folder itself: a link is never a directory here.
-    for (const entry of readdirSync(dir, { withFileTypes: true }))
-      if (entry.isDirectory()) writable(join(dir, entry.name));
-  };
-  writable(path);
+  makeWritable(path);
   rmSync(path, { recursive: true, force: true });
 };
 
@@ -434,7 +536,19 @@ function stop(message: string, code = 1): never {
   process.exit(code);
 }
 
+/** Set when the build was stopped by Ctrl-C or SIGTERM: the install then exits 130. */
+let interrupted = false;
+
 const main = (): void => {
+  // Ctrl-C reaches the whole foreground group: the build dies, the staging failure path cleans up and main exits
+  // 130. A signal that lands while no child runs removes the lock and the staging folder here.
+  for (const signal of ["SIGINT", "SIGTERM"] as const)
+    process.on(signal, () => {
+      if (active.staging !== undefined) removeInstall(active.staging);
+      if (active.lock !== undefined) rmSync(active.lock, { recursive: true, force: true });
+      console.error(`scripts/install: interrupted by ${signal}; nothing was installed`);
+      process.exit(130);
+    });
   const root = resolve(import.meta.dir, "..");
   let values: { prefix?: string; tools?: string; rollback?: boolean };
   try {
@@ -493,6 +607,10 @@ const main = (): void => {
         stdout: "pipe",
         stderr: "pipe",
       });
+      if (built.signalCode === "SIGINT" || built.signalCode === "SIGTERM") {
+        interrupted = true;
+        throw new Error(`interrupted by ${built.signalCode} during the build`);
+      }
       if (built.exitCode !== 0) throw new Error(`bun build failed: ${built.stderr.toString().trim()}`);
       for (const tool of TOOL_NAMES) copyFileSync(join(tools, tool), join(dir, tool));
       const ran = Bun.spawnSync([outfile, "--version"], { stdout: "pipe", stderr: "pipe" });
@@ -503,7 +621,7 @@ const main = (): void => {
     },
     { commit: full || "unknown" },
   );
-  if (!installed.ok) stop(installed.message);
+  if (!installed.ok) stop(installed.message, interrupted ? 130 : 1);
   const paths = layout(prefix);
   console.log(
     `plainport ${installed.version} ${installed.reused ? "was already installed and is current again" : "installed"} in ${join(paths.versions, basename(installed.version))}`,

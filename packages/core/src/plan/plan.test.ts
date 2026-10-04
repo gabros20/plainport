@@ -386,6 +386,14 @@ describe("plan: totals, findings and the plan's own fields", () => {
     ]);
     expect(Date.parse(p.expiresAt) - NOW.getTime()).toBe(PLAN_TTL_MS);
     expect(PLAN_TTL_MS).toBe(60 * 60 * 1000);
+  });
+
+  test("D77: the arrival step is there only when the strip set is not empty: onload installs back only what offload left out", async () => {
+    expect((await plan([])).arrival).toBeUndefined();
+    expect((await plan([deps("node_modules")])).arrival).toBeUndefined();
+    put("node_modules/a.js");
+    const p = await plan([deps("node_modules")]);
+    expect(stripped(p)).toEqual(["node_modules"]);
     expect(p.arrival).toEqual([{ part: "deps", outcome: "hydrate", detail: "fake install --frozen" }]);
   });
 

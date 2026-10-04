@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ok } from "@plainport/contract";
 import { parse } from "smol-toml";
 import { nodeLocalIo } from "../node-io.ts";
+import { updateRegistry } from "../registry.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { listRoots, type RootChange, writeRoots } from "./roots.ts";
 
@@ -308,5 +310,56 @@ describe("roots: list", () => {
       ok: false,
       finding: { code: "config.invalid" },
     });
+  });
+});
+
+describe("roots: plainport's reserved holders are never a root (D84)", () => {
+  test("a root in .plainport-staging, or reached through a symlink into .plainport-trash, is path.reserved", async () => {
+    box.dir("work/.plainport-staging/inner");
+    const direct = await write([{ kind: "add", key: "inner", path: "~/work/.plainport-staging/inner" }]);
+    expect(direct).toMatchObject({ ok: false, exitCode: 6, finding: { code: "path.reserved" } });
+    const trash = box.dir("work/.plainport-trash/x");
+    symlinkSync(trash, join(box.home, "alias"));
+    const aliased = await write([{ kind: "add", key: "alias", path: "~/alias" }]);
+    expect(aliased).toMatchObject({ ok: false, finding: { code: "path.reserved" } });
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+});
+
+describe("roots: a root never puts a project and a local store together (D83)", () => {
+  const storeAt = (path: string) =>
+    box.file(".config/plainport/config.toml", `[stores.vault]\nkind = "local"\npath = "${path}"\n`);
+
+  test("a root inside a local store is store.inside-project; a store beside a root's projects is fine", async () => {
+    box.dir("vault/work");
+    storeAt("~/vault");
+    const inside = await write([{ kind: "add", key: "work", path: "~/vault/work" }]);
+    expect(inside).toMatchObject({ ok: false, exitCode: 6, finding: { code: "store.inside-project" } });
+    box.dir("code/archive");
+    storeAt("~/code/archive");
+    expect((await write([{ kind: "add", key: "code", path: "~/code" }])).ok).toBe(true);
+  });
+
+  test("binding a root where a registered project of it would hold a store is store.inside-project", async () => {
+    box.dir("old");
+    expect((await write([{ kind: "add", key: "work", path: "~/old" }])).ok).toBe(true);
+    const updated = await updateRegistry(io, box.paths, (registry) =>
+      ok({
+        ...registry,
+        projects: {
+          ...registry.projects,
+          "01ARYZ6S410000000000000000": {
+            root: "work",
+            path: "web",
+            registeredAt: "2026-10-04T12:00:00.000Z",
+          },
+        },
+      }),
+    );
+    expect(updated.ok).toBe(true);
+    box.dir("new/web/.next/archive");
+    storeAt("~/new/web/.next/archive");
+    const bound = await write([{ kind: "bind", key: "work", path: "~/new" }]);
+    expect(bound).toMatchObject({ ok: false, exitCode: 6, finding: { code: "store.inside-project" } });
   });
 });

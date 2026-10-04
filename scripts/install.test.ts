@@ -12,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,10 +22,12 @@ import { describeT1 } from "../test/tiers.ts";
 import {
   dirtyFromStatus,
   installVersion,
+  isVersionName,
   layout,
   planName,
   readState,
   removeInstall,
+  removeVersion,
   rollback,
   versionName,
 } from "./install.ts";
@@ -74,6 +77,28 @@ describe("naming a build", () => {
       ok: true,
       name: "0.1.0-dev+19700101000000.unknown",
     });
+  });
+
+  test("every SemVer pre-release names a version the installer owns, consistently with versionName (R3-M3)", () => {
+    const now = new Date("2026-10-04T12:34:56Z");
+    for (const version of ["0.1.0", "0.2.0-rc.1", "1.0.0-beta.2.x-y", "0.1.0-dev"]) {
+      const named = planName({ version, commit: "abc1234", dirty: false, now });
+      expect(named.ok).toBe(true);
+      if (named.ok) expect(isVersionName(named.name)).toBe(true);
+    }
+    expect(planName({ version: "0.2.0-rc.1", commit: "abc1234", dirty: false, now })).toEqual({
+      ok: true,
+      name: "0.2.0-rc.1",
+    });
+    expect(isVersionName("0.1.0-dev+20261004123456.abc1234.dirty")).toBe(true);
+    for (const name of ["dev", "0.1", "0.1.0-", "0.1.0-rc..1", "v0.1.0", "0.1.0+junk"])
+      expect(isVersionName(name)).toBe(false);
+  });
+
+  test("a VERSION that is not SemVer is refused with its fix (R3-M3)", () => {
+    const refused = planName({ version: "0.2", commit: "abc1234", dirty: false });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.message).toContain("VERSION");
   });
 
   test("tracked changes anywhere and untracked files under packages/ make the tree dirty", () => {
@@ -273,6 +298,85 @@ describe("installVersion and rollback", () => {
     expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(true);
   });
 
+  test("a lock whose recorded pid is alive is refused with the exact rm -r to run (R3-M1)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const lock = join(layout(prefix).share, ".install.lock");
+    mkdirSync(lock);
+    writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+    const refused = installVersion(prefix, "0.2.0", stageFake("two"));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.message).toContain(`rm -r '${lock}'`);
+    rmSync(lock, { recursive: true });
+  });
+
+  test("a lock whose recorded pid is gone is taken over, with a notice (R3-M1)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const lock = join(layout(prefix).share, ".install.lock");
+    const dead = Bun.spawnSync(["/bin/sh", "-c", "echo $$"], { stdout: "pipe" }).stdout.toString().trim();
+    mkdirSync(lock);
+    writeFileSync(join(lock, "pid"), `${dead}\n`);
+    const taken = installVersion(prefix, "0.2.0", stageFake("two"));
+    expect(taken).toMatchObject({ ok: true, version: "0.2.0" });
+    if (taken.ok) expect(taken.notices).toContain(`took over a stale lock: pid ${dead} is gone (${lock})`);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("a lock with no pid file is taken over once it is a minute old, and refused while younger (R3-M1)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const lock = join(layout(prefix).share, ".install.lock");
+    mkdirSync(lock);
+    expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(false);
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lock, old, old);
+    const taken = installVersion(prefix, "0.2.0", stageFake("two"));
+    expect(taken.ok).toBe(true);
+    if (taken.ok) expect(taken.notices.some((n) => n.startsWith("took over a stale lock"))).toBe(true);
+  });
+
+  test("a prune that fails partway keeps build.json, so the folder stays the installer's and the next prune finishes it (R3-M2)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    installVersion(prefix, "0.2.0", stageFake("two"));
+    const dir = join(layout(prefix).versions, "0.1.0");
+    // An rm that fails on the binary: everything it reached before build.json may be gone, build.json is not.
+    const rm = (path: string) => {
+      if (path.endsWith("/plainport")) throw new Error(`EPERM: operation not permitted, unlink '${path}'`);
+      rmSync(path, { recursive: true, force: true });
+    };
+    expect(() => removeVersion(dir, rm)).toThrow("EPERM");
+    expect(existsSync(join(dir, "build.json"))).toBe(true);
+    expect(readState(prefix).versions).toContain("0.1.0");
+    const third = installVersion(prefix, "0.3.0", stageFake("three"));
+    expect(third).toMatchObject({ ok: true, pruned: ["0.1.0"] });
+    if (third.ok) expect(third.notices).toEqual([]);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  test("a failed stage whose cleanup also fails returns one message naming both, not an exception (R3-M4)", () => {
+    const prefix = fresh();
+    const result = installVersion(
+      prefix,
+      "0.1.0",
+      () => {
+        throw new Error("build broke");
+      },
+      undefined,
+      {
+        remove: () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("build broke");
+      expect(result.message).toContain("removing its staging folder failed: EACCES");
+    }
+  });
+
   test("a current that is not a link fails with a message, not an exception", () => {
     const prefix = fresh();
     mkdirSync(join(layout(prefix).current, "x"), { recursive: true });
@@ -384,6 +488,28 @@ describeT1("scripts/install end to end", () => {
     expect(readState(prefix)).toMatchObject({ current: state.previous, previous: state.current });
     expect(back.out).toContain(`${state.previous}`);
   }, 180_000);
+
+  test("Ctrl-C during the build exits 130 and leaves no lock and no staging folder (R3-M1)", async () => {
+    const prefix = join(top, "sigint");
+    const child = Bun.spawn([script, "--prefix", prefix, "--tools", tools], {
+      env: { ...env, PATH: `${join(process.execPath, "..")}:/usr/bin:/bin` },
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+    const versions = layout(prefix).versions;
+    const deadline = Date.now() + 60_000;
+    const staging = () =>
+      existsSync(versions) ? readdirSync(versions).filter((n) => n.startsWith(".staging-")) : [];
+    while (staging().length === 0 && Date.now() < deadline) await Bun.sleep(10);
+    expect(staging()).toHaveLength(1);
+    process.kill(-child.pid, "SIGINT"); // the terminal's Ctrl-C reaches the whole foreground group
+    expect(await child.exited).toBe(130);
+    expect(await new Response(child.stderr).text()).toContain("interrupted");
+    expect(staging()).toEqual([]);
+    expect(existsSync(join(layout(prefix).share, ".install.lock"))).toBe(false);
+    expect(readState(prefix).current).toBeUndefined();
+  }, 120_000);
 
   test("an installed dev build never walks up into a checkout, and its missing-tool fix says to reinstall (N1)", () => {
     // A checkout-looking folder above the prefix: an installed build must never walk up into it.

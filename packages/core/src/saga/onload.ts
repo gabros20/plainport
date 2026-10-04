@@ -17,7 +17,9 @@
 //                                         then the journal; the stub still names the project. A rerun of the same
 //                                         onload takes the journal over instead (DESIGN step 3): it restores into the
 //                                         same staging folder with --overwrite if-changed, so files already written
-//                                         are skipped
+//                                         are skipped. At onload.verified, and at onload.begin in reuse mode, recover
+//                                         first asks the world as at onload.swap.start: the rename may have landed
+//                                         and swap.start's write been lost (D24, N3)
 //   onload.swap.start                     the rename may have happened (a lost write, D24): if `project.dir` stands
 //                                         and the source (`staging`, or `reuse.folder`) is gone, go on as from
 //                                         onload.swapped; otherwise roll back as above
@@ -49,12 +51,18 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader } from "../catalog/head.ts";
+import {
+  type CatalogRead,
+  catalogReader,
+  type HeadDoubt,
+  headUncertain,
+  unfoldedSnapshot,
+} from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
-import { removeEmptyHolder } from "../holder.ts";
+import { notReserved, removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -252,6 +260,11 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     );
   }
   const landing: string = requested;
+  // Never into plainport's own holders, whose folders gc deletes (D84).
+  if (req.to !== undefined) {
+    const reserved = await notReserved(io, landing, paths.home, `a project's place`);
+    if (!reserved.ok) return reserved;
+  }
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
   const config = loaded.value.config;
@@ -328,22 +341,36 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   const gate = { io, paths, clock, log: deps.log };
   return withProjectLock(gate, { id, address: ref.address }, (lock, resumed) => onloadLocked(lock, resumed), {
     related: nested,
-    // An onload that stopped before its swap is taken over, never refused (DESIGN step 3).
-    resume: (j) => j.kind === "onload" && BEFORE_SWAP.has(j.step),
+    // An onload of this project that stopped before its swap is taken over, never refused (DESIGN step 3).
+    resume: (j, own) => own && j.kind === "onload" && BEFORE_SWAP.has(j.step),
   });
 
   async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
     const state = await catalog();
     if (!state.ok) return state;
+    // A newer snapshot this device knows of that no readable event names (D86): only that snapshot, asked for by name,
+    // goes on; it is found in the repository by its op tag, restored, and its stub removed as usual.
+    const doubt = doubtOf(state.value);
+    if (doubt !== undefined && req.snapshot !== doubt.newest) return fail(doubt.finding);
     const project = state.value.projects[id];
     if (project === undefined) {
-      return fail(finding("project.not-found", notInStore()));
+      return fail(doubt?.finding ?? finding("project.not-found", notInStore()));
     }
     const head = headOf(project);
     if (!head.ok) return head;
     const over = head.value;
     const snapshot = req.snapshot ?? over;
-    const made = project.snapshots[snapshot];
+    let made: { event?: string; stored: Record<string, string> } | undefined = project.snapshots[snapshot];
+    if (made === undefined && doubt !== undefined) {
+      const found = await unfoldedSnapshot(store.engine, {
+        id,
+        snapshot,
+        discarded: project.discarded,
+        address: ref.address,
+      });
+      if (!found.ok) return found;
+      made = { stored: { [store.name]: found.value } };
+    }
     if (made === undefined) {
       return fail(
         finding("snapshot.not-found", {
@@ -396,7 +423,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
             ? `offload it on that device first, or set onload.leases = "warn" to onload it here anyway`
             : `offload it on that device first, or keep in mind that two copies now exist`,
       });
-      if (config.onload.leases === "strict") return fail({ ...held, severity: "block" }, 8);
+      if (config.onload.leases === "strict") return fail(held, 8);
       report(held);
     }
 
@@ -437,7 +464,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         engine: store.engine,
         store: store.blob,
         stored,
-        event: made.event,
+        ...(made.event === undefined ? {} : { event: made.event }),
         ctx,
         op,
         nearest: placed.value,
@@ -453,7 +480,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       stripped = listed.value.stripped;
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
-      const produced = await producedBy(store.blob, made.event);
+      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
       files = produced?.stats.files ?? 0;
       bytes = produced?.stats.bytes ?? 0;
     }
@@ -511,13 +538,26 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     return hydrate(result.value, stripped);
   }
 
+  /** catalog.head-uncertain when the read may lack the event naming the stub's or the registry's snapshot (D86). */
+  function doubtOf(read: CatalogRead): HeadDoubt | undefined {
+    const known = [
+      stub?.ok ? stub.value.snapshot : undefined,
+      registered.ok ? registered.value.projects[id]?.base : undefined,
+    ];
+    return headUncertain(read, id, known, ref.address, {
+      what: "nothing was restored",
+      instead: (newest) =>
+        `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
+    });
+  }
+
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
   function headOf(project: CatalogProject): Result<string> {
     if (project.missing.length > 0) {
       return fail(
         finding("catalog.incomplete", {
           message: `the catalog names ${plural(project.missing.length, "snapshot")} of ${ref.address} it does not hold (${project.missing.join(", ")}), so its head is unknown; nothing was restored`,
-          fix: `connect the store that holds them (plainport store replicate syncs them), or run plainport doctor; plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads a snapshot side by side meanwhile`,
+          fix: `connect the store that holds them, then re-run; plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads a snapshot side by side meanwhile`,
         }),
       );
     }
@@ -525,7 +565,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       return fail(
         finding("catalog.head-moved", {
           message: `${ref.address} is conflicted in the catalog: two copies were offloaded from the same snapshot (${project.conflicts.map((c) => c.join(" and ")).join("; ")}); nothing was restored`,
-          fix: `plainport resolve ${shellWord(ref.address)} settles which copy wins (M2); plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either side by side`,
+          fix: `plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side (settling which copy wins arrives in M2)`,
         }),
       );
     }
@@ -783,6 +823,9 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           `re-run plainport onload ${shellWord(ref.address)} once the store answers; it takes over the restored copy`,
         ),
       );
+    const doubtNow = doubtOf(fresh.value);
+    if (doubtNow !== undefined && journal.snapshot !== doubtNow.newest)
+      return saga.keep(fail(doubtNow.finding));
     const project = fresh.value.projects[id];
     const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);

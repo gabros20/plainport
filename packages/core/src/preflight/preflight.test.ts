@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { type Finding, fail, finding, ok } from "@plainport/contract";
+import { PathRefused } from "../guard.ts";
 import type { HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { GitFacts } from "../scan/git.ts";
@@ -808,4 +809,28 @@ describe("preflight: the git.unpushed finding, by case (q1)", () => {
       for (const fix of fixes) expect(found?.fix).toContain(fix);
     });
   }
+});
+
+describe("preflight: a host lookup that throws (task 17 concern 2)", () => {
+  test("each check that throws blocks under its own code; preflight itself never throws", async () => {
+    const dir = fx.repo("web");
+    const refused = new PathRefused("stat", "/Users/someone/.local/bin/docker", "/Users/someone");
+    const report = await run(dir, {
+      dataless: async () => {
+        throw refused;
+      },
+      processesUsing: async () => {
+        throw refused;
+      },
+      dockerMounts: async () => {
+        throw refused;
+      },
+    });
+    expect(codes(report.findings)).toEqual([
+      "block fs.dataless",
+      "block proc.open-files",
+      "block env.docker-mount",
+    ]);
+    expect(report.findings[2]?.message).toContain("/Users/someone/.local/bin/docker");
+  });
 });

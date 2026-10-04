@@ -359,6 +359,16 @@ describe("runner (fake spawner): deadlines and cancelling", () => {
       /outputLimitBytes/,
     );
   });
+
+  test("a deadline beyond what a timer holds (2^31 - 1 ms) is refused, never fired at once (N14)", async () => {
+    await expect(runProcess(new FakeSpawner(), spec({ timeoutMs: 2 ** 31 }))).rejects.toThrow(/timeoutMs/);
+    await expect(runProcess(new FakeSpawner(), spec({ idleTimeoutMs: 30 * 86_400_000 }))).rejects.toThrow(
+      /idleTimeoutMs/,
+    );
+    await expect(runProcess(new FakeSpawner(), spec({ killGraceMs: 2 ** 40 }))).rejects.toThrow(
+      /killGraceMs/,
+    );
+  });
 });
 
 describe("runner (fake spawner): capturing the whole stdout", () => {
