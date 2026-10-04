@@ -37,7 +37,11 @@ _plainport_names() {
 _plainport() {
   local cur=${words[CURRENT]}
   local -a typed opts
-  typed=(${words[2,CURRENT-1]:#-*})
+  local i
+  for ((i = 2; i < CURRENT; i++)); do
+    case "${words[i]}" in --store|--config) ((i++)); continue ;; esac
+    [[ ${words[i]} == -* ]] || typed+=("${words[i]}")
+  done
   local cmd='' used=0
   if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
   if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|recover|gc|version) cmd=${typed[1]}; used=1 ;; esac; fi

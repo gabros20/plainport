@@ -716,6 +716,38 @@ describe("completions", () => {
     },
   );
 
+  test.skipIf(shellSkip("zsh"))("zsh completion finds the command after a global option's value (N7)", () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-zsh-"));
+    try {
+      const script = join(root, "_plainport");
+      writeFileSync(
+        script,
+        (generateFiles(REGISTRY).get("completions/_plainport") ?? "").replace(/_plainport "\$@"\n$/, ""),
+      );
+      const complete = (line: string) => {
+        const words = line.split(" ");
+        const probe = [
+          // Stand-ins for the completion system: print what would be offered.
+          "compadd() { [[ $1 == -- ]] && shift; print -l -- $@ }",
+          "_describe() { local name=$4; print -l -- ${${(P)name}%%:*} }",
+          "_files() { print FILES }",
+          `source ${script}`,
+          `words=(${words.map((w) => `'${w}'`).join(" ")})`,
+          `CURRENT=${words.length}`,
+          "_plainport",
+        ].join("\n");
+        const run = Bun.spawnSync(["zsh", "-f", "-c", probe], { stdout: "pipe", stderr: "pipe" });
+        expect(run.stderr.toString()).toBe("");
+        return run.stdout.toString().split("\n").filter(Boolean);
+      };
+      expect(complete("plainport --store mini gc --no")).toContain("--now");
+      expect(complete("plainport --store mini gc ")).toEqual(["FILES"]);
+      expect(complete("plainport --config ~/c.toml he")).toContain("help");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(shellSkip("bash"))(
     "bash completion completes commands, command groups, help's argument and options",
     () => {
@@ -762,6 +794,11 @@ describe("completions", () => {
         expect(complete(FAKE_REGISTRY, "plainport root ")).toEqual(["add"]);
         expect(complete(FAKE_REGISTRY, "plainport help root a")).toEqual(["add"]);
         expect(complete(FAKE_REGISTRY, "plainport write web --ad")).toEqual(["--adopt"]);
+        // N7: the value of a global option that takes one is not the command.
+        expect(complete(REGISTRY, "plainport --store mini gc --no")).toEqual(["--now", "--no-input"]);
+        expect(complete(REGISTRY, "plainport --config ~/c.toml --store mini he")).toEqual(["help"]);
+        expect(complete(REGISTRY, "plainport --store=mini gc --no")).toEqual(["--now", "--no-input"]);
+        expect(complete(FAKE_REGISTRY, "plainport --store mini root ")).toEqual(["add"]);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
