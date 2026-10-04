@@ -50,9 +50,14 @@ type Incomplete =
   | { why: "leftovers" }
   | { why: "read-error"; stream: OutputStream; error: unknown };
 
+/** The longest delay a timer holds: setTimeout fires a longer one at once (N14). About 24.8 days. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 const positive = (name: string, value: number): number => {
   if (!Number.isFinite(value) || value <= 0)
     throw new RangeError(`runProcess: ${name} must be positive, got ${value}`);
+  if (name.endsWith("Ms") && value > MAX_TIMER_MS)
+    throw new RangeError(`runProcess: ${name} must be at most ${MAX_TIMER_MS} ms, got ${value}`);
   return value;
 };
 
