@@ -46,6 +46,13 @@ restic peaked at 160 MB or less. These trees are small and nothing was installed
 - **Docker and nested repositories (D69).** Docker checks use the current context and `Type=bind` mounts only. Unpushed detection counts `HEAD` and branches, not tags. Nested repositories are not listed in the plan.
 - **Hydration runs package scripts (D54, D79).** A project's own `hydrate.command` and hooks never run in M1. `--ignore-scripts` waits for `plainport trust`.
 - **No resident process.** Trash older than its deadline is deleted by the next write command or `gc`, not by a timer.
+- **The delete guard has limits (D87).** All of them need a process acting on purpose, or a layout nobody builds by accident:
+  - The guard's walk and the delete are two separate walks. A store, mount or working copy moved into a trash between them is deleted; Node has no `openat`-style descent to close the gap.
+  - A same-device bind mount on Linux is invisible to the device check. Plainport's own stores and restic repositories are still caught by their markers. M3 brings Linux hosts, and `/proc/self/mountinfo` with them.
+  - The guard protects plainport stores and restic repositories only. Anything else parked in a stripped folder (a borg repository, a bare git repo, a database under `node_modules/`) is not in the snapshot and goes with the trash, by the contract that stripped means regenerable.
+  - If neither the stub nor `registry.roots` holds a root's id, `--snapshot S` under an uncertain head keeps asking for `--snapshot S`. It needs a damaged registry on top of a damaged catalog; nothing is deleted.
+- **A doubtful catalog is detected only from local evidence (D86).** Onload checks the stub's and the registry's snapshot against the readable events. With neither, a skipped newer event shows only as a `catalog.event-skipped` warning and onload restores the older head. A second device hits this by construction, so M2 should treat any skipped event newer than the head as doubt.
+- **`init --store-path` can re-point an unreachable pinned name.** If the new path cannot be reached, the name is re-pointed before the identity can be checked. D45 then refuses every use of the wrong disk, so nothing is lost, but D85's "before anything is written" bends. It also allows the legitimate D68 flow of re-pointing an unplugged disk. M2 decides whether to tighten it.
 - **The catalog format is frozen at v0.1.0 (D74).** Dev builds before d131f2a do not read stores written by newer builds.
 - **Hydration is proven on tiny fixtures only** (D13), and an install keeps only the current and previous versions.
 
@@ -70,9 +77,15 @@ The controller made these calls under your delegation of format and API decision
 - **D83:** a project and a local store may not overlap (`store.inside-project`).
 - **D84:** `.plainport-*` holders are never a project destination, and `gc` never deletes inside a registered project.
 - **D85:** `init` enforces the store identity pin.
-- **D86:** a skipped state-changing event makes onload refuse (`catalog.head-uncertain`).
+- **D86:** a skipped state-changing event makes onload refuse (`catalog.head-uncertain`); `--snapshot S` is the way on.
+- **D87:** one guarded deleter checks every recursive delete (`delete.guard-refused`); the detached delete's refusal is a note beside the trash, and offload reports `deleteStarted`.
+- **D88:** `recover` rolls back a restore-mode onload interrupted at its start.
 
 ADR-0005 (libraries) was marked "confirm in M1". The Stack section in `DESIGN.md` records what M1 confirmed; accept it when you review.
+
+## How the release was reviewed
+
+Three final whole-branch rounds ran after the last task. Rounds 1 and 2 used Fable and Codex gpt-6-astra, a cross-family pair; astra's round 1 is where D83 to D86 came from, and round 2 led to D87 and D88. Round 3, on the D87 and D88 fixes, was Fable alone, standing in because Codex's weekly quota ran out until 2026-10-09. Round 3 found no Critical issue; its contrived findings are in the known limits above. An astra pass over the final tree was not possible before the tag, so a Codex review of the guard (D87) once the quota returns would be a cheap second opinion.
 
 ## Next: milestone M2, remote stores
 
