@@ -11,6 +11,7 @@ import { appendEvent, type CatalogEvent, readEvents, storeEventLog } from "../ca
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { readJournals } from "../journal/index.ts";
+import { readStagingRecords } from "../recover/staging.ts";
 import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
@@ -526,5 +527,38 @@ describe("restore: fix wave r2", () => {
     const result = await runRestore(deps(host), { project: await ref(), to });
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "path.occupied"]);
     expect(readdirSync(to)).toEqual([]);
+  });
+});
+
+describe("restore: release fixes (I9, rule 7)", () => {
+  test("a rename that fails on a volume that also refuses the cleanup is fs.write-failed, never a throw", async () => {
+    await offload();
+    const to = join(box.home, "old/web");
+    const warnings: string[] = [];
+    const real = testHost();
+    const eio = (what: string) => Object.assign(new Error(`EIO: ${what}`), { code: "EIO" });
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        rename: async (from, target) => {
+          if (target === to) throw eio("rename");
+          return real.fs.rename(from, target);
+        },
+        rmdir: async (path) => {
+          if (path === to) throw Object.assign(new Error("EROFS: read-only"), { code: "EROFS" });
+          return real.fs.rmdir(path);
+        },
+      },
+    };
+    const result = await runRestore(
+      { ...deps(host), log: (_level, message) => warnings.push(message) },
+      { project: await ref(), to },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([1, "fs.write-failed"]);
+    expect(warnings.join("\n")).toContain(`the empty folder ${to}`);
+    // The cleanup after the failure still ran: no staging folder and no staging record are left.
+    expect(existsSync(join(box.home, "old/.plainport-staging"))).toBe(false);
+    expect(await readStagingRecords(testHost(), box.paths)).toEqual([]);
   });
 });

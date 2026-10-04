@@ -317,8 +317,13 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     } catch (error) {
       const code = systemErrorCode(error);
       if (code === "ENOTEMPTY" || code === "EEXIST") return occupied();
-      // Its own empty folder goes again; anything in it stays.
-      await rmdirIfEmpty(io, to);
+      // Its own empty folder goes again; anything in it stays. A volume that refuses even that keeps it, said once.
+      try {
+        await rmdirIfEmpty(io, to);
+      } catch (cleanup) {
+        assertSystemError(cleanup);
+        deps.log("warn", `the empty folder ${to} this restore made could not be removed; remove it by hand`);
+      }
       return writeFailed(error, `moving ${staging} to ${to}`, false, to);
     }
     // The rename landed: the copy is there whatever the flush says.
