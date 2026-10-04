@@ -104,6 +104,7 @@ export const onload = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z
@@ -212,6 +213,7 @@ export const hydrate = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().meta({ description: "An address (root:path), a unique name, a path or ." }),
@@ -264,6 +266,7 @@ export const dehydrate = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().meta({ description: "An address (root:path), a unique name, a path or ." }),

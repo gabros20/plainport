@@ -115,6 +115,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "read",
     dryRun: false,
     acceptsPlan: false,
+    group: "projects",
     positionals: ["project"],
     args: z.strictObject({ project: z.string().optional().meta({ description: "A project" }) }),
     output: done,
@@ -131,6 +132,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "safe_write",
     dryRun: false,
     acceptsPlan: false,
+    group: "projects",
     positionals: ["project"],
     args: z.strictObject({
       project: z.string().meta({ description: "A project" }),
@@ -154,6 +156,7 @@ export const FAKE_REGISTRY: Registry = [
       human: (plan) => `plan: ${plan.plan}`,
     },
     acceptsPlan: true,
+    group: "projects",
     positionals: ["projects"],
     args: z.strictObject({
       projects: z.array(z.string()).min(1).meta({ description: "Projects" }),
@@ -181,6 +184,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "safe_write",
     dryRun: false,
     acceptsPlan: false,
+    group: "roots",
     positionals: ["key"],
     args: z.strictObject({ key: z.string().meta({ description: "The root's key" }) }),
     output: done,
@@ -194,6 +198,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "read",
     dryRun: false,
     acceptsPlan: false,
+    group: "setup",
     positionals: [],
     args: z.strictObject({}),
     output: done,
@@ -223,6 +228,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "read",
     dryRun: false,
     acceptsPlan: false,
+    group: "setup",
     positionals: [],
     args: z.strictObject({}),
     output: done,
@@ -239,6 +245,7 @@ export const FAKE_REGISTRY: Registry = [
     risk: "read",
     dryRun: false,
     acceptsPlan: false,
+    group: "setup",
     positionals: ["word"],
     args: z.strictObject({
       word: z.string().transform((): string => {

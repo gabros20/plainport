@@ -138,10 +138,36 @@ describe("version and help", () => {
     );
   });
 
+  test("the footer names exactly the commands whose registry entry accepts a plan (quality r1 minor 6)", async () => {
+    const fake = await capture(["help"], FAKE_REGISTRY);
+    expect(fake.out.replaceAll("\n", " ")).toContain(
+      "ship also takes --plan <id> from its --dry-run instead.",
+    );
+    expect(fake.out).not.toMatch(/(show|write|root add|stream|boom|fragile) also takes --plan/);
+    for (const c of REGISTRY) {
+      const info = JSON.parse((await capture(["help", ...c.name.split(" "), "--json"], REGISTRY)).out).data
+        .commands[0];
+      expect(info.acceptsPlan).toBe(c.acceptsPlan);
+    }
+  });
+
+  test("help groups come from each registry entry's group, and the real registry leaves no command under Other (quality r1 minor 7)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out).not.toContain("\nOther:\n");
+    const fake = await capture(["help"], FAKE_REGISTRY);
+    expect(fake.out).toMatch(/\nRoots:\n {2}root add /);
+    for (const c of REGISTRY) {
+      const info = JSON.parse((await capture(["help", ...c.name.split(" "), "--json"], REGISTRY)).out).data
+        .commands[0];
+      expect(["projects", "recovery", "roots", "setup"]).toContain(c.group);
+      expect(info.group).toBe(c.group);
+    }
+  });
+
   test("help says that --plan <id> stands in for --yes, in the listing, the global option and the command (agent smoke)", async () => {
     const help = await capture(["help"], REGISTRY);
-    expect(help.out).toContain(
-      "confirm commands need --yes, or --plan <id> with the id their --dry-run\nprinted",
+    expect(help.out.replaceAll("\n", " ")).toContain(
+      "read and safe_write commands run freely; confirm commands need --yes. offload also takes --plan <id> from its --dry-run instead.",
     );
     expect(help.out).toMatch(/--yes +Allow a confirm-class command to run; --plan <id> stands in for it/);
     const offload = await capture(["help", "offload"], REGISTRY);
@@ -202,6 +228,8 @@ describe("generated contract files", () => {
         "usage",
         "risk",
         "dryRun",
+        "acceptsPlan",
+        "group",
         "positionals",
         "options",
         "arguments",

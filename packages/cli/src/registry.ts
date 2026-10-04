@@ -129,6 +129,9 @@ export interface DryRun<P extends z.ZodType> {
   human(plan: z.output<P>): string;
 }
 
+/** Where help's overview lists a command. */
+export type CommandGroup = "projects" | "recovery" | "roots" | "setup";
+
 export interface CommandDef<
   A extends z.ZodObject = z.ZodObject,
   O extends z.ZodType = z.ZodType,
@@ -142,6 +145,8 @@ export interface CommandDef<
   dryRun: false | DryRun<P>;
   /** The command takes `--plan <id>`: an approved plan stands in for --yes. The args need a string `plan` option. */
   acceptsPlan: boolean;
+  /** The group help's overview lists it under. */
+  group: CommandGroup;
   /** The argument schema's positional keys, in order; an array-typed one takes the rest and must be last. */
   positionals: readonly (keyof z.output<A> & string)[];
   /** Strict: an unknown key is an error (D16). */
@@ -409,6 +414,8 @@ export type CommandInfo = {
   usage: string;
   risk: RiskClass;
   dryRun: boolean;
+  acceptsPlan: boolean;
+  group: CommandGroup;
   positionals: PositionalInfo[];
   options: OptionInfo[];
   examples: Example[];
@@ -421,6 +428,8 @@ export const commandInfo = (command: AnyCommand): CommandInfo => ({
   usage: usageOf(command),
   risk: command.risk,
   dryRun: command.dryRun !== false,
+  acceptsPlan: command.acceptsPlan,
+  group: command.group,
   positionals: positionalsOf(command),
   options: optionsOf(command),
   examples: command.examples.map((e: Example) => ({ argv: [...e.argv], summary: e.summary })),

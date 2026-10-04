@@ -161,6 +161,7 @@ export const offload = defineCommand({
   risk: "confirm",
   dryRun: { plan: PlanSchema, human: renderPlan },
   acceptsPlan: true,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z

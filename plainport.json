@@ -50,6 +50,8 @@
       "usage": "plainport help [<command...>]",
       "risk": "read",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
       "positionals": [
         {
           "name": "command",
@@ -106,6 +108,14 @@
                 },
                 "dryRun": {
                   "type": "boolean"
+                },
+                "acceptsPlan": {
+                  "type": "boolean",
+                  "description": "Whether --plan <id> from its --dry-run stands in for --yes"
+                },
+                "group": {
+                  "type": "string",
+                  "description": "Where help's overview lists it: projects, recovery, roots or setup today; an open set"
                 },
                 "positionals": {
                   "type": "array",
@@ -203,6 +213,8 @@
                 "usage",
                 "risk",
                 "dryRun",
+                "acceptsPlan",
+                "group",
                 "positionals",
                 "options",
                 "examples"
@@ -239,6 +251,8 @@
       "usage": "plainport init [--root <value>...] [--store-path <value>] [--store-secret <value>] [--device <value>]",
       "risk": "confirm",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
       "positionals": [],
       "options": [
         {
@@ -472,6 +486,8 @@
       "usage": "plainport ls [--root <value>] [--local] [--shelved] [--sort <value>]",
       "risk": "read",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [],
       "options": [
         {
@@ -993,6 +1009,8 @@
       "usage": "plainport status [<project>]",
       "risk": "read",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -1408,6 +1426,8 @@
       "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
       "risk": "confirm",
       "dryRun": true,
+      "acceptsPlan": true,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -2432,6 +2452,8 @@
       "usage": "plainport onload <project> [--to <value>] [--snapshot <value>] [--no-hydrate]",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -2688,6 +2710,8 @@
       "usage": "plainport hydrate <project>",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -2834,6 +2858,8 @@
       "usage": "plainport dehydrate <project>",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -2923,6 +2949,8 @@
       "usage": "plainport restore <project> --to <value> [--snapshot <value>]",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
       "positionals": [
         {
           "name": "project",
@@ -3030,6 +3058,8 @@
       "usage": "plainport recover",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "recovery",
       "positionals": [],
       "options": [],
       "arguments": {
@@ -3185,6 +3215,8 @@
       "usage": "plainport gc [--now]",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "recovery",
       "positionals": [],
       "options": [
         {
@@ -3430,6 +3462,8 @@
       "usage": "plainport root add <key> [<path>] [--label <value>] [--create]",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
       "positionals": [
         {
           "name": "key",
@@ -3592,6 +3626,8 @@
       "usage": "plainport root bind <key> <path> [--device <value>] [--create]",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
       "positionals": [
         {
           "name": "key",
@@ -3742,6 +3778,8 @@
       "usage": "plainport root list",
       "risk": "read",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
       "positionals": [],
       "options": [],
       "arguments": {
@@ -3900,6 +3938,8 @@
       "usage": "plainport root scan <key>",
       "risk": "safe_write",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
       "positionals": [
         {
           "name": "key",
@@ -3996,6 +4036,8 @@
       "usage": "plainport version",
       "risk": "read",
       "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
       "positionals": [],
       "options": [],
       "arguments": {

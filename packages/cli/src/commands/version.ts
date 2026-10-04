@@ -11,6 +11,7 @@ export const version = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "setup",
   positionals: [],
   args: z.strictObject({}),
   output: z.looseObject({ version: z.string().min(1) }),

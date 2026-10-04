@@ -56,6 +56,7 @@ describe("--json: NDJSON event lines, then exactly one final envelope", () => {
       risk: "read",
       dryRun: false,
       acceptsPlan: false,
+      group: "setup",
       positionals: [],
       args: z.strictObject({}),
       output: z.looseObject({ n: z.number() }),

@@ -62,6 +62,7 @@ export const recover = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "recovery",
   positionals: [],
   args: z.strictObject({}),
   output: z
@@ -128,6 +129,7 @@ export const gc = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "recovery",
   positionals: [],
   args: z.strictObject({
     now: z
@@ -193,6 +195,7 @@ export const restore = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z

@@ -188,6 +188,7 @@ export const status = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: ["project"],
   args: z.strictObject({
     project: z.string().optional().meta({
@@ -227,6 +228,7 @@ export const ls = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "projects",
   positionals: [],
   args: z.strictObject({
     root: z.string().optional().meta({ description: "Only this root's projects" }),

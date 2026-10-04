@@ -43,6 +43,7 @@ export const rootList = defineCommand({
   risk: "read",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: [],
   args: z.strictObject({}),
   output: z.looseObject({
@@ -120,6 +121,7 @@ export const rootAdd = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key", "path"],
   args: z.strictObject({
     key,
@@ -164,6 +166,7 @@ export const rootBind = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key", "path"],
   args: z.strictObject({
     key,
@@ -206,6 +209,7 @@ export const rootScan = defineCommand({
   risk: "safe_write",
   dryRun: false,
   acceptsPlan: false,
+  group: "roots",
   positionals: ["key"],
   args: z.strictObject({ key }),
   output: z.looseObject({
