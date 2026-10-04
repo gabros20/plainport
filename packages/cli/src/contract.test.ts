@@ -122,11 +122,19 @@ describe("version and help", () => {
     expect(help).toMatch(
       /--snapshot <value> +Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy\n/,
     );
-    expect(help).toMatch(
-      /--no-hydrate +Restore the files without installing dependencies; a reused kept copy has its dependencies either way\n/,
-    );
+    expect(help).toContain("a reused kept copy has its dependencies either way\n");
     expect(help).toContain(
       "plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
+    );
+  });
+
+  test("help onload says the install usually needs the network, what a failed install leaves, and that --no-hydrate keeps the tree as stored (C3)", async () => {
+    const help = (await capture(["help", "onload"], REGISTRY)).out;
+    expect(help).toMatch(
+      /--no-hydrate +Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way\n/,
+    );
+    expect(help).toContain(
+      "the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
     );
   });
 

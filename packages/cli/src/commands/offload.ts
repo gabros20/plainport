@@ -122,7 +122,14 @@ const OffloadOutputSchema = z.union([
     }),
     store: z.string(),
     stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
-    trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
+    trash: z.string().meta({
+      description:
+        "Where the folder was moved: kept there, or waiting there for recover; with localCopy deleted it is already being deleted and is soon gone",
+    }),
+    localCopy: z.enum(["deleted", "kept", "waiting"]).optional().meta({
+      description:
+        "deleted: keepLocalFor is 0 and the folder's detached delete has started, so nothing is kept (freedBytes has it). kept: offload.keepLocalFor keeps it until keepUntil, and onload renames it back. waiting: the delete could not start; plainport recover deletes it",
+    }),
     keepUntil: z.iso.datetime().optional().meta({
       description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
     }),
@@ -195,9 +202,9 @@ export const offload = defineCommand({
         ? [
             `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
           ]
-        : data.freedBytes === 0
+        : data.localCopy === "waiting"
           ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
-          : []),
+          : ["deleted   the local copy (keepLocalFor is 0, so nothing is kept)"]),
     ].join("\n");
   },
   handler: async (args, ctx) => {

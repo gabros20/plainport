@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -287,6 +288,40 @@ describe("onload: the command", () => {
     });
     expect(existsSync(join(box.home, "elsewhere/web/src/main.ts"))).toBe(true);
     expect(existsSync(join(box.home, "pm.log"))).toBe(false);
+  });
+
+  test("a restore leaves no empty .plainport-staging in the root (C2)", async () => {
+    await offloaded();
+    const run = await cli(["onload", "work:web", "--json"]);
+    expect([run.code, envelope(run.out).data.restored]).toEqual([0, "restore"]);
+    expect(existsSync(join(box.home, "work/.plainport-staging"))).toBe(false);
+    await expectInvariants();
+  });
+
+  test("a project whose offload stripped nothing ends local after --no-hydrate, and status suggests no hydrate (C4)", async () => {
+    rmSync(join(dir(), "node_modules"), { recursive: true });
+    await offloaded();
+    const run = await cli(["onload", "work:web", "--no-hydrate", "--json"]);
+    expect(run.code).toBe(0);
+    expect(envelope(run.out).data.hydrate).toMatchObject({
+      status: "skipped",
+      reason:
+        "the offload stripped nothing, so the restored files are the whole folder as it was: nothing to install back",
+    });
+    const status = envelope((await cli(["status", "work:web", "--json"])).out).data;
+    expect(status.state).toBe("local");
+    expect(status.next).toBeUndefined();
+    await expectInvariants();
+  });
+
+  test("a project whose offload stripped its dependencies stays restored-unhydrated after --no-hydrate (C4)", async () => {
+    await offloaded();
+    expect((await cli(["onload", "work:web", "--no-hydrate"])).code).toBe(0);
+    const status = envelope((await cli(["status", "work:web", "--json"])).out).data;
+    expect([status.state, status.next?.command]).toEqual([
+      "restored-unhydrated",
+      "plainport hydrate work:web",
+    ]);
   });
 
   test("an occupied target exits 6 with path.occupied, and the hint names --to", async () => {

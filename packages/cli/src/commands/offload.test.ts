@@ -408,6 +408,21 @@ describe("offload: a real run", () => {
     expect(data.freedBytes).toBe(615_970);
     expect(data.keptBytes).toBe(0);
     expect(data.freedBy).toBeUndefined();
+    // The trash path is marked as already being deleted, not kept (C1).
+    expect(data.localCopy).toBe("deleted");
+  });
+
+  test("the human result without keepLocalFor says the local copy is deleted, not kept (C1)", async () => {
+    const run = await cli(["offload", "work:web", "--yes"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("\ndeleted   the local copy (keepLocalFor is 0, so nothing is kept)\n");
+    expect(run.out).not.toContain(".plainport-trash");
+  });
+
+  test("with keepLocalFor the local copy is kept (C1)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const data = envelope((await cli(["offload", "work:web", "--yes", "--json"])).out).data;
+    expect(data.localCopy).toBe("kept");
   });
 
   test("a fresh plan id stands in for --yes; once the hour is over it no longer does", async () => {

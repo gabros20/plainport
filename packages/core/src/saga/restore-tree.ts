@@ -58,6 +58,8 @@ export const producedBy = async (store: BlobStore, event: string) => {
 const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Result<boolean>> => {
   const probe = join(folder, `.plainport-case-${op.toLowerCase()}`);
   try {
+    // Made again here: another onload may have removed the holder it found empty since this one made it.
+    await io.fs.mkdirp(folder);
     await io.fs.writeBytesDurable(probe, new Uint8Array(), { exclusive: true });
   } catch (error) {
     return unreadable(folder, error, "whether its volume ignores case is unknown; nothing was restored");
@@ -86,6 +88,8 @@ export interface SnapshotTotals {
   bytes: number;
   /** The project folder's own mode, from the offloaded event (D55). */
   rootMode?: number;
+  /** What the offload stripped, from its event; absent when the event cannot be read. */
+  strippedBytes?: number;
 }
 
 /**
@@ -174,7 +178,12 @@ export const checkSnapshot = async (options: {
       }),
     );
   }
-  return ok({ files, bytes, ...(rootMode === undefined ? {} : { rootMode }) });
+  return ok({
+    files,
+    bytes,
+    ...(rootMode === undefined ? {} : { rootMode }),
+    ...(made === undefined ? {} : { strippedBytes: made.stats.strippedBytes }),
+  });
 };
 
 /**

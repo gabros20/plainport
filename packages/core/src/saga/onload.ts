@@ -35,7 +35,7 @@
 //
 // An injected fault (InjectedFault) is a simulated crash: nothing here catches it.
 
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -69,7 +69,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { noteStagingHolder } from "../recover/staging.ts";
+import { noteStagingHolder, removeHolderIfEmpty } from "../recover/staging.ts";
 import { type ProjectRegistry, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
@@ -422,6 +422,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     let files = 0;
     let bytes = 0;
     let rootMode: number | undefined;
+    let strippedBytes: number | undefined;
     if (reuse === undefined) {
       try {
         // A --to landing's holder is noted first, so gc finds a staging folder whose journal a lost write dropped.
@@ -448,6 +449,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       files = listed.value.files;
       bytes = listed.value.bytes;
       rootMode = listed.value.rootMode;
+      strippedBytes = listed.value.strippedBytes;
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
       const produced = await producedBy(store.blob, made.event);
@@ -505,7 +507,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       return swapAndCommit(saga, lock, files, bytes);
     });
     if (!result.ok) return result;
-    return hydrate(result.value);
+    return hydrate(result.value, strippedBytes);
   }
 
   /** The head onload restores over; catalog.incomplete or catalog.head-moved when it has none (D44). */
@@ -872,7 +874,10 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   }
 
   /** Agent state (later milestones), the toolchain and the frozen install (DESIGN steps 6 to 8). */
-  async function hydrate(outcome: OnloadOutcome): Promise<Result<OnloadOutcome>> {
+  async function hydrate(
+    outcome: OnloadOutcome,
+    strippedBytes: number | undefined,
+  ): Promise<Result<OnloadOutcome>> {
     phase("agents", "skip");
     if (outcome.restored === "reuse") {
       phase("toolchain", "skip");
@@ -893,6 +898,22 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       phase("toolchain", "skip");
       phase("hydrate", "skip");
       phase("hooks", "skip");
+      // An offload that stripped nothing left nothing to put back: the restored files are the whole folder, so the
+      // project is local, not restored-unhydrated (C4).
+      if (strippedBytes === 0) {
+        const marked = await markHydrated(host, paths, id, true);
+        if (!marked.ok) deps.log("warn", `registry.json was not updated: ${marked.finding.message}`);
+        return ok({
+          ...outcome,
+          hydrate: {
+            status: "skipped",
+            steps: [],
+            untrusted: [],
+            reason:
+              "the offload stripped nothing, so the restored files are the whole folder as it was: nothing to install back",
+          },
+        });
+      }
       deps.log(
         "info",
         `${ref.address} was restored without its dependencies; plainport hydrate ${shellWord(ref.address)} installs them`,
@@ -1015,6 +1036,15 @@ export const finishOnload = async (
     }
     const swapped = await saga.step("onload.swapped");
     if (!swapped.ok) return swapped;
+    // The staging holder this onload's folder left empty goes (rmdir: it stays while another onload uses it, and the
+    // next onload makes it again). Only plainport's own holder, and never a failure: an empty one left is harmless.
+    if (journal.staging !== undefined && basename(dirname(journal.staging)) === STAGING_DIR) {
+      try {
+        await removeHolderIfEmpty(io, dirname(journal.staging));
+      } catch (error) {
+        assertSystemError(error);
+      }
+    }
   }
 
   // The stub goes only while it is this project's; anything else at the path is never touched (D47).

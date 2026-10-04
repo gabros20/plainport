@@ -284,6 +284,8 @@ export interface OffloadOutcome {
   keptBytes: number;
   /** With keptBytes: what frees them, plainport gc once keepUntil has passed, or plainport recover. */
   freedBy?: string;
+  /** The folder moved to `trash`: deleted (its detached delete has started), kept (keepLocalFor) or waiting (recover). */
+  localCopy: "deleted" | "kept" | "waiting";
   /** Absent when config says stub = false. */
   stub?: string;
   /** Where the folder waits to be deleted. */
@@ -848,6 +850,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         freedBytes: freed ? verified.prepared.tree.bytes : 0,
         keptBytes: freed ? 0 : verified.prepared.tree.bytes,
         ...(freed ? {} : { freedBy: keepUntil === undefined ? "plainport recover" : "plainport gc" }),
+        localCopy: freed ? "deleted" : keepUntil === undefined ? "waiting" : "kept",
         ...(stub === undefined ? {} : { stub }),
         trash,
         ...(keepUntil === undefined ? {} : { keepUntil }),

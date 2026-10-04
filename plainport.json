@@ -1514,7 +1514,16 @@
               },
               "trash": {
                 "type": "string",
-                "description": "Where the folder waits to be deleted, by a detached process"
+                "description": "Where the folder was moved: kept there, or waiting there for recover; with localCopy deleted it is already being deleted and is soon gone"
+              },
+              "localCopy": {
+                "description": "deleted: keepLocalFor is 0 and the folder's detached delete has started, so nothing is kept (freedBytes has it). kept: offload.keepLocalFor keeps it until keepUntil, and onload renames it back. waiting: the delete could not start; plainport recover deletes it",
+                "type": "string",
+                "enum": [
+                  "deleted",
+                  "kept",
+                  "waiting"
+                ]
               },
               "keepUntil": {
                 "description": "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
@@ -2438,7 +2447,7 @@
           "name": "no-hydrate",
           "type": "boolean",
           "multiple": false,
-          "summary": "Restore the files without installing dependencies; a reused kept copy has its dependencies either way"
+          "summary": "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way"
         }
       ],
       "arguments": {
@@ -2458,7 +2467,7 @@
             "type": "string"
           },
           "no-hydrate": {
-            "description": "Restore the files without installing dependencies; a reused kept copy has its dependencies either way",
+            "description": "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way",
             "type": "boolean"
           }
         },
@@ -2606,7 +2615,7 @@
                 "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
               },
               "reason": {
-                "description": "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+                "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
                 "type": "string"
               }
             },
@@ -2642,6 +2651,14 @@
             "work:clients/acme/api"
           ],
           "summary": "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side"
+        },
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api",
+            "--no-hydrate"
+          ],
+          "summary": "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries"
         },
         {
           "argv": [
@@ -2768,7 +2785,7 @@
                 "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
               },
               "reason": {
-                "description": "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+                "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
                 "type": "string"
               }
             },

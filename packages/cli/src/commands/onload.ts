@@ -38,7 +38,7 @@ const HydrateReportSchema = z.looseObject({
   }),
   reason: z.string().optional().meta({
     description:
-      "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+      "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
   }),
 });
 
@@ -118,7 +118,7 @@ export const onload = defineCommand({
     }),
     "no-hydrate": z.boolean().optional().meta({
       description:
-        "Restore the files without installing dependencies; a reused kept copy has its dependencies either way",
+        "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way",
     }),
   }),
   output: OnloadOutputSchema,
@@ -127,6 +127,11 @@ export const onload = defineCommand({
       argv: ["onload", "work:clients/acme/api"],
       summary:
         "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
+    },
+    {
+      argv: ["onload", "work:clients/acme/api", "--no-hydrate"],
+      summary:
+        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
     },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],
@@ -152,7 +157,9 @@ export const onload = defineCommand({
         : hydrate.status === "reused"
           ? "its folder came back from the trash with its dependencies"
           : hydrate.status === "skipped"
-            ? `dependencies not installed: plainport hydrate ${data.project} installs them`
+            ? hydrate.reason !== undefined
+              ? `nothing installed: ${hydrate.reason}`
+              : `dependencies not installed: plainport hydrate ${data.project} installs them`
             : "nothing to install";
     return [
       `onloaded ${from}; ${deps}`,
