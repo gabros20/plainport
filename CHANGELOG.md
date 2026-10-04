@@ -57,6 +57,24 @@ Contract and safety:
 - Config: `config.toml` (yours) and `managed.toml` (plainport's) with merge rules and a write lock; a device file
   and a project registry in plainport's own state folder.
 
+Deletion safety (D83 to D88, ADR-0022):
+
+- One guarded deleter. Every recursive delete (the detached trash delete, `gc`, housekeeping, `recover`, staging
+  cleanup) first inspects the actual tree and refuses to delete a mount point, a plainport store, a restic
+  repository, or anything that is or lies inside a registered project's folder. A refusal keeps the folder, leaves
+  the journal pending and reports `delete.guard-refused` with the reason and the way out, then `plainport gc`.
+- A detached delete that refuses leaves a note beside the trash. `status`, `ls` and `gc` show it, and housekeeping
+  prints it without trying again. Offload's result says `deleteStarted: true` when the copy's delete has started,
+  because the folder is only freed once the delete's own check passes.
+- New findings: `store.inside-project` (a local store and a project overlap; setup, `root add`, `root bind`,
+  offload and its release refuse), `path.reserved` (a destination or root inside a `.plainport-*` holder, in any
+  letter case), `delete.guard-refused`, `catalog.head-uncertain` (an event the catalog could not read may hide a
+  newer snapshot), `store.identity-changed` (now also from `init`, which enforces the store's recorded identity)
+  and `project.unregistered` (a folder under a root that is not registered yet).
+- When the head is uncertain, `onload --snapshot S` and `restore --snapshot S` restore the newest snapshot this
+  device knows from the repository by its tag, and the next offload builds on it.
+- `recover` rolls back an onload interrupted at its start unless it was reusing the kept copy.
+
 Tooling, install and checks:
 
 - `scripts/install` installs plainport from a checkout as ADR-0020 lays it out: a read-only

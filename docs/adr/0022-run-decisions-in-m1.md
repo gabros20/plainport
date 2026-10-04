@@ -1,7 +1,7 @@
 # ADR-0022 — Run decisions carried into M1 (2026-10-04)
 
 **Context.** The M1 run (`/orchestrate`, branch `m1-local-core`) settled many questions the design left open or got
-wrong. Each was logged as a numbered run decision (D1 to D86) in `.orchestrate/decisions.md`, which is gitignored
+wrong. Each was logged as a numbered run decision (D1 to D88) in `.orchestrate/decisions.md`, which is gitignored
 as run state (ADR-0019). More than a hundred tracked files cite those numbers, in `docs/DESIGN.md`,
 `docs/machine-contract.md`, the finding catalogue and code comments, so a future reader finds a D-number with no
 definition behind it. The final review (I7) asked for the ones that changed behaviour, persisted formats or the
@@ -98,12 +98,15 @@ owner (D73).
   is recorded only on first setup.
 - **D83 (flagged).** No overlap between a project and a local store. Setup, the offload plan, the step before
   release and `recover` refuse (`store.inside-project`, not overridable) when a project's folder contains a local
-  store's path or the reverse, by real path, case-folded, symlinks resolved, against every registered store. Found
+  store's path or the reverse, by real path, case-folded, symlinks resolved, against every registered store. Overlap
+  is also found by file identity (device and inode), the live release reads the configured stores again right
+  before the rename, and `root add` and `root bind` refuse a root that is or lies inside a local store. Found
   by the final second opinion: a store under a stripped folder would be deleted with the release.
 - **D84 (flagged).** Reserved holders (`.plainport-staging`, `.plainport-trash`, anything named `.plainport-*`) are
   never a project destination for `onload --to`, `restore --to` or root registration. `gc` and housekeeping fail
   closed: a holder child that is, contains or lies inside a registered project's effective path is never deleted,
-  and deletion takes the project lock when one applies. Found by the same second opinion: `gc` could delete an
+  and deletion takes the project lock when one applies. A reserved segment is matched in any case, so
+  `.PLAINPORT-staging` on a case-insensitive volume is `path.reserved` too. Found by the same second opinion: `gc` could delete an
   onloaded working copy.
 
 ### Scan, preflight and strip set
@@ -177,7 +180,9 @@ owner (D73).
   Head-dependent defaults (onload, offload's fork rule, `gc`'s keep decisions) refuse with
   `catalog.head-uncertain` when the stub's or registry's known snapshot is not named by any readable event. Only
   an explicit `--snapshot` proceeds. Found by the final second opinion: an unreadable newest event let onload
-  restore an older snapshot silently.
+  restore an older snapshot silently. The way on is the newest snapshot this device knows (the stub's or the
+  registry's): `onload --snapshot S` and `restore --snapshot S` find S in restic by its operation tag, and `onload`
+  writes S, not the older fold head, as its `over` and as the registry's base.
 
 ### Sagas, release and recover
 
@@ -214,6 +219,29 @@ owner (D73).
   dependency folders. The view model lives in core; the CLI only renders.
 - **D67.** The detached delete removes the trash, then its claim, then the journal. The crash-matrix test hook is
   compiled out of release builds and a test checks the release binary holds none of its names.
+
+### Deletion guard and late recover fixes
+
+- **D87 (flagged).** One guarded deleter. Every recursive delete plainport makes (the detached trash delete, `gc`,
+  housekeeping, `recover`'s trash deletes and roll-backs, staging cleanup, a renamed-back trash's leftovers) runs a
+  guard immediately before deleting, over the actual tree and independent of config and path spelling. It walks
+  with `lstat` and never follows links, and it refuses when: a directory is a mount point (a different device from
+  the tree root); the tree holds a plainport store marker (`meta/v1/store.json`) or a restic repository (a restic
+  key in `keys/` beside `config` and `data/`), anywhere, stripped folders included; the tree is, holds or lies
+  inside a registered project's folder (a path that cannot be resolved refuses); or the config does not read
+  cleanly. A refusal leaves the journal pending with `delete.guard-refused`, naming the reason and the way out,
+  then `plainport gc`. The detached delete runs the guard in its own process right before it deletes. This replaces
+  patching overlap cases one by one; the D83 and D84 path checks stay as early, friendly refusals.
+- **D87 follow-ups (flagged).** A refusing detached delete leaves `<op>.refused` with its finding. Housekeeping
+  prints a notice and does not relaunch; `status`, `ls` and `gc` report it. Offload says `deleteStarted` (the delete
+  has started and checks the folder first) instead of claiming the copy is freed. A refused or failed launch puts
+  back the `keepUntil` that housekeeping took off, so the kept trash can still be renamed back. A folder this
+  user cannot read is opened up before the guard refuses.
+- **D88 (flagged).** `recover` routes `onload.begin` through the swap check only when the journal records reuse
+  mode; an ordinary restore-mode onload interrupted there rolls back, so a folder made at the destination
+  afterwards is never taken for the onload's own. `onload` and `restore --snapshot S` under an uncertain head reach
+  the tag lookup even when no readable event names the project, taking its project and root identity from the
+  validated stub and registry.
 
 ### The M1 gate
 
