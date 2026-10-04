@@ -23,6 +23,9 @@ import { makeGitFixture } from "../../packages/core/src/testing/git-fixture.ts";
 /** Paths the Node plugin strips from this project (not in the snapshot; regenerable). */
 export const STRIPPED = ["node_modules"] as const;
 
+/** src/extra.ts's mode: the discarded scenario's chmod 000 restores it. */
+export const EXTRA_MODE = 0o644;
+
 export interface ProjectTemplate {
   /** The project folder to copy. */
   dir: string;
@@ -45,6 +48,8 @@ export const makeProjectTemplate = (): ProjectTemplate => {
   git.origin(dir);
   // Committed after the push: unpushed.
   git.write(join(dir, "src/extra.ts"), "export const extra = 2;\n");
+  // The discarded scenario makes this file unreadable and then gives it back exactly this mode, whatever the umask.
+  chmodSync(join(dir, "src/extra.ts"), EXTRA_MODE);
   git.git(dir, "add", "src/extra.ts");
   git.git(dir, "commit", "-q", "-m", "unpushed");
   // A stash, then an uncommitted edit on top.

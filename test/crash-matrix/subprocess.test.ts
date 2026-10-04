@@ -8,6 +8,11 @@
 // journal for a watcher to see. Branches that need the world to change mid-run pause the binary just before restic
 // starts (PLAINPORT_TEST_PAUSE_AT) while the test changes it, as the in-process variant's fake engine hooks do.
 //
+// macOS only in M1: the binary has only the macOS host, so on Linux its preflight refuses safely (no BSD `find -flags`
+// for fs.dataless, no /usr/sbin/lsof for proc.open-files) before any step a row needs. The Linux host (host-linux)
+// arrives with M3 (Machines), whose VPS leg needs it; then these rows run on Linux as well. The in-process variant
+// runs everywhere.
+//
 // On macOS each row's root lives on a case-sensitive APFS sparse disk image (hdiutil, growing as written) and the
 // project gains a case pair; the image is detached and deleted afterwards. Elsewhere the root is in the row's sandbox.
 // Rows are independent (each has its own home, root and store), so they run a few at a time
@@ -15,7 +20,7 @@
 // and one row makes some fifteen. A row's deadline starts once it has its slot; whatever it started is killed, restic's
 // process groups included, when it ends, passed or failed.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
@@ -40,7 +45,7 @@ import { hostTarget } from "../../packages/core/src/tools.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { attachImage, type DiskImage } from "../disk-image.ts";
-import { onMac } from "../platform.ts";
+import { macOnlyTests, onMac } from "../platform.ts";
 import { describeT1, tierEnabled } from "../tiers.ts";
 import {
   crashCopyProblems,
@@ -56,6 +61,7 @@ import {
 } from "./checks.ts";
 import {
   copyProject,
+  EXTRA_MODE,
   hashEntry,
   hashTree,
   makeProjectTemplate,
@@ -108,7 +114,7 @@ let volume: string | undefined;
 const runs = new Set<RowRun>();
 
 beforeAll(async () => {
-  if (!tierEnabled(1)) return;
+  if (!tierEnabled(1) || !onMac) return;
   scratch = mkdtempSync(join(tmpdir(), "plainport-crash-sub-"));
   binary = join(scratch, "plainport");
   const build = Bun.spawnSync(
@@ -145,7 +151,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  if (!tierEnabled(1)) return;
+  if (!tierEnabled(1) || !onMac) return;
   for (const r of runs) r.stop();
   try {
     await image?.remove();
@@ -267,7 +273,7 @@ class RowRun {
     this.stop();
     runs.delete(this);
     try {
-      chmodSync(join(this.dir, "src/extra.ts"), 0o644);
+      chmodSync(join(this.dir, "src/extra.ts"), EXTRA_MODE);
     } catch {}
     this.box.cleanup();
     if (volume !== undefined) removeTree(this.area);
@@ -425,7 +431,7 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
     const ran = await r.run(offloadArgs, { ...crashAt(row.point), ...pauseAtUpload }, () =>
       chmodSync(join(r.dir, "src/extra.ts"), 0o000),
     );
-    chmodSync(join(r.dir, "src/extra.ts"), 0o644);
+    chmodSync(join(r.dir, "src/extra.ts"), EXTRA_MODE);
     killed(ran, "offload");
   },
   diverged: async (r, row) => {
@@ -530,6 +536,9 @@ const rowWork = async (r: RowRun, row: Row, options: RowOptions): Promise<string
   // The dead process's lock file is still there, naming a pid that is gone: recover takes it over (D63).
   const id = r.projectId();
   const stale = id !== undefined && existsSync(join(r.box.paths.locksDir, `${id}.lock`));
+  // Past the detached delete's start, that delete outlives the binary: let it finish, so recover meets one state.
+  if (row.point === MATRIX_POINTS.raced) await settleJournals(r.box.paths);
+  const journalAtRecover = crashedOp !== undefined && journalSteps(r.box.paths).has(crashedOp);
   const report = await r.recover();
   await settleJournals(r.box.paths);
   const again = await r.recover();
@@ -540,6 +549,7 @@ const rowWork = async (r: RowRun, row: Row, options: RowOptions): Promise<string
     await rowProblems(row, w, {
       crashedStep,
       crashedOp,
+      journalAtRecover,
       report,
       again,
       reference: r.reference,
@@ -559,30 +569,38 @@ const rowTest = (row: Row) => async () => {
 };
 
 describeT1("crash matrix, SIGKILL subprocess", () => {
-  test("a binary built by scripts/build.ts ignores the fault variables: the offload runs to its end", async () => {
-    const release = join(scratch, "plainport-release");
-    const build = Bun.spawnSync(
-      [process.execPath, join(checkout, "scripts/build.ts"), "--outfile", release],
-      { cwd: checkout, stdout: "pipe", stderr: "pipe" },
-    );
-    expect(build.exitCode).toBe(0);
-    const r = new RowRun(++rowsMade);
-    try {
-      await r.init();
-      const ran = await r.run(offloadArgs, crashAt("offload.committed"), undefined, release);
-      expect({ code: ran.code, signal: ran.signal }).toEqual({ code: 0, signal: null });
-    } finally {
-      r.cleanup();
-      removeTree(release);
-    }
-  }, 120_000);
+  // Every test here is macOS-only in M1 (see the file comment), counted so a skip never passes for a run on a Mac.
+  const macTest = macOnlyTests();
+  const macRow = macOnlyTests(process.env, { concurrent: true });
+
+  macTest(
+    "a binary built by scripts/build.ts ignores the fault variables: the offload runs to its end",
+    async () => {
+      const release = join(scratch, "plainport-release");
+      const build = Bun.spawnSync(
+        [process.execPath, join(checkout, "scripts/build.ts"), "--outfile", release],
+        { cwd: checkout, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(build.exitCode).toBe(0);
+      const r = new RowRun(++rowsMade);
+      try {
+        await r.init();
+        const ran = await r.run(offloadArgs, crashAt("offload.committed"), undefined, release);
+        expect({ code: ran.code, signal: ran.signal }).toEqual({ code: 0, signal: null });
+      } finally {
+        r.cleanup();
+        removeTree(release);
+      }
+    },
+    120_000,
+  );
 
   for (const [saga, rows] of [
     ["offload", OFFLOAD_ROWS],
     ["onload", ONLOAD_ROWS],
   ] as const)
     describe(`${saga} (${rows.length} rows)`, () => {
-      for (const row of rows) test.concurrent(row.name, rowTest(row), TEST_MS);
+      for (const row of rows) macRow(row.name, rowTest(row), TEST_MS);
     });
 
   // A crash while restic uploads, not at a step: once restic has written a pack of this upload, but no snapshot yet,
@@ -592,7 +610,7 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
   // (its rule allows nothing else but pending, which the row refuses), the folder is untouched, and a later offload
   // succeeds over the dead restic's lock and leftover packs and becomes the head, never a half-written snapshot of
   // the crashed operation.
-  test.concurrent(
+  macRow(
     `${MATRIX_POINTS.upload} · mid-upload SIGKILL of plainport and restic's process group`,
     async () => {
       let leftover = { packs: 0, locks: 0, snapshots: -1 };

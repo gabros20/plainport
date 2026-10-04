@@ -11,9 +11,12 @@ type Body = () => unknown;
 
 /**
  * A `test` for this file's macOS-only tests: skipped off darwin, counted on darwin. Call it once at the top of the
- * file; it registers the afterAll that checks the count.
+ * file; it registers the afterAll that checks the count. `concurrent` declares them as test.concurrent.
  */
-export const macOnlyTests = (env: Record<string, string | undefined> = process.env) => {
+export const macOnlyTests = (
+  env: Record<string, string | undefined> = process.env,
+  options: { concurrent?: boolean } = {},
+) => {
   let declared = 0;
   let ran = 0;
   afterAll(() => {
@@ -22,7 +25,7 @@ export const macOnlyTests = (env: Record<string, string | undefined> = process.e
   });
   return (name: string, body: Body, timeout?: number): void => {
     declared++;
-    test.skipIf(!onMac)(
+    (options.concurrent ? test.concurrent : test).skipIf(!onMac)(
       `[macOS] ${name}`,
       async () => {
         ran++;
