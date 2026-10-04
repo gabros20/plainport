@@ -226,6 +226,8 @@ const rewrite = async (journal: Journal) => writeJournal(testHost(), box.paths, 
 const expectInvariants = async (settleMs?: number) =>
   expect(
     await invariantViolations({
+      // These runs use the real clock (testHost), so their deadlines are compared with it.
+      now: new Date(),
       paths: box.paths,
       device: device.id,
       project: { id: await projectId(), dir },

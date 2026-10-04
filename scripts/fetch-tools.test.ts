@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Fetcher, fetchTools, type Lock, parseLock } from "./fetch-tools.ts";
+import { type Fetcher, fetchTools, type Lock, parseLock, pinnedProblems } from "./fetch-tools.ts";
 
 const fixtures = join(import.meta.dir, "../test/fixtures/tools");
 const resticArchive = new Uint8Array(readFileSync(join(fixtures, "restic-fixture.bz2")));
@@ -91,6 +91,24 @@ describe("tools: fetch-tools", () => {
     expect(result.message).toContain(fixtureLock().tools.restic.targets["darwin-arm64"].sha256);
     expect(existsSync(destRoot)).toBe(false);
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+  test("pinnedProblems passes fetched tools and names a stale lock, a changed binary or a missing pin", async () => {
+    await fetchTools({ lock: fixtureLock(), targets: ["darwin-arm64"], destRoot, fetcher: fixtureFetcher() });
+    const folder = join(destRoot, "darwin-arm64");
+    expect(pinnedProblems(folder, fixtureLock(), "darwin-arm64")).toEqual([]);
+    const bumped = fixtureLock();
+    bumped.tools.rclone.version = "9.9.9";
+    expect(pinnedProblems(folder, bumped, "darwin-arm64")).toEqual([
+      `rclone in ${folder} is not the 9.9.9 tools.lock.json pins`,
+    ]);
+    chmodSync(join(folder, "restic"), 0o755);
+    writeFileSync(join(folder, "restic"), "#!/bin/sh\n");
+    rmSync(join(folder, ".rclone.pin"));
+    expect(pinnedProblems(folder, fixtureLock(), "darwin-arm64")).toEqual([
+      `restic in ${folder} is not the 0.0.0 tools.lock.json pins`,
+      `rclone in ${folder} is not the 0.0.0 tools.lock.json pins`,
+    ]);
   });
 
   test("a mismatch on an existing install leaves the installed binary alone", async () => {
