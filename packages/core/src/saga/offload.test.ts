@@ -625,7 +625,7 @@ describe("offload: approved plans", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     return prepared.plan;
   };
 
@@ -1020,7 +1020,7 @@ describe("offload: fix wave r1", () => {
         keepDeps: true,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     const without = await offload({ plan: prepared.plan.id });
     expect(without.ok ? 0 : [without.exitCode, without.finding.code]).toEqual([6, "plan.stale"]);
     expect(without.ok ? undefined : without.data).toMatchObject({
@@ -1047,7 +1047,7 @@ describe("offload: fix wave r1", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     config('[strip]\nextra = ["src"]');
     const result = await offload({ plan: prepared.plan.id });
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
@@ -1422,7 +1422,7 @@ describe("offload: fix wave r2", () => {
         ...over,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     return prepared.plan;
   };
 
@@ -1772,7 +1772,7 @@ describe("offload: fix wave r3 (D50)", () => {
         storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
       }),
     );
-    await savePlan(testHost(), box.paths, prepared.plan, new Date());
+    await savePlan(testHost(), box.paths, prepared.plan);
     const listed = await listPlans(testHost(), box.paths, new Date());
     expect(listed.map((p) => p.id)).toContain(prepared.plan.id);
     value(await offload({ plan: prepared.plan.id, allow: ["git.locked"] }));
@@ -2377,7 +2377,7 @@ describe("offload: fix wave q2", () => {
     );
     expect(prepared.plan.fp).toBe(2);
     const { fp: _, ...older } = prepared.plan;
-    await savePlan(testHost(), box.paths, older, new Date());
+    await savePlan(testHost(), box.paths, older);
     const result = await offload({ plan: older.id });
     expect(result.ok ? 0 : result.finding.code).toBe("plan.stale");
     expect(engine.calls).toHaveLength(0);
@@ -2465,6 +2465,26 @@ describe("offload: fix wave q2", () => {
     );
     expect(order).toEqual(["lock", "scan", "rename"]);
     await expectInvariants();
+  });
+});
+
+describe("offload: long-expired plans go with a real run, never with a dry run (N5)", () => {
+  test("a real offload removes a plan expired more than an hour ago", async () => {
+    const prepared = value(
+      await prepareOffload(testHost(), quietChecks, [nodePlugin], {
+        dir,
+        project: { address: "work:web", root: "work", path: "web" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        env: { HOME: box.home, PATH },
+        now: new Date(Date.now() - 3 * 86_400_000),
+        storeId: value(await readRegistry(testHost(), box.paths)).stores?.ssd as string,
+      }),
+    );
+    await savePlan(testHost(), box.paths, prepared.plan);
+    const file = join(box.paths.plansDir, `${prepared.plan.id}.json`);
+    expect(existsSync(file)).toBe(true);
+    value(await offload());
+    expect(existsSync(file)).toBe(false);
   });
 });
 

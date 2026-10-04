@@ -289,7 +289,7 @@ export const offload = defineCommand({
     if (!planned.ok) return planned;
     let saved = true;
     try {
-      await savePlan(ctx.io, paths, planned.value, now);
+      await savePlan(ctx.io, paths, planned.value);
     } catch (error) {
       saved = false;
       // The preview stands without its file; only --plan <id> cannot find it.

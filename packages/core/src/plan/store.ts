@@ -60,25 +60,37 @@ const readFile = async (io: LocalIo, path: string): Promise<Result<Plan | undefi
 };
 
 /**
- * Saves a plan as plans/<id>.json, atomically. Plans that expired more than an hour before `now` are removed first,
- * best effort; younger ones stay, so a late --plan still hears plan.expired rather than plan.not-found.
+ * Removes plans that expired more than an hour before `now`, best effort, never `keep`; younger ones stay, so a late
+ * --plan still hears plan.expired rather than plan.not-found. Only a real run prunes: a dry run writes nothing but its
+ * plan file (D36, D61, N5). A folder that cannot be listed is left for the next run.
  */
-export const savePlan = async (io: LocalIo, paths: PlainportPaths, plan: Plan, now: Date): Promise<void> => {
-  await io.fs.mkdirp(paths.plansDir);
-  for (const name of await io.fs.readdir(paths.plansDir)) {
+export const prunePlans = async (io: LocalIo, paths: PlainportPaths, now: Date, keep?: string): Promise<void> => {
+  let names: string[];
+  try {
+    names = await io.fs.readdir(paths.plansDir);
+  } catch (error) {
+    systemErrorCode(error);
+    return;
+  }
+  for (const name of names) {
     const id = name.slice(0, -SUFFIX.length);
-    if (!name.endsWith(SUFFIX) || !isUlid(id) || id === plan.id) continue;
+    if (!name.endsWith(SUFFIX) || !isUlid(id) || id === keep) continue;
     const old = await readFile(io, join(paths.plansDir, name));
     if (!old.ok || old.value === undefined) continue;
     if (Date.parse(old.value.expiresAt) + PLAN_TTL_MS <= now.getTime()) {
       try {
         await io.fs.unlink(join(paths.plansDir, name));
       } catch (error) {
-        // Already gone, or not removable now: it is tried again with the next plan.
+        // Already gone, or not removable now: it is tried again with the next run.
         systemErrorCode(error);
       }
     }
   }
+};
+
+/** Saves a plan as plans/<id>.json, atomically; nothing else is written or removed (prunePlans does that). */
+export const savePlan = async (io: LocalIo, paths: PlainportPaths, plan: Plan): Promise<void> => {
+  await io.fs.mkdirp(paths.plansDir);
   await writeAtomic(io, fileOf(paths, plan.id), `${JSON.stringify({ v: 1, plan }, null, 2)}\n`);
 };
 

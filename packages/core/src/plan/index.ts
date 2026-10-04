@@ -29,7 +29,7 @@ export {
   type StripEntry,
   StripEntrySchema,
 } from "./schema.ts";
-export { listPlans, readPlan, savePlan } from "./store.ts";
+export { listPlans, prunePlans, readPlan, savePlan } from "./store.ts";
 export {
   type KeptReason,
   type ProposedStrip,

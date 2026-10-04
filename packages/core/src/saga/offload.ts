@@ -89,7 +89,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import { type PlanBoundary, type PreparedOffload, prepareOffload } from "../plan/planner.ts";
 import type { Plan } from "../plan/schema.ts";
 import { planBlocker, planCommand } from "../plan/schema.ts";
-import { readPlan, savePlan } from "../plan/store.ts";
+import { prunePlans, readPlan, savePlan } from "../plan/store.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
@@ -427,6 +427,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   const located = await locate(io, ref);
   if (!located.ok) return located;
   const folder = located.value;
+  // Long-expired plans go with a real run, never with a dry run, which writes only its plan file (N5).
+  await prunePlans(io, paths, clock(), req.plan);
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
@@ -610,7 +612,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       let saved = planBlocker(fresh.value.plan) === undefined;
       if (saved) {
         try {
-          await savePlan(io, paths, fresh.value.plan, clock());
+          await savePlan(io, paths, fresh.value.plan);
         } catch (error) {
           assertSystemError(error);
           saved = false;
