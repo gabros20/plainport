@@ -25,7 +25,14 @@ import { acquireLock, resolvePaths } from "@plainport/core";
 import Ajv2020 from "ajv/dist/2020";
 import { testHost } from "../../core/src/testing/host.ts";
 import { REGISTRY } from "./commands/index.ts";
-import { generateFiles, staleFiles, writeFiles } from "./generate.ts";
+import {
+  FINDINGS_BEGIN,
+  FINDINGS_END,
+  findingsTable,
+  generateFiles,
+  staleFiles,
+  writeFiles,
+} from "./generate.ts";
 import type { AnyCommand, Ports, Registry } from "./registry.ts";
 import { type Captured, capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
 
@@ -700,6 +707,71 @@ describe("generated contract files", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the finding table in docs/machine-contract.md §5 (I2)", () => {
+  test("is generated from the catalogue: one row per code, with its severity, allowable, exit code and summary", () => {
+    const doc = readFileSync(join(repoRoot, "docs/machine-contract.md"), "utf8");
+    const rows = doc
+      .split("\n")
+      .flatMap(
+        (line) =>
+          /^\| `([a-z][a-z0-9.-]*)` \| (info|warn|block) \| (yes|no) \| (\d+) \| (.*) \|$/.exec(line) ?? [],
+      )
+      .filter((_, i) => i % 6 === 1);
+    expect(rows.sort()).toEqual(Object.keys(FINDINGS).sort());
+    expect(findingsTable()).toContain(
+      `| \`project.unregistered\` | block | no | 4 | ${FINDINGS["project.unregistered"].summary} |`,
+    );
+    expect(doc).toContain(`${FINDINGS_BEGIN}\n${findingsTable()}\n${FINDINGS_END}`);
+  });
+
+  test("staleFiles reports the doc when its table drifts, and writeFiles puts it back", () => {
+    const root = mkdtempSync(join(tmpdir(), "plainport-doc-"));
+    try {
+      writeFiles(root, REGISTRY);
+      mkdirSync(join(root, "docs"));
+      const doc = join(root, "docs/machine-contract.md");
+      writeFileSync(doc, `# x\n\n${FINDINGS_BEGIN}\n| old |\n${FINDINGS_END}\n\nafter\n`);
+      expect(staleFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(writeFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(readFileSync(doc, "utf8")).toBe(
+        `# x\n\n${FINDINGS_BEGIN}\n${findingsTable()}\n${FINDINGS_END}\n\nafter\n`,
+      );
+      expect(staleFiles(root, REGISTRY)).toEqual([]);
+      writeFileSync(doc, "# no markers\n");
+      expect(staleFiles(root, REGISTRY)).toEqual(["docs/machine-contract.md"]);
+      expect(() => writeFiles(root, REGISTRY)).toThrow(/markers/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the envelopes the doc shows (§1, §2) validate against the published envelope and their command's output (N8)", () => {
+    const doc = readFileSync(join(repoRoot, "docs/machine-contract.md"), "utf8");
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    const checkEnvelope = ajv.compile(contractJsonSchemas().envelope);
+    const shown = [...doc.matchAll(/^\{"plainport_json": ?1.*\}$/gm)].map((m) => JSON.parse(m[0]));
+    expect(shown.length).toBeGreaterThanOrEqual(4);
+    for (const envelope of shown) {
+      expect(checkEnvelope(envelope) ? [] : checkEnvelope.errors).toEqual([]);
+      if (envelope.data === undefined) continue;
+      const published = manifest.commands.find((c: { name: string }) => c.name === envelope.verb);
+      const checkData = ajv.compile(published.output);
+      expect(checkData(envelope.data) ? [] : checkData.errors).toEqual([]);
+    }
+  });
+
+  test("every finding code the sources emit is in the catalogue", () => {
+    const codes = new Set<string>();
+    for (const { text } of sources())
+      for (const m of text.matchAll(
+        /(?:\bcode: |finding\(|fail\(finding\()"([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+)"/g,
+      ))
+        codes.add(m[1] as string);
+    expect(codes.size).toBeGreaterThan(50);
+    expect([...codes].filter((code) => !Object.hasOwn(FINDINGS, code))).toEqual([]);
   });
 });
 
