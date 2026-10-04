@@ -133,6 +133,10 @@ const OffloadOutputSchema = z.union([
     keepUntil: z.iso.datetime().optional().meta({
       description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
     }),
+    deleteStarted: z.literal(true).optional().meta({
+      description:
+        "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
+    }),
   }),
   z
     .looseObject({
@@ -197,7 +201,7 @@ export const offload = defineCommand({
         : `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
     const kept = data.keptBytes === undefined ? "" : ` (${formatBytes(data.keptBytes)})`;
     return [
-      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : `freed ${formatBytes(data.freedBytes)}`}`,
+      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : data.deleteStarted === true ? `freeing ${formatBytes(data.freedBytes)}` : `freed ${formatBytes(data.freedBytes)}`}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
       ...(data.keepUntil !== undefined
         ? [
@@ -205,7 +209,9 @@ export const offload = defineCommand({
           ]
         : data.localCopy === "waiting"
           ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
-          : ["deleted   the local copy (keepLocalFor is 0, so nothing is kept)"]),
+          : [
+              "deleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept",
+            ]),
     ].join("\n");
   },
   handler: async (args, ctx) => {

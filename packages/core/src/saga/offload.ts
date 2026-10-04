@@ -287,6 +287,11 @@ export interface OffloadOutcome {
   freedBy?: string;
   /** The folder moved to `trash`: deleted (its detached delete has started), kept (keepLocalFor) or waiting (recover). */
   localCopy: "deleted" | "kept" | "waiting";
+  /**
+   * With localCopy deleted: the detached delete has started, nothing more (r3 #4). It checks the folder before it
+   * deletes (D87); a refusal keeps it, and status, ls, gc and the start of the next command say why.
+   */
+  deleteStarted?: true;
   /** Absent when config says stub = false. */
   stub?: string;
   /** Where the folder is kept or waits to be deleted; absent when localCopy is deleted (D77). */
@@ -867,6 +872,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         keptBytes: freed ? 0 : verified.prepared.tree.bytes,
         ...(freed ? {} : { freedBy: keepUntil === undefined ? "plainport recover" : "plainport gc" }),
         localCopy: freed ? "deleted" : keepUntil === undefined ? "waiting" : "kept",
+        ...(freed ? { deleteStarted: true as const } : {}),
         ...(stub === undefined ? {} : { stub }),
         // A deleted local copy's trash is already going, so it is not named (D77).
         ...(freed ? {} : { trash }),

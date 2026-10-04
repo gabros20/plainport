@@ -38,7 +38,8 @@ export interface HostPorts extends LocalIo {
     trash: string,
     journal: string,
     device: string,
-    context: { paths: PlainportPaths; env: Env },
+    /** keepUntil: the deadline the caller took off the journal, which the child puts back if its guard refuses. */
+    context: { paths: PlainportPaths; env: Env; keepUntil?: string },
   ): Promise<Result<{ pid: number }>>;
 }
 

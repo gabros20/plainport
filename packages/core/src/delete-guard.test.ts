@@ -44,7 +44,9 @@ const guard = (path = tree, options = {}) =>
   deleteGuard({ io, paths: box.paths, env: { HOME: box.home } }, path, options);
 const refusal = async (path = tree, options = {}) => {
   const result = await guard(path, options);
-  return result.ok ? "allowed" : `${result.finding.code}: ${result.finding.message}`;
+  return result.ok
+    ? "allowed"
+    : `${result.finding.code}: ${result.finding.message} | fix: ${result.finding.fix}`;
 };
 const register = (entry: { path: string; override?: string }) =>
   updateRegistry(io, box.paths, (registry) =>
@@ -72,12 +74,38 @@ describe("delete guard (D87)", () => {
     expect(await refusal()).toContain("meta/v1/store.json");
   });
 
-  test("(b) a restic repository layout (config beside keys/ and data/) refuses", async () => {
+  test("(b) a restic repository (config beside keys/ and data/, and keys/ holding a restic key) refuses", async () => {
     const repo = join(tree, "web/.next/archive");
     mkdirSync(join(repo, "keys"), { recursive: true });
-    mkdirSync(join(repo, "data"), { recursive: true });
-    writeFileSync(join(repo, "config"), "x");
-    expect(await refusal()).toContain("a restic repository");
+    mkdirSync(join(repo, "data/00"), { recursive: true });
+    writeFileSync(join(repo, "config"), Buffer.alloc(155, 7));
+    // As restic 0.19.1 writes it: plain JSON with the scrypt parameters, the salt and the encrypted master key.
+    writeFileSync(
+      join(repo, "keys", "a".repeat(64)),
+      JSON.stringify({
+        created: "2026-10-04T12:00:00Z",
+        kdf: "scrypt",
+        N: 32768,
+        r: 8,
+        p: 12,
+        salt: "c2FsdA==",
+        data: "ZGF0YQ==",
+      }),
+    );
+    const said = await refusal();
+    expect(said).toContain("is a restic repository");
+    expect(said).toContain("mv ");
+    expect(said).toContain("plainport gc");
+  });
+
+  test("(b) a project's own config + keys/ + data/ is no restic repository: no false refusal (r3 #6)", async () => {
+    const app = join(tree, "web/fixture");
+    mkdirSync(join(app, "keys"), { recursive: true });
+    mkdirSync(join(app, "data"), { recursive: true });
+    writeFileSync(join(app, "config"), "[app]\nname = demo\n");
+    writeFileSync(join(app, "keys", "b".repeat(64)), "-----BEGIN PUBLIC KEY-----\n");
+    writeFileSync(join(app, "keys", "deploy.pub"), "ssh-ed25519 AAAA");
+    expect(await refusal()).toBe("allowed");
   });
 
   test("(a) a link is never followed: a symlink to a store outside is no refusal, and the store is not reached", async () => {
@@ -103,12 +131,38 @@ describe("delete guard (D87)", () => {
     expect(await refusal()).toContain("is a mount point");
   });
 
-  test("(a) a folder that cannot be read refuses: what it holds is unknown", async () => {
-    const closed = join(tree, "web/closed");
+  test("(a) a folder this user cannot read is opened up (as the delete would) and checked, not refused (r3 #6)", async () => {
+    const closed = join(tree, "web/node_modules/pkg/bin");
+    mkdirSync(closed, { recursive: true });
+    writeFileSync(join(closed, "x"), "");
+    chmodSync(closed, 0o111);
+    try {
+      expect(await refusal()).toBe("allowed");
+    } finally {
+      chmodSync(closed, 0o755);
+    }
+  });
+
+  test("(a) a folder that cannot be opened up (another user's) refuses, naming chown or mv and plainport gc", async () => {
+    const closed = join(tree, "web/root-owned");
     mkdirSync(closed);
     chmodSync(closed, 0o000);
+    const real = testHost();
+    io = {
+      ...real,
+      fs: {
+        ...real.fs,
+        chmod: async (path, mode) => {
+          if (path === closed) throw Object.assign(new Error("EPERM: not the owner"), { code: "EPERM" });
+          return real.fs.chmod(path, mode);
+        },
+      },
+    };
     try {
-      expect(await refusal()).toContain("cannot be read");
+      const said = await refusal();
+      expect(said).toContain("cannot be read");
+      expect(said).toContain("chown");
+      expect(said).toContain("plainport gc");
     } finally {
       chmodSync(closed, 0o755);
     }

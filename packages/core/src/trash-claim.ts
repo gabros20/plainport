@@ -7,6 +7,7 @@
 // earlier boot, a dead pid, a claim that cannot be read (the trash is committed and released, so a takeover loses no
 // work). A pid reused within one boot keeps a claim live while that process lives (as D63).
 
+import { type Finding, FindingSchema } from "@plainport/contract";
 import { z } from "zod";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 
@@ -65,3 +66,30 @@ export const trashClaimJsonSchemas = (): Record<"trash-claim", Record<string, un
     unknown
   >,
 });
+
+/**
+ * `<root>/.plainport-trash/<op>.refused`: the finding of the delete guard's last refusal of that trash (D87), left by
+ * the detached delete (which has no one to tell) and by every in-process deleter, so housekeeping, gc and status can
+ * say why a released trash stays and how to let it go. Removed with the trash once it is deleted.
+ */
+export const trashRefusedFile = (trash: string): string => `${trash}.refused`;
+
+/** Leaves the refusal note; best effort, since the refusal itself is what keeps the trash safe. */
+export const noteRefusal = async (io: LocalIo, trash: string, refusal: Finding): Promise<void> => {
+  try {
+    await io.fs.writeTextDurable(trashRefusedFile(trash), `${JSON.stringify(refusal)}\n`);
+  } catch (error) {
+    systemErrorCode(error);
+  }
+};
+
+/** The last refusal noted for a trash, if any; a note that does not read is no note. */
+export const readRefusal = async (io: LocalIo, trash: string): Promise<Finding | undefined> => {
+  try {
+    const parsed = FindingSchema.safeParse(JSON.parse(await io.fs.readText(trashRefusedFile(trash))));
+    return parsed.success ? parsed.data : undefined;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) systemErrorCode(error);
+    return undefined;
+  }
+};
