@@ -19,14 +19,14 @@ import { dirname, join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
 import { readDevice } from "../device.ts";
 import { removeEmptyHolder } from "../holder.ts";
-import { type LocalIo, systemErrorCode } from "../io.ts";
+import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
-  JournalSchema,
   journalFile,
   type OffloadJournal,
   readJournals,
   removeJournal,
+  rereadJournal,
   writeJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -86,17 +86,6 @@ const itemOf = (journal: OffloadJournal): TrashItem => ({
   trash: journal.trash ?? offloadTrashOf(journal),
   ...(journal.keepUntil === undefined ? {} : { keepUntil: journal.keepUntil }),
 });
-
-const reread = async (io: LocalIo, paths: PlainportPaths, op: string): Promise<Journal | undefined> => {
-  try {
-    const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalFile(paths, op))));
-    return parsed.success ? parsed.data : undefined;
-  } catch (error) {
-    if (error instanceof SyntaxError) return undefined;
-    systemErrorCode(error);
-    return undefined;
-  }
-};
 
 /** Bytes of the files below a folder, never entering a folder named in `skip`; what cannot be read counts as nothing. */
 export const treeBytes = async (
@@ -168,7 +157,13 @@ const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
  */
 const finished = async (io: LocalIo, journal: OffloadJournal): Promise<boolean> => {
   if ((await rootAway(io, journal)) !== undefined) return false;
-  return !(await stillThere(io, itemOf(journal).trash));
+  try {
+    return !(await stillThere(io, itemOf(journal).trash));
+  } catch (error) {
+    // A trash that cannot be looked at is not known to be gone: deleting it is what then says why (rule 7).
+    assertSystemError(error);
+    return false;
+  }
 };
 
 /** This device's id, which a trash claim names (D64); empty when it cannot be read, so no claim is this device's. */
@@ -258,7 +253,9 @@ export const collectTrash = async (
       { id: journal.project.id, address: journal.project.address },
       async () => {
         // Read again under the lock: an onload may have renamed the folder back, a detached delete finished it.
-        const now = await reread(io, paths, journal.op);
+        const reread = await rereadJournal(io, paths, journal.op);
+        if (!reread.ok) return reread;
+        const now = reread.value;
         if (now === undefined || !released(now)) return ok(undefined);
         let journals: Journal[];
         try {
@@ -520,7 +517,9 @@ export const housekeeping = async (
           { io, paths, clock, log: deps.log },
           { id: journal.project.id, address: journal.project.address },
           async () => {
-            const now = await reread(io, paths, journal.op);
+            const reread = await rereadJournal(io, paths, journal.op);
+            if (!reread.ok) return reread;
+            const now = reread.value;
             if (now === undefined || !released(now) || !(await finished(io, now))) return ok(undefined);
             if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
             try {
@@ -551,7 +550,9 @@ export const housekeeping = async (
       gate,
       { id: journal.project.id, address: journal.project.address },
       async () => {
-        const now = await reread(io, paths, journal.op);
+        const reread = await rereadJournal(io, paths, journal.op);
+        if (!reread.ok) return reread;
+        const now = reread.value;
         if (now === undefined || !released(now) || now.keepUntil === undefined) return ok(undefined);
         // An onload may have started renaming the trash back since the journals were first read.
         let current: Journal[];

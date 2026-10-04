@@ -53,12 +53,12 @@ import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
-  JournalSchema,
   journalFile,
   type OffloadJournal,
   type OnloadJournal,
   readJournals,
   removeJournal,
+  rereadJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
@@ -321,7 +321,15 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
             continue;
           }
           // Read again under the lock: a detached delete or the onload before it may have closed it since.
-          const now = await reread(journal.op);
+          const reread = await rereadJournal(io, paths, journal.op);
+          if (!reread.ok) {
+            // Left as it is, and it holds the project's later operations back, as any pending one does.
+            const left = pending(journal, reread);
+            held ??= left.op;
+            out.push(left);
+            continue;
+          }
+          const now = reread.value;
           if (now === undefined) continue;
           // An earlier operation of the project that stays pending holds the later ones: their order matters (an
           // onload renaming a trash back before that trash's deletion).
@@ -384,17 +392,6 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       } catch (error) {
         systemErrorCode(error);
       }
-    }
-  }
-
-  async function reread(op: string): Promise<Journal | undefined> {
-    try {
-      const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalFile(paths, op))));
-      return parsed.success ? parsed.data : undefined;
-    } catch (error) {
-      if (error instanceof SyntaxError) return undefined;
-      systemErrorCode(error);
-      return undefined;
     }
   }
 

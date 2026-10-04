@@ -233,8 +233,16 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
   try {
     opened = await readJournals(io, paths);
   } catch (error) {
-    systemErrorCode(error);
-    opened = { journals: [], unreadable: [], owners: {} };
+    // A journal folder that cannot be listed may hold any project's interrupted operation: never "no journals".
+    const code = systemErrorCode(error);
+    findings.push(
+      finding("fs.unreadable", {
+        message: `the journal folder ${paths.journalDir} cannot be read (${code}), so interrupted operations cannot be shown`,
+        fix: `check that you can read ${paths.journalDir}, then plainport recover`,
+        paths: [paths.journalDir],
+      }),
+    );
+    opened = { journals: [], unreadable: [paths.journalDir], owners: {} };
   }
   const journals = opened.journals;
 

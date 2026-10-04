@@ -2273,3 +2273,122 @@ describe("D67: a released journal whose trash is already gone is finished", () =
     await expectInvariants();
   });
 });
+
+describe("release fixes: expected I/O failures are values, never exceptions (I9, rule 7)", () => {
+  const eio = (what: string) => Object.assign(new Error(`EIO: ${what}`), { code: "EIO" });
+  const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({
+    host: testHost(),
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...over,
+  });
+
+  test("gc: a trash that cannot be stat'ed is not taken as finished, and gc still reports (no throw)", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const trash = join(box.home, "work/.plainport-trash", trashes()[0] as string);
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: async (path) => {
+          if (path === trash) throw eio("lstat");
+          return real.fs.lstat(path);
+        },
+      },
+    };
+    const report = value(await collectTrash(trashDeps({ host }), { early: true }));
+    expect(report.deleted).toHaveLength(1);
+    expect(trashes()).toEqual([]);
+    expect(await journals()).toEqual([]);
+  });
+
+  test("housekeeping: a trash that cannot be stat'ed never throws out of the start of a command", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const trash = join(box.home, "work/.plainport-trash", trashes()[0] as string);
+    const real = testHost();
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: async (path) => {
+          if (path === trash) throw eio("lstat");
+          return real.fs.lstat(path);
+        },
+      },
+    };
+    const later = new Date(Date.now() + 2 * 3_600_000);
+    const done = await housekeeping(trashDeps({ host, now: () => later }), { deleteDue: false });
+    expect(done.notices.join("\n")).toContain("plainport gc deletes it");
+  });
+
+  test("recover: a journal that cannot be read again under the lock stays pending with fs.unreadable, not exit 0", async () => {
+    await crashOffloadAt("offload.verified");
+    const journal = onlyJournal();
+    const file = join(box.paths.journalDir, `${journal.op}.json`);
+    const real = testHost({ faults: { onStep: capture } });
+    let reads = 0;
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        // The first two reads are recover's listing and the gate's; the third is the read under the lock.
+        readText: async (path) => {
+          if (path === file && ++reads >= 3) throw eio("read");
+          return real.fs.readText(path);
+        },
+      },
+    };
+    const result = await recover(recoverDeps({ host }));
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "fs.unreadable"]);
+    expect(reportOf(result).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect((await journals()).map((j) => j.op)).toEqual([journal.op]);
+  });
+
+  test("recover: a journal whose keepLocalFor is not a duration is unreadable (journal.pending), never a RangeError", async () => {
+    await crashOffloadAt("offload.committed");
+    const journal = onlyJournal<OffloadJournal>();
+    expect(journal.release?.keepLocalFor).toBe("0");
+    const file = join(box.paths.journalDir, `${journal.op}.json`);
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    raw.release.keepLocalFor = "soon";
+    writeFileSync(file, JSON.stringify(raw));
+    const result = await recover(recoverDeps());
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "journal.pending"]);
+    expect(existsSync(file)).toBe(true);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+
+  test("status: a journal folder that cannot be listed is a finding and a condition, never 'no journals'", async () => {
+    await crashOffloadAt("offload.verified");
+    const real = testHost();
+    const io: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        readdir: async (path) => {
+          if (path === box.paths.journalDir) throw eio("readdir");
+          return real.fs.readdir(path);
+        },
+      },
+    };
+    const views = value(
+      await projectViews({
+        io,
+        paths: box.paths,
+        env: env(),
+        device,
+        loader: new ConfigLoader(real, box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+      }),
+    );
+    expect(views.findings.map((f) => f.code)).toContain("fs.unreadable");
+    const web = views.projects.find((p) => p.address === "work:web");
+    expect(web?.conditions).toContain("journal-unreadable");
+    expect(web?.next?.command).toBe("plainport recover");
+  });
+});
