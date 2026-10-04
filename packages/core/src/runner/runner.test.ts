@@ -365,7 +365,9 @@ describe("runner (fake spawner): deadlines and cancelling", () => {
     await expect(runProcess(new FakeSpawner(), spec({ idleTimeoutMs: 30 * 86_400_000 }))).rejects.toThrow(
       /idleTimeoutMs/,
     );
-    await expect(runProcess(new FakeSpawner(), spec({ killGraceMs: 2 ** 40 }))).rejects.toThrow(/killGraceMs/);
+    await expect(runProcess(new FakeSpawner(), spec({ killGraceMs: 2 ** 40 }))).rejects.toThrow(
+      /killGraceMs/,
+    );
   });
 });
 

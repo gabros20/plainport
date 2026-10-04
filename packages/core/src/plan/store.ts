@@ -64,7 +64,12 @@ const readFile = async (io: LocalIo, path: string): Promise<Result<Plan | undefi
  * --plan still hears plan.expired rather than plan.not-found. Only a real run prunes: a dry run writes nothing but its
  * plan file (D36, D61, N5). A folder that cannot be listed is left for the next run.
  */
-export const prunePlans = async (io: LocalIo, paths: PlainportPaths, now: Date, keep?: string): Promise<void> => {
+export const prunePlans = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  now: Date,
+  keep?: string,
+): Promise<void> => {
   let names: string[];
   try {
     names = await io.fs.readdir(paths.plansDir);
