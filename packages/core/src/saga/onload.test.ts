@@ -38,7 +38,12 @@ import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { makeGitFixture } from "../testing/git-fixture.ts";
 import { testHost } from "../testing/host.ts";
-import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
+import {
+  captureTree,
+  catalogInvariantViolations,
+  invariantViolations,
+  type TreeCapture,
+} from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { settledOffload } from "../testing/settle.ts";
@@ -1712,4 +1717,107 @@ describe("onload: case collisions on hdiutil images", () => {
     },
     60_000,
   );
+});
+
+describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
+  /** Two offloads, S1 then S2; S2's offloaded event is then replaced by `bytes` and this device's mirror is emptied. */
+  const hideNewest = async (bytes: (id: string) => string) => {
+    const first = await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    const newest = (await storeEvents()).find((e) => e.type === "offloaded" && e.snapshot === second.op);
+    if (newest === undefined) throw new Error("no offloaded event for the second snapshot");
+    store.data.set(`meta/v1/events/${newest.id}.json`, new TextEncoder().encode(bytes(newest.id)));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    return { first, second, hidden: newest.id };
+  };
+  const malformed = () => '{"v":1,"id":"';
+  const unsupported = (id: string) =>
+    `${JSON.stringify({ v: 1, id, type: "merged", at: new Date().toISOString() })}\n`;
+
+  for (const [kind, bytes] of [
+    ["malformed", malformed],
+    ["unsupported", unsupported],
+  ] as const) {
+    test(`a ${kind} newest event: the default onload refuses with catalog.head-uncertain and changes nothing`, async () => {
+      const { first, second, hidden } = await hideNewest(bytes);
+      const result = await onload();
+      expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+      if (result.ok) return;
+      expect(result.finding.message).toContain(second.op);
+      expect(result.finding.message).toContain(hidden);
+      expect(result.finding.message).toContain(`its head ${first.op}`);
+      expect(result.finding.fix).toContain("plainport onload work:web --snapshot <id>");
+      expect(existsSync(dir)).toBe(false);
+      expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
+      expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+      expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+      expect(engine.restores).toHaveLength(1);
+    });
+
+    test(`a ${kind} newest event: --snapshot restores the one named and keeps the stub of the newer one`, async () => {
+      const { first, second } = await hideNewest(bytes);
+      const before = engine.repository.snapshots.map((s) => s.info.id);
+      const result = value(await onload({ snapshot: first.op }));
+      expect(result).toMatchObject({ snapshot: first.op, over: first.op });
+      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+      const stub = JSON.parse(readFileSync(`${dir}.plainport`, "utf8"));
+      expect(stub.snapshot).toBe(second.op);
+      // The kept stub is the one departure from invariant 2 (a stub only while shelved): it is the newer evidence.
+      expect(
+        (
+          await invariantViolations({
+            now: new Date(),
+            paths: box.paths,
+            device: device.id,
+            project: { id: await projectId(), dir },
+            roots: [join(box.home, "work")],
+            store: { name: "ssd", blob: store, engine },
+            stripped: ["node_modules"],
+          })
+        ).filter((v) => !v.includes("stub")),
+      ).toEqual([]);
+      expect(
+        catalogInvariantViolations({
+          events: await storeEvents(),
+          snapshotsBefore: before,
+          snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
+        }),
+      ).toEqual([]);
+    });
+  }
+
+  test("a skipped event that leaves the known snapshot named does not stop the default onload", async () => {
+    await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    store.data.set(`meta/v1/events/${ulid()}.json`, new TextEncoder().encode(malformed()));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const result = value(await onload());
+    expect(result).toMatchObject({ snapshot: second.op });
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+  });
+
+  test("offload of a copy whose base no readable event names refuses with catalog.head-uncertain, not a fork", async () => {
+    await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    value(await onload());
+    // Every event that names this copy's base (its offload, and the onload that restored it) is unreadable now: the
+    // fold shows the first snapshot as the head, which without D86 reads as "the head moved" and commits a fork.
+    for (const e of await storeEvents())
+      if (e.type !== "root-created" && e.type !== "root-bound" && JSON.stringify(e).includes(second.op))
+        store.data.set(`meta/v1/events/${e.id}.json`, new TextEncoder().encode(malformed()));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const before = (await storeEvents()).length;
+    const tree = treeOf(dir);
+    const result = await runOffload(offloadDeps(), { project: await ref() });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!result.ok && result.finding.message).toContain(second.op);
+    expect(treeOf(dir)).toEqual(tree);
+    expect(await storeEvents()).toHaveLength(before);
+  });
 });

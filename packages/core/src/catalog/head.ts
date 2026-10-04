@@ -2,11 +2,18 @@
 // and data model"): the catalog itself through the one read path (a stale read is store.unreachable, never trusted for
 // a write), whether the project's head is still the snapshot this working copy came from, and whether the store
 // serves another root (ADR-0010, D48). Offload uses it now; onload's lease check reads the same head.
+//
+// A fold that left out an event it could not read or use is not known to be whole (D86): when the snapshot this
+// device knows of a project (its stub's, its registry entry's base) is named by no readable event, the head the fold
+// shows may be older than one that exists, so a head-dependent default refuses with catalog.head-uncertain.
 
 import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { BlobStore } from "../ports/blob-store.ts";
-import type { CatalogState } from "./fold.ts";
+import type { CatalogProject, CatalogState } from "./fold.ts";
 import { loadCatalog } from "./log.ts";
+
+/** A catalog read for writing: the fold, and the events it left out that may change state (D86). */
+export type CatalogRead = CatalogState & { uncertain: readonly string[] };
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
@@ -23,7 +30,7 @@ export const catalogReader =
     storeName: string;
     now(): Date;
     report(finding: Finding): void;
-  }): (() => Promise<Result<CatalogState>>) =>
+  }): (() => Promise<Result<CatalogRead>>) =>
   async () => {
     const read = await loadCatalog({
       store: options.store,
@@ -38,18 +45,56 @@ export const catalogReader =
           finding("store.unreachable", { message: `store ${options.storeName} could not be reached` }),
       );
     for (const f of read.value.findings) options.report(f);
-    return ok(read.value.state);
+    return ok({ ...read.value.state, uncertain: read.value.uncertain });
   };
+
+/** Whether a readable event names `snapshot`: one the project holds, discarded, or named as a base it lacks. */
+const named = (project: CatalogProject | undefined, snapshot: string): boolean =>
+  project !== undefined &&
+  (project.snapshots[snapshot] !== undefined ||
+    project.discarded.includes(snapshot) ||
+    project.missing.includes(snapshot));
+
+/**
+ * catalog.head-uncertain (D86) when the read left out events that may change state and a snapshot this device knows
+ * of the project (`known`: its stub's, its registry entry's base) is named by none of the readable ones; else
+ * undefined. `said.what` says what was not done ("nothing was restored"), `said.instead` the way on that keeps the
+ * newer evidence.
+ */
+export const headUncertain = (
+  read: CatalogState & { uncertain?: readonly string[] },
+  id: string,
+  known: readonly (string | undefined)[],
+  address: string,
+  said: { what: string; instead: string },
+): Finding | undefined => {
+  const uncertain = read.uncertain ?? [];
+  if (uncertain.length === 0) return undefined;
+  const project = read.projects[id];
+  const unnamed = [...new Set(known.filter((s): s is string => s !== undefined && !named(project, s)))];
+  if (unnamed.length === 0) return undefined;
+  const latest = project?.head ?? null;
+  return finding("catalog.head-uncertain", {
+    message: `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
+    fix: `upgrade plainport if a newer version wrote ${uncertain.length === 1 ? "that event" : "those events"}, or connect the store that holds a whole copy of ${uncertain.length === 1 ? "it" : "them"}; ${said.instead}`,
+  });
+};
 
 export type HeadCheck = { kind: "ok" } | { kind: "moved" | "incomplete"; finding: Finding };
 
 /** The catalog's view of the head this working copy should offload on top of; a refusal when it is not that. */
 export const headCheck = (
-  state: CatalogState,
+  state: CatalogState & { uncertain?: readonly string[] },
   id: string,
   base: string | undefined,
   address: string,
 ): HeadCheck => {
+  // A fold that may lack the event naming this copy's base cannot say whether the head moved (D86).
+  const uncertain = headUncertain(state, id, [base], address, {
+    what: "nothing was offloaded",
+    instead: "meanwhile keep this folder as it is",
+  });
+  if (uncertain !== undefined) return { kind: "incomplete", finding: uncertain };
   const project = state.projects[id];
   const kept = project !== undefined && (project.heads.length > 0 || project.conflicts.length > 0);
   if (project !== undefined && project.missing.length > 0) {

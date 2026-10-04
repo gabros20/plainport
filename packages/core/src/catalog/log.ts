@@ -311,10 +311,29 @@ const readJson = async <S extends z.ZodType>(
   }
 };
 
+/**
+ * The ids of event files left out of the fold (catalog.event-skipped on a `<ulid>.json`), sorted: torn, damaged or of a
+ * type or schema this version does not know. Any of them may change a project's state, so the fold without them is
+ * not known to be whole (D86). A file not named as an event is no event, and leaves the fold certain.
+ */
+export const uncertainEvents = (findings: readonly Finding[]): string[] => {
+  const ids = new Set<string>();
+  for (const f of findings) {
+    if (f.code !== "catalog.event-skipped") continue;
+    for (const path of f.paths ?? []) {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      if (name.endsWith(".json") && isUlid(name.slice(0, -5))) ids.add(name.slice(0, -5));
+    }
+  }
+  return [...ids].sort(compare);
+};
+
 export interface LoadedCatalog {
   state: CatalogState;
   /** catalog.event-skipped for every file left out, on the store or in the mirror. */
   findings: Finding[];
+  /** uncertainEvents(findings): events left out that may change state (D86). */
+  uncertain: string[];
   /** Whether a cached fold was reused. */
   cached: boolean;
   /** True when the store could not be reached: the state is the mirror's, as of syncedAt. */
@@ -478,9 +497,11 @@ const readOffline = async (
   const folded = await foldMirror(mirror, listed.value);
   if (!folded.ok) return folded;
   const skippedOnStore = Object.values(recorded.value?.skipped ?? {}).map((entry) => entry.finding);
+  const findings = [...skippedOnStore, ...folded.value.findings];
   return ok({
     ...folded.value,
-    findings: [...skippedOnStore, ...folded.value.findings],
+    findings,
+    uncertain: uncertainEvents(findings),
     stale: true,
     source: "mirror",
     ...(recorded.value && { syncedAt: recorded.value.lastSyncedAt }),
@@ -521,9 +542,11 @@ export const loadCatalog = async (options: {
   if (synced.ok) {
     const folded = await foldMirror(mirror, synced.value.listed);
     if (folded.ok) {
+      const findings = [...synced.value.findings, ...folded.value.findings];
       return ok({
         ...folded.value,
-        findings: [...synced.value.findings, ...folded.value.findings],
+        findings,
+        uncertain: uncertainEvents(findings),
         stale: false,
         source: "store",
         syncedAt: options.now.toISOString(),
@@ -542,6 +565,7 @@ export const loadCatalog = async (options: {
   return ok({
     state: foldCatalog(direct.value.events),
     findings: direct.value.findings,
+    uncertain: uncertainEvents(direct.value.findings),
     cached: false,
     stale: false,
     source: "store",

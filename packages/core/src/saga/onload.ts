@@ -517,7 +517,10 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
 
   /** catalog.head-uncertain when the read may lack the event naming the stub's or the registry's snapshot (D86). */
   function doubtOf(read: CatalogRead): Finding | undefined {
-    const known = [stub?.ok ? stub.value.snapshot : undefined, registered.ok ? registered.value.projects[id]?.base : undefined];
+    const known = [
+      stub?.ok ? stub.value.snapshot : undefined,
+      registered.ok ? registered.value.projects[id]?.base : undefined,
+    ];
     return headUncertain(read, id, known, ref.address, {
       what: "nothing was restored",
       instead: `to go on anyway, name the snapshot: plainport onload ${shellWord(ref.address)} --snapshot <id> (the stub that names the newer one stays)`,
