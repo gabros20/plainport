@@ -20,6 +20,7 @@ import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree, type TreeScan } from "../scan/walk.ts";
+import { localStores, storeOverlap } from "../store-overlap.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { gitignoredFiles } from "./gitignored.ts";
@@ -231,6 +232,10 @@ export const prepareOffload = async (
   const { manifest } = tree;
 
   const findings: Finding[] = [...loaded.value.findings, ...report.findings];
+  // A store the folder holds, or lies inside, would go into the trash with it (D83): never allowable.
+  const home = req.loader.paths.home;
+  const overlap = await storeOverlap(host, home, req.dir, localStores(config, home));
+  if (!overlap.ok) findings.push(overlap.finding);
   for (const f of scanFindings(scanned.value)) {
     findings.push(f.code === "git.unpushed" && config.offload.requirePushed ? required(f) : f);
   }

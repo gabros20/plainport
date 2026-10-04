@@ -100,6 +100,7 @@ import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
+import { localStores } from "../store-overlap.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
@@ -432,6 +433,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
+  // The local stores release never moves a folder holding (D83).
+  const stores = localStores(loaded.value.config, paths.home);
   const storeName =
     req.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
   if (storeName === undefined) {
@@ -839,7 +842,15 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
       phase("release", "start");
       const released = await releaseOffload(
-        { host, paths, saga, clock, log: deps.log, stillHeld: lock.stillHeld },
+        {
+          host,
+          paths,
+          saga,
+          clock,
+          log: deps.log,
+          stillHeld: lock.stillHeld,
+          stores,
+        },
         { at: event.at, bytes: verified.bytes },
       );
       if (!released.ok) return released;

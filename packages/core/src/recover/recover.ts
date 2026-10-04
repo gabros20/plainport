@@ -79,6 +79,7 @@ import {
 import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
+import { localStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
@@ -728,11 +729,22 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       if (!read.ok) return pending(journal, read);
       facts = read.value;
     }
+    // The stores no released folder may hold (D83): without the configuration, nothing is moved.
+    const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
+    if (!loaded.ok) return pending(journal, loaded);
     const saga = openSaga<OffloadJournal, OffloadStep>(sagaContext("offload"), journal);
     // The journal is past the commit, or the event was found on the store: committed either way.
     saga.commit();
     const released = await releaseOffload(
-      { host, paths, saga, clock, log: deps.log, stillHeld: lock.stillHeld },
+      {
+        host,
+        paths,
+        saga,
+        clock,
+        log: deps.log,
+        stillHeld: lock.stillHeld,
+        stores: localStores(loaded.value.config, paths.home),
+      },
       facts,
     );
     if (released.ok) {

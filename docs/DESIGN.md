@@ -207,6 +207,8 @@ The choice is low-risk because every adapter sits behind the six-method `BlobSto
 
 **Store kinds.** One store definition in config produces both the restic repository URL and the metadata location, so both layers always point at the same place.
 
+A local store and a project never overlap (D83): an offload releases the whole project folder into the trash, so a store inside it (under stripped output such as `.next/archive`, which no fingerprint watches) would be deleted with its snapshots. Store setup, the offload plan, the step right before release's rename and recover all compare real paths (symlinks resolved, the volume's case rule) against every configured local store and refuse with `store.inside-project`, which is never allowable; a project inside a store is refused the same way.
+
 | Store | Restic repository | Metadata | Notes |
 | --- | --- | --- | --- |
 | Peer device (Mac mini, VPS) | `rclone:` backend running `rclone serve restic --stdio --append-only` over SSH | Peer RPC over the same SSH link | The recommended hub. Other devices can only append; pruning runs there when you ask |

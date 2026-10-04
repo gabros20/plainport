@@ -2413,6 +2413,7 @@ describe("offload: fix wave q2", () => {
         host,
         paths: box.paths,
         saga: resumed,
+        stores: [],
         clock: () => new Date(),
         log: () => {},
         ...(over.stillHeld === undefined ? {} : { stillHeld: over.stillHeld }),
@@ -2511,5 +2512,70 @@ describe("offload: a preflight lookup that throws (task 17 concern 2)", () => {
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "env.docker-mount"]);
     expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+  });
+});
+
+describe("offload: a store inside the project is never offloaded with it (D83)", () => {
+  const storeAt = (path: string) =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "local"',
+        `path = "${path}"`,
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+  const expectBothSurvive = async (archive: string) => {
+    await expectUntouched();
+    expect(readFileSync(join(archive, "data/snap"), "utf8")).toBe("repository bytes");
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+  };
+
+  test("a store under stripped output refuses (store.inside-project, 6); the source and the repository survive", async () => {
+    box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+    storeAt("~/work/web/node_modules/.archive");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    expect(engine.calls).toHaveLength(0);
+    await expectBothSurvive(join(dir, "node_modules/.archive"));
+  });
+
+  test("the comparison is by real path: a store reached through a symlink into the project refuses too", async () => {
+    box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+    symlinkSync(join(dir, "node_modules"), join(box.home, "alias"));
+    storeAt("~/alias/.archive");
+    const result = await offload({ allow: ["store.inside-project"] });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    await expectBothSurvive(join(dir, "node_modules/.archive"));
+  });
+
+  test("a project inside the store refuses too", async () => {
+    box.file("work/web/data/snap", "repository bytes");
+    storeAt("~/work");
+    const result = await offload();
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+    await expectBothSurvive(dir);
+  });
+
+  test("setting up a store inside a registered project's folder refuses, and makes no folder", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try registers the project" })),
+    };
+    expect((await offload()).ok).toBe(false);
+    const result = await setUpStore(testHost(), {
+      paths: box.paths,
+      env: { PLAINPORT_STORE_PASSWORD: "pw" },
+      name: "inner",
+      store: { kind: "local", path: "~/work/web/.store" },
+      opener,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : result.finding.code).toBe("store.inside-project");
+    expect(existsSync(join(dir, ".store"))).toBe(false);
   });
 });

@@ -24,6 +24,8 @@ import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
 import type { OpenedStore, StoreOpener } from "./ports/store.ts";
 import { readRegistry, updateRegistry } from "./registry.ts";
+import { registeredFolders } from "./saga/project-gate.ts";
+import { storeOverlap } from "./store-overlap.ts";
 
 const secretMissing = (name: string, message: string, fix: string) =>
   fail(finding("store.secret-missing", { message: `store ${name}'s password: ${message}`, fix }));
@@ -222,6 +224,13 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   const root = storeRoot(store, paths.home);
   const folder = await storeFolder(io, name, root);
   if (!folder.ok) return folder;
+  // Never inside, or holding, a registered project's folder: its offload would delete the store (D83).
+  const projects = await registeredFolders(io, paths, options.env);
+  if (!projects.ok) return projects;
+  for (const project of projects.value) {
+    const overlap = await storeOverlap(io, paths.home, project.folder, [{ name, root }]);
+    if (!overlap.ok) return overlap;
+  }
   if (folder.value === undefined) {
     try {
       await io.fs.mkdirp(root);

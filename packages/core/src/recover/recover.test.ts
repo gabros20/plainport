@@ -566,7 +566,7 @@ describe("recover: releaseOffload's guards (Task 12 quality r3)", () => {
     );
     await expect(
       releaseOffload(
-        { host, paths: box.paths, saga, clock: () => new Date(), log: () => {} },
+        { host, paths: box.paths, saga, clock: () => new Date(), log: () => {}, stores: [] },
         { at: new Date().toISOString(), bytes: 1 },
       ),
     ).rejects.toThrow(/committed/);
@@ -2390,5 +2390,22 @@ describe("release fixes: expected I/O failures are values, never exceptions (I9,
     const web = views.projects.find((p) => p.address === "work:web");
     expect(web?.conditions).toContain("journal-unreadable");
     expect(web?.next?.command).toBe("plainport recover");
+  });
+});
+
+describe("recover: release never moves a folder holding a store (D83)", () => {
+  test("a store that appeared inside the project after the commit keeps the release pending; moved away, it finishes", async () => {
+    await crashOffloadAt("offload.committed");
+    box.file("work/web/node_modules/.vault/data/snap", "repository bytes");
+    config('[stores.vault]\nkind = "local"\npath = "~/work/web/node_modules/.vault"');
+    const stuck = await recover(recoverDeps());
+    expect(stuck.ok ? 0 : [stuck.exitCode, stuck.finding.code]).toEqual([6, "store.inside-project"]);
+    expect(reportOf(stuck).operations.map((o) => o.outcome)).toEqual(["pending"]);
+    expect(readFileSync(join(dir, "node_modules/.vault/data/snap"), "utf8")).toBe("repository bytes");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(trashes()).toEqual([]);
+    config();
+    const done = reportOf(await recover(recoverDeps()));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
   });
 });

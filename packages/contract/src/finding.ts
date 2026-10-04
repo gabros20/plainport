@@ -551,6 +551,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
   },
+  "store.inside-project": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "A local store and a project overlap (the store lies inside the project's folder, or the project inside the store), compared by real path: an offload would move the store into the trash with the folder and delete its snapshots, so setup, offload and its release refuse; move one of them (D83)",
+  },
   "store.key-exists": {
     severity: "block",
     allowable: false,
