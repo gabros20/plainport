@@ -253,15 +253,23 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
 };
 
 /**
- * After a crash mid-upload was rolled back and a later offload ran: the head is that later offload's snapshot, never the
- * crashed operation's (restic wrote no snapshot for it, and nothing may name one), the repository holds it, and it
- * restores byte-identical to the project apart from the stripped paths.
+ * After a crash during the upload was rolled back and a later offload ran: no event names the crashed operation's
+ * snapshot, the head is the later offload's snapshot, the repository holds it, and it restores byte-identical to the
+ * project apart from the stripped paths.
+ *
+ * `orphan` says what the crash left in the repository under the crashed operation's tag (plainport:op=<op>):
+ * - "none": restic was killed before it wrote its snapshot, so there is none;
+ * - "kept": restic finished its snapshot but plainport died before journaling it. DESIGN ("Journal steps", the
+ *   offload saga's recover table at offload.snapshot.start) and D28 (d): recover rolls back, the snapshot stays in
+ *   the repository with no event naming it, unexplained and never a head (in M1 nothing lists it; doctor
+ *   --rebuild-catalog reports it in M5, and only prune --yes may forget it). So exactly one such snapshot is there.
  */
 export const laterHeadProblems = async (
   world: World,
   projectId: string | undefined,
   crashedOp: string | undefined,
   reference: TreeHash,
+  orphan: "none" | "kept" = "none",
 ): Promise<string[]> => {
   const problems: string[] = [];
   const read = await readEvents(storeEventLog(world.store.blob));
@@ -272,14 +280,24 @@ export const laterHeadProblems = async (
       problems.push(`a ${e.type} event names the crashed operation's snapshot ${crashedOp}`);
   const listed = await world.store.engine.list({});
   if (!listed.ok) return [...problems, `listing snapshots: ${listed.finding.message}`];
-  for (const s of listed.value)
-    if (crashedOp !== undefined && s.tags.some((t) => t.includes(crashedOp)))
+  const tagged = listed.value.filter(
+    (s) => crashedOp !== undefined && s.tags.includes(`plainport:op=${crashedOp}`),
+  );
+  if (orphan === "none")
+    for (const s of tagged)
       problems.push(`the repository holds a snapshot ${s.id} tagged with the crashed operation ${crashedOp}`);
+  else if (tagged.length !== 1)
+    problems.push(
+      `the repository holds ${tagged.length} snapshots of the crashed operation ${crashedOp}, not 1`,
+    );
+  for (const s of tagged)
+    if (events.some((e) => "stored" in e && Object.values(e.stored).includes(s.id)))
+      problems.push(`an event names the crashed operation's restic snapshot ${s.id}`);
   const project = projectId === undefined ? undefined : foldCatalog(events).projects[projectId];
   const head = project?.head ?? undefined;
   const event = events.find((e) => e.type === "offloaded" && e.snapshot === head);
   const stored = event?.type === "offloaded" ? event.stored[world.store.name] : undefined;
-  if (head === undefined || head === crashedOp || stored === undefined)
+  if (head === undefined || head === crashedOp || stored === undefined || tagged.some((t) => t.id === stored))
     return [...problems, `the later offload is not the head (head ${head}, crashed ${crashedOp})`];
   if (!listed.value.some((s) => s.id === stored))
     problems.push(`the repository does not hold the head ${stored}`);

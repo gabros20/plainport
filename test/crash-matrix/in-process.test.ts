@@ -413,7 +413,30 @@ describe("crash matrix, in-process: a crash while the upload runs", () => {
     expect(problems).toEqual([]);
     const later = await offload();
     expect(later.ok ? later.value.op : later.finding.code).not.toBe(crashedOp);
-    expect(await laterHeadProblems(world(), await projectId(), crashedOp, reference)).toEqual([]);
+    expect(await laterHeadProblems(world(), await projectId(), crashedOp, reference, "none")).toEqual([]);
+  }, 30_000);
+
+  // restic finished its snapshot, and plainport died before it journaled offload.snapshot.done: the journal still says
+  // offload.snapshot.start, whose rule rolls back; the snapshot stays in the repository, named by no event, never the
+  // head (DESIGN "Journal steps", D28 (d)).
+  test("offload.snapshot.start · restic committed, plainport died before journaling it: rolled back, the snapshot an orphan", async () => {
+    const row = plainRowAt(MATRIX_POINTS.upload);
+    const { problems, crashedOp } = await runRow(row, {
+      crash: async () => {
+        const real = engine.snapshot;
+        engine.snapshot = async (input, ctx) => {
+          const made = await real(input, ctx);
+          engine.snapshot = real;
+          if (!made.ok) throw new Error(`the snapshot failed: ${made.finding.message}`);
+          throw new InjectedFault("offload.upload.committed");
+        };
+        await expect(offload()).rejects.toBeInstanceOf(InjectedFault);
+      },
+    });
+    expect(problems).toEqual([]);
+    const later = await offload();
+    expect(later.ok ? later.value.op : later.finding.code).not.toBe(crashedOp);
+    expect(await laterHeadProblems(world(), await projectId(), crashedOp, reference, "kept")).toEqual([]);
   }, 30_000);
 });
 

@@ -603,67 +603,144 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
       for (const row of rows) macRow(row.name, rowTest(row), TEST_MS);
     });
 
-  // A crash while restic uploads, not at a step: once restic has written a pack of this upload, but no snapshot yet,
-  // the test freezes plainport and restic's whole process group (SIGSTOP, so the upload cannot finish in between),
-  // checks the upload is still unfinished, then SIGKILLs them, as a power cut or an OOM kill would leave it. The
-  // journal stays at the upload's step, so the row is that step's, with three more demands: recover rolled it back
-  // (its rule allows nothing else but pending, which the row refuses), the folder is untouched, and a later offload
-  // succeeds over the dead restic's lock and leftover packs and becomes the head, never a half-written snapshot of
-  // the crashed operation.
+  // Two crashes while restic runs, not at a step; the journal stays at the upload's step either way, so each row is
+  // that step's, with more demands (uploadCrashRow):
+  //
+  // 1. Mid-upload: once restic has written a pack of this upload, the test freezes plainport and restic's whole process
+  //    group (SIGSTOP), then checks that no snapshot exists yet, and only then SIGKILLs them, as a power cut or an OOM
+  //    kill would. If restic had already written its snapshot when it was frozen (a slow machine: the upload finished
+  //    between the pack and the freeze), the attempt is the second case, not this one: it is run again, at most three
+  //    times, and never passes as this case.
+  // 2. Committed: plainport is frozen as soon as its restic backup starts, restic runs to its end alone and writes its
+  //    snapshot, then plainport is killed before it could journal offload.snapshot.done. DESIGN's rule for the step
+  //    (roll back) and D28 (d) keep that snapshot in the repository, named by no event, never a head.
+  //
+  // Both demand: recover rolled back (the rule allows nothing else but pending, which the row refuses), the folder is
+  // untouched, and a later offload succeeds over what the dead restic left (a lock, packs) and becomes the head.
   macRow(
     `${MATRIX_POINTS.upload} · mid-upload SIGKILL of plainport and restic's process group`,
     async () => {
-      let leftover = { packs: 0, locks: 0, snapshots: -1 };
-      const problems = await runRow(plainRowAt(MATRIX_POINTS.upload), {
-        crash: async (r) => {
-          // Incompressible bytes, several 16 MiB packs: restic writes packs while the upload still runs.
-          writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(40 * 1024 * 1024));
-          r.noteEdit("data/blob.bin");
-          const repo = join(r.box.home, "ssd/repo");
-          const child = r.spawn(offloadArgs);
-          const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-          const deadline = Date.now() + 120_000;
-          while (child.exitCode === null && countFiles(join(repo, "data")) === 0 && Date.now() < deadline)
-            await Bun.sleep(2);
-          // Freeze first: plainport cannot start anything new, restic cannot finish its snapshot.
-          signal(child.pid, "SIGSTOP");
-          const uploading = childrenOf(child.pid, "restic");
-          for (const pid of uploading) {
-            r.groups.add(pid);
-            signal(-pid, "SIGSTOP");
-          }
-          leftover = {
-            packs: countFiles(join(repo, "data")),
-            locks: countFiles(join(repo, "locks")),
-            snapshots: countFiles(join(repo, "snapshots")),
-          };
-          // The runner gives each child its own process group (pgid = its pid): kill the group, as a crash would.
-          for (const pid of uploading) signal(-pid, "SIGKILL");
-          signal(child.pid, "SIGKILL");
-          await child.exited;
-          const [out, err] = await output;
-          if (uploading.length === 0)
-            throw new Error(
-              `restic was not uploading when the kill was due (exit ${child.exitCode}): ${err}${out}`,
-            );
-          killed({ code: child.exitCode, signal: child.signalCode, out, err }, "offload");
-          const gone = Date.now() + 10_000;
-          while (uploading.some(alive) && Date.now() < gone) await Bun.sleep(10);
-          if (uploading.some(alive)) throw new Error(`restic ${uploading.join(", ")} outlived its SIGKILL`);
-        },
-        after: async (r, crashedOp) => {
-          const later = await r.run(offloadArgs);
-          if (later.code !== 0) return [`a later offload exited ${later.code}: ${later.err}${later.out}`];
-          await settleJournals(r.box.paths);
-          return laterHeadProblems(await r.world(), r.projectId(), crashedOp, r.reference);
-        },
-      });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const { problems, leftover } = await uploadCrashRow("mid-upload");
+          expect(problems).toEqual([]);
+          // The kill really landed mid-upload: packs written, the dead restic's lock left, no snapshot yet.
+          expect(leftover.packs).toBeGreaterThan(0);
+          expect(leftover.locks).toBeGreaterThan(0);
+          expect(leftover.snapshots).toBe(0);
+          return;
+        } catch (error) {
+          if (!(error instanceof CommittedBeforeFreeze) || attempt === 3) throw error;
+        }
+      }
+    },
+    TEST_MS,
+  );
+
+  macRow(
+    `${MATRIX_POINTS.upload} · restic committed its snapshot, plainport killed before journaling it`,
+    async () => {
+      const { problems, leftover } = await uploadCrashRow("committed");
       expect(problems).toEqual([]);
-      // The kill really landed mid-upload: packs written, the dead restic's lock left, no snapshot yet.
-      expect(leftover.packs).toBeGreaterThan(0);
-      expect(leftover.locks).toBeGreaterThan(0);
-      expect(leftover.snapshots).toBe(0);
+      expect(leftover.snapshots).toBe(1);
     },
     TEST_MS,
   );
 });
+
+/** A mid-upload attempt in which restic had already written its snapshot when it was frozen. */
+class CommittedBeforeFreeze extends Error {}
+
+/** The restic backups a process is running: its restic children whose arguments say backup. */
+const backups = (parent: number): number[] =>
+  childrenOf(parent, "restic").filter((pid) =>
+    Bun.spawnSync(["ps", "-o", "args=", "-p", String(pid)], {
+      env: { PATH: "/usr/bin:/bin" },
+      stdout: "pipe",
+    })
+      .stdout.toString()
+      .includes(" backup "),
+  );
+
+/** Whether a process has ended (gone, or a zombie its frozen parent has not reaped). */
+const ended = (pid: number): boolean => {
+  const stat = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], {
+    env: { PATH: "/usr/bin:/bin" },
+    stdout: "pipe",
+  })
+    .stdout.toString()
+    .trim();
+  return stat === "" || stat.startsWith("Z");
+};
+
+const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
+  let leftover = { packs: 0, locks: 0, snapshots: -1 };
+  const problems = await runRow(plainRowAt(MATRIX_POINTS.upload), {
+    crash: async (r) => {
+      // Mid-upload: incompressible bytes, several 16 MiB packs, so restic writes packs while the upload still runs.
+      if (mode === "mid-upload") {
+        writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(40 * 1024 * 1024));
+        r.noteEdit("data/blob.bin");
+      }
+      const repo = join(r.box.home, "ssd/repo");
+      const count = () => ({
+        packs: countFiles(join(repo, "data")),
+        locks: countFiles(join(repo, "locks")),
+        snapshots: countFiles(join(repo, "snapshots")),
+      });
+      const child = r.spawn(offloadArgs);
+      const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      const deadline = Date.now() + 120_000;
+      let restic: number[] = [];
+      const waitFor = async (what: string, done: () => boolean) => {
+        while (!done()) {
+          if (child.exitCode !== null || Date.now() > deadline) {
+            r.stop();
+            const [out, err] = await output;
+            throw new Error(`${what} never came (exit ${child.exitCode}): ${err}${out}`);
+          }
+          await Bun.sleep(2);
+        }
+      };
+      await waitFor("restic's backup", () => {
+        restic = backups(child.pid);
+        return restic.length > 0;
+      });
+      for (const pid of restic) r.groups.add(pid);
+      if (mode === "committed") {
+        // plainport stands still; restic runs to its end alone, and plainport never sees it finish.
+        signal(child.pid, "SIGSTOP");
+        await waitFor("restic's end", () => restic.every(ended));
+      } else {
+        await waitFor("a pack of the upload", () => countFiles(join(repo, "data")) > 0);
+        signal(child.pid, "SIGSTOP");
+        for (const pid of restic) signal(-pid, "SIGSTOP");
+      }
+      leftover = count();
+      // The runner gives each child its own process group (pgid = its pid): kill the group, as a crash would.
+      for (const pid of restic) signal(-pid, "SIGKILL");
+      signal(child.pid, "SIGKILL");
+      await child.exited;
+      const [out, err] = await output;
+      killed({ code: child.exitCode, signal: child.signalCode, out, err }, "offload");
+      const gone = Date.now() + 10_000;
+      while (restic.some(alive) && Date.now() < gone) await Bun.sleep(10);
+      if (restic.some(alive)) throw new Error(`restic ${restic.join(", ")} outlived its SIGKILL`);
+      if (mode === "mid-upload" && leftover.snapshots > 0)
+        throw new CommittedBeforeFreeze("restic had written its snapshot before it was frozen");
+    },
+    after: async (r, crashedOp) => {
+      const later = await r.run(offloadArgs);
+      if (later.code !== 0) return [`a later offload exited ${later.code}: ${later.err}${later.out}`];
+      await settleJournals(r.box.paths);
+      return laterHeadProblems(
+        await r.world(),
+        r.projectId(),
+        crashedOp,
+        r.reference,
+        mode === "mid-upload" ? "none" : "kept",
+      );
+    },
+  });
+  return { problems, leftover };
+};
