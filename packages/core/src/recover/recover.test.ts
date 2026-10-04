@@ -34,7 +34,7 @@ import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { readRegistry } from "../registry.ts";
+import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { openSaga } from "../saga/journaled.ts";
 import {
@@ -2407,5 +2407,83 @@ describe("recover: release never moves a folder holding a store (D83)", () => {
     config();
     const done = reportOf(await recover(recoverDeps()));
     expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+  });
+});
+
+describe("D84: plainport's holders are never a working copy's place, and gc never deletes one there", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const holderChild = () => join(box.home, "work/.plainport-staging", ulid());
+
+  test("onload --to and restore --to into a .plainport-* holder are usage.invalid; nothing lands there", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    const to = holderChild();
+    const onload = await runOnload(onloadDeps(testHost()), { project: await ref(), to, hydrate: false });
+    expect(onload.ok ? 0 : [onload.exitCode, onload.finding.code]).toEqual([2, "usage.invalid"]);
+    const restore = await runRestore(
+      {
+        host: testHost(),
+        paths: box.paths,
+        device,
+        env: env(),
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+        emit: () => {},
+        log: () => {},
+      },
+      { project: await ref(), to: join(box.home, "old/.plainport-trash/web") },
+    );
+    expect(restore.ok ? 0 : restore.finding.code).toBe("usage.invalid");
+    expect(existsSync(to)).toBe(false);
+    expect(existsSync(join(box.home, "old/.plainport-trash"))).toBe(false);
+  });
+
+  /** A working copy an earlier build onloaded into a staging holder: registered there, then edited. */
+  const workingCopyInHolder = async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    const elsewhere = join(box.home, "old/web");
+    mkdirSync(join(box.home, "old"), { recursive: true });
+    value(await runOnload(onloadDeps(testHost()), { project: await ref(), to: elsewhere, hydrate: false }));
+    const landed = holderChild();
+    mkdirSync(join(box.home, "work/.plainport-staging"), { recursive: true });
+    renameSync(elsewhere, landed);
+    const id = (await projectId()) as string;
+    value(
+      await updateRegistry(testHost(), box.paths, (registry) => {
+        const entry = registry.projects[id];
+        if (entry === undefined) throw new Error("not registered");
+        return ok({ ...registry, projects: { ...registry.projects, [id]: { ...entry, override: landed } } });
+      }),
+    );
+    writeFileSync(join(landed, "src/main.ts"), "export const main = 2; // an edit no snapshot has\n");
+    return { landed, id };
+  };
+
+  test("gc fails closed: a registered working copy in a staging holder is kept and reported, never deleted", async () => {
+    const { landed } = await workingCopyInHolder();
+    const result = await collectTrash(trashDeps(), { early: true });
+    expect(result.ok ? 0 : result.finding.code).toBe("project.nested");
+    if (!result.ok)
+      expect((result.data as { stagingKept: { staging: string }[] }).stagingKept[0]?.staging).toBe(landed);
+    expect(readFileSync(join(landed, "src/main.ts"), "utf8")).toContain("an edit no snapshot has");
+  });
+
+  test("gc fails closed while the project's lock is live, too", async () => {
+    const { landed, id } = await workingCopyInHolder();
+    const held = value(
+      await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+        timeoutMs: 0,
+        held: () => finding("project.locked", { message: "held" }),
+      }),
+    );
+    try {
+      const result = await collectTrash(trashDeps(), { early: true });
+      expect(result.ok).toBe(false);
+      expect(readFileSync(join(landed, "src/main.ts"), "utf8")).toContain("an edit no snapshot has");
+    } finally {
+      await held.release();
+    }
   });
 });

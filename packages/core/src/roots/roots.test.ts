@@ -310,3 +310,16 @@ describe("roots: list", () => {
     });
   });
 });
+
+describe("roots: plainport's reserved holders are never a root (D84)", () => {
+  test("a root in .plainport-staging, or reached through a symlink into .plainport-trash, is usage.invalid", async () => {
+    box.dir("work/.plainport-staging/inner");
+    const direct = await write([{ kind: "add", key: "inner", path: "~/work/.plainport-staging/inner" }]);
+    expect(direct).toMatchObject({ ok: false, exitCode: 2, finding: { code: "usage.invalid" } });
+    const trash = box.dir("work/.plainport-trash/x");
+    symlinkSync(trash, join(box.home, "alias"));
+    const aliased = await write([{ kind: "add", key: "alias", path: "~/alias" }]);
+    expect(aliased).toMatchObject({ ok: false, finding: { code: "usage.invalid" } });
+    expect(existsSync(box.paths.managedFile)).toBe(false);
+  });
+});

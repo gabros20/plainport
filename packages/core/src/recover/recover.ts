@@ -72,6 +72,7 @@ import type { OffloadStep } from "../saga/offload.ts";
 import { finishOnload, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
 import {
   nestedProjects,
+  notAProject,
   type ProjectLock,
   registeredFolders,
   withProjectLock,
@@ -871,6 +872,9 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       deps.log("info", `the trash ${trash} is left: ${deleting}`);
       return { op: { ...entry(journal, "trash-kept", state), trash } };
     }
+    // A registered working copy is never deleted as trash (D84).
+    const guarded = await notAProject(io, paths, deps.env, trash);
+    if (!guarded.ok) return pending(journal, guarded);
     try {
       await removeTrash(io, trash);
       await removeJournal(io, paths, journal.op);

@@ -56,7 +56,7 @@ import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
-import { removeEmptyHolder } from "../holder.ts";
+import { notReserved, removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import {
   type Journal,
@@ -254,6 +254,11 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     );
   }
   const landing: string = requested;
+  // Never into plainport's own holders, whose folders gc deletes (D84).
+  if (req.to !== undefined) {
+    const reserved = await notReserved(io, landing, paths.home, `a project's place`);
+    if (!reserved.ok) return reserved;
+  }
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
   const config = loaded.value.config;

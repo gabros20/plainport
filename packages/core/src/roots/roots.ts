@@ -9,6 +9,7 @@ import { ConfigLoader } from "../config/load.ts";
 import { updateManaged } from "../config/managed.ts";
 import { type ConfigLayer, ConfigLayerSchema } from "../config/schema.ts";
 import { readTomlFile } from "../config/toml.ts";
+import { notReserved } from "../holder.ts";
 import type { LocalIo } from "../io.ts";
 import { type Env, expandHome, type PlainportPaths } from "../paths.ts";
 import { RootKeySchema } from "../registry.ts";
@@ -270,6 +271,9 @@ export const writeRoots = async (
           );
         }
 
+        // A root inside plainport's own holders would have its projects deleted by gc (D84).
+        const reserved = await notReserved(io, path, options.cwd, "a root's folder");
+        if (!reserved.ok) return reserved;
         const resolved = await canonicalPath(io, path, options.cwd);
         if (!resolved.ok) return resolved;
         const canon = resolved.value;

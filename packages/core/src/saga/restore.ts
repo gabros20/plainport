@@ -27,7 +27,7 @@ import { catalogReader } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
-import { removeEmptyHolder, rmdirIfEmpty } from "../holder.ts";
+import { notReserved, removeEmptyHolder, rmdirIfEmpty } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
@@ -108,6 +108,9 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     `plainport restore ${shellWord(ref.address)} --snapshot ${snapshot} --to <path>`;
 
   phase("resolve", "start");
+  // Never into plainport's own holders, whose folders gc deletes (D84).
+  const reserved = await notReserved(io, to, paths.home, "a restore's landing folder");
+  if (!reserved.ok) return reserved;
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
   const config = loaded.value.config;

@@ -35,7 +35,7 @@ import { readRegistry } from "../registry.ts";
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
-import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
+import { holdsProjectBack, notAProject, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "../saga/release.ts";
 import { trashClaim, trashClaimFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
@@ -278,6 +278,9 @@ export const collectTrash = async (
           report.kept.push({ ...itemOf(now), reason: deleting });
           return ok(undefined);
         }
+        // A registered working copy is never deleted as trash (D84).
+        const guarded = await notAProject(io, paths, deps.env, trash);
+        if (!guarded.ok) return guarded;
         // Its trash already gone (a delete killed before it closed the journal, D67): finished; the journal goes.
         if (await finished(io, now)) {
           try {
@@ -398,6 +401,13 @@ const sweepStaging = async (
     for (const [holder, name] of listed) {
       const staging = join(holder, name);
       if (owners.has(name) || recorded.has(staging)) continue;
+      // A registered working copy that landed in a holder is never abandoned staging (D84).
+      const guarded = await notAProject(io, paths, deps.env, staging);
+      if (!guarded.ok) {
+        kept.push({ staging, finding: guarded.finding });
+        problems.push(guarded);
+        continue;
+      }
       try {
         await io.fs.removeTree(staging);
         await removeEmptyHolder(io, holder, STAGING_DIR);
@@ -435,6 +445,8 @@ const sweepStaging = async (
       gate,
       record.project,
       async () => {
+        const guarded = await notAProject(io, paths, deps.env, record.staging);
+        if (!guarded.ok) return guarded;
         try {
           await io.fs.removeTree(record.staging);
           await removeEmptyHolder(io, dirname(record.staging), STAGING_DIR);
@@ -522,6 +534,8 @@ export const housekeeping = async (
             const now = reread.value;
             if (now === undefined || !released(now) || !(await finished(io, now))) return ok(undefined);
             if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+            const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
+            if (!guarded.ok) return guarded;
             try {
               await removeTrash(io, itemOf(now).trash);
               await removeJournal(io, paths, now.op);
@@ -567,6 +581,9 @@ export const housekeeping = async (
         if (away !== undefined) return away;
         // A live deleter's already (D64); a dead one's is taken over by the new detached delete's claim.
         if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+        // A registered working copy is never deleted as trash (D84).
+        const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
+        if (!guarded.ok) return guarded;
         // Without a deadline the trash is no longer renamed back by an onload (it may be being deleted).
         const { keepUntil: _, ...rest } = now;
         try {

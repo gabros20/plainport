@@ -174,6 +174,32 @@ export const nestedProjects = async (
 };
 
 /**
+ * project.nested when `path`, something gc, housekeeping or recover is about to delete from a holder, is, holds or lies
+ * inside a registered project's effective folder: a working copy is never deleted as staging or trash (D84). A
+ * registry that cannot be read refuses too (fail closed).
+ */
+export const notAProject = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  env: Env,
+  path: string,
+): Promise<Result<void>> => {
+  const folders = await registeredFolders(io, paths, env);
+  if (!folders.ok) return folders;
+  const nested = await nestedProjects(io, paths, folders.value, { folder: path });
+  if (!nested.ok) return nested;
+  const [project] = nested.value;
+  if (project === undefined) return ok(undefined);
+  return fail(
+    finding("project.nested", {
+      message: `${path} ${project.same ? "is" : project.inside ? "holds" : "lies inside"} ${project.address}'s folder (${project.folder}), a registered working copy, so it was not deleted (D84)`,
+      fix: `move ${project.folder} out of plainport's .plainport-* holder by hand (it is your working copy, not plainport's), then re-run`,
+      paths: [path, project.folder],
+    }),
+  );
+};
+
+/**
  * Runs `body` holding the project's lock and its nested projects' (options.related), once no interrupted operation
  * of the project is open; an open one `options.resume` accepts is handed to the body instead.
  */
