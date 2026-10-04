@@ -54,9 +54,13 @@ reinstall plainport (release and installed builds), or put the tool in `PLAINPOR
 read-only; `~/.local/share/plainport/current` points at the active version and `~/.local/bin/plainport` points
 through it. A release installs as `<version>` and only from a clean tree; a dev build installs as
 `<version>+<UTC build time>.<commit>[.dirty]`. A version already installed from the same commit is activated again
-rather than rebuilt; one installed from another commit is refused. After an install only `current` and `previous` (the
-rollback target) are kept, and an install first sweeps the `.staging-*` folders and `.tmp-*` links an interrupted
-one left. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
+rather than rebuilt; one installed from another commit is refused, and a release needs a git checkout. After an
+install only `current` and `previous` (the rollback target) are kept: it prunes only the version folders it made (real
+folders with its names and its `build.json`), never follows a link, and leaves anything else under `versions/` alone
+with a notice. It first sweeps the `.staging-*` folders and `.tmp-*` links an interrupted install left, by the same
+rules. A failed prune after a good install is a notice and exits 0. An mkdir lock (`share/plainport/.install.lock`)
+keeps installs and rollbacks one at a time. A plainport still running from a version pruned under it (two installs
+during one run) loses the restic beside it; the operation stops and `plainport recover` settles it. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
 and skips that check. `scripts/install --rollback` makes the previous version current again; `--prefix <dir>`
 replaces `~/.local`. Tests use only temp prefixes.
 

@@ -66,6 +66,16 @@ describe("naming a build", () => {
     if (!refused.ok) expect(refused.message).toContain("commit or stash");
   });
 
+  test("a release outside a git checkout (no commit) is refused", () => {
+    const refused = planName({ version: "0.1.0", commit: undefined, dirty: false });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.message).toContain("not a git checkout");
+    expect(planName({ version: "0.1.0-dev", commit: undefined, dirty: false, now: new Date(0) })).toEqual({
+      ok: true,
+      name: "0.1.0-dev+19700101000000.unknown",
+    });
+  });
+
   test("tracked changes anywhere and untracked files under packages/ make the tree dirty", () => {
     expect(dirtyFromStatus("")).toBe(false);
     expect(dirtyFromStatus("?? notes.txt\n?? .orchestrate/x.md\n")).toBe(false);
@@ -78,7 +88,14 @@ describe("installVersion and rollback", () => {
   test("installs a read-only version tree behind current, with bin/plainport pointing through current", () => {
     const prefix = fresh();
     const first = installVersion(prefix, "0.1.0", stageFake("one"));
-    expect(first).toEqual({ ok: true, version: "0.1.0", previous: undefined, reused: false, pruned: [] });
+    expect(first).toEqual({
+      ok: true,
+      version: "0.1.0",
+      previous: undefined,
+      reused: false,
+      pruned: [],
+      notices: [],
+    });
     const paths = layout(prefix);
     expect(readlinkSync(paths.current)).toBe("versions/0.1.0");
     expect(readlinkSync(paths.bin)).toBe(join(paths.current, "plainport"));
@@ -172,6 +189,91 @@ describe("installVersion and rollback", () => {
     expect(readdirSync(join(prefix, "bin")).sort()).toEqual(["other-tool", "plainport"]);
   });
 
+  /** A folder outside the install whose modes must never change: it, a 700 folder in it, and a file. */
+  const outside = (): { dir: string; modes: () => number[] } => {
+    const dir = mkdtempSync(join(scratch, "outside-"));
+    mkdirSync(join(dir, "private"));
+    chmodSync(join(dir, "private"), 0o700);
+    writeFileSync(join(dir, "private", "key"), "secret-ish");
+    chmodSync(join(dir, "private", "key"), 0o600);
+    chmodSync(dir, 0o700);
+    const modes = () =>
+      [dir, join(dir, "private"), join(dir, "private", "key")].map((p) => statSync(p).mode & 0o777);
+    return { dir, modes };
+  };
+
+  test("prune and sweep never follow a symlink: links in versions/ survive and their targets keep their modes (R2-I1)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const paths = layout(prefix);
+    chmodSync(paths.versions, 0o755);
+    const a = outside();
+    const b = outside();
+    symlinkSync(a.dir, join(paths.versions, "dev"));
+    symlinkSync(a.dir, join(paths.versions, "0.0.9"));
+    symlinkSync(b.dir, join(paths.versions, ".staging-AbC123"));
+    installVersion(prefix, "0.2.0", stageFake("two"));
+    const third = installVersion(prefix, "0.3.0", stageFake("three"));
+    expect(third).toMatchObject({ ok: true, pruned: ["0.1.0"] });
+    if (third.ok) {
+      expect(third.notices).toContain(
+        `left alone: ${join(paths.versions, "dev")} (not a version scripts/install made)`,
+      );
+      expect(third.notices).toContain(
+        `left alone: ${join(paths.versions, ".staging-AbC123")} (not a staging folder scripts/install made)`,
+      );
+    }
+    for (const name of ["dev", "0.0.9", ".staging-AbC123"])
+      expect(lstatSync(join(paths.versions, name)).isSymbolicLink()).toBe(true);
+    expect(a.modes()).toEqual([0o700, 0o700, 0o600]);
+    expect(b.modes()).toEqual([0o700, 0o700, 0o600]);
+  });
+
+  test("prune leaves a foreign file and a foreign folder in versions/ alone, version-shaped or not (R2-I1)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const paths = layout(prefix);
+    chmodSync(paths.versions, 0o755);
+    writeFileSync(join(paths.versions, "README"), "the owner's notes");
+    mkdirSync(join(paths.versions, "9.9.9"));
+    writeFileSync(join(paths.versions, "9.9.9", "plainport"), "another tool's");
+    mkdirSync(join(paths.versions, "scratch"));
+    installVersion(prefix, "0.2.0", stageFake("two"));
+    installVersion(prefix, "0.3.0", stageFake("three"));
+    expect(readdirSync(paths.versions).sort()).toEqual(["0.2.0", "0.3.0", "9.9.9", "README", "scratch"]);
+    expect(readFileSync(join(paths.versions, "9.9.9", "plainport"), "utf8")).toBe("another tool's");
+  });
+
+  test("a prune that fails after activation is a notice, and the install still succeeds (R2-M2)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    installVersion(prefix, "0.2.0", stageFake("two"));
+    const locked = join(layout(prefix).versions, "0.1.0", "plainport");
+    Bun.spawnSync(["chflags", "uchg", locked]);
+    try {
+      const third = installVersion(prefix, "0.3.0", stageFake("three"));
+      expect(third).toMatchObject({ ok: true, version: "0.3.0", pruned: [] });
+      if (third.ok) expect(third.notices.some((n) => n.startsWith("prune of 0.1.0 failed:"))).toBe(true);
+      expect(readState(prefix)).toMatchObject({ current: "0.3.0", previous: "0.2.0" });
+    } finally {
+      Bun.spawnSync(["chflags", "nouchg", locked]);
+    }
+  });
+
+  test("a second install while one holds the lock is refused, and the lock goes when an install ends (R2-M7)", () => {
+    const prefix = fresh();
+    installVersion(prefix, "0.1.0", stageFake("one"));
+    const lock = join(layout(prefix).share, ".install.lock");
+    expect(existsSync(lock)).toBe(false);
+    mkdirSync(lock);
+    const refused = installVersion(prefix, "0.2.0", stageFake("two"));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.message).toContain("another scripts/install is running");
+    expect(rollback(prefix).ok).toBe(false);
+    rmSync(lock, { recursive: true });
+    expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(true);
+  });
+
   test("a current that is not a link fails with a message, not an exception", () => {
     const prefix = fresh();
     mkdirSync(join(layout(prefix).current, "x"), { recursive: true });
@@ -259,6 +361,10 @@ describeT1("scripts/install end to end", () => {
     expect(state.current).toStartWith(`${version}`);
     for (const name of ["plainport", "restic", "rclone", "build.json"])
       expect(existsSync(join(layout(prefix).versions, state.current ?? "", name))).toBe(true);
+    const build = JSON.parse(
+      readFileSync(join(layout(prefix).versions, state.current ?? "", "build.json"), "utf8"),
+    );
+    expect(build.commit).toMatch(/^[0-9a-f]{40}$/);
     const ran = Bun.spawnSync([layout(prefix).bin, "--version"], { env, stdout: "pipe" });
     expect(ran.exitCode).toBe(0);
     expect(ran.stdout.toString().trim()).toBe(`plainport ${version}`);
