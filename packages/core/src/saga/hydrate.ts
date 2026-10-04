@@ -43,6 +43,7 @@ import type { ProjectRef } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { refreshIndex } from "../scan/git.ts";
 import { scanTree } from "../scan/walk.ts";
+import { secretVariables } from "../store.ts";
 import { ulid } from "../ulid.ts";
 import { nestedProjects, registeredFolders, withProjectLock } from "./project-gate.ts";
 
@@ -72,9 +73,12 @@ export type HydrateReport = {
 export interface HydrateDeps {
   host: HostPorts;
   plugins: readonly EcosystemPlugin[];
-  /** The user's environment: the installs run with it (plainport's own PLAINPORT_* variables left out). */
+  /** The user's environment: the installs run with it, without plainport's and its engines' variables (D79). */
   env: Env;
-  /** Reads the project file, to report what it asks to run untrusted. */
+  /**
+   * Reads the configuration: the variables its `env:` secret references name are left out of the installs'
+   * environment, and the project file's commands are reported as untrusted.
+   */
   loader?: ConfigLoader;
   op: string;
   emit(event: StreamEvent): void;
@@ -89,11 +93,23 @@ const INSTALL_IDLE_MS = 10 * 60_000;
 const INSTALL_TIMEOUT_MS = 60 * 60_000;
 const VERSION_TIMEOUT_MS = 30_000;
 
-/** The installs' environment: the user's, without unset entries and without plainport's own variables (secrets). */
-const installEnv = (env: Env): Record<string, string> => {
+/** Variables only plainport and its engines read: a store password or a restic or rclone setting may be among them. */
+const PRIVATE_PREFIXES = ["PLAINPORT_", "RESTIC_", "RCLONE_"];
+
+/**
+ * The installs' environment (D79): the user's, without unset entries, without plainport's, restic's and rclone's
+ * variables, and without `secrets`, the variables a configured `env:` secret reference names. Package scripts run
+ * with it, so no store password reaches them.
+ */
+const installEnv = (env: Env, secrets: readonly string[] = []): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(env))
-    if (value !== undefined && !name.startsWith("PLAINPORT_")) out[name] = value;
+    if (
+      value !== undefined &&
+      !PRIVATE_PREFIXES.some((prefix) => name.startsWith(prefix)) &&
+      !secrets.includes(name)
+    )
+      out[name] = value;
   return out;
 };
 
@@ -232,18 +248,6 @@ export const hydrateProject = async (
   const phase = (name: "toolchain" | "hydrate", status: "start" | "end") =>
     deps.emit({ type: "phase", op, phase: name, status });
   const untrusted: string[] = [];
-  if (deps.loader !== undefined) {
-    const loaded = await deps.loader.load({ env: deps.env, projectDir: dir });
-    if (loaded.ok) {
-      if (loaded.value.config.hydrate?.command !== undefined) untrusted.push("hydrate.command");
-      for (const name of Object.keys(loaded.value.config.hooks ?? {}).sort()) untrusted.push(`hooks.${name}`);
-    }
-    if (untrusted.length > 0)
-      deps.log(
-        "info",
-        `${address}'s .plainport.toml asks to run ${untrusted.join(", ")}; it is code from the repository, and this version of plainport never runs it (plainport trust arrives later), so it was skipped`,
-      );
-  }
   const failed = (message: string, steps: HydrateStepReport[], fix?: string) => ({
     report: { status: "failed" as const, steps, untrusted },
     failure: fail(
@@ -267,6 +271,31 @@ export const hydrateProject = async (
     ),
   });
 
+  // The installs run package scripts (D54): no variable a configured secret reference names may reach them (D79).
+  let secrets: string[] = [];
+  if (deps.loader !== undefined) {
+    // The stores are global settings, read without the project file (which cannot name one), and fail closed.
+    const global = await deps.loader.load({ env: deps.env });
+    if (!global.ok)
+      return failed(
+        `${address} is restored, but its install did not run: the configuration could not be read, so plainport cannot tell which variables hold a store's password (${global.finding.message})`,
+        [],
+        `${(global.finding.fix ?? "fix the configuration").replace(/, then re-run$/, "")}, then plainport hydrate ${shellWord(address)}`,
+      );
+    secrets = secretVariables(global.value.config);
+    const loaded = await deps.loader.load({ env: deps.env, projectDir: dir });
+    if (loaded.ok) {
+      if (loaded.value.config.hydrate?.command !== undefined) untrusted.push("hydrate.command");
+      for (const name of Object.keys(loaded.value.config.hooks ?? {}).sort()) untrusted.push(`hooks.${name}`);
+    }
+    if (untrusted.length > 0)
+      deps.log(
+        "info",
+        `${address}'s .plainport.toml asks to run ${untrusted.join(", ")}; it is code from the repository, and this version of plainport never runs it (plainport trust arrives later), so it was skipped`,
+      );
+  }
+  const env = installEnv(deps.env, secrets);
+
   phase("toolchain", "start");
   const scanned = await scanTree(host.fs, dir);
   if (!scanned.ok)
@@ -281,7 +310,7 @@ export const hydrateProject = async (
     if (plugin.toolchain !== undefined) requirements.push(...(await plugin.toolchain(ctx)));
     installs.push(...(await plugin.hydrate(ctx)).steps);
   }
-  const toolchain = await resolveToolchain(host, deps.env, requirements, deps.signal, dir);
+  const toolchain = await resolveToolchain(host, env, requirements, deps.signal, dir);
   for (const f of toolchain.findings) deps.emit({ type: "finding", op, finding: f });
   if (toolchain.manager !== undefined)
     deps.log(
@@ -301,7 +330,7 @@ export const hydrateProject = async (
       command: argv[0] as string,
       args: argv.slice(1),
       cwd,
-      env: installEnv(deps.env),
+      env,
       idleTimeoutMs: INSTALL_IDLE_MS,
       timeoutMs: INSTALL_TIMEOUT_MS,
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
@@ -333,7 +362,7 @@ export const hydrateProject = async (
   // The index's stat data is stale after a restore: one refresh, so the first git status is not slow.
   if (manifest.get(".git") !== undefined) {
     const refreshed = await refreshIndex(host, dir, {
-      env: deps.env,
+      env,
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
     });
     if (!refreshed)

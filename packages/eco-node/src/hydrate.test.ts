@@ -18,7 +18,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StreamEvent } from "@plainport/contract";
-import { hydrateProject, resolveToolchain, scanTree, type ToolRequirement } from "@plainport/core";
+import {
+  ConfigLoader,
+  hydrateProject,
+  resolvePaths,
+  resolveToolchain,
+  scanTree,
+  type ToolRequirement,
+} from "@plainport/core";
 import { testHost } from "../../core/src/testing/host.ts";
 import { nodePlugin } from "./plugin.ts";
 import { FIXTURES } from "./testing.ts";
@@ -291,6 +298,106 @@ describe("hydrate: real frozen installs, offline", () => {
     },
     60_000,
   );
+
+  // D79: package scripts run (D54), so no store password may be in their environment: plainport's own variables,
+  // restic's and rclone's, and whatever variable a configured env: secret reference names.
+  const secretEnv = (path?: string) => ({
+    ...offlineEnv(path),
+    PLAINPORT_STORE_PASSWORD: "pw-default-store",
+    RESTIC_PASSWORD: "pw-restic",
+    RCLONE_CONFIG_PASS: "pw-rclone",
+    MY_VAULT_PW: "pw-custom-ref",
+    MY_RECOVERY_PW: "pw-recovery-ref",
+    KEEP_ME: "visible",
+  });
+  const secretLoader = () => {
+    const configDir = join(home, ".config", "plainport");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, "config.toml"),
+      [
+        "[stores.ssd]",
+        'kind = "local"',
+        `path = "${join(root, "store")}"`,
+        'secret = "env:MY_VAULT_PW"',
+        "[secrets]",
+        'recovery = "env:MY_RECOVERY_PW"',
+        "",
+      ].join("\n"),
+    );
+    const paths = resolvePaths({ HOME: home }, { cwd: root });
+    if (!paths.ok) throw new Error(paths.finding.message);
+    return new ConfigLoader(testHost(), paths.value);
+  };
+  const expectNoSecrets = (printed: string) => {
+    expect(printed).toContain("KEEP_ME=visible");
+    for (const value of ["pw-default-store", "pw-restic", "pw-rclone", "pw-custom-ref", "pw-recovery-ref"])
+      expect(printed).not.toContain(value);
+  };
+  const hydrateWith = (dir: string, env: Record<string, string>) =>
+    hydrateProject(
+      {
+        host: testHost(),
+        plugins: [nodePlugin],
+        env,
+        loader: secretLoader(),
+        op: "01M40X7EC1DTXN87AJ4SH74DK6",
+        emit: (event) => events.push(event),
+        log: () => {},
+      },
+      dir,
+      "work:web",
+    );
+
+  test.skipIf(!Bun.which("npm") && !process.env.CI)(
+    "npm: a package script that prints its environment sees no store password (D79)",
+    async () => {
+      expect(Bun.which("npm")).not.toBeNull();
+      const dir = project("npm");
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ ...pkg, scripts: { preinstall: "env > printed-env.txt" } }),
+      );
+      const done = await hydrateWith(dir, secretEnv());
+      expect(done.failure?.finding.message).toBeUndefined();
+      expectNoSecrets(readFileSync(join(dir, "printed-env.txt"), "utf8"));
+    },
+    60_000,
+  );
+
+  test("the install itself (a fake npm) sees no store password either (D79)", async () => {
+    const dir = project("npm");
+    fake("npm", 'env > "$PWD/printed-env.txt"');
+    fake("node", 'echo "v20.11.0"');
+    const done = await hydrateWith(dir, secretEnv(`${bin}:/usr/bin:/bin`));
+    expect(done.report.status).toBe("installed");
+    expectNoSecrets(readFileSync(join(dir, "printed-env.txt"), "utf8"));
+  });
+
+  test("a configuration that cannot be read stops the install before it runs: fail closed (D79)", async () => {
+    const dir = project("npm");
+    fake("npm", 'echo ran > "$PWD/ran.txt"');
+    const loader = secretLoader();
+    writeFileSync(join(home, ".config", "plainport", "config.toml"), "[stores.ssd\n");
+    const done = await hydrateProject(
+      {
+        host: testHost(),
+        plugins: [nodePlugin],
+        env: secretEnv(`${bin}:/usr/bin:/bin`),
+        loader,
+        op: "01M40X7EC1DTXN87AJ4SH74DK6",
+        emit: (event) => events.push(event),
+        log: () => {},
+      },
+      dir,
+      "work:web",
+    );
+    expect(done.report).toEqual({ status: "failed", steps: [], untrusted: [] });
+    expect(done.failure?.finding.code).toBe("hydrate.failed");
+    expect(done.failure?.finding.fix).toEndWith("then plainport hydrate work:web");
+    expect(existsSync(join(dir, "ran.txt"))).toBe(false);
+  });
 
   test("yarn-berry (faked: Yarn 4 needs a download): yarn install --immutable runs in the project", async () => {
     const dir = join(root, "work", "yarn-berry");

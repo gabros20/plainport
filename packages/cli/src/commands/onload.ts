@@ -132,7 +132,7 @@ export const onload = defineCommand({
     {
       argv: ["onload", "work:clients/acme/api", "--no-hydrate"],
       summary:
-        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries",
+        "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them",
     },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],

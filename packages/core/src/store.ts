@@ -31,6 +31,16 @@ export const secretRefOf = (store: Store): string | undefined =>
       ? DEFAULT_LOCAL_SECRET
       : undefined;
 
+/**
+ * The environment variables that hold a secret by the configuration's references: every store's `env:` password
+ * (DEFAULT_LOCAL_SECRET included) and the recovery secret's. Code plainport does not trust never sees them (D79).
+ */
+export const secretVariables = (config: ResolvedConfig): string[] => {
+  const refs = [...Object.values(config.stores).map(secretRefOf), config.secrets?.recovery];
+  const names = refs.flatMap((ref) => (ref?.startsWith("env:") ? [ref.slice("env:".length)] : []));
+  return [...new Set(names)].sort();
+};
+
 /** Reads a secret reference: `env:NAME` from the environment, `file:PATH` from a file (one trailing newline cut). */
 export const resolveSecret = async (
   io: LocalIo,
