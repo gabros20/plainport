@@ -1430,6 +1430,13 @@ describe("offload: fix wave r2", () => {
     const approved = await approve();
     store = memoryBlobStore({ createIfAbsent: true });
     engine = fakeEngine();
+    // init never moves a pinned name to another store (D85): the device forgot the old pin before setting this one up.
+    value(
+      await updateRegistry(testHost(), box.paths, (registry) => {
+        const { ssd: _, ...stores } = registry.stores ?? {};
+        return ok({ ...registry, stores });
+      }),
+    );
     value(
       await setUpStore(testHost(), {
         paths: box.paths,
