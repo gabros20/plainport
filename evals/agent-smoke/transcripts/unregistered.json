@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "project": "work:fixture",
+  "agentExitCode": 0,
+  "fixtureIntact": true,
+  "agentIssues": [],
+  "calls": [
+    {
+      "argv": ["help"],
+      "exitCode": 0,
+      "stdout": "plainport 0.1.0-dev: offload, onload and move coding projects\n\nUsage: plainport <command> [options]\n\nProjects:\n  ls         read        Every project with its root, state, device, size and last activity\n  status     read        One project in detail: its state, head, lease and what to do next\n  offload    confirm     Snapshot a project, verify it and free its folder; --dry-run shows the plan first\n  onload     safe_write  Restore a shelved project into place and reinstall its dependencies\n  hydrate    safe_write  Install a project's dependencies again with its own package manager (frozen)\n  dehydrate  safe_write  Remove a project's installed dependencies (only what a plugin claims and git does not track)\n  restore    safe_write  Restore a snapshot side by side into a free path: no lease, no hydration\n\nRecovery and cleanup:\n  recover    safe_write  Settle interrupted operations: roll back what had not committed, finish what had\n  gc         safe_write  Delete released trash past its keepLocalFor deadline; --now deletes it early\n\nRoots:\n  root add   safe_write  Add a root, optionally with this device's folder for it; the global --store sets its store\n  root bind  safe_write  Point a root at its folder on this device\n  root list  read        Show every root, its folder on each device and its state here\n  root scan  safe_write  Find every project under a root's folder here and register the new ones\n\nSetup and info:\n  help       read        Show every command, or one command's arguments, options and risk class\n  init       confirm     Name this device, set up its roots and record the store snapshots go to\n  version    read        Print plainport's version\n\nGlobal options:\n  --json           Print NDJSON: event lines, then exactly one final envelope\n  --yes            Allow a confirm-class command to run; --plan <id> stands in for it on a command that runs a --dry-run's plan\n  --no-input       Never prompt; implied when stdin is not a terminal\n  --dry-run        Preview only: build and print the plan, change nothing\n  --store <name>   Use this store instead of the default\n  --config <path>  Read this config file instead of the default\n  --quiet          Print only results, warnings and errors\n  --verbose        Print debug logs too\n\nread and safe_write commands run freely; confirm commands need --yes, or --plan <id> with the id their --dry-run\nprinted. --dry-run always runs as read.\nRun plainport help <command> for a command's arguments, options and examples.\nFor scripts and agents: add --json to any command for NDJSON with one final envelope; plainport help --json lists\nthe commands as data; plainport.json, generated from the same registry, is the full machine contract (every\nschema, exit code and finding) and is large: read it as data, not as help.\n",
+      "stderr": "",
+      "issues": ["Status observation exited 4. "]
+    },
+    {
+      "argv": ["help"],
+      "exitCode": 0,
+      "stdout": "plainport 0.1.0-dev: offload, onload and move coding projects\n\nUsage: plainport <command> [options]\n\nProjects:\n  ls         read        Every project with its root, state, device, size and last activity\n  status     read        One project in detail: its state, head, lease and what to do next\n  offload    confirm     Snapshot a project, verify it and free its folder; --dry-run shows the plan first\n  onload     safe_write  Restore a shelved project into place and reinstall its dependencies\n  hydrate    safe_write  Install a project's dependencies again with its own package manager (frozen)\n  dehydrate  safe_write  Remove a project's installed dependencies (only what a plugin claims and git does not track)\n  restore    safe_write  Restore a snapshot side by side into a free path: no lease, no hydration\n\nRecovery and cleanup:\n  recover    safe_write  Settle interrupted operations: roll back what had not committed, finish what had\n  gc         safe_write  Delete released trash past its keepLocalFor deadline; --now deletes it early\n\nRoots:\n  root add   safe_write  Add a root, optionally with this device's folder for it; the global --store sets its store\n  root bind  safe_write  Point a root at its folder on this device\n  root list  read        Show every root, its folder on each device and its state here\n  root scan  safe_write  Find every project under a root's folder here and register the new ones\n\nSetup and info:\n  help       read        Show every command, or one command's arguments, options and risk class\n  init       confirm     Name this device, set up its roots and record the store snapshots go to\n  version    read        Print plainport's version\n\nGlobal options:\n  --json           Print NDJSON: event lines, then exactly one final envelope\n  --yes            Allow a confirm-class command to run; --plan <id> stands in for it on a command that runs a --dry-run's plan\n  --no-input       Never prompt; implied when stdin is not a terminal\n  --dry-run        Preview only: build and print the plan, change nothing\n  --store <name>   Use this store instead of the default\n  --config <path>  Read this config file instead of the default\n  --quiet          Print only results, warnings and errors\n  --verbose        Print debug logs too\n\nread and safe_write commands run freely; confirm commands need --yes, or --plan <id> with the id their --dry-run\nprinted. --dry-run always runs as read.\nRun plainport help <command> for a command's arguments, options and examples.\nFor scripts and agents: add --json to any command for NDJSON with one final envelope; plainport help --json lists\nthe commands as data; plainport.json, generated from the same registry, is the full machine contract (every\nschema, exit code and finding) and is large: read it as data, not as help.\n",
+      "stderr": "",
+      "issues": ["Status observation exited 4. "]
+    },
+    {
+      "argv": ["ls", "--json"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"ls\",\"data\":{\"projects\":[],\"stores\":[{\"name\":\"local\",\"id\":\"01M435J7BT3MME4PD33KCQCGPF\",\"stale\":false,\"syncedAt\":\"2026-10-04T09:57:58.041Z\"}],\"unreadableJournals\":[]}}\n",
+      "stderr": "",
+      "issues": ["Status observation exited 4. "]
+    },
+    {
+      "argv": ["root", "list", "--json"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"root list\",\"data\":{\"device\":\"eval\",\"roots\":[{\"key\":\"work\",\"store\":\"local\",\"bindings\":{\"eval\":\"/var/folders/fg/wxc979cs1hb4kk06zzmd4r4r0000gn/T/plainport-agent-smoke-1HOCZm/work\"},\"path\":\"/var/folders/fg/wxc979cs1hb4kk06zzmd4r4r0000gn/T/plainport-agent-smoke-1HOCZm/work\",\"state\":\"ok\",\"source\":\"managed\",\"projects\":0}],\"findings\":[]}}\n",
+      "stderr": "",
+      "issues": ["Status observation exited 4. "]
+    },
+    {
+      "argv": ["offload", "work:fixture", "--json", "--yes"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"offload\",\"data\":{}}\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["onload", "work:fixture", "--json"],
+      "exitCode": 0,
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"onload\",\"data\":{}}\n",
+      "stderr": ""
+    }
+  ],
+  "observations": [
+    {
+      "afterCall": 5,
+      "project": "work:fixture",
+      "state": "shelved"
+    },
+    {
+      "afterCall": 6,
+      "project": "work:fixture",
+      "state": "local"
+    }
+  ],
+  "finalObservation": {
+    "project": "work:fixture",
+    "state": "local"
+  },
+  "source": "First four calls from task-16-claude-1791107864639.json; observer responses reconstructed because the original recording omitted them; lifecycle calls authored.",
+  "observerResults": [
+    {
+      "exitCode": 4,
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"status\",\"error\":{\"code\":4,\"message\":\"work:fixture is not registered or offloaded yet\",\"hint\":\"plainport offload work:fixture --dry-run\",\"finding\":{\"code\":\"project.not-found\",\"severity\":\"block\",\"allowable\":false,\"message\":\"work:fixture is not registered or offloaded yet\",\"fix\":\"plainport offload work:fixture --dry-run\"}}}\n"
+    },
+    {
+      "exitCode": 4,
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"status\",\"error\":{\"code\":4,\"message\":\"work:fixture is not registered or offloaded yet\",\"hint\":\"plainport offload work:fixture --dry-run\",\"finding\":{\"code\":\"project.not-found\",\"severity\":\"block\",\"allowable\":false,\"message\":\"work:fixture is not registered or offloaded yet\",\"fix\":\"plainport offload work:fixture --dry-run\"}}}\n"
+    },
+    {
+      "exitCode": 4,
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"status\",\"error\":{\"code\":4,\"message\":\"work:fixture is not registered or offloaded yet\",\"hint\":\"plainport offload work:fixture --dry-run\",\"finding\":{\"code\":\"project.not-found\",\"severity\":\"block\",\"allowable\":false,\"message\":\"work:fixture is not registered or offloaded yet\",\"fix\":\"plainport offload work:fixture --dry-run\"}}}\n"
+    },
+    {
+      "exitCode": 4,
+      "stdout": "{\"plainport_json\":1,\"ok\":false,\"verb\":\"status\",\"error\":{\"code\":4,\"message\":\"work:fixture is not registered or offloaded yet\",\"hint\":\"plainport offload work:fixture --dry-run\",\"finding\":{\"code\":\"project.not-found\",\"severity\":\"block\",\"allowable\":false,\"message\":\"work:fixture is not registered or offloaded yet\",\"fix\":\"plainport offload work:fixture --dry-run\"}}}\n"
+    }
+  ]
+}

@@ -52,6 +52,13 @@ test("scorer requires ordered observations for the fixture, byte integrity and a
 
 test("scorer rejects malformed recordings instead of silently counting them", () => {
   expect(() => scoreTranscript({ calls: [] })).toThrow();
+  const transcript = recorded("pass") as Record<string, unknown>;
+  expect(() =>
+    scoreTranscript({
+      ...transcript,
+      observations: [{ afterCall: 1, project: "work:fixture", state: "not-a-state" }],
+    }),
+  ).toThrow();
 });
 
 test("scorer reports calls that bypass JSON and malformed event lines", () => {

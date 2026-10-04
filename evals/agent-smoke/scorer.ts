@@ -8,10 +8,20 @@ export const CallSchema = z.object({
   stderr: z.string(),
   issues: z.array(z.string()).default([]),
 });
+export const ObservedStateSchema = z.enum([
+  "unregistered",
+  "local",
+  "shelved",
+  "offloading",
+  "onloading",
+  "conflicted",
+  "restored-unhydrated",
+  "unavailable",
+]);
 export const ObservationSchema = z.object({
   afterCall: z.number().int().nonnegative(),
   project: z.string(),
-  state: z.string(),
+  state: ObservedStateSchema,
 });
 export const TranscriptSchema = z.object({
   version: z.literal(1),
