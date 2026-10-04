@@ -171,6 +171,7 @@ entry names another code. Each finding code is listed once in the catalogue (`FI
 | --- | --- | --- | --- | --- |
 | `catalog.event-skipped` | warn | no | 6 | A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed |
 | `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's `data` names it (D14). Nothing local is deleted |
+| `catalog.head-uncertain` | block | no | 6 | The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's, its registry entry's base) is named by no readable event, so the head may be older than the newest snapshot (D86). Onload and offload refuse; `onload --snapshot <id>` goes on and keeps the stub that names the newer snapshot |
 | `catalog.incomplete` | block | no | 6 | The catalog names a snapshot of the project it does not hold, so its head is unknown; nothing is uploaded or committed |
 | `command.cancelled` | block | no | 130 | The person answering `init`'s prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and `fix` is the corrected command line |

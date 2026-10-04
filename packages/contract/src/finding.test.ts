@@ -175,6 +175,12 @@ describe("findings", () => {
       "plan.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "catalog.head-moved": { severity: "block", allowable: false, exitCode: 8, summary: expect.any(String) },
       "catalog.incomplete": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "catalog.head-uncertain": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "fs.cross-volume": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "fs.write-failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "path.stub-occupied": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
