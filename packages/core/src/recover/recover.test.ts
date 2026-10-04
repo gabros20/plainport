@@ -10,12 +10,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
@@ -566,7 +567,15 @@ describe("recover: releaseOffload's guards (Task 12 quality r3)", () => {
     );
     await expect(
       releaseOffload(
-        { host, paths: box.paths, saga, clock: () => new Date(), log: () => {}, stores: async () => ok([]) },
+        {
+          host,
+          paths: box.paths,
+          saga,
+          clock: () => new Date(),
+          log: () => {},
+          env: env(),
+          stores: async () => ok([]),
+        },
         { at: new Date().toISOString(), bytes: 1 },
       ),
     ).rejects.toThrow(/committed/);
@@ -2284,7 +2293,7 @@ describe("release fixes: expected I/O failures are values, never exceptions (I9,
     ...over,
   });
 
-  test("gc: a trash that cannot be stat'ed is not taken as finished, and gc still reports (no throw)", async () => {
+  test("gc: a trash that cannot be stat'ed is not taken as finished, and gc reports the guard's refusal (no throw, D87)", async () => {
     config('[offload]\nkeepLocalFor = "1h"');
     value(await offloadNow());
     const trash = join(box.home, "work/.plainport-trash", trashes()[0] as string);
@@ -2299,10 +2308,10 @@ describe("release fixes: expected I/O failures are values, never exceptions (I9,
         },
       },
     };
-    const report = value(await collectTrash(trashDeps({ host }), { early: true }));
-    expect(report.deleted).toHaveLength(1);
-    expect(trashes()).toEqual([]);
-    expect(await journals()).toEqual([]);
+    const result = await collectTrash(trashDeps({ host }), { early: true });
+    expect(result.ok ? 0 : result.finding.code).toBe("delete.guard-refused");
+    expect(trashes()).toHaveLength(1);
+    expect(await journals()).toHaveLength(1);
   });
 
   test("housekeeping: a trash that cannot be stat'ed never throws out of the start of a command", async () => {
@@ -2485,5 +2494,180 @@ describe("D84: plainport's holders are never a working copy's place, and gc neve
     } finally {
       await held.release();
     }
+  });
+});
+
+describe("D87: one guarded deleter (astra r2 findings 1, 3, 4, 5)", () => {
+  const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({
+    host: testHost(),
+    paths: box.paths,
+    env: env(),
+    log: () => {},
+    ...over,
+  });
+  /** A store a person would set up: the identity file and a restic repository's layout. */
+  const plantStore = (at: string) => {
+    mkdirSync(join(at, "meta/v1"), { recursive: true });
+    writeFileSync(join(at, "meta/v1/store.json"), '{"v":1}\n');
+    mkdirSync(join(at, "keys"), { recursive: true });
+    mkdirSync(join(at, "data"), { recursive: true });
+    writeFileSync(join(at, "config"), "repository");
+  };
+  /** Waits for the detached child: its claim gone, or its trash gone. */
+  const childDone = async (trash: string) => {
+    for (let i = 0; i < 600 && existsSync(`${trash}.claim`); i++) await Bun.sleep(25);
+    await Bun.sleep(200);
+  };
+
+  test("finding 1: a store moved into excluded output during the final fingerprint scan is never deleted", async () => {
+    let armed = false;
+    let planted: string | undefined;
+    const real = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step === "offload.release.trash") armed = true;
+        },
+      },
+    });
+    const host: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        // The interleaving: the first look at the folder in the release's fingerprint scan moves a store into the
+        // excluded node_modules and points the configuration at it.
+        lstat: async (path) => {
+          if (armed && path.startsWith(`${realpathSync(dir)}/`)) {
+            armed = false;
+            planted = join(dir, "node_modules/.archive");
+            plantStore(planted);
+            config(`[stores.archive]\nkind = "local"\npath = "${planted}"`);
+          }
+          return real.fs.lstat(path);
+        },
+      },
+    };
+    const result = await runOffload(offloadDeps(host), { project: await ref() });
+    expect(planted).toBeDefined();
+    const [op] = trashes();
+    const trash = join(box.home, "work/.plainport-trash", op as string);
+    await childDone(trash);
+    // Moved with the folder, never deleted: the guard in the detached child refused.
+    expect(readFileSync(join(trash, "web/node_modules/.archive/meta/v1/store.json"), "utf8")).toContain(
+      '"v":1',
+    );
+    expect(result.ok || result.finding.code === "delete.guard-refused").toBe(true);
+    const gc = await collectTrash(trashDeps(), { early: true });
+    expect(gc.ok ? 0 : gc.finding.code).toBe("delete.guard-refused");
+    expect(existsSync(join(trash, "web/node_modules/.archive/config"))).toBe(true);
+  });
+
+  test("finding 3: a store inside an orphan staging folder is never deleted by gc", async () => {
+    const staging = join(box.home, "work/.plainport-staging", ulid());
+    plantStore(join(staging, "store"));
+    const result = await collectTrash(trashDeps(), { early: false });
+    expect(result.ok ? 0 : result.finding.code).toBe("delete.guard-refused");
+    expect(existsSync(join(staging, "store/meta/v1/store.json"))).toBe(true);
+  });
+
+  test("finding 3: a store inside retained trash survives gc, housekeeping and recover past its deadline", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const trash = join(box.home, "work/.plainport-trash", (journal as OffloadJournal).op);
+    const store = join(trash, "web/.next/archive");
+    plantStore(store);
+    const later = () => new Date(Date.parse((journal as OffloadJournal).keepUntil as string) + 1000);
+    const gc = await collectTrash(trashDeps({ now: later }), { early: false });
+    expect(gc.ok ? 0 : gc.finding.code).toBe("delete.guard-refused");
+    await housekeeping(trashDeps({ now: later }), { deleteDue: true });
+    await childDone(trash);
+    const recovered = await recover(recoverDeps({ now: later }));
+    expect(recovered.ok ? 0 : recovered.finding.code).toBe("delete.guard-refused");
+    expect(existsSync(join(store, "meta/v1/store.json"))).toBe(true);
+    expect(existsSync(join(trash, "web/src/main.ts"))).toBe(true);
+  });
+
+  test("finding 3: store setup refuses a folder inside a reserved holder", async () => {
+    const result = await setUpStore(testHost(), {
+      paths: box.paths,
+      env: { PLAINPORT_STORE_PASSWORD: "pw" },
+      name: "inside",
+      store: { kind: "local", path: `~/work/.plainport-staging/${ulid()}` },
+      opener,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : result.finding.code).toBe("path.reserved");
+  });
+
+  /** A working copy in a holder whose registered override reaches it through a symlink under ~/aliases. */
+  const aliasedCopy = async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    mkdirSync(join(box.home, "old"), { recursive: true });
+    const elsewhere = join(box.home, "old/web");
+    value(await runOnload(onloadDeps(testHost()), { project: await ref(), to: elsewhere, hydrate: false }));
+    const landed = join(box.home, "work/.plainport-staging", ulid());
+    mkdirSync(dirname(landed), { recursive: true });
+    renameSync(elsewhere, landed);
+    mkdirSync(join(box.home, "aliases"));
+    symlinkSync(landed, join(box.home, "aliases/web"));
+    const id = (await projectId()) as string;
+    value(
+      await updateRegistry(testHost(), box.paths, (registry) => {
+        const entry = registry.projects[id];
+        if (entry === undefined) throw new Error("not registered");
+        return ok({
+          ...registry,
+          projects: { ...registry.projects, [id]: { ...entry, override: join(box.home, "aliases/web") } },
+        });
+      }),
+    );
+    writeFileSync(join(landed, "src/main.ts"), "export const main = 3; // an edit no snapshot has\n");
+    chmodSync(join(box.home, "aliases"), 0o000);
+    return { landed, id };
+  };
+
+  for (const live of [false, true])
+    test(`finding 4: an alias that cannot be resolved keeps the working copy in a holder${live ? ", with a live lock" : ""}`, async () => {
+      const { landed, id } = await aliasedCopy();
+      const held = live
+        ? value(
+            await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+              timeoutMs: 0,
+              held: () => finding("project.locked", { message: "held" }),
+            }),
+          )
+        : undefined;
+      try {
+        const result = await collectTrash(trashDeps(), { early: true });
+        expect(result.ok).toBe(false);
+        expect(readFileSync(join(landed, "src/main.ts"), "utf8")).toContain("an edit no snapshot has");
+      } finally {
+        await held?.release();
+        chmodSync(join(box.home, "aliases"), 0o755);
+      }
+    });
+
+  test("finding 5: a configuration that turns invalid after the first load moves nothing; source and store intact", async () => {
+    const archive = join(dir, "node_modules/.archive");
+    const host = testHost({
+      faults: {
+        onStep: (step) => {
+          capture(step);
+          if (step !== "offload.committed") return;
+          plantStore(archive);
+          box.file(
+            ".config/plainport/config.toml",
+            `[stores.archive]\nkind = "local"\npath = "${archive}"\n[roots.work\n`,
+          );
+        },
+      },
+    });
+    const result = await runOffload(offloadDeps(host), { project: await ref() });
+    expect(result.ok ? 0 : result.finding.code).toBe("config.invalid");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(existsSync(join(archive, "meta/v1/store.json"))).toBe(true);
+    expect(trashes()).toEqual([]);
   });
 });

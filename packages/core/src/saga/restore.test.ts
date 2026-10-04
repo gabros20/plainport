@@ -606,3 +606,23 @@ describe("restore: a newer snapshot the catalog cannot read (D86)", () => {
     expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.snapshot);
   });
 });
+
+describe("restore: a first offload whose only event is unreadable (D88)", () => {
+  test("without --snapshot it refuses naming --snapshot S; --snapshot S restores S side by side", async () => {
+    const first = await offload();
+    await waitTrashGone();
+    const id = Object.entries(value(await readRegistry(testHost(), box.paths)).projects)[0]?.[0] as string;
+    for (const e of await storeEvents())
+      if (JSON.stringify(e).includes(id))
+        store.data.set(`meta/v1/events/${e.id}.json`, new TextEncoder().encode('{"v":1,"id":"'));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const to = join(box.home, "old/web");
+    const refused = await runRestore(deps(), { project: await ref(), to });
+    expect(!refused.ok && [refused.exitCode, refused.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!refused.ok && refused.finding.fix).toContain(`--snapshot ${first.snapshot}`);
+    const was = await untouched();
+    value(await runRestore(deps(), { project: await ref(), snapshot: first.snapshot, to }));
+    expect(readFileSync(join(to, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(await untouched()).toEqual(was);
+  });
+});

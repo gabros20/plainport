@@ -6,9 +6,10 @@
 // and recover (through release) all ask; the refusal store.inside-project is never allowable.
 
 import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { ConfigLoader } from "./config/load.ts";
 import type { ConfigLayer, ResolvedConfig } from "./config/schema.ts";
 import type { LocalIo } from "./io.ts";
-import { expandHome } from "./paths.ts";
+import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
 import { canonicalPath, overlapByIdentity } from "./roots/canonical.ts";
 
 /** A local store's folder: what no project may hold or lie inside. */
@@ -73,4 +74,21 @@ export const storeOverlap = async (
     );
   }
   return ok(undefined);
+};
+
+/**
+ * Every local store, from a fresh, clean read of the configuration (astra r2 finding 5): a configuration that does not
+ * read, or reads only as its last good copy (config.kept-last-good), is a refusal, so a destructive step never decides
+ * on stale store paths. Other readers keep the last-good behaviour.
+ */
+export const freshStores = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  env: Env,
+): Promise<Result<ProtectedStore[]>> => {
+  const loaded = await new ConfigLoader(io, paths).load({ env });
+  if (!loaded.ok) return loaded;
+  const kept = loaded.value.findings.find((f) => f.code === "config.kept-last-good");
+  if (kept !== undefined) return fail(kept);
+  return ok(localStores(loaded.value.config, paths.home));
 };

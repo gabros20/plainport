@@ -21,7 +21,7 @@ import { readDevice } from "../device.ts";
 import { makeInHolder } from "../holder.ts";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
-import type { PlainportPaths } from "../paths.ts";
+import type { Env, PlainportPaths } from "../paths.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
@@ -53,6 +53,8 @@ export interface ReleaseContext {
   /** Re-checks the project's lock right before the rename (lock.ts's known limit); absent, it is not re-checked. */
   stillHeld?(): Promise<boolean>;
   paths: PlainportPaths;
+  /** The caller's environment: the detached delete's guard (D87) reads the configuration and roots with it. */
+  env: Env;
   /**
    * Every local store's folder (store-overlap.ts), read from the configuration when asked, right before the rename:
    * the folder, or its copy in the trash, is never moved or deleted while it holds one or lies inside one (D83). A store
@@ -336,7 +338,7 @@ export const releaseOffload = async (
     const self = await readDevice(io, paths);
     const started =
       self.ok && self.value !== undefined
-        ? await io.deleteTrashDetached(trash, journalFile(paths, op), self.value.id)
+        ? await io.deleteTrashDetached(trash, journalFile(paths, op), self.value.id, { paths, env: rc.env })
         : fail(
             finding("device.none", {
               message: "this device's identity could not be read, so its trash cannot be claimed",

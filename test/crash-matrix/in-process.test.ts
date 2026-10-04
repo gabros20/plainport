@@ -224,8 +224,8 @@ const offload = async (faults: { at?: string; occurrence?: number } = {}) => {
       ? real
       : {
           ...real,
-          deleteTrashDetached: async (trash, journal, device) => {
-            heldDelete = () => real.deleteTrashDetached(trash, journal, device);
+          deleteTrashDetached: async (trash, journal, device, context) => {
+            heldDelete = () => real.deleteTrashDetached(trash, journal, device, context);
             return ok({ pid: process.pid });
           },
         };

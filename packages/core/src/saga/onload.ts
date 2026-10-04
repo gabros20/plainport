@@ -56,11 +56,13 @@ import {
   catalogReader,
   type HeadDoubt,
   headUncertain,
+  recordedProject,
   unfoldedSnapshot,
 } from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
+import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
 import { notReserved, removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
@@ -352,11 +354,14 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     // goes on; it is found in the repository by its op tag, restored, and its stub removed as usual.
     const doubt = doubtOf(state.value);
     if (doubt !== undefined && req.snapshot !== doubt.newest) return fail(doubt.finding);
-    const project = state.value.projects[id];
+    // No readable event names the project at all (its first offload's event unreadable): the snapshot named is restored
+    // by this device's own records of the project (D88).
+    const folded = state.value.projects[id];
+    const project = folded ?? (doubt === undefined ? undefined : recorded());
     if (project === undefined) {
       return fail(doubt?.finding ?? finding("project.not-found", notInStore()));
     }
-    const head = headOf(project);
+    const head = folded === undefined ? ok(req.snapshot as string) : headOf(project);
     if (!head.ok) return head;
     const snapshot = req.snapshot ?? head.value;
     // Under doubt the fold's head is older than the snapshot restored (D86): that snapshot is the copy's next base.
@@ -549,6 +554,18 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       what: "nothing was restored",
       instead: (newest) =>
         `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
+    });
+  }
+
+  /** The project as the stub and registry.json record it, when no readable event names it (D88). */
+  function recorded(): CatalogProject | undefined {
+    if (!registered.ok) return undefined;
+    return recordedProject({
+      id,
+      root: ref.root,
+      path: ref.path,
+      stub: stub?.ok ? stub.value : undefined,
+      registry: registered.value,
     });
   }
 
@@ -762,6 +779,12 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   async function abandon(saga: Saga<OnloadJournal, OnloadStep>, failure: Failure): Promise<Failure> {
     const staging = saga.journal.staging;
     if (staging === undefined) return failure;
+    // The one guard before every recursive delete (D87): a refusal keeps the journal for recover.
+    const guarded = await deleteGuard({ io, paths, env: deps.env }, staging);
+    if (!guarded.ok) {
+      deps.log("warn", `the staging folder ${staging} was kept: ${guarded.finding.message}`);
+      return saga.keep(failure);
+    }
     try {
       await io.fs.removeTree(staging);
     } catch (error) {
@@ -774,6 +797,10 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
 
   /** Rolls back an earlier onload that stopped before its swap: its staging folder, then its journal. */
   async function dropStaging(journal: OnloadJournal): Promise<Result<void>> {
+    if (journal.staging !== undefined) {
+      const guarded = await deleteGuard({ io, paths, env: deps.env }, journal.staging);
+      if (!guarded.ok) return guarded;
+    }
     try {
       if (journal.staging !== undefined) await io.fs.removeTree(journal.staging);
       await removeJournal(io, paths, journal.op);
@@ -828,7 +855,12 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     if (doubtNow !== undefined && journal.snapshot !== doubtNow.newest)
       return saga.keep(fail(doubtNow.finding));
     const project = fresh.value.projects[id];
-    const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
+    const head =
+      project === undefined
+        ? doubtNow !== undefined && recorded() !== undefined
+          ? ok(journal.snapshot)
+          : fail(finding("project.not-found", notInStore()))
+        : headOf(project);
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);
     if (!head.ok) return abandon(saga, head);
     let over = journal.over;
@@ -888,6 +920,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     const finished = await finishOnload({
       host,
       paths,
+      env: deps.env,
       saga,
       store: store.blob,
       device: device.id,
@@ -1024,6 +1057,8 @@ export const onloadSwapped = async (io: LocalIo, journal: OnloadJournal): Promis
 export interface FinishContext {
   host: HostPorts;
   paths: PlainportPaths;
+  /** For the delete guard (D87) before the renamed-back trash's leftovers go. */
+  env: Env;
   /** The onload's saga, past its swap: its journal says what is left to do. */
   saga: Saga<OnloadJournal, OnloadStep>;
   /** The store's catalog events. */
@@ -1067,18 +1102,27 @@ export const finishOnload = async (
       }
     }
     if (journal.reuse !== undefined) {
-      // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
-      try {
-        await io.fs.removeTree(dirname(journal.reuse.folder));
-        await removeEmptyHolder(io, dirname(dirname(journal.reuse.folder)), TRASH_DIR);
-        await removeJournal(io, paths, journal.reuse.op);
-      } catch (error) {
-        assertSystemError(error);
+      // The offload whose trash this was is finished: its trash folder (now empty) and its journal go, once the
+      // guard (D87) lets the folder go; a refusal keeps both, and gc reports it.
+      const leftovers = dirname(journal.reuse.folder);
+      const guarded = await deleteGuard({ io, paths, env: ctx.env }, leftovers);
+      if (!guarded.ok)
         ctx.log(
           "warn",
-          `the offload ${journal.reuse.op}'s empty trash or journal could not be removed; plainport recover removes them`,
+          `the offload ${journal.reuse.op}'s trash ${leftovers} was kept: ${guarded.finding.message}`,
         );
-      }
+      else
+        try {
+          await io.fs.removeTree(leftovers);
+          await removeEmptyHolder(io, dirname(leftovers), TRASH_DIR);
+          await removeJournal(io, paths, journal.reuse.op);
+        } catch (error) {
+          assertSystemError(error);
+          ctx.log(
+            "warn",
+            `the offload ${journal.reuse.op}'s empty trash or journal could not be removed; plainport recover removes them`,
+          );
+        }
       saga.after("onload.reuse.cleared");
     }
     const swapped = await saga.step("onload.swapped");

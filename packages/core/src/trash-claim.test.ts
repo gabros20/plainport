@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { posixDeleteTrash } from "./spawner.ts";
-import { testHost } from "./testing/host.ts";
+import { childGuardEnv, SELF, testHost } from "./testing/host.ts";
 import { makeSandbox, type Sandbox } from "./testing/sandbox.ts";
 import { trashClaim, trashClaimFile } from "./trash-claim.ts";
 import { ulid } from "./ulid.ts";
@@ -15,6 +15,8 @@ let box: Sandbox;
 let trash: string;
 let journal: string;
 const DEVICE = ulid();
+/** The detached child: plainport from this checkout, told the sandbox's paths (D87). */
+const launch = () => ({ self: SELF, paths: box.paths, env: { HOME: box.home }, passEnv: childGuardEnv() });
 
 beforeEach(() => {
   box = makeSandbox("plainport-claim-");
@@ -70,7 +72,7 @@ describe("which claims are live (D64 revised)", () => {
 
 describe("the detached delete claims before it deletes (D64 revised)", () => {
   test("it returns once its claim, naming this device and its own pid, is there; then trash, claim and journal go", async () => {
-    const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE);
+    const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE, launch());
     if (!started.ok) throw new Error(started.finding.message);
     // Its claim is there, or it already finished (claim and journal gone with the trash).
     if (existsSync(trashClaimFile(trash))) {
@@ -91,7 +93,7 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
     const journalDir = join(box.home, "state/journal");
     chmodSync(journalDir, 0o555);
     try {
-      const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE);
+      const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE, launch());
       if (!started.ok) throw new Error(started.finding.message);
       for (let i = 0; i < 500 && (await testHost().proc.isAlive(started.value.pid)); i++) await Bun.sleep(10);
       expect([existsSync(trash), existsSync(trashClaimFile(trash)), existsSync(journal)]).toEqual([
@@ -126,7 +128,7 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
       },
     };
     try {
-      const started = await posixDeleteTrash(slow, trash, journal, DEVICE);
+      const started = await posixDeleteTrash(slow, trash, journal, DEVICE, launch());
       expect(started.ok ? "ok" : started.finding.message).toBe("ok");
       expect([existsSync(trash), existsSync(trashClaimFile(trash)), existsSync(journal)]).toEqual([
         false,
@@ -141,7 +143,7 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
   test("a claim it cannot write fails the start, and nothing is deleted", async () => {
     mkdirSync(join(box.home, "work/.plainport-trash"), { recursive: true });
     chmodSync(join(box.home, "work/.plainport-trash"), 0o555);
-    const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE);
+    const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE, launch());
     expect(started.ok ? "ok" : started.finding.code).toBe("fs.write-failed");
     expect([existsSync(join(trash, "web/a.txt")), existsSync(journal)]).toEqual([true, true]);
   });
@@ -162,7 +164,7 @@ describe("the detached delete when its claim cannot be looked at (N4)", () => {
         },
       },
     };
-    const started = await posixDeleteTrash(io, trash, journal, DEVICE);
+    const started = await posixDeleteTrash(io, trash, journal, DEVICE, launch());
     expect(started.ok ? "started" : started.finding.code).toBe("fs.write-failed");
     if (!started.ok) {
       expect(started.finding.message).toContain("but its claim could not be checked (EIO)");

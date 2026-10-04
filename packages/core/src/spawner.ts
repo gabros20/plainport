@@ -2,12 +2,14 @@
 // session and process group (setsid, Bun's `detached`), and signals go to the whole group, kill(-pgid). POSIX
 // only, so it serves Linux as well until host-linux exists.
 
-import { constants, uptime } from "node:os";
+import { constants } from "node:os";
 import { isAbsolute } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { errorCode, type LocalIo, systemErrorCode } from "./io.ts";
+import type { Env, PlainportPaths } from "./paths.ts";
 import type { Spawner } from "./runner/types.ts";
 import { trashClaimFile } from "./trash-claim.ts";
+import { TRASH_DELETE_EXIT, TRASH_DELETE_WORD, trashDeletePayload } from "./trash-delete.ts";
 
 // Bun 1.3.14 names a child's terminating signal from the Linux signal table on every platform, so on macOS a
 // SIGUSR1 (30) comes back as "SIGPWR" and a SIGBUS (10) as "SIGUSR1". Map the name back to its Linux number, then to
@@ -105,7 +107,7 @@ const awaitClaim = async (
   trash: string,
   claim: string,
   exitCode: () => number | null,
-): Promise<"claimed" | "finished" | "failed" | "timeout"> => {
+): Promise<"claimed" | "finished" | "refused" | "failed" | "timeout"> => {
   const deadline = io.proc.monotonicMs() + CLAIM_WAIT_MS;
   for (;;) {
     try {
@@ -116,7 +118,9 @@ const awaitClaim = async (
     }
     const code = exitCode();
     if (code !== null) {
-      if (code === 0) return "finished";
+      if (code === TRASH_DELETE_EXIT.done) return "finished";
+      // The guard refused before it deleted anything; it removed its claim (D87).
+      if (code === TRASH_DELETE_EXIT.refused) return "refused";
       // Done before this poll looked: the trash is removed only after the claim was written (and the claim only after
       // the trash), so a trash that is gone means it claimed and deleted, and failed later (on the journal, D67).
       try {
@@ -133,47 +137,47 @@ const awaitClaim = async (
 };
 
 /**
- * HostPorts.deleteTrashDetached on POSIX (D47): /bin/sh in a new session (setsid), every stream on /dev/null, never
- * waited for. It first claims the trash as its own (trash-claim.ts, D64: its pid, written by itself), makes the trash
- * writable (a read-only folder cannot be emptied), deletes it, then the claim, then the journal (D67: a crash between them leaves a journal whose trash is gone, which
- * housekeeping and gc close; never a claim no journal leads to), then the trash holder if that left it empty. This resolves ok only
- * once the claim is there (or the child already finished), polled through `io`, so a caller holding the project's
- * lock releases it only after any other deleter can see the claim. A child that exits without its claim is
- * fs.write-failed; one that has not claimed within CLAIM_WAIT_MS (a disk that hangs) is killed first, so no deleter
- * runs unclaimed, and is fs.write-failed too; gc and recover delete that trash later.
+ * HostPorts.deleteTrashDetached on POSIX (D47, D87): plainport itself (`launch.self`) in a new session (setsid), every
+ * stream on /dev/null, never waited for, running the internal word `__delete-trash` (trash-delete.ts). It first claims
+ * the trash as its own (trash-claim.ts, D64: its pid, written by itself), runs the delete guard right before it deletes,
+ * then deletes the trash, the claim and the journal (D67: a crash between them leaves a journal whose trash is gone,
+ * which housekeeping and gc close; never a claim no journal leads to), then the trash holder if that left it empty. This
+ * resolves ok only once the claim is there (or the child already finished), polled through `io`, so a caller holding
+ * the project's lock releases it only after any other deleter can see the claim. A child that exits without its claim
+ * is fs.write-failed; one whose guard refused before the first poll is delete.guard-refused; one that has not claimed
+ * within CLAIM_WAIT_MS (a disk that hangs) is killed first, so no deleter runs unclaimed, and is fs.write-failed too; gc
+ * and recover delete that trash later.
  */
 export const posixDeleteTrash = async (
   io: LocalIo,
   trash: string,
   journal: string,
   device: string,
+  /** How to run plainport itself (its binary, or bun and the CLI's entry), and what the child is told (D87). */
+  launch: {
+    self: readonly string[];
+    paths: PlainportPaths;
+    env: Env;
+    passEnv?: Readonly<Record<string, string>>;
+  },
 ): Promise<Result<{ pid: number }>> => {
   const op = TRASH.exec(trash)?.[1];
   if (op === undefined || JOURNAL.exec(journal)?.[1] !== op || !isAbsolute(trash) || !isAbsolute(journal))
     throw new Error(`deleteTrashDetached: ${trash} and ${journal} are not an offload's trash and journal`);
+  if (launch.self.length === 0) throw new Error("deleteTrashDetached: no command runs plainport itself");
   let child: ReturnType<typeof Bun.spawn>;
   try {
+    // plainport itself, in its own process: it claims the trash, runs the delete guard right before it deletes, and
+    // deletes only what the guard lets go (trash-delete.ts, D87). Never a plain rm -rf on a tree nobody checked.
     child = Bun.spawn(
       [
-        "/bin/sh",
-        "-c",
-        [
-          'c="$1.claim"',
-          `printf '{"v":1,"device":"%s","pid":%s,"bootedAt":%s,"startedAt":"%s"}\\n' "$3" "$$" "$4" "$5" > "$c.tmp" && mv -f -- "$c.tmp" "$c" || exit 1`,
-          'chmod -R u+w -- "$1" 2>/dev/null; rm -rf -- "$1" && rm -f -- "$c" && rm -f -- "$2" || exit 1',
-          // The trash holder, only when that left it empty (holder.ts, removeEmptyHolder).
-          'rmdir -- "$(dirname -- "$1")" 2>/dev/null; exit 0',
-        ].join("\n"),
-        "plainport-trash",
-        trash,
-        journal,
-        device,
-        String(Date.now() - uptime() * 1000),
-        new Date().toISOString(),
+        ...launch.self,
+        TRASH_DELETE_WORD,
+        trashDeletePayload(trash, journal, device, launch.paths, launch.env),
       ],
       {
         cwd: "/",
-        env: { PATH: "/usr/bin:/bin" },
+        env: { PATH: "/usr/bin:/bin", HOME: launch.paths.home, ...launch.passEnv },
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -186,7 +190,7 @@ export const posixDeleteTrash = async (
       finding("process.spawn-failed", {
         message: `the detached delete of ${trash} could not be started (${code})`,
         fix: "plainport recover deletes the trash",
-        paths: ["/bin/sh", trash],
+        paths: [launch.self[0] as string, trash],
       }),
     );
   }
@@ -215,6 +219,14 @@ export const posixDeleteTrash = async (
     );
   }
   if (claimed === "claimed" || claimed === "finished") return ok({ pid: child.pid });
+  if (claimed === "refused")
+    return fail(
+      finding("delete.guard-refused", {
+        message: `the detached delete of ${trash} checked it and refused to delete it (a mount point, a store, a registered project's folder, or a configuration that does not read cleanly); the trash and its journal stay`,
+        fix: "plainport gc names the reason; fix it, then run plainport gc",
+        paths: [trash],
+      }),
+    );
   if (claimed === "timeout") stop();
   return fail(
     finding("fs.write-failed", {

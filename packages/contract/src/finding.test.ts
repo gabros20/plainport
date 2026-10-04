@@ -176,6 +176,12 @@ describe("findings", () => {
       "git.worktrees": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "git.nested-repos": { severity: "info", allowable: false, exitCode: 6, summary: expect.any(String) },
       "deps.ambiguous": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
+      "delete.guard-refused": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "deps.no-lockfile": { severity: "warn", allowable: true, exitCode: 6, summary: expect.any(String) },
       "plan.expired": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "plan.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },

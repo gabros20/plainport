@@ -195,6 +195,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `config.read-only` | block | no | 5 | A write would rewrite config.toml, which plainport never does |
 | `config.write-failed` | block | no | 1 | managed.toml or device.json could not be written; the old file is intact |
 | `contract.invalid` | block | no | 1 | A value crossing an edge did not match its schema |
+| `delete.guard-refused` | block | no | 6 | plainport did not delete a folder because the check right before every recursive delete refused it: it holds a mount point, a store plainport made or a restic repository, it is, holds or lies inside a registered project's folder (or one cannot be resolved), or the configuration does not read cleanly; the journal stays and the message names the fix (D87) |
 | `deps.ambiguous` | warn | yes | 6 | A package folder holds lockfiles of more than one package manager and no packageManager field; onload uses the first in DESIGN's table |
 | `deps.no-lockfile` | warn | yes | 6 | A package folder has no lockfile for its package manager, so onload would install fresh versions; fix suggests --keep-deps |
 | `device.invalid` | block | no | 6 | device.json, this device's identity, is unreadable; plainport never replaces it |

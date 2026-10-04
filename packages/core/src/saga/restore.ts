@@ -23,9 +23,10 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader, headUncertain, unfoldedSnapshot } from "../catalog/head.ts";
+import { catalogReader, headUncertain, recordedProject, unfoldedSnapshot } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
+import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
 import { notReserved, removeEmptyHolder, rmdirIfEmpty } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
@@ -167,7 +168,21 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
           },
         );
   if (doubt !== undefined && req.snapshot === undefined) return fail(doubt.finding);
-  const project = id === undefined ? undefined : read.value.projects[id];
+  // No readable event names the project at all (its first offload's event unreadable): the newest snapshot, named, is
+  // restored by this device's own records of the project (D88).
+  const project =
+    id === undefined
+      ? undefined
+      : (read.value.projects[id] ??
+        (doubt !== undefined && req.snapshot === doubt.newest
+          ? recordedProject({
+              id,
+              root: ref.root,
+              path: ref.path,
+              stub: stub?.ok ? stub.value : undefined,
+              registry: registered.value,
+            })
+          : undefined));
   if (project === undefined) {
     if (doubt !== undefined) return fail(doubt.finding);
     return fail(
@@ -267,18 +282,22 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       return writeFailed(error, `making ${holder}`, false, holder);
     }
     const result = await restoreInto(parent, holder, staging);
-    // Only this restore's own folder goes, then the shared holder if, and only if, it is empty (rmdir).
-    try {
-      await io.fs.removeTree(staging);
-      await removeEmptyHolder(io, holder, STAGING_DIR);
-      await removeStagingRecord(io, paths, op);
-    } catch (error) {
-      assertSystemError(error);
-      deps.log(
-        "warn",
-        `${staging} could not be removed; it holds only a partial copy, and plainport gc removes it`,
-      );
-    }
+    // Only this restore's own folder goes, then the shared holder if, and only if, it is empty (rmdir), once the
+    // guard (D87) lets it; a refusal keeps the folder and its record for gc, which reports why.
+    const guarded = await deleteGuard({ io, paths, env: deps.env }, staging);
+    if (!guarded.ok) deps.log("warn", `${staging} was kept: ${guarded.finding.message}`);
+    else
+      try {
+        await io.fs.removeTree(staging);
+        await removeEmptyHolder(io, holder, STAGING_DIR);
+        await removeStagingRecord(io, paths, op);
+      } catch (error) {
+        assertSystemError(error);
+        deps.log(
+          "warn",
+          `${staging} could not be removed; it holds only a partial copy, and plainport gc removes it`,
+        );
+      }
     return result;
   }
 

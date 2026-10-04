@@ -20,6 +20,14 @@ export const testGuard = (): GuardPolicy => {
   return { refuse: [...homes], readOnly: [checkout] };
 };
 
+/** How tests run plainport itself, for the detached delete's guarded child (D87): bun and this checkout's CLI entry. */
+export const SELF: readonly string[] = [process.execPath, resolve(checkout, "packages/cli/src/main.ts")];
+
+/** The detached child refuses the real home too: the CLI's composition root guards what the tripwire names. */
+export const childGuardEnv = (): Record<string, string> => ({
+  PLAINPORT_TRIPWIRE_REAL_HOME: process.env.PLAINPORT_TRIPWIRE_REAL_HOME || resolve(userInfo().homedir),
+});
+
 /** `faults` plans a crash at one journal step (ADR-0017), as the crash matrix does. */
 export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
   const guard = new PathGuard(testGuard());
@@ -33,9 +41,13 @@ export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
       return runProcess(posixSpawner, spec);
     },
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
-    deleteTrashDetached: async (trash, journal, device) => {
-      await guard.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
-      return posixDeleteTrash({ fs: guardedFs(nodeLocalIo.fs, guard), proc }, trash, journal, device);
+    deleteTrashDetached: async (trash, journal, device, context) => {
+      await guard.checkRun({ command: SELF[0] as string, args: [trash, journal], cwd: "/", env: {} });
+      return posixDeleteTrash({ fs: guardedFs(nodeLocalIo.fs, guard), proc }, trash, journal, device, {
+        self: SELF,
+        ...context,
+        passEnv: childGuardEnv(),
+      });
     },
   };
 };

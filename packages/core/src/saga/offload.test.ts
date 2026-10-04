@@ -38,7 +38,7 @@ import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
-import { testHost } from "../testing/host.ts";
+import { childGuardEnv, SELF, testHost } from "../testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
@@ -1296,18 +1296,25 @@ describe("invariants helper", () => {
 });
 
 describe("the detached trash delete (D47)", () => {
+  const launch = () => ({ self: SELF, paths: box.paths, env: { HOME: box.home }, passEnv: childGuardEnv() });
   test("starts only for an offload's own trash and journal; anything else is a bug and refused", async () => {
     const op = ulid();
     await expect(
-      posixDeleteTrash(testHost(), "/tmp/somewhere", `/x/journal/${op}.json`, ulid()),
+      posixDeleteTrash(testHost(), "/tmp/somewhere", `/x/journal/${op}.json`, ulid(), launch()),
     ).rejects.toThrow("not an offload's");
     await expect(
-      posixDeleteTrash(testHost(), `/r/.plainport-trash/${op}`, `/x/journal/${ulid()}.json`, ulid()),
+      posixDeleteTrash(
+        testHost(),
+        `/r/.plainport-trash/${op}`,
+        `/x/journal/${ulid()}.json`,
+        ulid(),
+        launch(),
+      ),
     ).rejects.toThrow();
     const trash = box.dir(`work/.plainport-trash/${op}`);
     box.file(`work/.plainport-trash/${op}/web/a.txt`, "a");
     const journal = box.file(`.local/state/plainport/journal/${op}.json`, "{}");
-    value(await posixDeleteTrash(testHost(), trash, journal, ulid()));
+    value(await posixDeleteTrash(testHost(), trash, journal, ulid(), launch()));
     await waitGone(journal);
     expect([existsSync(trash), existsSync(journal)]).toEqual([false, false]);
   });
@@ -2077,8 +2084,8 @@ describe("offload: fix wave q1 (D52)", () => {
     let detach: (() => Promise<unknown>) | undefined;
     const host: HostPorts = {
       ...real,
-      deleteTrashDetached: async (trash, journal, device) => {
-        detach = () => real.deleteTrashDetached(trash, journal, device);
+      deleteTrashDetached: async (trash, journal, device, context) => {
+        detach = () => real.deleteTrashDetached(trash, journal, device, context);
         return ok({ pid: process.pid });
       },
     };
@@ -2413,6 +2420,7 @@ describe("offload: fix wave q2", () => {
         host,
         paths: box.paths,
         saga: resumed,
+        env: { HOME: box.home },
         stores: async () => ok([]),
         clock: () => new Date(),
         log: () => {},

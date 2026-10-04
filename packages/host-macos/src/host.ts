@@ -3,6 +3,7 @@
 // is per process), children run through core's runner on the POSIX process-group spawner, and faultAt is the crash
 // seam from ADR-0017.
 
+import { resolve } from "node:path";
 import {
   type FaultPlan,
   faultSeam,
@@ -34,7 +35,18 @@ export interface MacosHostOptions {
   faults?: FaultPlan;
   /** Tests wrap the real spawner to record the groups they start. */
   spawner?: Spawner;
+  /** How to run plainport itself, for the detached delete's guarded child (D87); selfCommand() by default. */
+  self?: readonly string[];
 }
+
+/**
+ * plainport itself: the compiled binary (its entry lives in Bun's embedded /$bunfs), or, from source, bun and the CLI's
+ * entry in this checkout.
+ */
+export const selfCommand = (): string[] =>
+  Bun.main.startsWith("/$bunfs/")
+    ? [process.execPath]
+    : [process.execPath, resolve(import.meta.dir, "../../cli/src/main.ts")];
 
 export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
   const guard = options.guard === undefined ? undefined : new PathGuard(options.guard);
@@ -76,13 +88,16 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
     },
     liveGroups: () => [...groups],
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
-    deleteTrashDetached: async (trash, journal, device) => {
-      await guard?.checkRun({ command: "/bin/sh", args: [trash, journal], cwd: "/", env: {} });
+    deleteTrashDetached: async (trash, journal, device, context) => {
+      const self = options.self ?? selfCommand();
+      await guard?.checkRun({ command: self[0] as string, args: [trash, journal], cwd: "/", env: {} });
+      const tripwire = process.env.PLAINPORT_TRIPWIRE_REAL_HOME;
       return posixDeleteTrash(
         { fs: guard === undefined ? nodeLocalIo.fs : guardedFs(nodeLocalIo.fs, guard), proc },
         trash,
         journal,
         device,
+        { self, ...context, ...(tripwire ? { passEnv: { PLAINPORT_TRIPWIRE_REAL_HOME: tripwire } } : {}) },
       );
     },
   };
