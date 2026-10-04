@@ -18,6 +18,7 @@ import {
   D11_PROJECTS,
   type GateReport,
   hashTree,
+  nulList,
   parseProjects,
   parseTimeL,
   runGate,
@@ -112,6 +113,15 @@ describe("hashTree and compareTrees", () => {
       "changed src/a.ts: content",
     ]);
   });
+});
+
+test("nulList reads git's -z output, so names git would quote (é, newlines) come through as they are", () => {
+  expect(nulList("src/caf\u00e9.ts\0a\nb.txt\0README.md\0")).toEqual([
+    "README.md",
+    "a\nb.txt",
+    "src/caf\u00e9.ts",
+  ]);
+  expect(nulList("")).toEqual([]);
 });
 
 describe("stripProblems: the gate checks plainport's strip set itself (I1)", () => {

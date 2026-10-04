@@ -328,13 +328,20 @@ const lines = (text: string): string[] =>
     .filter((l) => l !== "")
     .sort();
 
+/** The names in git's -z output, sorted: unquoted, whatever characters they hold. */
+export const nulList = (out: string): string[] =>
+  out
+    .split("\0")
+    .filter((name) => name !== "")
+    .sort();
+
 const gitFacts = (git: (...args: string[]) => Ran): GitFacts => ({
   head: git("rev-parse", "HEAD").out.trim(),
   unpushed: Number(git("rev-list", "--count", "@{upstream}..HEAD").out.trim() || -1),
   stashes: lines(git("stash", "list", "--format=%H %gs").out),
-  staged: lines(git("diff", "--cached", "--name-only").out),
-  modified: lines(git("diff", "--name-only").out),
-  untracked: lines(git("ls-files", "--others", "--exclude-standard").out),
+  staged: nulList(git("diff", "-z", "--cached", "--name-only").out),
+  modified: nulList(git("diff", "-z", "--name-only").out),
+  untracked: nulList(git("ls-files", "-z", "--others", "--exclude-standard").out),
 });
 
 const slug = (name: string): string => name.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase();
@@ -400,7 +407,7 @@ const runProject = async (
     must("branch", "-q", "--set-upstream-to=origin/gate", "gate");
 
     // The work that must survive: an unpushed commit, a stash, a staged file, an edit, an untracked file and .env.
-    const tracked = lines(must("ls-files"));
+    const tracked = nulList(must("ls-files", "-z"));
     const edited =
       ["README.md", "readme.md", "Readme.md"].find((f) => tracked.includes(f)) ??
       tracked.find((f) => f.endsWith(".md")) ??
@@ -521,7 +528,7 @@ const runProject = async (
     result.files = plan.include?.files ?? 0;
     result.bytes = plan.include?.bytes ?? 0;
     const badStrip = stripProblems(result.stripped, {
-      tracked: lines(must("ls-files")),
+      tracked: nulList(must("ls-files", "-z")),
       sentinels,
       planted,
     });
