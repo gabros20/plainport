@@ -10,7 +10,7 @@ _plainport_names() {
         'init:Name this device, set up its roots and record the store snapshots go to'
         'ls:Every project with its root, state, device, size and last activity'
         'status:One project in detail: its state, head, lease and what to do next'
-        'offload:Snapshot a project, verify it and free its folder; --dry-run shows the plan first'
+        'offload:Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it'
         'onload:Restore a shelved project into place and reinstall its dependencies'
         'hydrate:Install a project'\''s dependencies again with its own package manager (frozen)'
         'dehydrate:Remove a project'\''s installed dependencies (only what a plugin claims and git does not track)'
@@ -27,7 +27,7 @@ _plainport_names() {
         'add:Add a root, optionally with this device'\''s folder for it; the global --store sets its store'
         'bind:Point a root at its folder on this device'
         'list:Show every root, its folder on each device and its state here'
-        'scan:Find every project under a root'\''s folder here and register the new ones'
+        'scan:List and register the project folders under a root; offload takes an unregistered one as it is'
       ) ;;
     esac
   fi

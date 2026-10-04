@@ -1404,7 +1404,7 @@
     },
     {
       "name": "offload",
-      "summary": "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
+      "summary": "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
       "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
       "risk": "confirm",
       "dryRun": true,
@@ -1833,6 +1833,24 @@
                   "title": "Phase"
                 }
               },
+              "next": {
+                "description": "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "description": "The exact command, e.g. plainport offload work:web --plan <id>"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command",
+                  "reason"
+                ],
+                "additionalProperties": {}
+              },
               "arrival": {
                 "description": "What each part becomes where the project lands; for an offload, how it comes back",
                 "type": "array",
@@ -2222,6 +2240,24 @@
               "title": "Phase"
             }
           },
+          "next": {
+            "description": "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The exact command, e.g. plainport offload work:web --plan <id>"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
           "arrival": {
             "description": "What each part becomes where the project lands; for an offload, how it comes back",
             "type": "array",
@@ -2390,19 +2426,19 @@
           "name": "to",
           "type": "string",
           "multiple": false,
-          "summary": "Land it in this folder instead of its root's place"
+          "summary": "Land it in this folder instead of its root's place; always restored from the store"
         },
         {
           "name": "snapshot",
           "type": "string",
           "multiple": false,
-          "summary": "Restore this older snapshot instead of the head"
+          "summary": "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy"
         },
         {
           "name": "no-hydrate",
           "type": "boolean",
           "multiple": false,
-          "summary": "Restore the files without installing dependencies"
+          "summary": "Restore the files without installing dependencies; a reused kept copy has its dependencies either way"
         }
       ],
       "arguments": {
@@ -2414,15 +2450,15 @@
             "description": "An address (root:path), a unique name, a path or its .plainport stub"
           },
           "to": {
-            "description": "Land it in this folder instead of its root's place",
+            "description": "Land it in this folder instead of its root's place; always restored from the store",
             "type": "string"
           },
           "snapshot": {
-            "description": "Restore this older snapshot instead of the head",
+            "description": "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy",
             "type": "string"
           },
           "no-hydrate": {
-            "description": "Restore the files without installing dependencies",
+            "description": "Restore the files without installing dependencies; a reused kept copy has its dependencies either way",
             "type": "boolean"
           }
         },
@@ -2475,7 +2511,7 @@
               "restore",
               "reuse"
             ],
-            "description": "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused)"
+            "description": "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused). To restore from the store instead, plainport gc --now --yes deletes the kept copy first; --to and an older --snapshot always restore from the store"
           },
           "reused": {
             "description": "Only with restored: reuse",
@@ -2605,7 +2641,7 @@
             "onload",
             "work:clients/acme/api"
           ],
-          "summary": "Bring a shelved project back; while offload.keepLocalFor keeps its folder, that folder is renamed back instead (restored: reuse)"
+          "summary": "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side"
         },
         {
           "argv": [
@@ -3751,7 +3787,7 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 9007199254740991,
-                  "description": "Projects registered under it on this device"
+                  "description": "Projects registered under it on this device. offload also takes an unregistered project folder under the root as it is (offload <root>:<folder>); root scan lists and registers them"
                 }
               },
               "required": [
@@ -3833,7 +3869,7 @@
     },
     {
       "name": "root scan",
-      "summary": "Find every project under a root's folder here and register the new ones",
+      "summary": "List and register the project folders under a root; offload takes an unregistered one as it is",
       "usage": "plainport root scan <key>",
       "risk": "safe_write",
       "dryRun": false,

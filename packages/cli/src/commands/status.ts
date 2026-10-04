@@ -258,9 +258,10 @@ export const ls = defineCommand({
       (path) => `${path}: a journal this version of plainport cannot read; plainport recover reports it`,
     );
     if (data.projects.length === 0)
-      return ["no projects yet: plainport root scan <root> registers a root's projects", ...unreadable].join(
-        "\n",
-      );
+      return [
+        "no projects yet: plainport offload <root>:<folder> works on any project folder under a root without registering it first; plainport root scan <root> lists and registers a root's projects",
+        ...unreadable,
+      ].join("\n");
     const width = Math.max(...data.projects.map((p) => p.address.length));
     const stale = data.stores.filter((s) => s.stale);
     return [

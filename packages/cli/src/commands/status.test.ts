@@ -168,6 +168,13 @@ describe("ls: every project with its state", () => {
     expect(run.out).toMatch(/^work:web\s+local\s+/m);
   });
 
+  test("an empty ls says offload needs no registering, and root scan lists the candidates (agent smoke)", async () => {
+    const run = await cli(["ls"]);
+    expect(run.out).toBe(
+      "no projects yet: plainport offload <root>:<folder> works on any project folder under a root without registering it first; plainport root scan <root> lists and registers a root's projects\n",
+    );
+  });
+
   test("an unknown --sort is a usage error (2)", async () => {
     expect((await cli(["ls", "--sort", "colour"])).code).toBe(2);
   });

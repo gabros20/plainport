@@ -94,6 +94,16 @@ describe("root: commands", () => {
     expect((await cli(["root", "bind", "work", "~/work", "--device", "mbp"])).code).toBe(0);
   });
 
+  test("root list with no project registered says offload needs no registering, and root scan lists them (agent smoke)", async () => {
+    await setUp();
+    const hint =
+      "work: no project registered yet; plainport offload work:<folder> works on any project folder under it without registering it first, and plainport root scan work lists and registers them";
+    expect((await cli(["root", "list"])).out).toContain(`${hint}\n`);
+    box.file("work/tool/package.json", "{}");
+    await cli(["root", "scan", "work"]);
+    expect((await cli(["root", "list"])).out).not.toContain(hint);
+  });
+
   test("root scan registers projects; root list counts them", async () => {
     await setUp();
     box.repo("work/clients/acme/web");

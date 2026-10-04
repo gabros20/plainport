@@ -114,6 +114,17 @@ describe("offload: dry run", () => {
     });
   });
 
+  test("--dry-run --json carries next: the exact command that runs the plan, as the human plan prints it (agent smoke)", async () => {
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.next).toEqual({
+      command: `plainport offload work:web --plan ${data.id}`,
+      reason: `runs this plan instead of --yes, until ${data.expiresAt}, while the folder still matches it`,
+    });
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    const id = /plan {6}([0-9A-Z]{26}) /.exec(human.out)?.[1] ?? "";
+    expect(human.out).toContain(`→ plainport offload work:web --plan ${id}\n`);
+  });
+
   test("the dry run changes nothing in the project and saves its plan under plans/", async () => {
     const run = await cli(["offload", "work:web", "--dry-run", "--json"]);
     const { id } = envelope(run.out).data;
@@ -216,6 +227,8 @@ describe("offload: dry run", () => {
     });
     expect(PlanSchema.safeParse(env.data).success).toBe(true);
     expect(env.data.findings.map((f: { code: string }) => f.code)).toContain("git.locked");
+    // A blocked plan has nothing to run: no next.
+    expect(env.data.next).toBeUndefined();
   });
 
   test("--allow applies to a dry run (D50): an allowed blocker leaves an approvable plan the same --allow runs", async () => {

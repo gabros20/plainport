@@ -57,7 +57,7 @@ const OnloadOutputSchema = z
     dir: z.string().meta({ description: "Where the project now is" }),
     restored: z.enum(["restore", "reuse"]).meta({
       description:
-        "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused)",
+        "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused). To restore from the store instead, plainport gc --now --yes deletes the kept copy first; --to and an older --snapshot always restore from the store",
     }),
     reused: z
       .looseObject({
@@ -109,19 +109,27 @@ export const onload = defineCommand({
     project: z
       .string()
       .meta({ description: "An address (root:path), a unique name, a path or its .plainport stub" }),
-    to: z.string().optional().meta({ description: "Land it in this folder instead of its root's place" }),
-    snapshot: z.string().optional().meta({ description: "Restore this older snapshot instead of the head" }),
-    "no-hydrate": z
-      .boolean()
+    to: z
+      .string()
       .optional()
-      .meta({ description: "Restore the files without installing dependencies" }),
+      .meta({
+        description: "Land it in this folder instead of its root's place; always restored from the store",
+      }),
+    snapshot: z.string().optional().meta({
+      description:
+        "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy",
+    }),
+    "no-hydrate": z.boolean().optional().meta({
+      description:
+        "Restore the files without installing dependencies; a reused kept copy has its dependencies either way",
+    }),
   }),
   output: OnloadOutputSchema,
   examples: [
     {
       argv: ["onload", "work:clients/acme/api"],
       summary:
-        "Bring a shelved project back; while offload.keepLocalFor keeps its folder, that folder is renamed back instead (restored: reuse)",
+        "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
     },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],

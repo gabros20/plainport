@@ -100,6 +100,36 @@ describe("version and help", () => {
     expect(help.out).toContain("plainport.json");
   });
 
+  test("help's summaries: offload names the kept copy, and ls, root list and root scan say offload needs no registering (agent smoke)", async () => {
+    const help = await capture(["help"], REGISTRY);
+    expect(help.out).not.toContain("free its folder");
+    expect(help.out).toMatch(
+      /offload +confirm +Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it\n/,
+    );
+    expect(help.out).toMatch(
+      /root scan +safe_write +List and register the project folders under a root; offload takes an unregistered one as it is\n/,
+    );
+    const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+    const rootList = manifest.commands.find((c: { name: string }) => c.name === "root list");
+    expect(JSON.stringify(rootList.output)).toContain("offload also takes an unregistered project folder");
+  });
+
+  test("help onload says when it reuses the kept copy, how to restore from the store, and how --snapshot, --to and --no-hydrate interact (agent smoke)", async () => {
+    const help = (await capture(["help", "onload"], REGISTRY)).out;
+    expect(help).toMatch(
+      /--to <value> +Land it in this folder instead of its root's place; always restored from the store\n/,
+    );
+    expect(help).toMatch(
+      /--snapshot <value> +Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy\n/,
+    );
+    expect(help).toMatch(
+      /--no-hydrate +Restore the files without installing dependencies; a reused kept copy has its dependencies either way\n/,
+    );
+    expect(help).toContain(
+      "plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side",
+    );
+  });
+
   test("help says that --plan <id> stands in for --yes, in the listing, the global option and the command (agent smoke)", async () => {
     const help = await capture(["help"], REGISTRY);
     expect(help.out).toContain(

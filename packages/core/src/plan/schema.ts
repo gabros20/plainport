@@ -93,6 +93,17 @@ export const PlanSchema = outputObject({
   strip: z.array(StripEntrySchema),
   findings: z.array(FindingSchema),
   phases: z.array(PhaseSchema),
+  next: outputObject({
+    command: z
+      .string()
+      .meta({ description: "The exact command, e.g. plainport offload work:web --plan <id>" }),
+    reason: z.string(),
+  })
+    .optional()
+    .meta({
+      description:
+        "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+    }),
   arrival: z.array(ArrivalItemSchema).optional().meta({
     description: "What each part becomes where the project lands; for an offload, how it comes back",
   }),

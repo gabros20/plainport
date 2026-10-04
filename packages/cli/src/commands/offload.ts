@@ -149,7 +149,8 @@ const OffloadOutputSchema = z.union([
 
 export const offload = defineCommand({
   name: "offload",
-  summary: "Snapshot a project, verify it and free its folder; --dry-run shows the plan first",
+  summary:
+    "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
   risk: "confirm",
   dryRun: { plan: PlanSchema, human: renderPlan },
   acceptsPlan: true,
@@ -278,9 +279,11 @@ export const offload = defineCommand({
       onFinding: (f) => ctx.output.emit({ type: "finding", op, finding: f }),
     });
     if (!planned.ok) return planned;
+    let saved = true;
     try {
       await savePlan(ctx.io, paths, planned.value, now);
     } catch (error) {
+      saved = false;
       // The preview stands without its file; only --plan <id> cannot find it.
       ctx.output.log(
         "warn",
@@ -290,6 +293,18 @@ export const offload = defineCommand({
     // A plan with blockers its --allow leaves (D50) is a refusal that still shows the plan (D38): exit 6, the plan as
     // data (D14).
     const blocker = planBlocker(planned.value);
-    return blocker === undefined ? ok(planned.value) : failWith(blocker, planned.value, 6);
+    if (blocker !== undefined) return failWith(blocker, planned.value, 6);
+    // The command that runs it, as the human plan prints it (agent smoke).
+    return ok(
+      saved
+        ? {
+            ...planned.value,
+            next: {
+              command: planCommand(planned.value),
+              reason: `runs this plan instead of --yes, until ${planned.value.expiresAt}, while the folder still matches it`,
+            },
+          }
+        : planned.value,
+    );
   },
 });
