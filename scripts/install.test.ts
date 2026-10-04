@@ -248,16 +248,15 @@ describe("installVersion and rollback", () => {
     const prefix = fresh();
     installVersion(prefix, "0.1.0", stageFake("one"));
     installVersion(prefix, "0.2.0", stageFake("two"));
-    const locked = join(layout(prefix).versions, "0.1.0", "plainport");
-    Bun.spawnSync(["chflags", "uchg", locked]);
-    try {
-      const third = installVersion(prefix, "0.3.0", stageFake("three"));
-      expect(third).toMatchObject({ ok: true, version: "0.3.0", pruned: [] });
-      if (third.ok) expect(third.notices.some((n) => n.startsWith("prune of 0.1.0 failed:"))).toBe(true);
-      expect(readState(prefix)).toMatchObject({ current: "0.3.0", previous: "0.2.0" });
-    } finally {
-      Bun.spawnSync(["chflags", "nouchg", locked]);
-    }
+    // An injected removal fault stands in for EPERM (a uchg flag, another owner) on every platform.
+    const remove = (path: string) => {
+      throw Object.assign(new Error(`EPERM: operation not permitted, rm '${path}'`), { code: "EPERM" });
+    };
+    const third = installVersion(prefix, "0.3.0", stageFake("three"), undefined, { remove });
+    expect(third).toMatchObject({ ok: true, version: "0.3.0", pruned: [] });
+    if (third.ok) expect(third.notices.some((n) => n.startsWith("prune of 0.1.0 failed: EPERM"))).toBe(true);
+    expect(readState(prefix)).toMatchObject({ current: "0.3.0", previous: "0.2.0" });
+    expect(readState(prefix).versions).toEqual(["0.1.0", "0.2.0", "0.3.0"]);
   });
 
   test("a second install while one holds the lock is refused, and the lock goes when an install ends (R2-M7)", () => {
