@@ -64,9 +64,13 @@ export const rmdirIfEmpty = async (io: LocalIo, path: string): Promise<void> => 
   }
 };
 
-/** The reserved name a path goes through (a segment named .plainport-*, the holders and any later one), if any. */
+/**
+ * The reserved name a path goes through (a segment named .plainport-*, the holders and any later one), if any. Matched
+ * in any case, always: on a case-insensitive volume .PLAINPORT-staging is the holder itself (F4), and refusing it on a
+ * case-sensitive one costs nothing.
+ */
 const reservedSegment = (path: string): string | undefined =>
-  path.split(sep).find((segment) => segment.startsWith(".plainport-"));
+  path.split(sep).find((segment) => segment.normalize("NFC").toLowerCase().startsWith(".plainport-"));
 
 /**
  * path.reserved when `path` is, or lies inside, a folder plainport reserves (.plainport-staging, .plainport-trash, any

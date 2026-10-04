@@ -363,3 +363,11 @@ describe("roots: a root never puts a project and a local store together (D83)", 
     expect(bound).toMatchObject({ ok: false, exitCode: 6, finding: { code: "store.inside-project" } });
   });
 });
+
+describe("roots: a reserved holder in another case is still reserved (F4)", () => {
+  test("a root in .PLAINPORT-staging is path.reserved, whatever the volume's case rule", async () => {
+    box.dir("work/.PLAINPORT-Staging/inner");
+    const result = await write([{ kind: "add", key: "inner", path: "~/work/.PLAINPORT-Staging/inner" }]);
+    expect(result).toMatchObject({ ok: false, exitCode: 6, finding: { code: "path.reserved" } });
+  });
+});
