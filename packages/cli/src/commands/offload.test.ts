@@ -122,6 +122,51 @@ describe("offload: dry run", () => {
     expect(existsSync(join(box.home, "work/web.plainport"))).toBe(false);
   });
 
+  test("gitignored files travel: the plan names them, in --json and in the human plan (agent smoke, AGENTS rule 2)", async () => {
+    box.file("work/web/.gitignore", "node_modules/\ndist/\n.env\n*.sqlite\n");
+    box.file("work/web/.env", "TOKEN=op://vault/item\n");
+    box.file("work/web/data/dev.sqlite", "db");
+    box.file("work/web/data/.gitignore", "!keep.sqlite\n");
+    box.file("work/web/data/keep.sqlite", "kept by a negation");
+    const json = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    const data = envelope(json.out).data;
+    expect(PlanSchema.safeParse(data).success).toBe(true);
+    expect(data.include.gitignored).toEqual({ files: 2, paths: [".env", "data/dev.sqlite"] });
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(
+      "  ignored   .env · data/dev.sqlite: gitignored, and they travel; only what a plugin declares regenerable is stripped\n",
+    );
+  });
+
+  test("a plan without gitignored files says nothing about them", async () => {
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.include.gitignored).toBeUndefined();
+  });
+
+  test("help offload says gitignored files such as .env travel (agent smoke)", async () => {
+    const run = await cli(["help", "offload"]);
+    expect(run.out).toContain(
+      "gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
+    );
+  });
+
+  test("with keepLocalFor, the arrival step says the install is skipped when onload renames the kept copy back (D71)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.arrival).toEqual([
+      {
+        part: "deps",
+        outcome: "hydrate",
+        detail: "npm ci",
+        note: "skipped when onload renames back the local copy kept for 24h (keepLocalFor), which still has its dependencies",
+      },
+    ]);
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(
+      "  arrival   npm ci at onload; skipped when onload renames back the local copy kept for 24h (keepLocalFor), which still has its dependencies\n",
+    );
+  });
+
   const lockedRepo = () => {
     const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
@@ -295,6 +340,44 @@ describe("offload: a real run", () => {
     expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; freed [0-9.]+ KB\n/);
     expect(run.out).toContain(`stub      ${dir()}.plainport`);
     await expectInvariants();
+  });
+
+  test("with keepLocalFor nothing is freed yet: the result names the bytes kept, until when, and that gc frees them (agent smoke)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(run.code).toBe(0);
+    const data = envelope(run.out).data;
+    const until = new Date(NOW.getTime() + 24 * 3_600_000).toISOString();
+    expect(data).toMatchObject({
+      freedBytes: 0,
+      keptBytes: 615_970,
+      keepUntil: until,
+      freedBy: "plainport gc",
+    });
+    const schema = REGISTRY.find((c) => c.name === "offload")?.output;
+    expect(schema?.safeParse(data).success).toBe(true);
+    await expectInvariants();
+  });
+
+  test("the human result of a kept copy says what stays on disk and when gc frees it (agent smoke)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const run = await cli(["offload", "work:web", "--yes"]);
+    expect(run.code).toBe(0);
+    const until = new Date(NOW.getTime() + 24 * 3_600_000).toISOString();
+    expect(run.out).toMatch(/^offloaded work:web to local as snapshot [0-9A-Z]{26}; nothing freed yet\n/);
+    expect(run.out).toMatch(
+      new RegExp(
+        `\nkept {6}${box.home}/work/\\.plainport-trash/[0-9A-Z]{26} \\(616 KB\\) until ${until}; plainport gc frees it then \\(plainport gc --now --yes frees it early\\)\n`,
+      ),
+    );
+  });
+
+  test("without keepLocalFor the folder is freed now: keptBytes is 0 and no freedBy", async () => {
+    const run = await cli(["offload", "work:web", "--yes", "--json"]);
+    const data = envelope(run.out).data;
+    expect(data.freedBytes).toBe(615_970);
+    expect(data.keptBytes).toBe(0);
+    expect(data.freedBy).toBeUndefined();
   });
 
   test("a fresh plan id stands in for --yes; once the hour is over it no longer does", async () => {

@@ -46,6 +46,7 @@ export const formatBytes = (bytes: number): string => {
 const LABEL = 10;
 const row = (label: string, text: string): string => `  ${label.padEnd(LABEL)}${text}`;
 const SHOWN_LARGEST = 3;
+const SHOWN_IGNORED = 5;
 
 /** The plan as DESIGN.md "CLI design" shows it: target, totals, strip set, largest files, findings, the plan id. */
 export const renderPlan = (plan: Plan): string => {
@@ -63,6 +64,20 @@ export const renderPlan = (plan: Plan): string => {
     const largest = plan.include.largest.slice(0, SHOWN_LARGEST);
     lines.push(row("largest", largest.map((l) => `${l.path} ${formatBytes(l.bytes)}`).join(" · ")));
   }
+  // Gitignored does not mean disposable (AGENTS.md rule 2): say plainly that these travel.
+  const ignored = plan.include.gitignored;
+  if (ignored !== undefined) {
+    const more = ignored.files - SHOWN_IGNORED;
+    lines.push(
+      row(
+        "ignored",
+        `${ignored.paths.slice(0, SHOWN_IGNORED).join(" · ")}${more > 0 ? ` and ${more} more` : ""}: gitignored, and they travel; only what a plugin declares regenerable is stripped`,
+      ),
+    );
+  }
+  // An install that may not run at onload says so (D71).
+  for (const a of plan.arrival ?? [])
+    if (a.note !== undefined) lines.push(row("arrival", `${a.detail} at onload; ${a.note}`));
   const blocker = planBlocker(plan);
   const allowed = new Set(plan.options?.allow ?? []);
   for (const f of plan.findings) {
@@ -94,15 +109,23 @@ const OffloadOutputSchema = z.union([
     project: z.string(),
     snapshot: z.string(),
     freedBytes: z.int().nonnegative().meta({
-      description: "Bytes freed now: 0 while the trash is kept (keepLocalFor) or waits for recover",
+      description:
+        "Bytes freed now: the whole folder once its detached delete has started; 0 while the local copy is kept (offload.keepLocalFor) or waits for recover, and then keptBytes has them",
+    }),
+    keptBytes: z.int().nonnegative().optional().meta({
+      description:
+        "Bytes the local copy still holds in the trash: the whole folder while it is kept or waits for recover, else 0. They are freed by freedBy",
+    }),
+    freedBy: z.string().optional().meta({
+      description:
+        "With keptBytes: what frees them. plainport gc once keepUntil has passed (a write command's housekeeping also hands a due trash to a detached delete; plainport gc --now --yes frees it early), or plainport recover when the delete could not start",
     }),
     store: z.string(),
     stub: z.string().optional().meta({ description: "The .plainport stub left where the folder was" }),
     trash: z.string().meta({ description: "Where the folder waits to be deleted, by a detached process" }),
-    keepUntil: z.iso
-      .datetime()
-      .optional()
-      .meta({ description: "keepLocalFor: the trash is kept until then" }),
+    keepUntil: z.iso.datetime().optional().meta({
+      description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
+    }),
   }),
   z
     .looseObject({
@@ -141,10 +164,10 @@ export const offload = defineCommand({
       description:
         "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)",
     }),
-    "keep-deps": z
-      .boolean()
-      .optional()
-      .meta({ description: "Keep installed dependencies (node_modules) in the snapshot" }),
+    "keep-deps": z.boolean().optional().meta({
+      description:
+        "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
+    }),
     allow: z.array(z.string()).optional().meta({
       description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
     }),
@@ -163,13 +186,16 @@ export const offload = defineCommand({
       return data.kind === "diverged-after-commit"
         ? `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}, now its head; the folder changed after the commit, so it stays here with its edits, and the next offload builds on that snapshot`
         : `kept snapshot ${data.snapshot} (${data.stored.slice(0, 8)} in ${data.store}) as a fork of ${data.project}; the folder stays`;
+    const kept = data.keptBytes === undefined ? "" : ` (${formatBytes(data.keptBytes)})`;
     return [
-      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; freed ${formatBytes(data.freedBytes)}`,
+      `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : `freed ${formatBytes(data.freedBytes)}`}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
       ...(data.keepUntil !== undefined
-        ? [`kept      ${data.trash} until ${data.keepUntil}`]
+        ? [
+            `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
+          ]
         : data.freedBytes === 0
-          ? [`trash     ${data.trash} waits for plainport recover to delete it`]
+          ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
           : []),
     ].join("\n");
   },

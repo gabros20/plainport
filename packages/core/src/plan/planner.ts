@@ -15,12 +15,14 @@ import type { CheckContext, HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin, HydrateStep } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { preflight, scanFindings } from "../preflight/index.ts";
+import { durationMs } from "../saga/release.ts";
 import { gitTracked, stopFsmonitor } from "../scan/git.ts";
 import { scanProject } from "../scan/index.ts";
 import type { Manifest } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree, type TreeScan } from "../scan/walk.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
+import { gitignoredFiles } from "./gitignored.ts";
 import { type ArrivalItem, PLAN_TTL_MS, type Plan } from "./schema.ts";
 import { type ProposedStrip, resolveStripSet } from "./strip.ts";
 
@@ -306,6 +308,7 @@ export const prepareOffload = async (
     largest.sort((a, b) => b.bytes - a.bytes || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     if (largest.length > LARGEST) largest.pop();
   };
+  const included: string[] = [];
   for (const entry of manifest) {
     if (entry.type !== "file") continue;
     let left = stripped.has(entry.path);
@@ -320,17 +323,30 @@ export const prepareOffload = async (
     files++;
     bytes += size;
     const folder = gitFolderOf(entry.path);
-    if (folder === undefined) consider({ path: entry.path, bytes: size });
-    else gitFolders.set(folder, (gitFolders.get(folder) ?? 0) + size);
+    if (folder === undefined) {
+      consider({ path: entry.path, bytes: size });
+      included.push(entry.path);
+    } else gitFolders.set(folder, (gitFolders.get(folder) ?? 0) + size);
   }
   for (const [path, size] of gitFolders) consider({ path, bytes: size });
 
+  const gitignored = await gitignoredFiles(host.fs, req.dir, included);
+  // While keepLocalFor keeps the released folder, onload renames it back with its dependencies (D71).
+  const keepLocalFor = config.offload.keepLocalFor;
+  const reusable = durationMs(keepLocalFor) > 0;
   const arrival: ArrivalItem[] =
     steps.length === 0
       ? []
       : keepDeps
         ? [{ part: "deps", outcome: "restore", detail: "installed dependencies travel in the snapshot" }]
-        : steps.map(arrivalOf);
+        : steps.map((step) => ({
+            ...arrivalOf(step),
+            ...(reusable
+              ? {
+                  note: `skipped when onload renames back the local copy kept for ${keepLocalFor} (keepLocalFor), which still has its dependencies`,
+                }
+              : {}),
+          }));
   const store = req.store ?? config.roots[req.project.root]?.store ?? config.defaultStore;
 
   const plan: Plan = {
@@ -340,7 +356,14 @@ export const prepareOffload = async (
     // The included fingerprint (D53): the strip set left out, its kind beside it.
     fingerprint: includedFingerprint(tree, stripped),
     fp: FINGERPRINT_VERSION,
-    include: { files, bytes, largest },
+    include: {
+      files,
+      bytes,
+      largest,
+      ...(gitignored.length === 0
+        ? {}
+        : { gitignored: { files: gitignored.length, paths: gitignored.slice(0, 20) } }),
+    },
     strip: strip.value.entries,
     findings,
     phases: [...OFFLOAD_PHASES],

@@ -57,6 +57,10 @@ export const ArrivalItemSchema = outputObject({
   part: z.enum(["files", "deps", "agent-session", "secrets", "git-access", "process"]),
   outcome: z.enum(["restore", "reuse", "hydrate", "resume", "handoff", "withheld", "suggest", "skip"]),
   detail: z.string().meta({ description: 'e.g. "pnpm install --frozen-lockfile", "claude --resume <id>"' }),
+  note: z.string().optional().meta({
+    description:
+      "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+  }),
 }).meta({ title: "ArrivalItem" });
 export type ArrivalItem = z.infer<typeof ArrivalItemSchema>;
 
@@ -76,6 +80,15 @@ export const PlanSchema = outputObject({
     files: z.int().nonnegative(),
     bytes,
     largest: z.array(SizedPathSchema).meta({ description: "The ten largest included files, largest first" }),
+    gitignored: outputObject({
+      files: z.int().nonnegative(),
+      paths: z.array(z.string()).meta({ description: "The first 20, sorted" }),
+    })
+      .optional()
+      .meta({
+        description:
+          "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+      }),
   }),
   strip: z.array(StripEntrySchema),
   findings: z.array(FindingSchema),

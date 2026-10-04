@@ -1427,7 +1427,7 @@
           "name": "keep-deps",
           "type": "boolean",
           "multiple": false,
-          "summary": "Keep installed dependencies (node_modules) in the snapshot"
+          "summary": "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped"
         },
         {
           "name": "allow",
@@ -1454,7 +1454,7 @@
             "type": "string"
           },
           "keep-deps": {
-            "description": "Keep installed dependencies (node_modules) in the snapshot",
+            "description": "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
             "type": "boolean"
           },
           "allow": {
@@ -1493,7 +1493,17 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991,
-                "description": "Bytes freed now: 0 while the trash is kept (keepLocalFor) or waits for recover"
+                "description": "Bytes freed now: the whole folder once its detached delete has started; 0 while the local copy is kept (offload.keepLocalFor) or waits for recover, and then keptBytes has them"
+              },
+              "keptBytes": {
+                "description": "Bytes the local copy still holds in the trash: the whole folder while it is kept or waits for recover, else 0. They are freed by freedBy",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "freedBy": {
+                "description": "With keptBytes: what frees them. plainport gc once keepUntil has passed (a write command's housekeeping also hands a due trash to a detached delete; plainport gc --now --yes frees it early), or plainport recover when the delete could not start",
+                "type": "string"
               },
               "store": {
                 "type": "string"
@@ -1507,7 +1517,7 @@
                 "description": "Where the folder waits to be deleted, by a detached process"
               },
               "keepUntil": {
-                "description": "keepLocalFor: the trash is kept until then",
+                "description": "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
@@ -1683,6 +1693,29 @@
                       "title": "SizedPath"
                     },
                     "description": "The ten largest included files, largest first"
+                  },
+                  "gitignored": {
+                    "description": "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+                    "type": "object",
+                    "properties": {
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "The first 20, sorted"
+                      }
+                    },
+                    "required": [
+                      "files",
+                      "paths"
+                    ],
+                    "additionalProperties": {}
                   }
                 },
                 "required": [
@@ -1833,6 +1866,10 @@
                     "detail": {
                       "type": "string",
                       "description": "e.g. \"pnpm install --frozen-lockfile\", \"claude --resume <id>\""
+                    },
+                    "note": {
+                      "description": "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -2045,6 +2082,29 @@
                   "title": "SizedPath"
                 },
                 "description": "The ten largest included files, largest first"
+              },
+              "gitignored": {
+                "description": "Included files a .gitignore in the project ignores, such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none",
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The first 20, sorted"
+                  }
+                },
+                "required": [
+                  "files",
+                  "paths"
+                ],
+                "additionalProperties": {}
               }
             },
             "required": [
@@ -2195,6 +2255,10 @@
                 "detail": {
                   "type": "string",
                   "description": "e.g. \"pnpm install --frozen-lockfile\", \"claude --resume <id>\""
+                },
+                "note": {
+                  "description": "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+                  "type": "string"
                 }
               },
               "required": [
