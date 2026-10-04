@@ -17,7 +17,8 @@
 // (PLAINPORT_TRIPWIRE_REAL_HOME), and git runs with no global or system config, so no credential helper is asked.
 // Measured per project: offload and onload wall time and peak RSS (/usr/bin/time -l; the plainport process with its
 // children, and restic alone through a wrapper), the store's size after the offload, and the temp root's peak size.
-// Scripts may spawn directly and report failures as messages (run decisions D8 and D10).
+// macOS only in M1: plainport has only the macOS host, so the gate refuses elsewhere (platformProblem) until host-linux
+// arrives with M3. Scripts may spawn directly and report failures as messages (run decisions D8 and D10).
 
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -616,6 +617,13 @@ export const abandon = async (): Promise<void> => {
   if (active.root !== undefined) removeTree(active.root);
 };
 
+/** Why the gate can't run on this platform, if it can't: in M1 plainport has only the macOS host, whose preflight
+ * refuses on Linux (no BSD find -flags, no lsof), so every row would be a false FAIL. host-linux arrives with M3. */
+export const platformProblem = (platform: string = process.platform): string | undefined =>
+  platform === "darwin"
+    ? undefined
+    : `the M1 gate runs on macOS only: plainport has only the macOS host until host-linux arrives with M3, so on ${platform} its preflight refuses every offload; run it on a Mac`;
+
 /** Why the gate can't start with these tools, if it can't (D10: a message with its fix). */
 export const toolsProblem = (tools: string): string | undefined => {
   const missing = ["restic", "rclone"].filter((name) => !existsSync(join(tools, name)));
@@ -634,6 +642,8 @@ export class GateError extends Error {}
 export const runGate = async (options: GateOptions): Promise<GateReport> => {
   const log = options.log ?? ((line: string) => console.error(line));
   const realHome = resolve(process.env.PLAINPORT_TRIPWIRE_REAL_HOME ?? homedir());
+  const unsupported = platformProblem();
+  if (unsupported !== undefined) throw new GateError(unsupported);
   const tools = options.tools ?? join(CHECKOUT, ".tools", hostTarget() ?? "unsupported");
   const problem = toolsProblem(tools);
   if (problem !== undefined) throw new GateError(problem);
