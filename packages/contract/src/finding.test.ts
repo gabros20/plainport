@@ -93,6 +93,12 @@ describe("findings", () => {
       "process.timeout": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "project.ambiguous": { severity: "block", allowable: false, exitCode: 2, summary: expect.any(String) },
       "project.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
+      "project.unregistered": {
+        severity: "block",
+        allowable: false,
+        exitCode: 4,
+        summary: expect.any(String),
+      },
       "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "registry.unreadable": {

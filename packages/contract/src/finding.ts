@@ -367,6 +367,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 4,
     summary: "No project matches the name, address or path",
   },
+  "project.unregistered": {
+    severity: "block",
+    allowable: false,
+    exitCode: 4,
+    summary:
+      "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)",
+  },
   "registry.invalid": {
     severity: "block",
     allowable: false,

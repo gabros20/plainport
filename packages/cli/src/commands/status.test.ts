@@ -209,11 +209,15 @@ describe("status: one project in detail", () => {
     expect([run.code, envelope(run.out).error.finding.code]).toEqual([4, "project.not-found"]);
   });
 
-  test("an unregistered project folder under a root: the fix names offload, which takes it as it is, and root scan (agent smoke)", async () => {
+  test("an unregistered project folder under a root is project.unregistered (D76): the fix names offload, which takes it as it is, and root scan (agent smoke)", async () => {
     for (const input of ["work:web", "work/web"]) {
       const run = await cli(["status", input, "--json"]);
       const error = envelope(run.out).error;
-      expect([run.code, error.finding.code]).toEqual([4, "project.not-found"]);
+      expect([run.code, error.finding.code, error.finding.paths]).toEqual([
+        4,
+        "project.unregistered",
+        [dir()],
+      ]);
       expect(error.finding.message).toBe(
         `${dir()} is a project folder under root work that this device has not registered or offloaded yet, so it has no status`,
       );
