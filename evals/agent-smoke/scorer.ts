@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EventLineSchema } from "../../packages/contract/src/index.ts";
+import { StreamLineSchema } from "../../packages/contract/src/index.ts";
 
 export const CallSchema = z.object({
   argv: z.array(z.string()),
@@ -72,7 +72,7 @@ export function scoreTranscript(input: unknown) {
     if (call.argv.includes("--json")) {
       for (const line of call.stdout.trim().split("\n").slice(0, -1)) {
         try {
-          if (EventLineSchema.safeParse(JSON.parse(line)).success) continue;
+          if (StreamLineSchema.safeParse(JSON.parse(line)).success) continue;
         } catch {
           /* Invalid JSON is a contract issue too. */
         }
@@ -102,8 +102,8 @@ export function scoreTranscript(input: unknown) {
     if (observation.project !== transcript.project || observation.afterCall > transcript.calls.length)
       continue;
     if (observation.state === "shelved" && shelvedAt === undefined) shelvedAt = observation.afterCall;
-    if (observation.state === "local" && shelvedAt !== undefined && observation.afterCall > shelvedAt)
-      returnedLocal = true;
+    returnedLocal =
+      observation.state === "local" && shelvedAt !== undefined && observation.afterCall > shelvedAt;
   }
   const reachedShelved = shelvedAt !== undefined;
   if (!reachedShelved) issue("lifecycle.not-shelved", "No observation shows the fixture shelved.");

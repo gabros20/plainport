@@ -1,0 +1,17 @@
+# Agent smoke eval
+
+Run `bun run eval:agent` for Claude Code or `bun run eval:agent --agent codex` for Codex. This is an opt-in live eval, never started by `bun test`. The controller needs a working agent login, npm on PATH, and the pinned tools already fetched into `.tools/<os>-<arch>` or an explicit `PLAINPORT_TOOLS_DIR`.
+
+The prompt gives the goal and the discovery interfaces without teaching the command sequence. The dependency-free Node project has an offline npm lockfile. The harness adds an ignored `.env` containing a reference at runtime, compiles a release binary into a temporary directory, and runs `init` before handing control to the agent. A 24-hour trash grace period avoids detached deletion during cleanup. The store still receives a verified restic snapshot.
+
+The agent starts in the temporary directory above `work/fixture`, so its working directory cannot block offload. It keeps its normal authentication environment. Claude uses `-p --no-session-persistence`; Codex uses `exec --ephemeral`. These flags were checked against the installed CLIs' help. Claude loads no user/project settings or MCP servers and disables hooks; Codex ignores user configuration and rules and runs with the workspace sandbox. No login file is copied.
+
+Every `plainport` call goes through a temporary PATH wrapper. It replaces the inherited environment with a complete sandbox HOME, XDG paths, agent paths, config and temp directory. The store is inside that same temporary directory. The repository password is generated for the run and passed only through the environment; config stores its `env:` reference. No password goes into recorder settings or retained evidence. This isolates plainport's state; it is not an OS security boundary against an agent that ignores the prompt and bypasses the wrapper.
+
+The recorder uses the shared process runner with bounded output and idle/overall deadlines. Each call records argv, actual exit code, stdout and stderr. Independent `status --json` observations after calls establish `shelved` followed by `local` for `work:fixture`. Setup and observer calls are excluded from the agent call count. The restored tree is compared byte-for-byte, with mode bits, ignoring only `node_modules`.
+
+The scorer counts calls and non-zero exits, lists refusals without fixes, reports missing hints or explanations and envelope/exit mismatches, and includes every issue the agent reports in its final response. A repaired refusal with a fix and hint does not fail the eval. Missing lifecycle evidence, changed files, incomplete agent output or agent failure does. Human help is allowed; other calls must use `--json`.
+
+Evidence is retained under `.orchestrate/raw/task-16-<agent>-<timestamp>.json` with the normalized transcript and score, plus `.agent.jsonl` with the agent's output streams. Generated password occurrences are redacted. The temporary directory is removed in `finally`, including on handled SIGINT/SIGTERM. SIGKILL cannot run cleanup. The controller should remove a leftover `plainport-agent-smoke-*` directory after forcibly killing the harness.
+
+Run `bun test evals/agent-smoke -t scorer` to test the scorer on the authored pass/fail transcript fixtures. `bun test evals/agent-smoke` also checks environment isolation, session flags and extraction of agent-reported contract issues. These offline tests never launch an agent.

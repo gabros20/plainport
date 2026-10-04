@@ -81,3 +81,17 @@ test("scorer reports calls that bypass JSON and malformed event lines", () => {
     }).contractIssues.map((issue) => issue.code),
   ).toContain("output.invalid-event");
 });
+
+test("scorer requires the last observed fixture state to stay local", () => {
+  const transcript = recorded("pass") as Record<string, unknown>;
+  expect(
+    scoreTranscript({
+      ...transcript,
+      observations: [
+        { afterCall: 1, project: "work:fixture", state: "shelved" },
+        { afterCall: 2, project: "work:fixture", state: "local" },
+        { afterCall: 5, project: "work:fixture", state: "shelved" },
+      ],
+    }).returnedLocal,
+  ).toBe(false);
+});
