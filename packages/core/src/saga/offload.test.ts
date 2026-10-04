@@ -2554,6 +2554,27 @@ describe("offload: a store inside the project is never offloaded with it (D83)",
     await expectBothSurvive(join(dir, "node_modules/.archive"));
   });
 
+  test.skipIf(process.platform !== "darwin")(
+    "a store spelled through an alias realpath leaves apart is the same folder by identity and refuses (F3)",
+    async () => {
+      box.file("work/web/node_modules/.archive/data/snap", "repository bytes");
+      const firm = `/System/Volumes/Data${realpathSync(join(dir, "node_modules/.archive"))}`;
+      storeAt(firm);
+      const real = testHost({ faults: { onStep: capture } });
+      const host: HostPorts = {
+        ...real,
+        fs: {
+          ...real.fs,
+          realpath: async (path) =>
+            path.startsWith("/System/Volumes/Data/") ? path : real.fs.realpath(path),
+        },
+      };
+      const result = await runOffload(deps({}, host), { project: await ref() });
+      expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.inside-project"]);
+      await expectBothSurvive(join(dir, "node_modules/.archive"));
+    },
+  );
+
   test("a project inside the store refuses too", async () => {
     box.file("work/web/data/snap", "repository bytes");
     storeAt("~/work");

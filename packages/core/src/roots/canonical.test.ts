@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Result } from "@plainport/contract";
 import { nodeLocalIo } from "../node-io.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
-import { canonicalPath, overlapOf } from "./canonical.ts";
+import { canonicalPath, overlapByIdentity, overlapOf } from "./canonical.ts";
 
 const io = nodeLocalIo;
 const unwrap = <T>(result: Result<T>): T => {
@@ -59,4 +59,46 @@ describe("roots: real paths", () => {
     expect(overlapOf(at("/a/café", true), at("/a/café", true))).toBe("same");
     expect(overlapOf(at("/"), at("/a"))).toBe("contains");
   });
+});
+
+// F3: one folder may have two spellings. On macOS, realpath(3) already folds a firmlink spelling
+// (/System/Volumes/Data/private/var/… is /private/var/…), which the first test pins; an alias realpath leaves apart
+// (a Linux bind mount, a resolver that does not fold) is simulated by an io whose realpath keeps the firmlink spelling,
+// so only (dev, ino) can tell it is the same folder. Skipped where that spelling does not exist (Linux).
+describe("roots: overlap by identity (F3)", () => {
+  const ALIAS = "/System/Volumes/Data";
+  const firm = (path: string) => `${ALIAS}${realpathSync(path)}`;
+  /** realpath that leaves the alias spelling as it is, as a bind mount's would. */
+  const unfolded: typeof io = {
+    ...io,
+    fs: {
+      ...io.fs,
+      realpath: async (path: string) => (path.startsWith(`${ALIAS}/`) ? path : io.fs.realpath(path)),
+    },
+  };
+  const darwin = process.platform === "darwin";
+
+  test.skipIf(!darwin)("macOS realpath folds the firmlink spelling of a temp folder by itself", async () => {
+    const work = box.dir("work/web");
+    expect(existsSync(firm(work))).toBe(true);
+    const linked = unwrap(await canonicalPath(io, firm(work), box.home));
+    expect(linked.real).toBe(realpathSync(work));
+  });
+
+  test.skipIf(!darwin)(
+    "same, inside, contains and apart hold across an alias realpath leaves apart, for folders there or not",
+    async () => {
+      const work = box.dir("work/web");
+      const canon = async (path: string) => unwrap(await canonicalPath(unfolded, path, box.home));
+      expect(overlapOf(await canon(firm(work)), await canon(work))).toBeUndefined();
+      const by = async (a: string, b: string) =>
+        unwrap(await overlapByIdentity(unfolded, await canon(a), await canon(b)));
+      expect(await by(firm(work), work)).toBe("same");
+      expect(await by(join(firm(work), ".next/archive"), work)).toBe("inside");
+      expect(await by(work, join(firm(work), ".next/archive"))).toBe("contains");
+      expect(await by(join(firm(box.home), "work"), join(work, "missing/deeper"))).toBe("contains");
+      expect(await by(join(firm(work), "a"), join(work, "b"))).toBeUndefined();
+      expect(await by(box.dir("other"), firm(work))).toBeUndefined();
+    },
+  );
 });

@@ -16,7 +16,7 @@ import { type Journal, type JournalsRead, journalFile, readJournals } from "../j
 import { acquireLock, type LockHolder, liveHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { readRegistry } from "../registry.ts";
-import { type CanonicalPath, canonicalPath, overlapOf } from "../roots/canonical.ts";
+import { type CanonicalPath, canonicalPath, overlapByIdentity } from "../roots/canonical.ts";
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "./journaled.ts";
 
@@ -166,7 +166,10 @@ export const nestedProjects = async (
   const found: Nested[] = [];
   for (const f of folders) {
     if (f.id === project.id) continue;
-    const relation = overlapOf(f.canon, canon.value);
+    // By identity, so a firmlink or bind-mount spelling of one folder is still that folder (F3).
+    const related = await overlapByIdentity(io, f.canon, canon.value);
+    if (!related.ok) return related;
+    const relation = related.value;
     if (relation === undefined) continue;
     found.push({ ...f, inside: relation === "inside", same: relation === "same" });
   }

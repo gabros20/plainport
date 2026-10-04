@@ -2,14 +2,15 @@
 // value the caller sees, never an exception that ends the command with internal.unexpected.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
 import type { LocalIo } from "../io.ts";
 import { writeJournal } from "../journal/index.ts";
 import { nodeLocalIo } from "../node-io.ts";
+import { canonicalPath } from "../roots/canonical.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
-import { withProjectLock } from "./project-gate.ts";
+import { nestedProjects, withProjectLock } from "./project-gate.ts";
 
 const ID = "01ARYZ6S410000000000000000";
 let box: Sandbox;
@@ -124,4 +125,31 @@ describe("project gate: nested projects' interrupted operations (N1, D53)", () =
     });
     expect(result.ok ? result.value : result.finding.code).toBe("ran");
   });
+});
+
+describe("project gate: nested projects by identity (F3, D53)", () => {
+  test.skipIf(process.platform !== "darwin")(
+    "a registered folder spelled through an alias realpath leaves apart is still nested with the plain spelling",
+    async () => {
+      const outer = join(box.home, "work/web");
+      mkdirSync(join(outer, "inner"), { recursive: true });
+      const firm = `/System/Volumes/Data${realpathSync(join(outer, "inner"))}`;
+      const unfolded: LocalIo = {
+        ...nodeLocalIo,
+        fs: {
+          ...nodeLocalIo.fs,
+          realpath: async (path) => (path === firm ? path : nodeLocalIo.fs.realpath(path)),
+        },
+      };
+      const canon = await canonicalPath(unfolded, firm, box.home);
+      if (!canon.ok) throw new Error(canon.finding.message);
+      const folders = [
+        { id: "01ARYZ6S420000000000000000", address: "work:web/inner", folder: firm, canon: canon.value },
+      ];
+      const nested = await nestedProjects(unfolded, box.paths, folders, { id: ID, folder: outer });
+      expect(nested.ok ? nested.value.map((n) => [n.address, n.inside]) : nested.finding.code).toEqual([
+        ["work:web/inner", true],
+      ]);
+    },
+  );
 });

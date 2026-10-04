@@ -131,3 +131,63 @@ export const overlapOf = (a: CanonicalPath, b: CanonicalPath): "same" | "inside"
   if (within(y, x)) return "contains";
   return undefined;
 };
+
+export type Overlap = "same" | "inside" | "contains";
+
+/** Each prefix of a real path ("/", "/a", "/a/b", …) with its identity (dev:ino), up to the first that is not there. */
+const identities = async (
+  io: LocalIo,
+  real: string,
+): Promise<Result<{ segments: string[]; ids: (string | undefined)[] }>> => {
+  const segments = real.split(sep).filter((s) => s !== "");
+  const ids: (string | undefined)[] = [];
+  for (let k = 0; k <= segments.length; k++) {
+    const prefix = `${sep}${segments.slice(0, k).join(sep)}`;
+    try {
+      const st = await io.fs.stat(prefix);
+      ids.push(`${st.dev}:${st.ino}`);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === undefined) throw error;
+      if (!ABSENT.has(code)) return unresolvable(prefix, error);
+      break;
+    }
+  }
+  return ok({ segments, ids });
+};
+
+/** How two lists of names below one folder relate. */
+const tailsOverlap = (a: readonly string[], b: readonly string[], fold: boolean): Overlap | undefined => {
+  const key = (s: string) => (fold ? s.normalize("NFC").toLowerCase() : s);
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (key(a[i] as string) !== key(b[i] as string)) return undefined;
+  return a.length === b.length ? "same" : a.length > b.length ? "inside" : "contains";
+};
+
+/**
+ * overlapOf decided by identity, not spelling (fix wave F3): two real paths may name one folder through a macOS
+ * firmlink (/System/Volumes/Data/Users/x is /Users/x) or a bind mount, and realpath leaves both as they are. The
+ * deepest folder both paths reach is found by (dev, ino) along each path's existing ancestors; only the names below
+ * it, which do not exist on both sides, are compared as strings. A path that cannot be looked at refuses (unresolvable).
+ */
+export const overlapByIdentity = async (
+  io: LocalIo,
+  a: CanonicalPath,
+  b: CanonicalPath,
+): Promise<Result<Overlap | undefined>> => {
+  const spelled = overlapOf(a, b);
+  if (spelled !== undefined) return ok(spelled);
+  const x = await identities(io, a.real);
+  if (!x.ok) return x;
+  const y = await identities(io, b.real);
+  if (!y.ok) return y;
+  const fold = a.caseInsensitive || b.caseInsensitive;
+  for (let i = x.value.ids.length - 1; i >= 0; i--) {
+    const id = x.value.ids[i];
+    if (id === undefined) continue;
+    const j = y.value.ids.lastIndexOf(id);
+    if (j === -1) continue;
+    return ok(tailsOverlap(x.value.segments.slice(i), y.value.segments.slice(j), fold));
+  }
+  return ok(undefined);
+};

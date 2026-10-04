@@ -14,7 +14,7 @@ import type { LocalIo } from "../io.ts";
 import { type Env, expandHome, type PlainportPaths } from "../paths.ts";
 import { RootKeySchema, readRegistry } from "../registry.ts";
 import { localStoresOf, storeOverlap } from "../store-overlap.ts";
-import { canonicalPath, overlapOf, probeKind } from "./canonical.ts";
+import { canonicalPath, overlapByIdentity, probeKind } from "./canonical.ts";
 
 type RootTable = NonNullable<ConfigLayer["roots"]>[string];
 
@@ -305,7 +305,9 @@ export const writeRoots = async (
             });
           }
           const otherCanon = otherResolved.value;
-          const relation = overlapOf(canon, otherCanon);
+          const related = await overlapByIdentity(io, canon, otherCanon);
+          if (!related.ok) return related;
+          const relation = related.value;
           if (relation === undefined) continue;
           const realNote =
             canon.real !== path || otherCanon.real !== otherPath
