@@ -12,7 +12,7 @@
 // The process and container checks read nothing in the folder, so they always run.
 
 import { join, resolve } from "node:path";
-import { type Failure, type Finding, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { type Failure, type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { systemErrorCode } from "../io.ts";
 import type { CheckContext, HostChecks, ProcessUse } from "../ports/checks.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -164,6 +164,30 @@ const processFindings = (
 };
 
 /**
+ * A host lookup that throws instead of answering (a path the policy refuses, a port's bug) blocks under its check's
+ * own code: preflight fails closed and never throws, so an offload never ends with internal.unexpected after its
+ * journal began (rule 7). The message carries the error, so a bug is still visible.
+ */
+const asked = async <T>(
+  code: "fs.dataless" | "proc.open-files" | "env.docker-mount" | "git.failed",
+  what: string,
+  dir: string,
+  lookup: () => Promise<Result<T>>,
+): Promise<Result<T>> => {
+  try {
+    return await lookup();
+  } catch (error) {
+    return fail(
+      finding(code, {
+        message: `could not check ${what} for ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+        paths: [dir],
+        fix: `check that plainport can look up ${what} (the message names what failed), then re-run`,
+      }),
+    );
+  }
+};
+
+/**
  * The checks before the scan. A check that fails is reported as a blocker under its own code and the others still
  * run, so one run shows every blocker; only a cancellation ends preflight early. The one exception is git, which
  * is checked only once the folder is known to hold no placeholder, since reading .git could download one.
@@ -187,7 +211,7 @@ export const preflight = async (
     return undefined;
   };
 
-  const dataless = await checks.dataless(dir, ctx);
+  const dataless = await asked("fs.dataless", "placeholder files", dir, () => checks.dataless(dir, ctx));
   if (!dataless.ok) {
     if (failed(dataless)) return dataless;
   } else {
@@ -214,7 +238,9 @@ export const preflight = async (
     report.safeToRead = placeholders.length === 0 && unsearchable.length === 0;
   }
 
-  const processes = await checks.processesUsing(dir, ctx);
+  const processes = await asked("proc.open-files", "the processes using the folder", dir, () =>
+    checks.processesUsing(dir, ctx),
+  );
   if (!processes.ok) {
     if (failed(processes)) return processes;
   } else {
@@ -257,7 +283,9 @@ export const preflight = async (
     processFindings(processes.value, dir, daemonPaths, report);
   }
 
-  const docker = await checks.dockerMounts(dir, ctx);
+  const docker = await asked("env.docker-mount", "the containers mounting the folder", dir, () =>
+    checks.dockerMounts(dir, ctx),
+  );
   if (!docker.ok) {
     if (failed(docker)) return docker;
   } else if (!docker.value.available) {
@@ -275,8 +303,11 @@ export const preflight = async (
   }
 
   if (report.safeToRead) {
-    const git = await gitChecks(host, dir, ctx, report);
-    if (git !== undefined && failed(git)) return git;
+    const git = await asked("git.failed", "the repository's state", dir, async () =>
+      ok(await gitChecks(host, dir, ctx, report)),
+    );
+    const problem = git.ok ? git.value : git;
+    if (problem !== undefined && failed(problem)) return problem;
   } else {
     report.notes.push(
       "git was not checked: the placeholder check must pass first, since reading .git could download one",

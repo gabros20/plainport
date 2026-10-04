@@ -23,6 +23,7 @@ import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
+import { PathRefused } from "../guard.ts";
 import { journalFile, type OffloadJournal, OffloadJournalSchema, readJournals } from "../journal/index.ts";
 import { prepareOffload } from "../plan/planner.ts";
 import { listPlans, savePlan } from "../plan/store.ts";
@@ -2464,5 +2465,24 @@ describe("offload: fix wave q2", () => {
     );
     expect(order).toEqual(["lock", "scan", "rename"]);
     await expectInvariants();
+  });
+});
+
+describe("offload: a preflight lookup that throws (task 17 concern 2)", () => {
+  test("blocks with the check's code and leaves no journal for recover", async () => {
+    const result = await runOffload(
+      deps({
+        checks: {
+          ...quietChecks,
+          dockerMounts: async () => {
+            throw new PathRefused("stat", "/Users/someone/.local/bin/docker", "/Users/someone");
+          },
+        },
+      }),
+      { project: await ref() },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "env.docker-mount"]);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
   });
 });
