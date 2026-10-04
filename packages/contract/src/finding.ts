@@ -277,7 +277,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 130,
     summary:
-      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56)",
+      "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56). Also the envelope of a command a signal ended before it reported, under --json: one that runs no operation, or a second signal while an operation wound down, when plainport recover settles what it journaled (D81)",
   },
   "plan.not-found": {
     severity: "block",

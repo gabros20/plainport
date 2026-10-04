@@ -32,12 +32,14 @@ const wantsJson = (argv: readonly string[]): boolean => {
   return (end === -1 ? argv : argv.slice(0, end)).includes("--json");
 };
 
-/** Runs one invocation (`argv` is everything after `plainport`) and returns the exit code. Never rejects. */
+/** Runs one invocation (`argv` is everything after `plainport`) and returns the exit code. Never rejects. `onOutput`
+ * is told of the invocation's output as soon as it exists, so a signal can print the cancellation through it (D81). */
 export const run = async (
   argv: readonly string[],
   io: IO,
   ports: Ports,
   registry: Registry = REGISTRY,
+  options: { onOutput?: (output: Output) => void } = {},
 ): Promise<number> => {
   let output: Output | undefined;
   let verb = argv[0] ?? "plainport";
@@ -47,6 +49,7 @@ export const run = async (
     if (!gated.ok) {
       verb = gated.verb;
       output = new Output(io, { json: gated.json, quiet: false, verbose: false }, gated.verb);
+      options.onOutput?.(output);
       return output.failure(gated.failure);
     }
     const { command, args, globals, risk } = gated;
@@ -54,6 +57,7 @@ export const run = async (
     verbose = globals.verbose;
     const out = new Output(io, globals, command.name);
     output = out;
+    options.onOutput?.(out);
     const ctx: CommandContext = {
       json: globals.json,
       quiet: globals.quiet,
@@ -117,6 +121,42 @@ export const run = async (
   }
 };
 
+/**
+ * What a signal that ends plainport before its command reported prints (D81): under --json, an operation.cancelled
+ * envelope through the command's own output, so stdout still ends with exactly one envelope. In human mode the
+ * interrupt's stderr line says it.
+ */
+export const cancellationReport = (io: IO, argv: readonly string[]) => {
+  let live: Output | undefined;
+  return {
+    onOutput: (output: Output): void => {
+      live = output;
+    },
+    cancelled: (signal: NodeJS.Signals, windingDown: boolean): void => {
+      const output =
+        live ??
+        new Output(io, { json: wantsJson(argv), quiet: false, verbose: false }, argv[0] ?? "plainport");
+      if (!output.json || output.finished) return;
+      output.failure(
+        fail(
+          finding(
+            "operation.cancelled",
+            windingDown
+              ? {
+                  message: `a second ${signal} stopped plainport while ${output.verb} was winding down to a safe point`,
+                  fix: "plainport recover finishes or rolls back what it journaled",
+                }
+              : {
+                  message: `${signal} stopped plainport ${output.verb} before it finished`,
+                  fix: "re-run the command; plainport status shows any operation it left interrupted",
+                },
+          ),
+        ),
+      );
+    },
+  };
+};
+
 /** The real ports. core's io is the macOS host port (guarded only when a test run names its real home); the plan
  * store holds the fresh plans saved on this device, read before the gate runs. Paths come from the environment,
  * never os.homedir(). */
@@ -154,8 +194,9 @@ if (import.meta.main) {
   const argv = process.argv.slice(2);
   // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
   const cancellation = new Cancellation();
+  const report = cancellationReport(io, argv);
   const done = realPorts(host, cancellation).then(
-    (ports) => run(argv, io, ports),
+    (ports) => run(argv, io, ports, REGISTRY, { onOutput: report.onOutput }),
     (error: unknown) =>
       new Output(io, { json: wantsJson(argv), quiet: false, verbose: false }, argv[0] ?? "plainport").failure(
         unexpected("loading saved plans", error),
@@ -164,6 +205,7 @@ if (import.meta.main) {
   const release = stopOnSignals(host, done, {
     stderr: (text) => process.stderr.write(text),
     operation: cancellation,
+    cancelled: report.cancelled,
   });
   process.exitCode = await done;
   release();

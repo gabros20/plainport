@@ -44,8 +44,13 @@ export class Output {
   constructor(
     private readonly io: IO,
     private readonly mode: RenderMode,
-    private readonly verb: string,
+    readonly verb: string,
   ) {}
+
+  /** Whether the output is NDJSON (--json). */
+  get json(): boolean {
+    return this.mode.json;
+  }
 
   #open(): void {
     if (this.#finished)

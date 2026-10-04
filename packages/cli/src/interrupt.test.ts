@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseJsonLines } from "@plainport/contract";
 
 const env = { PATH: "/usr/bin:/bin" };
 let dir: string;
@@ -167,6 +168,79 @@ describe("interrupt: signals to plainport stop its children", () => {
     expect(await parent.exited).toBe(130);
     expect(performance.now() - started).toBeLessThan(10_000);
   }, 20_000);
+
+  /** plainport's own wiring (main.ts) around a command that never reports and holds no saga; "ready" on stderr. */
+  const startCommand = async (argv: string[]) => {
+    const fixture = join(dir, "command.ts");
+    const at = (path: string) => JSON.stringify(join(import.meta.dir, path));
+    writeFileSync(
+      fixture,
+      `import { z } from ${JSON.stringify(Bun.resolveSync("zod", import.meta.dir))};\n` +
+        `import { ok } from ${at("../../contract/src/index.ts")};\n` +
+        `import { createMacosHost } from ${at("../../host-macos/src/index.ts")};\n` +
+        `import { Cancellation, stopOnSignals } from ${at("interrupt.ts")};\n` +
+        `import { cancellationReport, run } from ${at("main.ts")};\n` +
+        `import { defineCommand } from ${at("registry.ts")};\n` +
+        `import { fakePorts } from ${at("testing.ts")};\n` +
+        "const hang = defineCommand({ name: 'hang', summary: 'Never finish', risk: 'read', dryRun: false,\n" +
+        "  acceptsPlan: false, group: 'setup', positionals: [], args: z.strictObject({}), output: z.looseObject({}),\n" +
+        "  examples: [], human: () => '', handler: (_args, ctx) => {\n" +
+        "    ctx.output.emit({ type: 'phase', op: '01J9', phase: 'scan', status: 'start' });\n" +
+        "    process.stderr.write('ready\\n');\n" +
+        "    return new Promise(() => {}); } });\n" +
+        "const host = createMacosHost();\n" +
+        "const operation = new Cancellation();\n" +
+        "const io = { stdout: (t) => process.stdout.write(t), stderr: (t) => process.stderr.write(t), isTTY: false };\n" +
+        `const argv = ${JSON.stringify(argv)};\n` +
+        "const report = cancellationReport(io, argv);\n" +
+        "const done = run(argv, io, { ...fakePorts(), cancellation: operation }, [hang], { onOutput: report.onOutput });\n" +
+        "stopOnSignals(host, done, { stderr: io.stderr, operation, cancelled: report.cancelled });\n" +
+        "process.exitCode = await done;\n",
+    );
+    const parent = Bun.spawn([process.execPath, fixture], {
+      cwd: dir,
+      env: { ...env, HOME: dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    parents.push(parent);
+    const reader = parent.stderr.getReader();
+    let text = "";
+    while (!text.includes("ready\n")) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error(`the command ended early: ${text}`);
+      text += new TextDecoder().decode(value);
+    }
+    /** All of stderr, once the process has ended. */
+    const stderr = async (): Promise<string> => {
+      for (let read = await reader.read(); !read.done; read = await reader.read())
+        text += new TextDecoder().decode(read.value);
+      return text;
+    };
+    return { parent, stderr };
+  };
+
+  test("D81: Ctrl-C under --json with no saga running ends stdout with an operation.cancelled envelope, exit 130", async () => {
+    const { parent } = await startCommand(["hang", "--json"]);
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(130);
+    const parsed = parseJsonLines(await new Response(parent.stdout).text());
+    if (!parsed.ok) throw new Error(parsed.finding.message);
+    expect(parsed.value.events).toHaveLength(1);
+    expect(parsed.value.envelope).toMatchObject({
+      ok: false,
+      verb: "hang",
+      error: { code: 130, finding: { code: "operation.cancelled", severity: "block" } },
+    });
+  }, 30_000);
+
+  test("D81: in human mode the interrupt's stderr line says it, and stdout stays empty", async () => {
+    const { parent, stderr } = await startCommand(["hang"]);
+    parent.kill("SIGINT");
+    expect(await parent.exited).toBe(130);
+    expect(await new Response(parent.stdout).text()).toBe("");
+    expect(await stderr()).toContain("plainport: SIGINT: exiting");
+  }, 30_000);
 
   test("with no child running, Ctrl-C exits 130 at once, without waiting", async () => {
     const { parent } = await startParent("", "run");
