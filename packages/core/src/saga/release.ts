@@ -18,7 +18,7 @@
 import { basename, dirname, join } from "node:path";
 import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { readDevice } from "../device.ts";
-import { systemErrorCode } from "../io.ts";
+import { type LocalIo, systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -29,6 +29,21 @@ import { type Saga, writeFailed } from "./journaled.ts";
 import { unchanged } from "./verify.ts";
 
 export const TRASH_DIR = ".plainport-trash";
+
+/**
+ * Removes `<root>/.plainport-trash` once removing the trash folder `trash` left it empty: by rmdir, so it stays as soon
+ * as another offload has put its own trash there (offload makes it again). Only plainport's own holder, and it never
+ * fails: an empty holder left behind is harmless.
+ */
+export const removeEmptyTrashHolder = async (io: LocalIo, trash: string): Promise<void> => {
+  const holder = dirname(trash);
+  if (basename(holder) !== TRASH_DIR) return;
+  try {
+    await io.fs.rmdir(holder);
+  } catch (error) {
+    systemErrorCode(error);
+  }
+};
 
 /** "0", or a whole number with a unit (DurationSchema), in milliseconds. */
 export const durationMs = (duration: string): number => {
@@ -221,7 +236,15 @@ export const releaseOffload = async (
       );
     }
     try {
-      await io.fs.mkdirp(trash);
+      // An empty holder another operation removes between mkdirp's two mkdirs (removeEmptyTrashHolder): make it again.
+      for (let tries = 1; ; tries++) {
+        try {
+          await io.fs.mkdirp(trash);
+          break;
+        } catch (error) {
+          if (tries === 3 || systemErrorCode(error) !== "ENOENT") throw error;
+        }
+      }
       // The new folders' own entries, so a power loss cannot orphan the trash (D24).
       await io.fs.syncDir(dirname(trash));
       await io.fs.syncDir(dirname(dirname(trash)));

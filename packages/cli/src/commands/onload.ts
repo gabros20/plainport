@@ -36,6 +36,10 @@ const HydrateReportSchema = z.looseObject({
     description:
       "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)",
   }),
+  reason: z.string().optional().meta({
+    description:
+      "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+  }),
 });
 
 const OnloadOutputSchema = z
@@ -52,8 +56,23 @@ const OnloadOutputSchema = z
     store: z.string(),
     dir: z.string().meta({ description: "Where the project now is" }),
     restored: z.enum(["restore", "reuse"]).meta({
-      description: "restore: from the store; reuse: the same head's folder renamed back from the trash",
+      description:
+        "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused)",
     }),
+    reused: z
+      .looseObject({
+        from: z
+          .string()
+          .meta({ description: "The trash folder renamed back: <root>/.plainport-trash/<op>/<name>" }),
+        offload: z
+          .string()
+          .meta({ description: "The offload that released it; its trash and journal are gone now" }),
+        reason: z
+          .string()
+          .meta({ description: "Why it was renamed back instead of restored from the store" }),
+      })
+      .optional()
+      .meta({ description: "Only with restored: reuse" }),
     files: z.int().nonnegative(),
     bytes: z.int().nonnegative(),
     hydrate: HydrateReportSchema,
@@ -99,7 +118,11 @@ export const onload = defineCommand({
   }),
   output: OnloadOutputSchema,
   examples: [
-    { argv: ["onload", "work:clients/acme/api"], summary: "Bring a shelved project back" },
+    {
+      argv: ["onload", "work:clients/acme/api"],
+      summary:
+        "Bring a shelved project back; while offload.keepLocalFor keeps its folder, that folder is renamed back instead (restored: reuse)",
+    },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],
       summary: "Land it elsewhere, files only",
@@ -107,7 +130,13 @@ export const onload = defineCommand({
   ],
   human: (data) => {
     const from = `${data.project} from snapshot ${data.snapshot} into ${data.dir}`;
-    const { hydrate } = data;
+    const { hydrate, reused } = data;
+    if (reused !== undefined && data.exitCode === 0) {
+      return [
+        `onloaded ${data.project} into ${data.dir}: renamed back from ${reused.from}, not restored from the store (${reused.reason})`,
+        "dependencies came back with the folder, so nothing was installed",
+      ].join("\n");
+    }
     if (data.exitCode === 10) {
       const failed = hydrate.steps.find((s) => !s.ok);
       return `restored ${from}; ${failed?.command ?? "the install"} failed, so its dependencies are not installed: plainport hydrate ${data.project} retries`;

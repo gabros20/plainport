@@ -207,7 +207,7 @@ export const status = defineCommand({
     if (!known.ok) return known;
     const named = await resolveKnown(ctx, known.value, args.project ?? ".", "status");
     if (!named.ok) return named;
-    if (named.value.known === undefined) return notKnown(named.value.ref.address);
+    if (named.value.known === undefined) return notKnown(named.value.ref);
     // Only this project's view is built, with its local details (D64 quality: views are lazy).
     for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
     return ok(await known.value.set.view(named.value.known.id, { detail: true }));

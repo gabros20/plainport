@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
 import { nodeLocalIo } from "@plainport/core";
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
+import { z } from "zod";
 import { describeT1 } from "../../../../test/tiers.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
@@ -119,11 +120,11 @@ const expectInvariants = async () => {
   ).toEqual([]);
 };
 
-const offloaded = async (): Promise<string> => {
+const offloaded = async (kept = false): Promise<string> => {
   const run = await cli(["offload", "work:web", "--yes", "--json"]);
   if (run.code !== 0) throw new Error(run.err);
   const op = envelope(run.out).data.op as string;
-  for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+  for (let i = 0; !kept && i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
     await Bun.sleep(25);
   return op;
 };
@@ -174,6 +175,59 @@ describe("onload: the command", () => {
     expect(existsSync(`${dir()}.plainport`)).toBe(false);
     expect(readFileSync(join(box.home, "pm.log"), "utf8")).toBe("ci\n");
     await expectInvariants();
+  });
+
+  test("a kept folder renamed back says so: where it came from, why, and why nothing was installed (agent smoke)", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const snapshot = await offloaded(true);
+    const trash = join(box.home, "work/.plainport-trash", snapshot, "web");
+    const run = await cli(["onload", "work:web", "--json"]);
+    expect(run.code).toBe(0);
+    const schema = REGISTRY.find((c) => c.name === "onload")?.output;
+    expect(schema?.safeParse(envelope(run.out).data).success).toBe(true);
+    const data = envelope(run.out).data;
+    expect(data).toMatchObject({
+      restored: "reuse",
+      reused: {
+        from: trash,
+        offload: snapshot,
+        reason: `the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified`,
+      },
+      hydrate: {
+        status: "reused",
+        steps: [],
+        reason:
+          "the folder came back with the dependencies it had when it was offloaded, so nothing was installed",
+      },
+    });
+    expect(existsSync(join(box.home, "pm.log"))).toBe(false);
+    // The offload's trash, and the trash holder it leaves empty, are gone.
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+    await expectInvariants();
+  });
+
+  test("the human output of a reuse names the folder renamed back and says nothing was restored or installed", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const snapshot = await offloaded(true);
+    const run = await cli(["onload", "work:web"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toBe(
+      [
+        `onloaded work:web into ${dir()}: renamed back from ${join(box.home, "work/.plainport-trash", snapshot, "web")}, not restored from the store (the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified)`,
+        "dependencies came back with the folder, so nothing was installed",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("help onload explains restored and reuse", async () => {
+    const run = await cli(["help", "onload"]);
+    expect(run.out).toContain("keepLocalFor");
+    const schema = JSON.stringify(
+      z.toJSONSchema(REGISTRY.find((c) => c.name === "onload")?.output ?? z.never()),
+    );
+    expect(schema).toContain("renamed back");
+    expect(schema).toContain('"reason"');
   });
 
   test("names the project by its stub, and says in one line what came back", async () => {

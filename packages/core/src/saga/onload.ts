@@ -79,7 +79,7 @@ import { ulid } from "../ulid.ts";
 import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
 import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
-import { offloadTrashOf, rootFolderOf } from "./release.ts";
+import { offloadTrashOf, removeEmptyTrashHolder, rootFolderOf } from "./release.ts";
 import { checkSnapshot, kindAt, producedBy, restoreVerified, unreadable } from "./restore-tree.ts";
 
 /** Every journal step, in the order a run reaches them; the crash matrix enumerates its rows from this list. */
@@ -204,6 +204,8 @@ export type OnloadOutcome = {
   dir: string;
   /** restore: restored from the store; reuse: the same head's folder renamed back from the trash. */
   restored: "restore" | "reuse";
+  /** With reuse: the trash folder renamed back, the offload that released it, and why it was not restored. */
+  reused?: { from: string; offload: string; reason: string };
   /** Files and bytes the snapshot holds. */
   files: number;
   bytes: number;
@@ -854,6 +856,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       store: journal.store.name,
       dir: target,
       restored: journal.reuse === undefined ? "restore" : "reuse",
+      ...(journal.reuse === undefined
+        ? {}
+        : {
+            reused: {
+              from: journal.reuse.folder,
+              offload: journal.reuse.op,
+              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+            },
+          }),
       files,
       bytes,
       hydrate: { status: "none", steps: [], untrusted: [] },
@@ -867,7 +878,16 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       phase("toolchain", "skip");
       phase("hydrate", "skip");
       phase("hooks", "skip");
-      return ok({ ...outcome, hydrate: { status: "reused", steps: [], untrusted: [] } });
+      return ok({
+        ...outcome,
+        hydrate: {
+          status: "reused",
+          steps: [],
+          untrusted: [],
+          reason:
+            "the folder came back with the dependencies it had when it was offloaded, so nothing was installed",
+        },
+      });
     }
     if (req.hydrate === false || !config.onload.hydrate) {
       phase("toolchain", "skip");
@@ -982,6 +1002,7 @@ export const finishOnload = async (
       // The offload whose trash this was is finished: its trash folder (now empty) and its journal go.
       try {
         await io.fs.removeTree(dirname(journal.reuse.folder));
+        await removeEmptyTrashHolder(io, dirname(journal.reuse.folder));
         await removeJournal(io, paths, journal.reuse.op);
       } catch (error) {
         assertSystemError(error);

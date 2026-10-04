@@ -10,7 +10,7 @@
     {
       "name": "yes",
       "type": "boolean",
-      "summary": "Allow a confirm-class command to run"
+      "summary": "Allow a confirm-class command to run; --plan <id> stands in for it on a command that runs a --dry-run's plan"
     },
     {
       "name": "no-input",
@@ -1421,7 +1421,7 @@
           "name": "plan",
           "type": "string",
           "multiple": false,
-          "summary": "Run a plan a --dry-run saved, instead of --yes"
+          "summary": "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)"
         },
         {
           "name": "keep-deps",
@@ -1450,7 +1450,7 @@
             "description": "An address (root:path), a unique name, a path, . or a stub; one for now"
           },
           "plan": {
-            "description": "Run a plan a --dry-run saved, instead of --yes",
+            "description": "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)",
             "type": "string"
           },
           "keep-deps": {
@@ -2295,7 +2295,7 @@
             "work:clients/acme/web",
             "--dry-run"
           ],
-          "summary": "Plan offloading a project"
+          "summary": "Plan offloading a project; --plan <id> then runs that plan, instead of --yes"
         },
         {
           "argv": [
@@ -2411,7 +2411,31 @@
               "restore",
               "reuse"
             ],
-            "description": "restore: from the store; reuse: the same head's folder renamed back from the trash"
+            "description": "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused)"
+          },
+          "reused": {
+            "description": "Only with restored: reuse",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "The trash folder renamed back: <root>/.plainport-trash/<op>/<name>"
+              },
+              "offload": {
+                "type": "string",
+                "description": "The offload that released it; its trash and journal are gone now"
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why it was renamed back instead of restored from the store"
+              }
+            },
+            "required": [
+              "from",
+              "offload",
+              "reason"
+            ],
+            "additionalProperties": {}
           },
           "files": {
             "type": "integer",
@@ -2480,6 +2504,10 @@
                   "type": "string"
                 },
                 "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+              },
+              "reason": {
+                "description": "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+                "type": "string"
               }
             },
             "required": [
@@ -2513,7 +2541,7 @@
             "onload",
             "work:clients/acme/api"
           ],
-          "summary": "Bring a shelved project back"
+          "summary": "Bring a shelved project back; while offload.keepLocalFor keeps its folder, that folder is renamed back instead (restored: reuse)"
         },
         {
           "argv": [
@@ -2638,6 +2666,10 @@
                   "type": "string"
                 },
                 "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only after plainport trust (D54)"
+              },
+              "reason": {
+                "description": "Why nothing was installed, with reused: the folder came back with the dependencies it had when it was offloaded",
+                "type": "string"
               }
             },
             "required": [

@@ -35,7 +35,7 @@ import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, operationRunning, withProjectLock } from "../saga/project-gate.ts";
-import { offloadTrashOf, rootFolderOf } from "../saga/release.ts";
+import { offloadTrashOf, removeEmptyTrashHolder, rootFolderOf } from "../saga/release.ts";
 import { trashClaim, trashClaimFile } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
 import {
@@ -135,7 +135,7 @@ export const treeBytes = async (
 };
 
 /**
- * Removes a released trash folder and any claim on it, once no live deleter claims it (D64: the caller checked, under
+ * Removes a released trash folder, any claim on it and the trash holder when that leaves it empty, once no live deleter claims it (D64: the caller checked, under
  * the project's lock). A folder found gone under the walk (a deleter that finished just before) is done.
  */
 export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => {
@@ -153,6 +153,7 @@ export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => 
       if (systemErrorCode(error) !== "ENOENT") throw error;
     }
   }
+  await removeEmptyTrashHolder(io, trash);
 };
 
 const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
