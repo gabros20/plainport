@@ -20,6 +20,7 @@ import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
+import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
 import type { OpenedStore, StoreOpener } from "./ports/store.ts";
@@ -222,6 +223,9 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   const pin = await checkStorePin(io, options);
   if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
+  // Never in plainport's own holders, whose folders gc deletes (D87).
+  const reserved = await notReserved(io, root, paths.home, `store ${name}'s folder`);
+  if (!reserved.ok) return reserved;
   const folder = await storeFolder(io, name, root);
   if (!folder.ok) return folder;
   // Never inside, or holding, a registered project's folder: its offload would delete the store (D83).

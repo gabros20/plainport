@@ -17,6 +17,7 @@
 
 import { dirname, join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
+import { type DeleteGuardContext, deleteGuard } from "../delete-guard.ts";
 import { readDevice } from "../device.ts";
 import { removeEmptyHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
@@ -120,10 +121,16 @@ export const treeBytes = async (
 };
 
 /**
- * Removes a released trash folder, any claim on it and the trash holder when that leaves it empty, once no live deleter claims it (D64: the caller checked, under
- * the project's lock). A folder found gone under the walk (a deleter that finished just before) is done.
+ * Removes a released trash folder, any claim on it and the trash holder when that leaves it empty, once no live deleter
+ * claims it (D64: the caller checked, under the project's lock) and the delete guard lets it (D87, delete.guard-refused
+ * otherwise). A folder found gone under the walk (a deleter that finished just before) is done. An I/O failure throws,
+ * for the caller's own finding.
  */
-export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => {
+export const removeTrash = async (ctx: DeleteGuardContext, trash: string): Promise<Result<void>> => {
+  const { io } = ctx;
+  // The one guard before every recursive delete (D87): a refusal is the caller's to report, and nothing goes.
+  const guarded = await deleteGuard(ctx, trash);
+  if (!guarded.ok) return guarded;
   try {
     await io.fs.removeTree(trash);
   } catch (error) {
@@ -139,6 +146,7 @@ export const removeTrash = async (io: LocalIo, trash: string): Promise<void> => 
     }
   }
   await removeEmptyHolder(io, dirname(trash), TRASH_DIR);
+  return ok(undefined);
 };
 
 const stillThere = async (io: LocalIo, path: string): Promise<boolean> => {
@@ -284,7 +292,8 @@ export const collectTrash = async (
         // Its trash already gone (a delete killed before it closed the journal, D67): finished; the journal goes.
         if (await finished(io, now)) {
           try {
-            await removeTrash(io, trash);
+            const removed = await removeTrash({ io, paths, env: deps.env }, trash);
+            if (!removed.ok) return removed;
             await removeJournal(io, paths, now.op);
           } catch (error) {
             return writeFailed(error, `closing the journal of ${now.op}`, true, journalFile(paths, now.op));
@@ -293,7 +302,8 @@ export const collectTrash = async (
         }
         const bytes = await treeBytes(io, trash);
         try {
-          await removeTrash(io, trash);
+          const removed = await removeTrash({ io, paths, env: deps.env }, trash);
+          if (!removed.ok) return removed;
           await removeJournal(io, paths, now.op);
         } catch (error) {
           return writeFailed(error, `deleting the trash ${trash}`, true, trash);
@@ -408,6 +418,12 @@ const sweepStaging = async (
         problems.push(guarded);
         continue;
       }
+      const cleared = await deleteGuard({ io, paths, env: deps.env }, staging);
+      if (!cleared.ok) {
+        kept.push({ staging, finding: cleared.finding });
+        problems.push(cleared);
+        continue;
+      }
       try {
         await io.fs.removeTree(staging);
         await removeEmptyHolder(io, holder, STAGING_DIR);
@@ -447,6 +463,8 @@ const sweepStaging = async (
       async () => {
         const guarded = await notAProject(io, paths, deps.env, record.staging);
         if (!guarded.ok) return guarded;
+        const cleared = await deleteGuard({ io, paths, env: deps.env }, record.staging);
+        if (!cleared.ok) return cleared;
         try {
           await io.fs.removeTree(record.staging);
           await removeEmptyHolder(io, dirname(record.staging), STAGING_DIR);
@@ -537,7 +555,8 @@ export const housekeeping = async (
             const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
             if (!guarded.ok) return guarded;
             try {
-              await removeTrash(io, itemOf(now).trash);
+              const removed = await removeTrash({ io, paths, env: deps.env }, itemOf(now).trash);
+              if (!removed.ok) return removed;
               await removeJournal(io, paths, now.op);
             } catch (error) {
               return writeFailed(error, `closing the journal of ${now.op}`, true, journalFile(paths, now.op));
@@ -592,7 +611,10 @@ export const housekeeping = async (
           return writeFailed(error, `writing the journal of ${now.op}`, true, journalFile(paths, now.op));
         }
         const item = itemOf(now);
-        const detached = await host.deleteTrashDetached(item.trash, journalFile(paths, now.op), self);
+        const detached = await host.deleteTrashDetached(item.trash, journalFile(paths, now.op), self, {
+          paths,
+          env: deps.env,
+        });
         if (!detached.ok) return detached;
         done.started.push(item);
         return ok(undefined);

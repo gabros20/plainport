@@ -4251,6 +4251,13 @@
       "summary": "A package folder holds lockfiles of more than one package manager and no packageManager field; onload uses the first in DESIGN's table"
     },
     {
+      "code": "delete.guard-refused",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "plainport did not delete a folder because the check right before every recursive delete refused it: it holds a mount point, a store plainport made or a restic repository, it is, holds or lies inside a registered project's folder (or one cannot be resolved), or the configuration does not read cleanly; the journal stays and the message names the fix (D87)"
+    },
+    {
       "code": "deps.no-lockfile",
       "severity": "warn",
       "allowable": true,

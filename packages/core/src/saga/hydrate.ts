@@ -31,6 +31,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { ConfigLoader } from "../config/load.ts";
+import { deleteGuard } from "../delete-guard.ts";
 import { systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { dehydrateSet } from "../plan/planner.ts";
@@ -578,6 +579,13 @@ export const runDehydrate = async (
           );
         }
         const path = join(dir, ...entry.path.split("/"));
+        // The one guard before every recursive delete (D87): a dependency folder lies inside its project by design,
+        // but never holds a mount, a store or another project.
+        const guarded = await deleteGuard({ io: host, paths, env: deps.env }, path, { insideProject: true });
+        if (!guarded.ok) {
+          if (removed.length > 0) await markUnhydrated();
+          return guarded;
+        }
         try {
           await host.fs.removeTree(path);
         } catch (error) {

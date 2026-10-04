@@ -53,6 +53,7 @@ import {
   storeEventLog,
 } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
+import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import {
@@ -81,7 +82,7 @@ import {
 import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
-import { localStores } from "../store-overlap.ts";
+import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
@@ -523,6 +524,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
 
   /** Rolls back an operation that did not commit: only its staging folder and its journal go. */
   async function rollBack(journal: Journal, note?: Finding): Promise<Settled> {
+    // The one guard before every recursive delete (D87): a refusal keeps the journal pending.
+    if (journal.kind === "onload" && journal.staging !== undefined) {
+      const guarded = await deleteGuard({ io, paths, env: deps.env }, journal.staging);
+      if (!guarded.ok) return pending(journal, guarded);
+    }
     try {
       if (journal.kind === "onload" && journal.staging !== undefined) await io.fs.removeTree(journal.staging);
       await removeJournal(io, paths, journal.op);
@@ -751,11 +757,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         clock,
         log: deps.log,
         stillHeld: lock.stillHeld,
-        // The stores no released folder may hold (D83), read right before the rename; without them nothing moves.
-        stores: async () => {
-          const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
-          return loaded.ok ? ok(localStores(loaded.value.config, paths.home)) : loaded;
-        },
+        env: deps.env,
+        // The stores no released folder may hold (D83), read fresh and clean right before the rename (astra r2
+        // finding 5): a configuration that reads only as its last good copy moves nothing.
+        stores: () => freshStores(io, paths, deps.env),
       },
       facts,
     );
@@ -887,7 +892,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const guarded = await notAProject(io, paths, deps.env, trash);
     if (!guarded.ok) return pending(journal, guarded);
     try {
-      await removeTrash(io, trash);
+      const removed = await removeTrash({ io, paths, env: deps.env }, trash);
+      if (!removed.ok) return pending(journal, removed);
       await removeJournal(io, paths, journal.op);
     } catch (error) {
       return pending(journal, writeFailed(error, `deleting the trash ${trash}`, true, trash));
@@ -933,6 +939,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const finished = await finishOnload({
       host,
       paths,
+      env: deps.env,
       saga,
       store: store.value.blob,
       device: deps.device.id,

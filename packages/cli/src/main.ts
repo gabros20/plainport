@@ -3,7 +3,7 @@
 // Whatever throws, from the gate to the last write, ends as one internal.unexpected refusal (exit 1).
 
 import { decode, type Failure, fail, finding } from "@plainport/contract";
-import { resolvePaths } from "@plainport/core";
+import { resolvePaths, runTrashDelete, TRASH_DELETE_WORD } from "@plainport/core";
 import { nodePlugin } from "@plainport/eco-node";
 import { createMacosChecks, createMacosHost, guardFromEnv, type MacosHost } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
@@ -188,25 +188,36 @@ if (import.meta.main) {
   // faults are the crash matrix's: the define folds this test to false in every release build, which drops the hook
   // (test-hooks.ts, D67).
   const guard = guardFromEnv(process.env);
-  const faults =
-    globalThis.PLAINPORT_TEST_HOOKS === true ? await testFaultPlan(process.env, guard) : undefined;
-  const host = createMacosHost({ guard, ...(faults === undefined ? {} : { faults }) });
-  const argv = process.argv.slice(2);
-  // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
-  const cancellation = new Cancellation();
-  const report = cancellationReport(io, argv);
-  const done = realPorts(host, cancellation).then(
-    (ports) => run(argv, io, ports, REGISTRY, { onOutput: report.onOutput }),
-    (error: unknown) =>
-      new Output(io, { json: wantsJson(argv), quiet: false, verbose: false }, argv[0] ?? "plainport").failure(
-        unexpected("loading saved plans", error),
-      ),
-  );
-  const release = stopOnSignals(host, done, {
-    stderr: (text) => process.stderr.write(text),
-    operation: cancellation,
-    cancelled: report.cancelled,
-  });
-  process.exitCode = await done;
-  release();
+  if (process.argv[2] === TRASH_DELETE_WORD) {
+    // The detached trash delete's own process (D87): not a command, so not in the registry, help, completions or
+    // plainport.json. It claims the trash, runs the delete guard, and deletes only what the guard lets go.
+    process.exitCode = await runTrashDelete(
+      createMacosHost(guard === undefined ? {} : { guard }),
+      process.argv[3],
+    );
+  } else {
+    const faults =
+      globalThis.PLAINPORT_TEST_HOOKS === true ? await testFaultPlan(process.env, guard) : undefined;
+    const host = createMacosHost({ guard, ...(faults === undefined ? {} : { faults }) });
+    const argv = process.argv.slice(2);
+    // Building the ports reads the saved plans; a bug there ends as internal.unexpected like any other (rule 7).
+    const cancellation = new Cancellation();
+    const report = cancellationReport(io, argv);
+    const done = realPorts(host, cancellation).then(
+      (ports) => run(argv, io, ports, REGISTRY, { onOutput: report.onOutput }),
+      (error: unknown) =>
+        new Output(
+          io,
+          { json: wantsJson(argv), quiet: false, verbose: false },
+          argv[0] ?? "plainport",
+        ).failure(unexpected("loading saved plans", error)),
+    );
+    const release = stopOnSignals(host, done, {
+      stderr: (text) => process.stderr.write(text),
+      operation: cancellation,
+      cancelled: report.cancelled,
+    });
+    process.exitCode = await done;
+    release();
+  }
 }

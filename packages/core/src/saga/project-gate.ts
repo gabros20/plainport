@@ -120,6 +120,11 @@ export const registeredFolders = async (
   io: LocalIo,
   paths: PlainportPaths,
   env: Env,
+  /**
+   * strict: a registered folder that cannot be resolved is a refusal, never dropped (D87, astra r2 finding 4): a
+   * destructive caller cannot tell that the folder is not the one it is about to delete through another spelling.
+   */
+  options: { strict?: boolean } = {},
 ): Promise<Result<RegisteredFolder[]>> => {
   const registry = await readRegistry(io, paths);
   if (!registry.ok) return registry;
@@ -137,7 +142,12 @@ export const registeredFolders = async (
     const folder = e.override ?? (root === undefined ? undefined : join(root, ...e.path.split("/")));
     if (folder === undefined) continue;
     const canon = await canonicalPath(io, folder, paths.home);
-    // A folder that cannot be resolved (a loop, no permission) holds nothing this device can reach.
+    if (!canon.ok && options.strict === true)
+      return fail({
+        ...canon.finding,
+        message: `${e.root}:${e.path}'s folder ${folder} cannot be resolved, so nothing that may be it is deleted: ${canon.finding.message}`,
+      });
+    // For locking, a folder that cannot be resolved (a loop, no permission) holds nothing this device can reach.
     if (canon.ok)
       folders.push({ id, address: `${e.root}:${e.path}`, folder: canon.value.path, canon: canon.value });
   }
@@ -187,7 +197,7 @@ export const notAProject = async (
   env: Env,
   path: string,
 ): Promise<Result<void>> => {
-  const folders = await registeredFolders(io, paths, env);
+  const folders = await registeredFolders(io, paths, env, { strict: true });
   if (!folders.ok) return folders;
   const nested = await nestedProjects(io, paths, folders.value, { folder: path });
   if (!nested.ok) return nested;

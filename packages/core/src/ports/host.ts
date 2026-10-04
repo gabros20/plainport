@@ -4,6 +4,7 @@
 
 import type { Result } from "@plainport/contract";
 import type { LocalIo } from "../io.ts";
+import type { Env, PlainportPaths } from "../paths.ts";
 import type { RunOutcome, RunSpec } from "../runner/types.ts";
 
 export interface Clock {
@@ -30,9 +31,15 @@ export interface HostPorts extends LocalIo {
    * and internal, it has no output to bound, and only a journaled trash path is accepted (`.../.plainport-trash/<op>`,
    * with its `journal/<op>.json`). If it dies or never starts, recover and gc finish the trash. It claims the trash
    * for this device (`device`, D64) before deleting; it resolves ok once that claim is there. One that cannot start is
-   * process.spawn-failed; one that cannot claim is stopped, and fs.write-failed.
+   * process.spawn-failed; one that cannot claim is stopped, and fs.write-failed. The child runs the delete guard
+   * (D87) right before it deletes, with `paths` and `env`, the caller's own.
    */
-  deleteTrashDetached(trash: string, journal: string, device: string): Promise<Result<{ pid: number }>>;
+  deleteTrashDetached(
+    trash: string,
+    journal: string,
+    device: string,
+    context: { paths: PlainportPaths; env: Env },
+  ): Promise<Result<{ pid: number }>>;
 }
 
 /** Dotted lower-case words, at least two: offload.release, onload.swap.rename. The name every fault step has. */
