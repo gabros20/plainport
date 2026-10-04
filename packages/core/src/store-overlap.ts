@@ -6,7 +6,7 @@
 // and recover (through release) all ask; the refusal store.inside-project is never allowable.
 
 import { fail, finding, ok, type Result, shellWord } from "@plainport/contract";
-import type { ResolvedConfig } from "./config/schema.ts";
+import type { ConfigLayer, ResolvedConfig } from "./config/schema.ts";
 import type { LocalIo } from "./io.ts";
 import { expandHome } from "./paths.ts";
 import { canonicalPath, overlapOf } from "./roots/canonical.ts";
@@ -23,6 +23,19 @@ export const localStores = (config: ResolvedConfig, home: string): ProtectedStor
     store.kind === "local" ? [{ name, root: expandHome(store.path, home, home) }] : [],
   );
 
+/** The local stores config layers name (a root write sees layers, not the merged config); later layers win per key. */
+export const localStoresOf = (layers: readonly ConfigLayer[], home: string): ProtectedStore[] => {
+  const merged: Record<string, { kind?: string; path?: string }> = {};
+  for (const layer of layers)
+    for (const [name, store] of Object.entries(layer.stores ?? {}))
+      merged[name] = { ...merged[name], ...store };
+  return Object.entries(merged).flatMap(([name, store]) =>
+    store.kind === "local" && store.path !== undefined
+      ? [{ name, root: expandHome(store.path, home, home) }]
+      : [],
+  );
+};
+
 /**
  * store.inside-project when `folder` holds, is, or lies inside one of `stores`; a path that cannot be resolved (a
  * loop, no permission) cannot be shown apart, so it refuses too (fail closed).
@@ -32,6 +45,8 @@ export const storeOverlap = async (
   home: string,
   folder: string,
   stores: readonly ProtectedStore[],
+  /** A root's folder may hold a store beside its projects: only the folder being, or lying inside, a store refuses. */
+  options: { storesInsideAllowed?: boolean } = {},
 ): Promise<Result<void>> => {
   if (stores.length === 0) return ok(undefined);
   const project = await canonicalPath(io, folder, home);
@@ -40,7 +55,7 @@ export const storeOverlap = async (
     const canon = await canonicalPath(io, store.root, home);
     if (!canon.ok) return canon;
     const relation = overlapOf(canon.value, project.value);
-    if (relation === undefined) continue;
+    if (relation === undefined || (relation === "inside" && options.storesInsideAllowed === true)) continue;
     const how =
       relation === "same"
         ? `store ${store.name} is the folder ${folder} itself`

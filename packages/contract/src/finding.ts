@@ -261,6 +261,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "An earlier operation on the project was interrupted and its journal is still open; fix is plainport recover. From recover itself: a journal file this version cannot read, left as it is",
   },
+  "path.reserved": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The path is, or lies inside, a folder plainport reserves for itself (.plainport-staging, .plainport-trash, any .plainport-*), whose contents gc deletes: it is never a project's place, a restore's landing folder or a root (D84)",
+  },
   "path.stub-occupied": {
     severity: "block",
     allowable: false,

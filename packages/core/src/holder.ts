@@ -69,7 +69,7 @@ const reservedSegment = (path: string): string | undefined =>
   path.split(sep).find((segment) => segment.startsWith(".plainport-"));
 
 /**
- * usage.invalid when `path` is, or lies inside, a folder plainport reserves (.plainport-staging, .plainport-trash, any
+ * path.reserved when `path` is, or lies inside, a folder plainport reserves (.plainport-staging, .plainport-trash, any
  * .plainport-*), as given or by its real path: gc deletes what it finds there, so it is never a project's place or a
  * root (D84).
  */
@@ -87,7 +87,7 @@ export const notReserved = async (
   }
   if (segment === undefined) return ok(undefined);
   return fail(
-    finding("usage.invalid", {
+    finding("path.reserved", {
       message: `${path} lies in ${segment}, a folder plainport reserves for its own staging and trash, which gc deletes; it cannot be ${what}`,
       fix: "choose a folder outside every .plainport-* folder, then re-run",
       paths: [path],

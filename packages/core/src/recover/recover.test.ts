@@ -2414,12 +2414,12 @@ describe("D84: plainport's holders are never a working copy's place, and gc neve
   const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
   const holderChild = () => join(box.home, "work/.plainport-staging", ulid());
 
-  test("onload --to and restore --to into a .plainport-* holder are usage.invalid; nothing lands there", async () => {
+  test("onload --to and restore --to into a .plainport-* holder are path.reserved; nothing lands there", async () => {
     value(await offloadNow());
     await waitJournalsGone();
     const to = holderChild();
     const onload = await runOnload(onloadDeps(testHost()), { project: await ref(), to, hydrate: false });
-    expect(onload.ok ? 0 : [onload.exitCode, onload.finding.code]).toEqual([2, "usage.invalid"]);
+    expect(onload.ok ? 0 : [onload.exitCode, onload.finding.code]).toEqual([6, "path.reserved"]);
     const restore = await runRestore(
       {
         host: testHost(),
@@ -2434,7 +2434,7 @@ describe("D84: plainport's holders are never a working copy's place, and gc neve
       },
       { project: await ref(), to: join(box.home, "old/.plainport-trash/web") },
     );
-    expect(restore.ok ? 0 : restore.finding.code).toBe("usage.invalid");
+    expect(restore.ok ? 0 : restore.finding.code).toBe("path.reserved");
     expect(existsSync(to)).toBe(false);
     expect(existsSync(join(box.home, "old/.plainport-trash"))).toBe(false);
   });

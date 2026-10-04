@@ -123,6 +123,12 @@ describe("findings", () => {
         exitCode: 6,
         summary: expect.any(String),
       },
+      "store.inside-project": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "store.unreachable": { severity: "block", allowable: false, exitCode: 9, summary: expect.any(String) },
       "stub.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
@@ -183,6 +189,7 @@ describe("findings", () => {
       },
       "fs.cross-volume": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "fs.write-failed": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "path.reserved": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "path.stub-occupied": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "journal.pending": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "offload.diverged-after-commit": {

@@ -3,7 +3,7 @@
 // (a duplicate key, overlapping real paths) and the write cannot race another writer. config.toml wins: a key it
 // sets is never shadowed by a copy in managed.toml, and the refusal names the key to edit there.
 
-import { sep } from "node:path";
+import { join, sep } from "node:path";
 import { type Finding, fail, finding, ok, type Result } from "@plainport/contract";
 import { ConfigLoader } from "../config/load.ts";
 import { updateManaged } from "../config/managed.ts";
@@ -12,7 +12,8 @@ import { readTomlFile } from "../config/toml.ts";
 import { notReserved } from "../holder.ts";
 import type { LocalIo } from "../io.ts";
 import { type Env, expandHome, type PlainportPaths } from "../paths.ts";
-import { RootKeySchema } from "../registry.ts";
+import { RootKeySchema, readRegistry } from "../registry.ts";
+import { localStoresOf, storeOverlap } from "../store-overlap.ts";
 import { canonicalPath, overlapOf, probeKind } from "./canonical.ts";
 
 type RootTable = NonNullable<ConfigLayer["roots"]>[string];
@@ -274,6 +275,18 @@ export const writeRoots = async (
         // A root inside plainport's own holders would have its projects deleted by gc (D84).
         const reserved = await notReserved(io, path, options.cwd, "a root's folder");
         if (!reserved.ok) return reserved;
+        // A root that is, or lies inside, a local store, or a registered project of it whose folder would hold one:
+        // an offload would move the store into the trash (D83).
+        const stores = localStoresOf([working, user], home);
+        const inStore = await storeOverlap(io, home, path, stores, { storesInsideAllowed: true });
+        if (!inStore.ok) return inStore;
+        const registry = await readRegistry(io, paths);
+        if (!registry.ok) return registry;
+        for (const entry of Object.values(registry.value.projects)) {
+          if (entry.root !== key || entry.override !== undefined) continue;
+          const overlap = await storeOverlap(io, home, join(path, ...entry.path.split("/")), stores);
+          if (!overlap.ok) return overlap;
+        }
         const resolved = await canonicalPath(io, path, options.cwd);
         if (!resolved.ok) return resolved;
         const canon = resolved.value;
