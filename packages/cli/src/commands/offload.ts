@@ -71,7 +71,7 @@ export const renderPlan = (plan: Plan): string => {
     lines.push(
       row(
         "ignored",
-        `${ignored.paths.slice(0, SHOWN_IGNORED).join(" · ")}${more > 0 ? ` and ${more} more` : ""}: gitignored, and they travel; only what a plugin declares regenerable is stripped`,
+        `${ignored.paths.length === 0 ? "none found" : ignored.paths.slice(0, SHOWN_IGNORED).join(" · ")}${more > 0 ? ` and ${more} more` : ""}: gitignored, and they travel; only what a plugin declares regenerable is stripped${ignored.incomplete === true ? " (incomplete: git could not be asked in every repository, so more may travel)" : ""}`,
       ),
     );
   }

@@ -2,20 +2,20 @@
 // disposable), and the plan names them so people and agents can see that `.env` files and local databases are in the
 // snapshot. git decides, by its own rules (every .gitignore, .git/info/exclude, the user's core.excludesFile), in the
 // innermost repository holding each file; a folder that is no repository has no list. The list only informs, so a
-// git call that fails leaves that repository's files out of it rather than failing the plan.
+// git call that fails does not fail the plan: the list is marked incomplete instead (more may travel).
 
 import { join } from "node:path";
 import type { HostPorts } from "../ports/host.ts";
 import { type GitContext, gitIgnored } from "../scan/git.ts";
 
-/** The files of `files` (project-relative, included in the snapshot) git ignores, sorted. */
+/** The files of `files` (project-relative, included in the snapshot) git ignores, sorted; incomplete when git failed. */
 export const gitignoredFiles = async (
   host: HostPorts,
   dir: string,
   ctx: GitContext,
   repos: readonly string[],
   files: readonly string[],
-): Promise<string[]> => {
+): Promise<{ paths: string[]; incomplete?: true }> => {
   // Innermost first, so each file goes to the repository nearest to it.
   const byDepth = [...repos].sort((a, b) => b.length - a.length);
   const asked = new Map<string, string[]>();
@@ -27,11 +27,15 @@ export const gitignoredFiles = async (
     asked.set(repo, list);
   }
   const ignored: string[] = [];
+  let incomplete = false;
   for (const [repo, paths] of asked) {
     const answer = await gitIgnored(host, repo === "" ? dir : join(dir, repo), ctx, paths);
-    if (!answer.ok) continue;
+    if (!answer.ok) {
+      incomplete = true;
+      continue;
+    }
     for (const path of paths)
       if (answer.value.has(path)) ignored.push(repo === "" ? path : `${repo}/${path}`);
   }
-  return ignored.sort();
+  return { paths: ignored.sort(), ...(incomplete ? { incomplete: true as const } : {}) };
 };

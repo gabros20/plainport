@@ -21,6 +21,7 @@ import { type Ports, positionalsOf } from "../registry.ts";
 import { localStores } from "../stores.ts";
 import { capture, fakeEngineHooks, fakeRepositoryAt, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
+import { renderPlan } from "./offload.ts";
 
 let box: Sandbox;
 const NOW = new Date("2026-10-03T12:00:00Z");
@@ -164,6 +165,29 @@ describe("offload: dry run", () => {
     box.file("work/web/.env", "TOKEN=op://vault/item\n");
     const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
     expect(data.include.gitignored).toBeUndefined();
+  });
+
+  test("a gitignored list git could not complete says so, in the human plan too (quality r1 minor 5)", () => {
+    const plan = PlanSchema.parse({
+      id: ulid(NOW.getTime()),
+      kind: "offload",
+      project: { address: "work:web", root: "work", path: "web", dir: "/w/web", store: "local" },
+      fingerprint: "sha256:x",
+      include: {
+        files: 1,
+        bytes: 1,
+        largest: [],
+        gitignored: { files: 1, paths: [".env"], incomplete: true },
+      },
+      strip: [],
+      findings: [],
+      phases: [],
+      estimate: { uploadBytes: 1 },
+      expiresAt: NOW.toISOString(),
+    });
+    expect(renderPlan(plan)).toContain(
+      "  ignored   .env: gitignored, and they travel; only what a plugin declares regenerable is stripped (incomplete: git could not be asked in every repository, so more may travel)\n",
+    );
   });
 
   test("a plan without gitignored files says nothing about them", async () => {

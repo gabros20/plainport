@@ -83,11 +83,15 @@ export const PlanSchema = outputObject({
     gitignored: outputObject({
       files: z.int().nonnegative(),
       paths: z.array(z.string()).meta({ description: "The first 20, sorted" }),
+      incomplete: z.literal(true).optional().meta({
+        description:
+          "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+      }),
     })
       .optional()
       .meta({
         description:
-          "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
+          "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
       }),
   }),
   strip: z.array(StripEntrySchema),

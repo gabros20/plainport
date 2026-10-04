@@ -1704,7 +1704,7 @@
                     "description": "The ten largest included files, largest first"
                   },
                   "gitignored": {
-                    "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
+                    "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
                     "type": "object",
                     "properties": {
                       "files": {
@@ -1718,6 +1718,11 @@
                           "type": "string"
                         },
                         "description": "The first 20, sorted"
+                      },
+                      "incomplete": {
+                        "description": "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+                        "type": "boolean",
+                        "const": true
                       }
                     },
                     "required": [
@@ -2111,7 +2116,7 @@
                 "description": "The ten largest included files, largest first"
               },
               "gitignored": {
-                "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository",
+                "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
                 "type": "object",
                 "properties": {
                   "files": {
@@ -2125,6 +2130,11 @@
                       "type": "string"
                     },
                     "description": "The first 20, sorted"
+                  },
+                  "incomplete": {
+                    "description": "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+                    "type": "boolean",
+                    "const": true
                   }
                 },
                 "required": [

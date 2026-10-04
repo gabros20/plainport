@@ -360,9 +360,15 @@ export const prepareOffload = async (
       files,
       bytes,
       largest,
-      ...(gitignored.length === 0
+      ...(gitignored.paths.length === 0 && gitignored.incomplete === undefined
         ? {}
-        : { gitignored: { files: gitignored.length, paths: gitignored.slice(0, 20) } }),
+        : {
+            gitignored: {
+              files: gitignored.paths.length,
+              paths: gitignored.paths.slice(0, 20),
+              ...(gitignored.incomplete === undefined ? {} : { incomplete: true as const }),
+            },
+          }),
     },
     strip: strip.value.entries,
     findings,
