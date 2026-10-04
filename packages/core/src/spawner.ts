@@ -96,9 +96,13 @@ const JOURNAL = /\/journal\/([0-9A-HJKMNP-TV-Z]{26})\.json$/;
 /** How long the detached delete has to write its claim before it is stopped. */
 const CLAIM_WAIT_MS = 10_000;
 
-/** Waits for the child's claim: written, the child already done (exit 0), failed (exited without one), or timeout. */
+/**
+ * Waits for the child's claim: written; the child already done (exit 0, or a later step failed once the trash was
+ * gone, which it deletes only under its claim); failed (exited without having claimed); or timeout.
+ */
 const awaitClaim = async (
   io: LocalIo,
+  trash: string,
   claim: string,
   exitCode: () => number | null,
 ): Promise<"claimed" | "finished" | "failed" | "timeout"> => {
@@ -111,7 +115,18 @@ const awaitClaim = async (
       if (errorCode(error) !== "ENOENT") throw error;
     }
     const code = exitCode();
-    if (code !== null) return code === 0 ? "finished" : "failed";
+    if (code !== null) {
+      if (code === 0) return "finished";
+      // Done before this poll looked: the trash is removed only after the claim was written (and the claim only after
+      // the trash), so a trash that is gone means it claimed and deleted, and failed later (on the journal, D67).
+      try {
+        await io.fs.lstat(trash);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return "finished";
+        throw error;
+      }
+      return "failed";
+    }
     if (io.proc.monotonicMs() > deadline) return "timeout";
     await io.proc.sleep(5);
   }
@@ -164,7 +179,7 @@ export const posixDeleteTrash = async (
     );
     child.unref();
     // Until the claim is there, nothing tells another deleter that this one runs (D64).
-    const claimed = await awaitClaim(io, trashClaimFile(trash), () => child.exitCode);
+    const claimed = await awaitClaim(io, trash, trashClaimFile(trash), () => child.exitCode);
     if (claimed === "claimed" || claimed === "finished") return ok({ pid: child.pid });
     if (claimed === "timeout") {
       try {
