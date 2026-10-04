@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { type StreamEvent, StreamEventSchema, type UnknownEvent, UnknownEventSchema } from "./events.ts";
-import { EXIT, type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
+import { type ExitCode, type FailureExitCode, FailureExitCodeSchema } from "./exit-codes.ts";
 import { type Finding, FindingSchema, finding } from "./finding.ts";
 import { outputObject } from "./objects.ts";
 import { decode, fail, ok, type Result } from "./result.ts";
@@ -12,28 +12,19 @@ export const PLAINPORT_JSON = 1;
 
 const verb = z.string().min(1).meta({ description: "The command as registered, e.g. offload or root add" });
 
-/**
- * Failures that still carry a useful result (D14): 6, the plan of a --dry-run its blockers stopped (D38); 8, the
- * kept snapshot of a conflict; 10, a restore not hydrated.
- */
-export const PARTIAL_EXIT_CODES = [EXIT.blocked, EXIT.conflict, EXIT.unhydrated] as const;
-export type PartialExitCode = (typeof PARTIAL_EXIT_CODES)[number];
-
-const errorObject = <C extends z.ZodType>(code: C) =>
-  outputObject({
-    code: code.meta({ description: "Equal to the process exit code" }),
-    message: z.string().min(1),
-    hint: z.string().min(1).optional(),
-    finding: FindingSchema.optional().meta({
-      description: "The finding behind the failure, so a reader can branch on its code",
-    }),
-  });
-
-export const ErrorObjectSchema = errorObject(FailureExitCodeSchema);
+export const ErrorObjectSchema = outputObject({
+  code: FailureExitCodeSchema.meta({ description: "Equal to the process exit code" }),
+  message: z.string().min(1),
+  hint: z.string().min(1).optional(),
+  finding: FindingSchema.optional().meta({
+    description: "The finding behind the failure, so a reader can branch on its code",
+  }),
+});
 const absent = z.never().optional();
 
 /** The final envelope for a command whose data matches `data` (any JSON value by default). A failure carries data
- * only when it still has a useful result (D14): exit 6, 8 or 10. */
+ * when it still has a useful result (D14), whatever its code: a blocked dry run's plan (6), a kept snapshot (8), a
+ * restore not hydrated (10), recover's and gc's report (any code, since part of it may have been settled). */
 export const envelopeSchema = <D extends z.ZodType>(data: D) =>
   z.union([
     outputObject({
@@ -54,7 +45,7 @@ export const envelopeSchema = <D extends z.ZodType>(data: D) =>
       plainport_json: z.literal(PLAINPORT_JSON),
       ok: z.literal(false),
       verb,
-      error: errorObject(z.literal(PARTIAL_EXIT_CODES)),
+      error: ErrorObjectSchema,
       data,
     }),
   ]);
@@ -63,13 +54,7 @@ export const EnvelopeSchema = envelopeSchema(z.json()).meta({ title: "Envelope" 
 export type Envelope<D = z.infer<ReturnType<typeof z.json>>> =
   | { plainport_json: 1; ok: true; verb: string; data: D }
   | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema>; data?: undefined }
-  | {
-      plainport_json: 1;
-      ok: false;
-      verb: string;
-      error: z.infer<typeof ErrorObjectSchema> & { code: PartialExitCode };
-      data: D;
-    };
+  | { plainport_json: 1; ok: false; verb: string; error: z.infer<typeof ErrorObjectSchema>; data: D };
 
 export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   plainport_json: PLAINPORT_JSON,
@@ -78,18 +63,12 @@ export const successEnvelope = <D>(verbName: string, data: D): Envelope<D> => ({
   data,
 });
 
-const isPartial = (code: FailureExitCode): code is PartialExitCode =>
-  (PARTIAL_EXIT_CODES as readonly number[]).includes(code);
-
-/**
- * A failure envelope. `data` is accepted only with exit 6, 8 or 10, a useful partial result (D14): the types refuse it for
- * any other code, and a caller that gets past them with a non-literal code is a bug, so it throws.
- */
-export const errorEnvelope = <C extends FailureExitCode, D = never>(
+/** A failure envelope; `data`, when given, is the result that still stands (D14). Never throws. */
+export const errorEnvelope = <D = never>(
   verbName: string,
-  code: C,
+  code: FailureExitCode,
   message: string,
-  extra: { hint?: string; finding?: Finding; data?: [C] extends [PartialExitCode] ? D : never } = {},
+  extra: { hint?: string; finding?: Finding; data?: D } = {},
 ): Envelope<D> => {
   const error = {
     code,
@@ -98,14 +77,7 @@ export const errorEnvelope = <C extends FailureExitCode, D = never>(
     ...(extra.finding === undefined ? {} : { finding: extra.finding }),
   };
   if (extra.data === undefined) return { plainport_json: PLAINPORT_JSON, ok: false, verb: verbName, error };
-  if (!isPartial(code)) throw new TypeError(`exit ${code} cannot carry data; only 6, 8 and 10 can (D14)`);
-  return {
-    plainport_json: PLAINPORT_JSON,
-    ok: false,
-    verb: verbName,
-    error: { ...error, code },
-    data: extra.data,
-  };
+  return { plainport_json: PLAINPORT_JSON, ok: false, verb: verbName, error, data: extra.data };
 };
 
 /** The process exit code an envelope stands for: 0 on success, error.code otherwise. */

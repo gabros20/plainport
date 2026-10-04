@@ -1,14 +1,36 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: these strings are shell code, where ${…} is shell syntax.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { contractJsonSchemas, parseJsonLines, RISK_CLASSES } from "@plainport/contract";
+import {
+  contractJsonSchemas,
+  type FailureExitCode,
+  FINDINGS,
+  finding,
+  parseJsonLines,
+  RISK_CLASSES,
+} from "@plainport/contract";
+import { acquireLock, resolvePaths } from "@plainport/core";
 import Ajv2020 from "ajv/dist/2020";
+import { testHost } from "../../core/src/testing/host.ts";
 import { REGISTRY } from "./commands/index.ts";
 import { generateFiles, staleFiles, writeFiles } from "./generate.ts";
-import type { Registry } from "./registry.ts";
-import { capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
+import type { AnyCommand, Ports, Registry } from "./registry.ts";
+import { type Captured, capture, exampleHome, FAKE_REGISTRY } from "./testing.ts";
+
+type ExampleHome = Awaited<ReturnType<typeof exampleHome>>;
+
 import { VERSION } from "./version.ts";
 
 const repoRoot = join(import.meta.dir, "../../..");
@@ -63,6 +85,277 @@ describe("contract round trip: every command's --json output matches its declare
     "fake",
     FAKE_REGISTRY.filter((c) => c.name !== "help"),
   );
+});
+
+/** One way to make a command fail: what it is run with, the exit code and finding code it must end with, and whether
+ * the envelope carries data (D14). `setup` prepares the example home and returns the ports to run with. */
+interface FailureCase {
+  argv: string[];
+  exit: FailureExitCode;
+  code: string;
+  data: boolean;
+  setup?: (home: ExampleHome) => Promise<Partial<Ports> | undefined>;
+}
+
+const pathsOf = (home: ExampleHome) => {
+  const paths = resolvePaths(home.ports.env, { cwd: home.home });
+  if (!paths.ok) throw new Error(paths.finding.message);
+  return paths.value;
+};
+
+/** Offloads work:clients/acme/web with a crash planned at `step` (an in-process fault: the run throws). */
+const crashOffloadAt = async (home: ExampleHome, step: string): Promise<void> => {
+  const run = await capture(["offload", "work:clients/acme/web", "--yes"], REGISTRY, {
+    ports: { ...home.ports, system: testHost({ faults: { at: step } }) },
+  });
+  if (run.code !== 1) throw new Error(`the crash at ${step} did not happen: exit ${run.code}, ${run.err}`);
+};
+
+const keepLocalFor = (home: ExampleHome, value: string): void =>
+  writeFileSync(pathsOf(home).configFile, `version = 1\n[offload]\nkeepLocalFor = "${value}"\n`);
+
+/** Every registered command's failures, at least one each, run through the same checks as the examples. */
+const FAILURES: Record<string, FailureCase[]> = {
+  help: [{ argv: ["help", "nosuch"], exit: 4, code: "command.unknown", data: false }],
+  init: [{ argv: ["init", "--nosuch"], exit: 2, code: "usage.invalid", data: false }],
+  ls: [
+    { argv: ["ls", "--dry-run"], exit: 2, code: "usage.dry-run-unsupported", data: false },
+    {
+      argv: ["ls"],
+      exit: 6,
+      code: "config.invalid",
+      data: false,
+      setup: async (home) => {
+        writeFileSync(pathsOf(home).configFile, "version = [\n");
+        return undefined;
+      },
+    },
+  ],
+  status: [
+    { argv: ["status", "work:nosuch"], exit: 4, code: "project.not-found", data: false },
+    { argv: ["status", "work:clients/acme/web"], exit: 4, code: "project.unregistered", data: false },
+  ],
+  offload: [
+    { argv: ["offload", "work:clients/acme/web"], exit: 3, code: "risk.needs-yes", data: false },
+    {
+      argv: ["offload", "work:clients/acme/web", "--dry-run"],
+      exit: 6,
+      code: "git.locked",
+      data: true,
+      setup: async (home) => {
+        writeFileSync(join(home.home, "work/clients/acme/web/.git/index.lock"), "");
+        return undefined;
+      },
+    },
+    { argv: ["offload", "work:nosuch", "--yes"], exit: 4, code: "project.not-found", data: false },
+  ],
+  onload: [
+    { argv: ["onload", "work:nosuch"], exit: 4, code: "project.not-found", data: false },
+    {
+      argv: ["onload", "work:clients/acme/api", "--to", "~/personal"],
+      exit: 6,
+      code: "path.occupied",
+      data: false,
+    },
+  ],
+  hydrate: [{ argv: ["hydrate", "work:nosuch"], exit: 4, code: "project.not-found", data: false }],
+  dehydrate: [{ argv: ["dehydrate", "work:nosuch"], exit: 4, code: "project.not-found", data: false }],
+  restore: [
+    {
+      argv: ["restore", "work:clients/acme/api", "--to", "~/personal"],
+      exit: 6,
+      code: "path.occupied",
+      data: false,
+    },
+    {
+      argv: ["restore", "work:clients/acme/api", "--snapshot", "nosuch", "--to", "~/copy"],
+      exit: 4,
+      code: "snapshot.not-found",
+      data: false,
+    },
+  ],
+  recover: [
+    {
+      // C1: the SSD is unplugged; the report still arrives as data.
+      argv: ["recover"],
+      exit: 9,
+      code: "store.unreachable",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.commit.appended");
+        renameSync(join(home.home, "store"), join(home.home, "store-unplugged"));
+        return undefined;
+      },
+    },
+    {
+      // C1: another process holds the project's lock.
+      argv: ["recover"],
+      exit: 11,
+      code: "project.locked",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        const paths = pathsOf(home);
+        for (const name of readdirSync(paths.journalDir)) {
+          const journal = JSON.parse(readFileSync(join(paths.journalDir, name), "utf8"));
+          const held = await acquireLock(testHost(), join(paths.locksDir, `${journal.project.id}.lock`), {
+            timeoutMs: 0,
+            held: () => finding("project.locked", { message: "held" }),
+          });
+          if (!held.ok) throw new Error(held.finding.message);
+        }
+        return undefined;
+      },
+    },
+    {
+      // C1: Ctrl-C before recover settled anything.
+      argv: ["recover"],
+      exit: 130,
+      code: "operation.cancelled",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        const controller = new AbortController();
+        controller.abort();
+        return { cancellation: { signal: controller.signal, hold: () => () => {} } };
+      },
+    },
+    {
+      argv: ["recover"],
+      exit: 6,
+      code: "journal.pending",
+      data: true,
+      setup: async (home) => {
+        const paths = pathsOf(home);
+        mkdirSync(paths.journalDir, { recursive: true });
+        writeFileSync(join(paths.journalDir, "01J9Z6K2ZZZZZZZZZZZZZZZZZZ.json"), "{not json");
+        return undefined;
+      },
+    },
+  ],
+  gc: [
+    { argv: ["gc", "--now"], exit: 3, code: "risk.needs-yes", data: false },
+    {
+      // C1: a kept trash that cannot be deleted (its holder is read-only).
+      argv: ["gc", "--now", "--yes"],
+      exit: 1,
+      code: "fs.write-failed",
+      data: true,
+      setup: async (home) => {
+        keepLocalFor(home, "1h");
+        const offloaded = await capture(["offload", "work:clients/acme/web", "--yes"], REGISTRY, {
+          ports: home.ports,
+        });
+        if (offloaded.code !== 0) throw new Error(offloaded.err);
+        const holder = join(home.home, "work/.plainport-trash");
+        chmodSync(holder, 0o500);
+        readOnly.push(holder);
+        return undefined;
+      },
+    },
+  ],
+  "root add": [{ argv: ["root", "add", "work", "~/personal"], exit: 6, code: "root.exists", data: false }],
+  "root bind": [
+    { argv: ["root", "bind", "nosuch", "~/personal"], exit: 4, code: "root.not-found", data: false },
+  ],
+  "root list": [
+    { argv: ["root", "list", "--dry-run"], exit: 2, code: "usage.dry-run-unsupported", data: false },
+  ],
+  "root scan": [{ argv: ["root", "scan", "nosuch"], exit: 4, code: "root.not-found", data: false }],
+  version: [{ argv: ["version", "extra"], exit: 2, code: "usage.invalid", data: false }],
+};
+
+/** Folders a setup made read-only, made writable again after the test so its home can be removed. */
+const readOnly: string[] = [];
+const unlock = (): void => {
+  for (const dir of readOnly.splice(0)) if (existsSync(dir)) chmodSync(dir, 0o755);
+};
+
+/**
+ * Checks a failed --json run the way roundTrip checks a success: the stream rule (parseJsonLines with the command's
+ * declared schema), the published envelope schema, the published output or plan schema for any data, the exit code
+ * equal to error.code, and the finding's severity and allowable as its catalogue entry says.
+ */
+const checkFailure = (
+  command: AnyCommand | undefined,
+  argv: readonly string[],
+  run: Captured,
+  expected: { exit: number; code: string; data: boolean },
+): void => {
+  const manifest = JSON.parse(generateFiles(REGISTRY).get("plainport.json") ?? "");
+  const checkEnvelope = ajv.compile(contractJsonSchemas().envelope);
+  const dry = argv.includes("--dry-run");
+  const schema =
+    command === undefined
+      ? undefined
+      : dry && command.dryRun !== false
+        ? command.dryRun.plan
+        : command.output;
+  const parsed = parseJsonLines(run.out, schema);
+  if (!parsed.ok)
+    throw new Error(`${argv.join(" ")}: ${parsed.finding.message}\nstdout: ${run.out}\nstderr: ${run.err}`);
+  const envelope = JSON.parse(run.out.trimEnd().split("\n").at(-1) ?? "");
+  expect(checkEnvelope(envelope) ? [] : checkEnvelope.errors).toEqual([]);
+  expect({
+    argv,
+    exit: run.code,
+    ok: envelope.ok,
+    errorCode: envelope.error?.code,
+    finding: envelope.error?.finding?.code,
+    data: envelope.data !== undefined,
+  }).toEqual({
+    argv,
+    exit: expected.exit,
+    ok: false,
+    errorCode: expected.exit,
+    finding: expected.code,
+    data: expected.data,
+  });
+  const spec = FINDINGS[expected.code as keyof typeof FINDINGS];
+  expect({ severity: envelope.error.finding.severity, allowable: envelope.error.finding.allowable }).toEqual({
+    severity: spec.severity,
+    allowable: spec.allowable,
+  });
+  if (envelope.data !== undefined && command !== undefined) {
+    const published = manifest.commands.find((c: { name: string }) => c.name === command.name);
+    const checkData = ajv.compile(dry ? published.plan : published.output);
+    expect(checkData(envelope.data) ? [] : checkData.errors).toEqual([]);
+  }
+};
+
+describe("contract round trip: every command's --json failures match the published envelope (I10, C1)", () => {
+  test("every registered command has at least one failure case", () => {
+    expect(REGISTRY.map((c) => c.name).filter((name) => (FAILURES[name] ?? []).length === 0)).toEqual([]);
+  });
+  for (const command of REGISTRY) {
+    for (const failure of FAILURES[command.name] ?? []) {
+      test(`${command.name}: ${failure.argv.join(" ")} --json exits ${failure.exit} (${failure.code}) with a valid envelope`, async () => {
+        const home = await exampleHome();
+        try {
+          const ports = { ...home.ports, ...((await failure.setup?.(home)) ?? {}) };
+          const run = await capture([...failure.argv, "--json"], REGISTRY, { ports });
+          checkFailure(command, failure.argv, run, failure);
+          // Human mode exits the same.
+          if (failure.setup === undefined)
+            expect((await capture(failure.argv, REGISTRY, { ports })).code).toBe(failure.exit);
+        } finally {
+          unlock();
+          home.cleanup();
+        }
+      }, 30_000);
+    }
+  }
+
+  test("an unknown command and a handler's bug end in a valid failure envelope", async () => {
+    checkFailure(undefined, ["nosuch"], await capture(["nosuch", "--json"], REGISTRY), {
+      exit: 4,
+      code: "command.unknown",
+      data: false,
+    });
+    const boom = FAKE_REGISTRY.find((c) => c.name === "boom");
+    const run = await capture(["boom", "--json"]);
+    checkFailure(boom, ["boom"], run, { exit: 1, code: "internal.unexpected", data: false });
+  });
 });
 
 describe("version and help", () => {

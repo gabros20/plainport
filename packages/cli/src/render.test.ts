@@ -32,6 +32,36 @@ describe("--json: NDJSON event lines, then exactly one final envelope", () => {
     expect(parsed.value.envelope.ok === false && parsed.value.envelope.error.message).toContain("kaboom");
   });
 
+  test("a result that cannot be printed as JSON still ends in exactly one envelope: internal.unexpected, exit 1 (C1)", () => {
+    for (const print of [
+      (o: Output) => o.success({ n: 1n }, ""),
+      (o: Output) =>
+        o.failure({
+          ok: false,
+          exitCode: 9,
+          finding: { code: "store.unreachable", severity: "block", message: "gone", allowable: false },
+          data: { n: 1n },
+        }),
+    ]) {
+      let out = "";
+      const output = new Output(
+        { stdout: (t) => (out += t), stderr: () => {}, isTTY: false },
+        { json: true, quiet: false, verbose: false },
+        "recover",
+      );
+      expect(print(output)).toBe(1);
+      expect(output.finished).toBe(true);
+      const parsed = parseJsonLines(out);
+      if (!parsed.ok) throw new Error(parsed.finding.message);
+      expect(parsed.value.envelope).toMatchObject({
+        ok: false,
+        verb: "recover",
+        error: { code: 1, finding: { code: "internal.unexpected" } },
+      });
+      expect(parsed.value.envelope.data).toBeUndefined();
+    }
+  });
+
   test("nothing can be written after the envelope", () => {
     let out = "";
     const output = new Output(

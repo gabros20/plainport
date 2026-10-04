@@ -7,7 +7,6 @@ import {
   exitCodeOf,
   type FailureExitCode,
   finding,
-  type PartialExitCode,
   PLAINPORT_JSON,
   parseJsonLines,
   successEnvelope,
@@ -87,30 +86,19 @@ describe("envelope", () => {
     expect(EnvelopeSchema.safeParse({ ...env, data: undefined }).success).toBe(true);
   });
 
-  test("D14: only exit 6 (a blocked dry run's plan), 8 and 10 may carry data", () => {
-    for (const code of [1, 2, 3, 4, 5, 7, 9, 11, 130]) {
-      const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
-      expect(EnvelopeSchema.safeParse(env).success).toBe(false);
+  test("D14 (C1): a failure of any code may carry data, and errorEnvelope never throws", () => {
+    for (const code of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 130] as const) {
+      const env = errorEnvelope("recover", code, "m", { data: { operations: [] } });
+      expect(EnvelopeSchema.parse(env) as unknown).toEqual({
+        plainport_json: 1,
+        ok: false,
+        verb: "recover",
+        error: { code, message: "m" },
+        data: { operations: [] },
+      });
     }
-    for (const code of [6, 8, 10]) {
-      const env = { plainport_json: 1, ok: false, verb: "onload", error: { code, message: "m" }, data: {} };
-      expect(EnvelopeSchema.safeParse(env).success).toBe(true);
-    }
-    // @ts-expect-error data is only for exit 6, 8 and 10
-    expect(() => errorEnvelope("ls", 4, "no project", { data: { project: "x" } })).toThrow(TypeError);
-    const blocked = errorEnvelope("offload", 6, "blocked", { data: { id: "plan" } });
-    expect(EnvelopeSchema.parse(blocked) as unknown).toEqual(blocked);
-  });
-
-  test("D14 holds at runtime when the code is not a literal", () => {
     const codeFrom = (n: number): FailureExitCode => n as FailureExitCode;
-    const code = codeFrom(4);
-    // @ts-expect-error a FailureExitCode variable may not carry data
-    expect(() => errorEnvelope("ls", code, "no project", { data: { project: "x" } })).toThrow(TypeError);
-    const partial: PartialExitCode = 10;
-    expect(
-      EnvelopeSchema.parse(errorEnvelope("onload", partial, "not hydrated", { data: { project: "x" } })),
-    ).toBeTruthy();
+    expect(errorEnvelope("gc", codeFrom(1), "m", { data: { deleted: [] } }).data).toEqual({ deleted: [] });
   });
 
   test("D16: an envelope from a newer plainport, with a field this version does not know, still validates", () => {
@@ -144,8 +132,6 @@ describe("envelope", () => {
       { ...finalOk, ok: false },
       { ...finalOk, error: { code: 1, message: "m" } },
       { plainport_json: 1, ok: false, verb: "ls" },
-      { plainport_json: 1, ok: false, verb: "ls", error: { code: 1, message: "m" }, data: {} },
-      { plainport_json: 1, ok: false, verb: "ls", error: { code: 4, message: "m" }, data: { project: "x" } },
     ];
     for (const e of bad) expect(EnvelopeSchema.safeParse(e).success).toBe(false);
   });
