@@ -1888,3 +1888,74 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     expect(await storeEvents()).toHaveLength(before);
   });
 });
+
+describe("onload: recover at onload.begin in restore mode (D88)", () => {
+  test("a folder someone made at the destination after the crash is not taken for the onload: rolled back, untouched", async () => {
+    const off = await offload();
+    const stub = readFileSync(`${dir}.plainport`, "utf8");
+    const crash = testHost({ faults: { at: "onload.begin" } });
+    await expect(onload({ hydrate: false }, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    const [journal] = (await readJournals(testHost(), box.paths)).journals;
+    expect(journal).toMatchObject({ kind: "onload", step: "onload.begin" });
+    expect(journal && "reuse" in journal ? journal.reuse : undefined).toBeUndefined();
+    // Someone clones another project to the same place before recover runs.
+    mkdirSync(join(dir, "other"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "other/README.md"), "not web\n");
+    chmodSync(dir, 0o700);
+    const tree = treeOf(dir);
+    const onloadedBefore = (await storeEvents()).filter((e) => e.type === "onloaded").length;
+    const recovered = await recover({
+      host: testHost(),
+      paths: box.paths,
+      device,
+      env: env(),
+      loader: new ConfigLoader(testHost(), box.paths),
+      opener,
+      openMirror: async () => ({ ok: true, value: mirror }),
+      log: () => {},
+    });
+    expect(recovered.ok && recovered.value.operations.map((o) => o.outcome)).toEqual(["rolled-back"]);
+    expect(treeOf(dir)).toEqual(tree);
+    expect(lstatSync(dir).mode & 0o7777).toBe(0o700);
+    expect(readFileSync(`${dir}.plainport`, "utf8")).toBe(stub);
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(onloadedBefore);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[await projectId()]?.base).toBe(off.op);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+  });
+});
+
+describe("onload: a first offload whose only event is unreadable (D88)", () => {
+  test("the default refuses naming --snapshot S; onload --snapshot S restores S from its tag by the stub's identity", async () => {
+    const first = await offload();
+    const id = await projectId();
+    // Every event that names the project is unreadable; the root's own event still reads.
+    for (const e of await storeEvents())
+      if (JSON.stringify(e).includes(id))
+        store.data.set(`meta/v1/events/${e.id}.json`, new TextEncoder().encode('{"v":1,"id":"'));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    expect(foldCatalog(await storeEvents()).projects[id]).toBeUndefined();
+    const refused = await onload();
+    expect(!refused.ok && [refused.exitCode, refused.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!refused.ok && refused.finding.fix).toContain(`plainport onload work:web --snapshot ${first.op}`);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    const before = engine.repository.snapshots.map((s) => s.info.id);
+    const result = value(await onload({ snapshot: first.op, hydrate: false }));
+    expect(result).toMatchObject({ snapshot: first.op, over: first.op });
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[id]?.base).toBe(first.op);
+    expect((await storeEvents()).filter((e) => e.type === "onloaded").at(-1)).toMatchObject({
+      project: id,
+      base: first.op,
+      over: first.op,
+    });
+    await expectInvariants();
+    expect(
+      catalogInvariantViolations({
+        events: await storeEvents(),
+        snapshotsBefore: before,
+        snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  });
+});

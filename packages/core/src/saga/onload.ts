@@ -56,6 +56,7 @@ import {
   catalogReader,
   type HeadDoubt,
   headUncertain,
+  recordedProject,
   unfoldedSnapshot,
 } from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
@@ -352,11 +353,14 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     // goes on; it is found in the repository by its op tag, restored, and its stub removed as usual.
     const doubt = doubtOf(state.value);
     if (doubt !== undefined && req.snapshot !== doubt.newest) return fail(doubt.finding);
-    const project = state.value.projects[id];
+    // No readable event names the project at all (its first offload's event unreadable): the snapshot named is restored
+    // by this device's own records of the project (D88).
+    const folded = state.value.projects[id];
+    const project = folded ?? (doubt === undefined ? undefined : recorded());
     if (project === undefined) {
       return fail(doubt?.finding ?? finding("project.not-found", notInStore()));
     }
-    const head = headOf(project);
+    const head = folded === undefined ? ok(req.snapshot as string) : headOf(project);
     if (!head.ok) return head;
     const snapshot = req.snapshot ?? head.value;
     // Under doubt the fold's head is older than the snapshot restored (D86): that snapshot is the copy's next base.
@@ -549,6 +553,18 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       what: "nothing was restored",
       instead: (newest) =>
         `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
+    });
+  }
+
+  /** The project as the stub and registry.json record it, when no readable event names it (D88). */
+  function recorded(): CatalogProject | undefined {
+    if (!registered.ok) return undefined;
+    return recordedProject({
+      id,
+      root: ref.root,
+      path: ref.path,
+      stub: stub?.ok ? stub.value : undefined,
+      registry: registered.value,
     });
   }
 
@@ -828,7 +844,12 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     if (doubtNow !== undefined && journal.snapshot !== doubtNow.newest)
       return saga.keep(fail(doubtNow.finding));
     const project = fresh.value.projects[id];
-    const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
+    const head =
+      project === undefined
+        ? doubtNow !== undefined && recorded() !== undefined
+          ? ok(journal.snapshot)
+          : fail(finding("project.not-found", notInStore()))
+        : headOf(project);
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);
     if (!head.ok) return abandon(saga, head);
     let over = journal.over;

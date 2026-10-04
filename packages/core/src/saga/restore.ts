@@ -23,7 +23,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader, headUncertain, unfoldedSnapshot } from "../catalog/head.ts";
+import { catalogReader, headUncertain, recordedProject, unfoldedSnapshot } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
@@ -167,7 +167,21 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
           },
         );
   if (doubt !== undefined && req.snapshot === undefined) return fail(doubt.finding);
-  const project = id === undefined ? undefined : read.value.projects[id];
+  // No readable event names the project at all (its first offload's event unreadable): the newest snapshot, named, is
+  // restored by this device's own records of the project (D88).
+  const project =
+    id === undefined
+      ? undefined
+      : (read.value.projects[id] ??
+        (doubt !== undefined && req.snapshot === doubt.newest
+          ? recordedProject({
+              id,
+              root: ref.root,
+              path: ref.path,
+              stub: stub?.ok ? stub.value : undefined,
+              registry: registered.value,
+            })
+          : undefined));
   if (project === undefined) {
     if (doubt !== undefined) return fail(doubt.finding);
     return fail(

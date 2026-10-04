@@ -12,6 +12,8 @@
 import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
+import type { ProjectRegistry } from "../registry.ts";
+import type { Stub } from "../stub.ts";
 import type { CatalogProject, CatalogState } from "./fold.ts";
 import { loadCatalog } from "./log.ts";
 
@@ -120,6 +122,38 @@ export const unfoldedSnapshot = async (
       fix: "upgrade plainport if a newer version wrote the unreadable event; until then restore an older snapshot side by side: plainport restore <project> --snapshot <id> --to <path>",
     }),
   );
+};
+
+/**
+ * The project as this device's own records know it (D88), for --snapshot under doubt when no readable event names it at
+ * all (its first offload's event unreadable): its root's ULID from its stub, when the stub is this project's at this
+ * root and path, else from registry.json, with no snapshots folded. Undefined when neither record says.
+ */
+export const recordedProject = (options: {
+  id: string;
+  root: string;
+  path: string;
+  stub: Stub | undefined;
+  registry: ProjectRegistry;
+}): CatalogProject | undefined => {
+  const { id, root, path, stub, registry } = options;
+  const entry = registry.projects[id];
+  if (entry !== undefined && (entry.root !== root || entry.path !== path)) return undefined;
+  const ours = stub !== undefined && stub.project === id && stub.root === root && stub.path === path;
+  const rootId = ours ? stub.rootId : entry !== undefined ? registry.roots?.[root] : undefined;
+  if (rootId === undefined) return undefined;
+  return {
+    root: rootId,
+    path,
+    status: "shelved",
+    head: null,
+    heads: [],
+    lease: null,
+    conflicts: [],
+    missing: [],
+    discarded: [],
+    snapshots: {},
+  };
 };
 
 export type HeadCheck = { kind: "ok" } | { kind: "moved" | "incomplete"; finding: Finding };
