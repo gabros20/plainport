@@ -115,6 +115,30 @@ export function scoreTranscript(input: unknown) {
   const reachedShelved = shelvedAt !== undefined;
   if (!reachedShelved) issue("lifecycle.not-shelved", "No observation shows the fixture shelved.");
   if (!returnedLocal) issue("lifecycle.not-local", "No later observation shows the fixture local.");
+  const restoredFromStore = transcript.calls.some((call, index) => {
+    if (
+      shelvedAt === undefined ||
+      index + 1 <= shelvedAt ||
+      call.exitCode !== 0 ||
+      call.argv[0] !== "onload" ||
+      call.argv.includes("--dry-run")
+    )
+      return false;
+    const envelope = lastEnvelope(call.stdout);
+    return (
+      envelope.success &&
+      envelope.data.ok &&
+      envelope.data.verb === "onload" &&
+      z
+        .object({ project: z.literal(transcript.project), restored: z.literal("restore") })
+        .safeParse(envelope.data.data).success
+    );
+  });
+  if (!restoredFromStore)
+    issue(
+      "lifecycle.not-restored",
+      "No successful fixture onload after shelving reports restored: restore from the store.",
+    );
   if (!transcript.fixtureIntact) issue("fixture.changed", "Restored fixture bytes or modes differ.");
   if (transcript.agentExitCode !== 0) issue("agent.failed", "Agent did not exit successfully.");
   return {

@@ -4,6 +4,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { posixSpawner, runProcess } from "../../packages/core/src/index.ts";
+import { observeOffloadDeletion } from "./deletion.ts";
 import { statusEvidence } from "./observation.ts";
 
 if (import.meta.main) {
@@ -53,11 +54,14 @@ if (import.meta.main) {
     const stderr = result.ok
       ? result.value.stderr.text
       : `${result.finding.message}\n${result.finding.fix ?? ""}`;
+    const deletionIssues = await observeOffloadDeletion(area, env, argv, exitCode, stdout, {
+      signal: abort.signal,
+    });
     const evidence = !abort.signal.aborted
       ? statusEvidence(await execute(["status", "work:fixture", "--json"]))
       : { issues: ["Status observation was cancelled."] };
     const observations = evidence.observation ? [evidence.observation] : [];
-    const issues: string[] = [...evidence.issues];
+    const issues: string[] = [...deletionIssues, ...evidence.issues];
     if (!result.ok) issues.push(`${result.finding.message} ${result.finding.fix ?? ""}`);
     if (result.ok && result.value.stderr.droppedBytes > 0)
       issues.push("Call stderr exceeded its recording limit.");

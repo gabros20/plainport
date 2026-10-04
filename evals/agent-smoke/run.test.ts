@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok } from "../../packages/contract/src/index.ts";
+import { DurationSchema } from "../../packages/core/src/config/schema.ts";
 import type { runProcess } from "../../packages/core/src/index.ts";
 import { runEvalWith } from "./run.ts";
 import { projectSlug } from "./session.ts";
@@ -45,6 +46,10 @@ test("harness builds, initializes, records a fake agent and removes its entire s
       const settings = JSON.parse(readFileSync(join(area, "settings.json"), "utf8"));
       expect(settings.env.HOME).toBe(join(area, "home"));
       expect(settings.env.PLAINPORT_STORE_PASSWORD).toBeUndefined();
+      const duration = readFileSync(settings.env.PLAINPORT_CONFIG, "utf8").match(
+        /keepLocalFor = "([^"]+)"/,
+      )?.[1];
+      expect(DurationSchema.parse(duration)).toBe("0");
       expect(readFileSync(settings.env.PLAINPORT_CONFIG, "utf8")).not.toContain(
         spec.env.PLAINPORT_STORE_PASSWORD as string,
       );
@@ -56,7 +61,12 @@ test("harness builds, initializes, records a fake agent and removes its entire s
             startedAt: index,
             argv: [verb, "work:fixture", "--json", "--yes"],
             exitCode: 0,
-            stdout: JSON.stringify({ plainport_json: 1, ok: true, verb, data: {} }),
+            stdout: JSON.stringify({
+              plainport_json: 1,
+              ok: true,
+              verb,
+              data: verb === "onload" ? { project: "work:fixture", restored: "restore" } : {},
+            }),
             stderr: "",
             observations: [{ project: "work:fixture", state }],
           }),

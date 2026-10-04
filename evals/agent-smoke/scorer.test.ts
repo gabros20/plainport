@@ -32,6 +32,7 @@ test("scorer reports every missing fix, hint and confusing message in a failed r
     "agent.confusing",
     "lifecycle.not-shelved",
     "lifecycle.not-local",
+    "lifecycle.not-restored",
   ]);
 });
 
@@ -166,4 +167,19 @@ test("scorer accepts final independent local evidence after shelving without ear
       observations: [{ afterCall: 5, project: "work:fixture", state: "shelved" }],
     }).returnedLocal,
   ).toBe(true);
+});
+
+test("scorer requires a successful fixture onload reporting restore from the store", () => {
+  expect(scoreTranscript(recorded("pass")).passed).toBe(true);
+  const reused = recorded("reuse") as { calls: { stdout: string }[] };
+  const score = scoreTranscript(reused);
+  expect(score.passed).toBe(false);
+  expect(score.contractIssues.map((issue) => issue.code)).toContain("lifecycle.not-restored");
+  for (const data of [{}, { project: "other:fixture", restored: "restore" }]) {
+    const candidate = structuredClone(reused);
+    const call = candidate.calls.at(-1);
+    if (!call) throw new Error("Missing fixture onload");
+    call.stdout = JSON.stringify({ plainport_json: 1, ok: true, verb: "onload", data });
+    expect(scoreTranscript(candidate).passed).toBe(false);
+  }
 });

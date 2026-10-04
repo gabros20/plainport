@@ -15,6 +15,7 @@ test("harness keeps every plainport home and config path in the temporary area",
     "GROK_HOME",
     "PLAINPORT_CONFIG",
     "TMPDIR",
+    "npm_config_cache",
   ])
     expect(env[key]).toStartWith("/tmp/agent-smoke/");
   expect(env.PLAINPORT_STORE_PASSWORD).toBeUndefined();

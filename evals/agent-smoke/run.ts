@@ -124,7 +124,7 @@ export async function runEvalWith(
     writeFileSync(join(project, ".env"), "TOKEN=op://fixture/item/token\n");
     const reference = hashTree(project, ["node_modules"]);
     cpSync(join(repo, "plainport.json"), join(area, "plainport.json"));
-    writeFileSync(env.PLAINPORT_CONFIG as string, `version = 1\n[offload]\nkeepLocalFor = "24h"\n`);
+    writeFileSync(env.PLAINPORT_CONFIG as string, `version = 1\n[offload]\nkeepLocalFor = "0"\n`);
     const binary = join(area, "plainport-real");
     const execute = (command: string, args: string[]) =>
       executeProcess(posixSpawner, {

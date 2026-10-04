@@ -42,7 +42,7 @@
     {
       "argv": ["onload", "work:fixture", "--json"],
       "exitCode": 0,
-      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"onload\",\"data\":{}}\n",
+      "stdout": "{\"plainport_json\":1,\"ok\":true,\"verb\":\"onload\",\"data\":{\"project\":\"work:fixture\",\"restored\":\"restore\"}}\n",
       "stderr": ""
     }
   ],

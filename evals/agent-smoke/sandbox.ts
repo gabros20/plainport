@@ -16,6 +16,7 @@ export function sandboxEnv(area: string, path: string, tools: string): Record<st
     PATH: path,
     PLAINPORT_TOOLS_DIR: tools,
     PLAINPORT_CONFIG: join(home, ".config/plainport/config.toml"),
+    npm_config_cache: join(home, ".npm"),
     npm_config_offline: "true",
     npm_config_audit: "false",
     npm_config_fund: "false",
