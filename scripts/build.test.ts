@@ -54,6 +54,18 @@ test("every build defines the crash matrix's hook off (D67)", () => {
   );
 });
 
+test("an installed build also defines PLAINPORT_INSTALLED, so it never looks for a checkout's tools (N1)", () => {
+  expect(buildCommand("/bun", root, { outfile: "/o", installed: true }).slice(-2)).toEqual([
+    "--define",
+    "globalThis.PLAINPORT_INSTALLED=true",
+  ]);
+  expect(buildCommand("/bun", root, { outfile: "/o" }).join(" ")).not.toContain("PLAINPORT_INSTALLED");
+  expect(buildPlan(root, { installed: true })).toEqual({
+    ok: true,
+    builds: [{ outfile: "/repo/dist/plainport", installed: true }],
+  });
+});
+
 // The release binary, built as `bun run build` builds it, holds no trace of the hook: its variables are not even
 // strings in it (the define folds the composition root's test, and the bundler drops the module).
 test("a binary built by scripts/build.ts contains none of the hook's variable names (D67)", () => {

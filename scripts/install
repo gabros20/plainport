@@ -1,0 +1,3 @@
+#!/bin/sh
+# Installs plainport from this checkout (ADR-0020); see scripts/install.ts for the flags.
+exec bun "$(dirname "$0")/install.ts" "$@"

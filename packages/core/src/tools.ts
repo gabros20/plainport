@@ -6,7 +6,9 @@
 //    are resolved, so the folder is the real one;
 // 2. the checkout's .tools/<os>-<arch>/, which `bun scripts/fetch-tools.ts` fills. This is a development aid:
 //    from source it is this checkout's; a development build (VERSION ends in -dev) walks up from the binary to the
-//    folder holding tools.lock.json, so `dist/plainport` works after a fetch. A release build never looks there.
+//    folder holding tools.lock.json, so `dist/plainport` works after a fetch. A release build never looks there, and
+//    neither does a build scripts/install made (compiled with globalThis.PLAINPORT_INSTALLED=true, whatever its
+//    version): an installed copy has its tools beside it, and its fix is to reinstall.
 //
 // Every file system question goes through the LocalIo it is given (the host port in the CLI), never node:fs.
 
@@ -52,7 +54,13 @@ export type ToolSource = "env" | "beside-binary" | "dev-tools";
 // On failure, a tool.missing finding whose paths are every place searched, in order.
 export type ToolPathResult = Result<{ path: string; source: ToolSource }>;
 
-/** How this code is running: from source under bun, or as a compiled development or release binary. */
+declare global {
+  /** Folded by `--define globalThis.PLAINPORT_INSTALLED=true` in the build scripts/install makes (scripts/build.ts). */
+  var PLAINPORT_INSTALLED: boolean | undefined;
+}
+
+/** How this code is running: from source under bun, or as a compiled development or release binary. An installed
+ * build counts as a release one, whatever its version. */
 export type BuildKind = "source" | "dev" | "release";
 
 /**
@@ -74,7 +82,7 @@ export type ToolPathContext = {
 // A compiled binary serves its own modules from Bun's embedded file system.
 const detectedBuild: BuildKind = !import.meta.dir.startsWith("/$bunfs/")
   ? "source"
-  : VERSION.endsWith("-dev")
+  : VERSION.endsWith("-dev") && globalThis.PLAINPORT_INSTALLED !== true
     ? "dev"
     : "release";
 

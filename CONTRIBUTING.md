@@ -40,11 +40,22 @@ How plainport finds each tool:
      resolved. This is skipped when running from source.
   2. `.tools/<os>-<arch>/` in a checkout: this checkout's when running from source, or, for a development build
      (`VERSION` ends in `-dev`) such as `dist/plainport`, the nearest folder above the binary that holds
-     `tools.lock.json`. Release builds never look here.
+     `tools.lock.json`. Release builds never look here, and neither does a build `scripts/install` made
+     (`scripts/build.ts --installed`), whatever its version.
 
 If nothing is found, plainport stops with finding `tool.missing` and exit code 6, naming every path it tried.
 The fix it prints depends on the case: run `bun scripts/fetch-tools.ts` (source and development builds),
-reinstall plainport (release builds), or put the tool in `PLAINPORT_TOOLS_DIR` or unset it.
+reinstall plainport (release and installed builds), or put the tool in `PLAINPORT_TOOLS_DIR` or unset it.
+
+### Installing from a checkout
+
+`scripts/install` (after `bun scripts/fetch-tools.ts`) builds the binary and installs it as ADR-0020 lays it out:
+`~/.local/share/plainport/versions/<version>/` holds `plainport`, `restic` and `rclone`, read-only;
+`~/.local/share/plainport/current` points at the active version and `~/.local/bin/plainport` points through it. A dev
+build installs as `<version>+<UTC build time>.<commit>`, so each install is its own rollback point; an installed version
+is activated again rather than rebuilt, and none is ever deleted. `scripts/install --rollback` makes the previous
+version current again. `--prefix <dir>` replaces `~/.local`; `--tools <dir>` bundles other restic and rclone binaries.
+Tests use only temp prefixes.
 
 ### The crash matrix
 
