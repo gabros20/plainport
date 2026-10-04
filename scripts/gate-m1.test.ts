@@ -80,6 +80,7 @@ describe("hashTree and compareTrees", () => {
     mkdirSync(join(dir, "node_modules/pkg"), { recursive: true });
     writeFileSync(join(dir, "src/a.ts"), "export const a = 1;\n");
     writeFileSync(join(dir, ".env"), "GATE=1\n");
+    chmodSync(join(dir, ".env"), 0o644); // whatever the umask (0002 for a Debian user)
     writeFileSync(join(dir, "node_modules/pkg/index.js"), "x");
     symlinkSync("src/a.ts", join(dir, "link"));
     return dir;
