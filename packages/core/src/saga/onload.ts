@@ -358,8 +358,9 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     }
     const head = headOf(project);
     if (!head.ok) return head;
-    const over = head.value;
-    const snapshot = req.snapshot ?? over;
+    const snapshot = req.snapshot ?? head.value;
+    // Under doubt the fold's head is older than the snapshot restored (D86): that snapshot is the copy's next base.
+    const over = doubt !== undefined ? snapshot : head.value;
     let made: { event?: string; stored: Record<string, string> } | undefined = project.snapshots[snapshot];
     if (made === undefined && doubt !== undefined) {
       const found = await unfoldedSnapshot(store.engine, {
@@ -831,7 +832,9 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);
     if (!head.ok) return abandon(saga, head);
     let over = journal.over;
-    if (head.value !== journal.over) {
+    // Restoring the newest snapshot under doubt (D86): it stays the base, whatever older head the fold shows.
+    if (doubtNow !== undefined) over = journal.snapshot;
+    else if (head.value !== journal.over) {
       if (req.snapshot === undefined)
         return abandon(
           saga,
