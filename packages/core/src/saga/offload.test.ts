@@ -187,6 +187,7 @@ const invariantsOf = async (
   target: { path: string; released: TreeCapture | undefined } = { path: "web", released },
 ) =>
   invariantViolations({
+    now: new Date(),
     paths: box.paths,
     device: device.id,
     project: { id: await projectIdOf(target.path), dir: join(box.home, "work", target.path) },
@@ -784,6 +785,7 @@ describe("offload: stopping", () => {
     expect(existsSync(journalFile(box.paths, journal?.op ?? ""))).toBe(true);
     // Invariants 2 and 3 hold only after recover (Task 14); invariant 1 already holds.
     const violations = await invariantViolations({
+      now: new Date(),
       paths: box.paths,
       device: device.id,
       project: { id: await projectId(), dir },
@@ -1241,6 +1243,7 @@ describe("invariants helper", () => {
     const stub = JSON.parse(readFileSync(`${dir}.plainport`, "utf8"));
     writeFileSync(`${dir}.plainport`, JSON.stringify({ ...stub, snapshot: ulid() }));
     const violations = await invariantViolations({
+      now: new Date(),
       paths: box.paths,
       device: device.id,
       project: { id: await projectId(), dir },
@@ -1255,6 +1258,7 @@ describe("invariants helper", () => {
   test("invariant 1 compares the committed snapshot with the folder as it was released", async () => {
     value(await offload());
     const violations = await invariantViolations({
+      now: new Date(),
       paths: box.paths,
       device: device.id,
       project: { id: await projectId(), dir },
@@ -1272,7 +1276,7 @@ describe("invariants helper", () => {
   test("invariant 3 reads each journal: a released operation's trash past its deadline is a leftover", async () => {
     config('[offload]\nkeepLocalFor = "24h"');
     const result = value(await offload());
-    const subject = async (now?: Date) =>
+    const subject = async (now = new Date()) =>
       invariantViolations({
         paths: box.paths,
         device: device.id,
@@ -1282,7 +1286,7 @@ describe("invariants helper", () => {
         ...(released === undefined ? {} : { released }),
         stripped: ["node_modules"],
         settleMs: 0,
-        ...(now === undefined ? {} : { now }),
+        now,
       });
     expect(await subject()).toEqual([]);
     const later = new Date(Date.parse(result.keepUntil as string) + 1000);
@@ -1623,6 +1627,7 @@ describe("offload: fix wave r3 (D50)", () => {
     await expectInvariants();
     expect(
       await invariantViolations({
+        now: new Date(),
         paths: box.paths,
         device: device.id,
         project: { id: await projectIdOf("notes"), dir: join(box.home, "personal/notes") },

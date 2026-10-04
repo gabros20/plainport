@@ -89,6 +89,7 @@ const projectId = (path: string) => {
 const expectInvariants = async (path = "web") =>
   expect(
     await invariantViolations({
+      now: NOW,
       paths: box.paths,
       device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
       project: { id: projectId(path), dir: join(box.home, "work", path) },

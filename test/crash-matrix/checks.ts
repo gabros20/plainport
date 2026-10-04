@@ -185,6 +185,8 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
   // Invariants 1–3.
   problems.push(
     ...(await invariantViolations({
+      // The matrix runs on the real clock (the binary and testHost), so deadlines are compared with it.
+      now: new Date(),
       paths: world.paths,
       device: world.device,
       project: { id: s.projectId, dir: world.dir },

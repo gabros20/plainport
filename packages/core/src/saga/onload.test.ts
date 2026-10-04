@@ -249,6 +249,8 @@ const projectId = async (path = "web"): Promise<string> => {
 const expectInvariants = async (path = "web", folder = join(box.home, "work", path)) =>
   expect(
     await invariantViolations({
+      // These runs use the real clock (testHost), so their deadlines are compared with it.
+      now: new Date(),
       paths: box.paths,
       device: device.id,
       project: { id: await projectId(path), dir: folder },

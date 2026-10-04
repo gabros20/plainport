@@ -324,6 +324,7 @@ describe("offload: a real run", () => {
     )?.[0];
     const device = JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id;
     return {
+      now: NOW,
       paths: box.paths,
       device,
       project: { id, dir: dir() },
@@ -674,6 +675,7 @@ describeT1("offload with the real restic on a temp external-disk store", () => {
     const opened = await localStores(host, env).open("t1", { kind: "local", path: ssd }, "t1-pw");
     if (!opened.ok) throw new Error(opened.finding.message);
     const violations = await invariantViolations({
+      now: NOW,
       paths: box.paths,
       device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
       project: { id: journal.project.id, dir: join(box.home, "work/web") },
@@ -722,6 +724,7 @@ describeT1("offload with the real restic on a temp external-disk store", () => {
       ([, e]) => e.path === "web",
     )?.[0];
     const violations = await invariantViolations({
+      now: NOW,
       paths: box.paths,
       device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
       project: { id, dir: join(box.home, "work/web") },

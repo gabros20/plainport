@@ -106,6 +106,7 @@ const expectInvariants = async () => {
   )?.[0];
   expect(
     await invariantViolations({
+      now: NOW,
       paths: box.paths,
       device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
       project: { id, dir: dir() },
@@ -473,6 +474,7 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
     )?.[0];
     expect(
       await invariantViolations({
+        now: NOW,
         paths: box.paths,
         device: JSON.parse(readFileSync(box.paths.deviceFile, "utf8")).id,
         project: { id, dir: dir() },

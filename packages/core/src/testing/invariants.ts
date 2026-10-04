@@ -48,8 +48,11 @@ export interface InvariantSubject {
   stripped?: readonly string[];
   /** How long invariant 3 waits for a detached deletion. Default 10 seconds, for a loaded CI runner. */
   settleMs?: number;
-  /** The time keepLocalFor deadlines are compared with. Default: now. */
-  now?: Date;
+  /**
+   * The time keepLocalFor deadlines are compared with: the clock the run under test used. Required, so a test that
+   * pins its clock never compares a kept trash with the real one (a deadline that passes on the calendar).
+   */
+  now: Date;
 }
 
 const present = (path: string): boolean => {
@@ -214,7 +217,7 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
   }
 
   // 3
-  const now = subject.now ?? new Date();
+  const now = subject.now;
   const deadline = Date.now() + (subject.settleMs ?? 10_000);
   let left = leftovers(subject, now);
   while (left.length > 0 && Date.now() < deadline) {
