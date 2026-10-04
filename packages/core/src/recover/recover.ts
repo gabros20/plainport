@@ -15,8 +15,11 @@
 //   offload.commit.start                    the event on the store: committed, release; not there: roll back
 //   offload.committed .. release.stub       release (releaseOffload: the D51 fingerprint guard, the derived trash)
 //   offload.release.delete                  delete the trash once keepUntil, if any, has passed
-//   onload, up to onload.verified           roll back (staging removed; the stub stays)
-//   onload.swap.start                       swapped (onloadSwapped): finish; otherwise roll back
+//   onload.restore.start, onload.restored    roll back (staging removed; the stub stays)
+//   onload.begin, onload.verified,          swapped (onloadSwapped): finish; otherwise roll back. At begin (reuse
+//   onload.swap.start                       mode) and verified the rename may have landed with swap.start's write
+//                                           lost (D24, N3); in restore mode at begin there is no staging yet, so
+//                                           nothing reads as swapped
 //   onload.swapped .. onload.committed      finish (finishOnload)
 //
 // Recovery is idempotent and never deletes a folder on the strength of a write that might be missing: it rolls back
@@ -192,10 +195,10 @@ export const OFFLOAD_RECOVERY = {
 } as const satisfies Record<OffloadStep, RecoveryRule>;
 
 export const ONLOAD_RECOVERY = {
-  "onload.begin": "roll-back",
+  "onload.begin": "swap-check",
   "onload.restore.start": "roll-back",
   "onload.restored": "roll-back",
-  "onload.verified": "roll-back",
+  "onload.verified": "swap-check",
   "onload.swap.start": "swap-check",
   "onload.swapped": "finish-onload",
   "onload.commit.start": "finish-onload",

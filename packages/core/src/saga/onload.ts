@@ -17,7 +17,9 @@
 //                                         then the journal; the stub still names the project. A rerun of the same
 //                                         onload takes the journal over instead (DESIGN step 3): it restores into the
 //                                         same staging folder with --overwrite if-changed, so files already written
-//                                         are skipped
+//                                         are skipped. At onload.verified, and at onload.begin in reuse mode, recover
+//                                         first asks the world as at onload.swap.start: the rename may have landed
+//                                         and swap.start's write been lost (D24, N3)
 //   onload.swap.start                     the rename may have happened (a lost write, D24): if `project.dir` stands
 //                                         and the source (`staging`, or `reuse.folder`) is gone, go on as from
 //                                         onload.swapped; otherwise roll back as above
