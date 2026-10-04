@@ -88,13 +88,14 @@ describe("contract round trip: every command's --json output matches its declare
 });
 
 /** One way to make a command fail: what it is run with, the exit code and finding code it must end with, and whether
- * the envelope carries data (D14). `setup` prepares the example home and returns the ports to run with. */
+ * the envelope carries data (D14). `setup` prepares the example home and may return ports to run with and the
+ * arguments, when they depend on what it made (a plan id). */
 interface FailureCase {
   argv: string[];
   exit: FailureExitCode;
   code: string;
   data: boolean;
-  setup?: (home: ExampleHome) => Promise<Partial<Ports> | undefined>;
+  setup?: (home: ExampleHome) => Promise<{ ports?: Partial<Ports>; argv?: string[] } | undefined>;
 }
 
 const pathsOf = (home: ExampleHome) => {
@@ -148,6 +149,47 @@ const FAILURES: Record<string, FailureCase[]> = {
       },
     },
     { argv: ["offload", "work:nosuch", "--yes"], exit: 4, code: "project.not-found", data: false },
+    {
+      // A real run's data is the fresh plan (D14): the union branch a dry run never reaches.
+      argv: ["offload", "work:clients/acme/web", "--plan", "<id>"],
+      exit: 6,
+      code: "plan.stale",
+      data: true,
+      setup: async (home) => {
+        const dry = await capture(["offload", "work:clients/acme/web", "--dry-run", "--json"], REGISTRY, {
+          ports: home.ports,
+        });
+        const id: string = JSON.parse(dry.out.trimEnd().split("\n").at(-1) ?? "").data.id;
+        writeFileSync(join(home.home, "work/clients/acme/web/changed.txt"), "since the plan\n");
+        return {
+          ports: { plans: { approved: () => true } },
+          argv: ["offload", "work:clients/acme/web", "--plan", id],
+        };
+      },
+    },
+    {
+      // Committed, then changed before the rename: exit 8 with offload's conflict data (D51, D52).
+      argv: ["offload", "work:clients/acme/web", "--yes"],
+      exit: 8,
+      code: "offload.diverged-after-commit",
+      data: true,
+      setup: async (home) => {
+        const web = join(home.home, "work/clients/acme/web");
+        writeFileSync(join(web, "main.ts"), "export const main = 1;\n");
+        return {
+          ports: {
+            system: testHost({
+              faults: {
+                onStep: (step) => {
+                  if (step === "offload.committed")
+                    writeFileSync(join(web, "main.ts"), "export const main = 2;\n");
+                },
+              },
+            }),
+          },
+        };
+      },
+    },
   ],
   onload: [
     { argv: ["onload", "work:nosuch"], exit: 4, code: "project.not-found", data: false },
@@ -156,6 +198,32 @@ const FAILURES: Record<string, FailureCase[]> = {
       exit: 6,
       code: "path.occupied",
       data: false,
+    },
+    {
+      // Restored, but the install fails: exit 10 with onload's output as data (D14).
+      argv: ["onload", "work:clients/acme/app"],
+      exit: 10,
+      code: "hydrate.failed",
+      data: true,
+      setup: async (home) => {
+        const app = join(home.home, "work/clients/acme/app");
+        mkdirSync(join(app, "node_modules/left-pad"), { recursive: true });
+        writeFileSync(join(app, "package.json"), `${JSON.stringify({ name: "app", version: "1.0.0" })}\n`);
+        writeFileSync(
+          join(app, "package-lock.json"),
+          `${JSON.stringify({ name: "app", version: "1.0.0", lockfileVersion: 3, packages: {} })}\n`,
+        );
+        writeFileSync(join(app, "node_modules/left-pad/index.js"), "module.exports = 1;\n");
+        const offloaded = await capture(["offload", "work:clients/acme/app", "--yes"], REGISTRY, {
+          ports: home.ports,
+        });
+        if (offloaded.code !== 0) throw new Error(offloaded.err);
+        // An npm that always fails, first on PATH.
+        const bin = join(home.home, "bin");
+        mkdirSync(bin);
+        writeFileSync(join(bin, "npm"), "#!/bin/sh\necho 'npm: no network' >&2\nexit 1\n", { mode: 0o755 });
+        return { ports: { env: { ...home.ports.env, PATH: `${bin}:${home.ports.env.PATH}` } } };
+      },
     },
   ],
   hydrate: [{ argv: ["hydrate", "work:nosuch"], exit: 4, code: "project.not-found", data: false }],
@@ -175,6 +243,17 @@ const FAILURES: Record<string, FailureCase[]> = {
     },
   ],
   recover: [
+    {
+      argv: ["recover"],
+      exit: 8,
+      code: "offload.diverged-after-commit",
+      data: true,
+      setup: async (home) => {
+        await crashOffloadAt(home, "offload.committed");
+        writeFileSync(join(home.home, "work/clients/acme/web/edited.txt"), "after the crash\n");
+        return undefined;
+      },
+    },
     {
       // C1: the SSD is unplugged; the report still arrives as data.
       argv: ["recover"],
@@ -217,7 +296,7 @@ const FAILURES: Record<string, FailureCase[]> = {
         await crashOffloadAt(home, "offload.committed");
         const controller = new AbortController();
         controller.abort();
-        return { cancellation: { signal: controller.signal, hold: () => () => {} } };
+        return { ports: { cancellation: { signal: controller.signal, hold: () => () => {} } } };
       },
     },
     {
@@ -332,9 +411,11 @@ describe("contract round trip: every command's --json failures match the publish
       test(`${command.name}: ${failure.argv.join(" ")} --json exits ${failure.exit} (${failure.code}) with a valid envelope`, async () => {
         const home = await exampleHome();
         try {
-          const ports = { ...home.ports, ...((await failure.setup?.(home)) ?? {}) };
-          const run = await capture([...failure.argv, "--json"], REGISTRY, { ports });
-          checkFailure(command, failure.argv, run, failure);
+          const prepared = await failure.setup?.(home);
+          const ports = { ...home.ports, ...prepared?.ports };
+          const argv = prepared?.argv ?? failure.argv;
+          const run = await capture([...argv, "--json"], REGISTRY, { ports });
+          checkFailure(command, argv, run, failure);
           // Human mode exits the same.
           if (failure.setup === undefined)
             expect((await capture(failure.argv, REGISTRY, { ports })).code).toBe(failure.exit);
