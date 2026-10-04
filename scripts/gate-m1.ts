@@ -4,13 +4,16 @@
 // and .next to strip, then offloaded and onloaded (--no-hydrate: nothing is ever installed) by a binary built from
 // this checkout, against a temp store under a sandboxed HOME. The restored tree must match the one offloaded byte
 // for byte (content, type, mode, symlink target) minus the stripped paths, and git must report the same facts.
+// The strip set is checked by the gate itself before it is trusted (stripProblems); the project must end
+// restored-unhydrated, and the offload must warn git.unpushed. Extended attributes, ACLs and file flags are not
+// compared.
 //
 // Flags: --projects <list> (comma-separated D11 names or <url>@<40-hex sha>; default all five D11 projects),
 // --out <file> (the report as JSON), --binary <path> (a built plainport; default: build one), --tools <dir> (restic
 // and rclone; default .tools/<os>-<arch>/ in the checkout), --min-free-gb <n> (stop when less is free; default 10).
 //
 // One project at a time: its clone, restore and store are deleted before the next starts, and the temp root when the
-// run ends. The originals are never touched; the binary refuses every path under the real home
+// run ends, also on SIGINT or SIGTERM (exit 130). The originals are never touched; the binary refuses every path under the real home
 // (PLAINPORT_TRIPWIRE_REAL_HOME), and git runs with no global or system config, so no credential helper is asked.
 // Measured per project: offload and onload wall time and peak RSS (/usr/bin/time -l; the plainport process with its
 // children, and restic alone through a wrapper), the store's size after the offload, and the temp root's peak size.
@@ -145,6 +148,38 @@ export const compareTrees = (before: Tree, after: Tree): string[] => {
       if (how.length > 0) problems.push(`changed ${path}: ${how.join(", ")}`);
     }
   }
+  return problems;
+};
+
+/**
+ * The strip set checked by the gate itself, not taken on plainport's word (AGENTS rule 2, DESIGN "Strip set"): nothing
+ * stripped may be .git or inside it, be or hold a file git tracks, or be or hold work the gate added; and every folder
+ * the gate planted as regenerable must be stripped. One line per violation.
+ */
+export const stripProblems = (
+  strip: readonly string[],
+  facts: { tracked: readonly string[]; sentinels: readonly string[]; planted: readonly string[] },
+): string[] => {
+  const holds = (folder: string, path: string) =>
+    folder === "." || path === folder || path.startsWith(`${folder}/`);
+  const problems: string[] = [];
+  for (const path of strip) {
+    if (path === ".git" || path.startsWith(".git/")) {
+      problems.push(`strip set holds ${path}, inside .git`);
+      continue;
+    }
+    const tracked = facts.tracked.find((file) => holds(path, file));
+    if (tracked !== undefined)
+      problems.push(`strip set holds ${path}, which holds ${tracked} that git tracks`);
+    const sentinel = facts.sentinels.find((file) => holds(path, file));
+    if (sentinel !== undefined)
+      problems.push(
+        `strip set holds ${path}, which holds ${sentinel} the gate added as work that must travel`,
+      );
+  }
+  for (const folder of facts.planted)
+    if (!strip.includes(folder))
+      problems.push(`strip set lacks ${folder}, which the gate planted as regenerable`);
   return problems;
 };
 
@@ -395,6 +430,8 @@ const runProject = async (
     git("update-index", "-q", "--refresh");
     git("status", "--porcelain");
     const before = gitFacts(git);
+    const sentinels = [".env", edited, "gate-commit.txt", "gate-staged.txt", "gate-untracked.txt"];
+    const planted = ["node_modules", ".next"];
 
     // plainport in a sandbox: its own HOME and store, the real home refused, no global git config.
     const env: Record<string, string> = {
@@ -422,12 +459,15 @@ const runProject = async (
         env,
         stdout: "pipe",
         stderr: "pipe",
+        detached: true,
       });
+      active.child = child;
       const [out, err] = await Promise.all([
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
       await child.exited;
+      active.child = undefined;
       const timing = parseTimeL(readFileSync(timeFile, "utf8")) ?? { wallMs: 0, maxRssBytes: 0 };
       const restic = parseTimeLAll(readFileSync(resticLog, "utf8"));
       return {
@@ -474,14 +514,25 @@ const runProject = async (
       | undefined;
     if (dry.code !== 0 || plan === undefined)
       return fail(`offload --dry-run exited ${dry.code}: ${dry.out.trim()}`);
+    // A dry run must save its plan, so the offload runs the strip set the gate checked and left out.
+    if (plan.id === undefined) return fail("offload --dry-run returned no plan id");
     result.stripped = (plan.strip ?? []).map((s) => s.path).sort();
     result.strippedBytes = (plan.strip ?? []).reduce((sum, s) => sum + (s.bytes ?? 0), 0);
     result.files = plan.include?.files ?? 0;
     result.bytes = plan.include?.bytes ?? 0;
+    const badStrip = stripProblems(result.stripped, {
+      tracked: lines(must("ls-files")),
+      sentinels,
+      planted,
+    });
+    if (badStrip.length > 0) {
+      result.problems.push(...badStrip);
+      return result;
+    }
     const reference = hashTree(dir, result.stripped);
 
     log(`${project.name}: offload (${result.files} files, strip ${result.stripped.join(", ") || "nothing"})`);
-    const off = await timed("offload", target, ...(plan.id ? ["--plan", plan.id] : ["--yes"]), "--json");
+    const off = await timed("offload", target, "--plan", plan.id, "--json");
     result.offload = off.measure;
     result.findings.push(...findingLines(off.ran.out));
     const offEnvelope = envelope(off.ran.out);
@@ -505,6 +556,13 @@ const runProject = async (
     await settle();
     const status = envelope(plainport("status", target, "--json").out).data as { state?: string } | undefined;
     result.stateAfter = status?.state ?? "unknown";
+    // Something was stripped and --no-hydrate installs nothing back, so the project waits for its install (D72, D73).
+    const expected = result.stripped.length > 0 ? "restored-unhydrated" : "local";
+    if (result.stateAfter !== expected)
+      result.problems.push(`state after the onload is ${result.stateAfter}, not ${expected}`);
+    // The unpushed commit and the stash are the snapshot's alone: offload must say so.
+    if (!result.findings.some((f) => f.startsWith("warn git.unpushed:")))
+      result.problems.push("offload raised no git.unpushed warning for the unpushed commit and the stash");
 
     const restored = hashTree(dir, []);
     for (const path of result.stripped)
@@ -529,14 +587,51 @@ const runProject = async (
   }
 };
 
+/** What a Ctrl-C must clean up: the temp root, and the plainport run in progress (main's signal handlers). */
+const active: { root?: string; child?: Bun.Subprocess } = {};
+
+/**
+ * Stops the run in progress and removes the temp root; main calls it on SIGINT and SIGTERM. The plainport run has its
+ * own process group (detached), so it gets SIGTERM and stops its restic itself, then whatever is left is killed.
+ */
+export const abandon = async (): Promise<void> => {
+  const child = active.child;
+  if (child !== undefined && child.exitCode === null) {
+    const group = (signal: NodeJS.Signals) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {}
+    };
+    group("SIGTERM");
+    await Promise.race([child.exited, Bun.sleep(10_000)]);
+    group("SIGKILL");
+  }
+  if (active.root !== undefined) removeTree(active.root);
+};
+
+/** Why the gate can't start with these tools, if it can't (D10: a message with its fix). */
+export const toolsProblem = (tools: string): string | undefined => {
+  const missing = ["restic", "rclone"].filter((name) => !existsSync(join(tools, name)));
+  return missing.length === 0
+    ? undefined
+    : `${missing.join(" and ")} not found in ${tools}; run \`bun scripts/fetch-tools.ts\` first, or pass --tools <dir>`;
+};
+
 /** A restic that runs the real one under /usr/bin/time -l, appending each call's figures to restic-time.txt. */
 const resticWrapper = (real: string, log: string): string =>
   `#!/bin/sh\nexec /usr/bin/time -l -a -o '${log}' '${real}' "$@"\n`;
 
+/** An expected failure the gate reports as a message, not a stack trace (D10). */
+export class GateError extends Error {}
+
 export const runGate = async (options: GateOptions): Promise<GateReport> => {
   const log = options.log ?? ((line: string) => console.error(line));
   const realHome = resolve(process.env.PLAINPORT_TRIPWIRE_REAL_HOME ?? homedir());
+  const tools = options.tools ?? join(CHECKOUT, ".tools", hostTarget() ?? "unsupported");
+  const problem = toolsProblem(tools);
+  if (problem !== undefined) throw new GateError(problem);
   const root = mkdtempSync(join(options.tmp ?? tmpdir(), "plainport-gate-"));
+  active.root = root;
   const report: GateReport = { ok: false, root, binary: "", projects: [] };
   try {
     const bin = join(root, "bin");
@@ -555,7 +650,6 @@ export const runGate = async (options: GateOptions): Promise<GateReport> => {
     }
     chmodSync(join(bin, "plainport"), 0o755);
     report.binary = sh([join(bin, "plainport"), "--version"], root, { PATH }).out.trim();
-    const tools = options.tools ?? join(CHECKOUT, ".tools", hostTarget() ?? "unsupported");
     copyFileSync(join(tools, "restic"), join(bin, "real/restic"));
     copyFileSync(join(tools, "rclone"), join(bin, "rclone"));
     chmodSync(join(bin, "real/restic"), 0o755);
@@ -581,34 +675,63 @@ export const runGate = async (options: GateOptions): Promise<GateReport> => {
     return report;
   } finally {
     removeTree(root);
+    active.root = undefined;
   }
 };
 
 const mb = (bytes: number | undefined): string => `${((bytes ?? 0) / 1024 ** 2).toFixed(1)} MB`;
 const sec = (ms: number | undefined): string => `${((ms ?? 0) / 1000).toFixed(2)} s`;
 
-if (import.meta.main) {
-  const { values } = parseArgs({
-    args: Bun.argv.slice(2),
-    options: {
-      projects: { type: "string" },
-      out: { type: "string" },
-      binary: { type: "string" },
-      tools: { type: "string" },
-      "min-free-gb": { type: "string" },
-    },
-  });
-  const parsed = parseProjects(values.projects);
-  if (!parsed.ok) {
-    console.error(`gate-m1: ${parsed.message}`);
-    process.exit(2);
+const USAGE =
+  "usage: bun scripts/gate-m1.ts [--projects <list>] [--out <file>] [--binary <path>] [--tools <dir>] [--min-free-gb <n>]";
+
+function stop(message: string, code = 1): never {
+  console.error(`gate-m1: ${message}`);
+  process.exit(code);
+}
+
+const main = async (): Promise<void> => {
+  let values: { projects?: string; out?: string; binary?: string; tools?: string; "min-free-gb"?: string };
+  try {
+    values = parseArgs({
+      args: Bun.argv.slice(2),
+      options: {
+        projects: { type: "string" },
+        out: { type: "string" },
+        binary: { type: "string" },
+        tools: { type: "string" },
+        "min-free-gb": { type: "string" },
+      },
+    }).values;
+  } catch (error) {
+    stop(`${(error as Error).message}\n${USAGE}`, 2);
   }
-  const report = await runGate({
-    projects: parsed.projects,
-    ...(values.binary === undefined ? {} : { binary: resolve(values.binary) }),
-    ...(values.tools === undefined ? {} : { tools: resolve(values.tools) }),
-    minFreeBytes: Number(values["min-free-gb"] ?? 10) * 1024 ** 3,
-  });
+  const parsed = parseProjects(values.projects);
+  if (!parsed.ok) stop(parsed.message, 2);
+  const minFree = Number(values["min-free-gb"] ?? 10);
+  if (!Number.isFinite(minFree) || minFree < 0)
+    stop(`--min-free-gb takes a number of GB, not ${values["min-free-gb"]}`, 2);
+  if (values.binary !== undefined && !existsSync(values.binary))
+    stop(`--binary ${values.binary} does not exist`, 2);
+  // Ctrl-C or a kill must not leave a clone, a restore and a store behind (D13).
+  for (const signal of ["SIGINT", "SIGTERM"] as const)
+    process.on(signal, async () => {
+      await abandon();
+      console.error(`gate-m1: stopped by ${signal}; the temp root is removed`);
+      process.exit(130);
+    });
+  let report: GateReport;
+  try {
+    report = await runGate({
+      projects: parsed.projects,
+      ...(values.binary === undefined ? {} : { binary: resolve(values.binary) }),
+      ...(values.tools === undefined ? {} : { tools: resolve(values.tools) }),
+      minFreeBytes: minFree * 1024 ** 3,
+    });
+  } catch (error) {
+    if (error instanceof GateError) stop(error.message);
+    stop(`unexpected failure: ${(error as Error).message}`);
+  }
   if (values.out !== undefined) writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`gate-m1 with ${report.binary}`);
   for (const p of report.projects) {
@@ -628,4 +751,6 @@ if (import.meta.main) {
   if (report.stopped !== undefined) console.log(report.stopped);
   console.log(report.ok ? "gate-m1: PASS" : "gate-m1: FAIL");
   process.exit(report.ok ? 0 : 1);
-}
+};
+
+if (import.meta.main) await main();

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeT1 } from "../test/tiers.ts";
+import { buildCommand } from "./build.ts";
 import {
   compareTrees,
   D11_PROJECTS,
@@ -20,6 +21,7 @@ import {
   parseProjects,
   parseTimeL,
   runGate,
+  stripProblems,
 } from "./gate-m1.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "plainport-gate-test-"));
@@ -112,37 +114,81 @@ describe("hashTree and compareTrees", () => {
   });
 });
 
+describe("stripProblems: the gate checks plainport's strip set itself (I1)", () => {
+  const facts = {
+    tracked: ["README.md", "package.json", "src/a.ts", "gate-commit.txt", "gate-staged.txt"],
+    sentinels: [".env", "README.md", "gate-commit.txt", "gate-staged.txt", "gate-untracked.txt"],
+    planted: ["node_modules", ".next"],
+  };
+
+  test("the planted folders alone pass", () => {
+    expect(stripProblems([".next", "node_modules"], facts)).toEqual([]);
+  });
+
+  test("a tracked file, .git, a sentinel or a folder holding one fails the project", () => {
+    expect(stripProblems([".next", "node_modules", "src"], facts)).toEqual([
+      "strip set holds src, which holds src/a.ts that git tracks",
+    ]);
+    expect(stripProblems([".git/objects", ".next", "node_modules"], facts)).toEqual([
+      "strip set holds .git/objects, inside .git",
+    ]);
+    expect(stripProblems([".env", ".next", "node_modules"], facts)).toEqual([
+      "strip set holds .env, which holds .env the gate added as work that must travel",
+    ]);
+    expect(stripProblems([".", ".next", "node_modules"], facts)).toContain(
+      "strip set holds ., which holds README.md that git tracks",
+    );
+  });
+
+  test("a planted regenerable folder that was not stripped fails the project", () => {
+    expect(stripProblems(["node_modules"], facts)).toEqual([
+      "strip set lacks .next, which the gate planted as regenerable",
+    ]);
+    expect(stripProblems([], facts)).toHaveLength(2);
+  });
+});
+
 // The gate end to end on a tiny fixture: a local repository stands in for GitHub, the real restic does the work.
+const fixtureEnv = (home: string) => ({
+  PATH: "/usr/bin:/bin",
+  HOME: home,
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+});
+
+/** A repository to clone from, which serves any commit by its id. Returns its URL and HEAD. */
+const makeRemote = (work: string): { url: string; sha: string } => {
+  const remote = join(work, "remote");
+  mkdirSync(remote, { recursive: true });
+  const git = (...args: string[]) => {
+    const ran = Bun.spawnSync(["git", ...args], { cwd: remote, env: fixtureEnv(work) });
+    if (ran.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${ran.stderr.toString()}`);
+    return ran.stdout.toString().trim();
+  };
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(remote, "README.md"), "# fixture\n");
+  writeFileSync(
+    join(remote, "package.json"),
+    `${JSON.stringify({ name: "fixture", packageManager: "npm@10.9.0" }, null, 2)}\n`,
+  );
+  writeFileSync(join(remote, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}\n');
+  writeFileSync(join(remote, ".gitignore"), "node_modules\n.next\n.env\n");
+  git("add", "-A");
+  git("-c", "user.name=f", "-c", "user.email=f@example.invalid", "commit", "-qm", "fixture");
+  git("config", "uploadpack.allowAnySHA1InWant", "true");
+  return { url: `file://${remote}`, sha: git("rev-parse", "HEAD") };
+};
+
 describeT1("gate-m1 on a fixture project", () => {
   let report: GateReport;
   let sha: string;
   const work = join(scratch, "t1");
 
   beforeAll(async () => {
-    const remote = join(work, "remote");
-    mkdirSync(remote, { recursive: true });
-    const git = (...args: string[]) => {
-      const ran = Bun.spawnSync(["git", ...args], {
-        cwd: remote,
-        env: { PATH: "/usr/bin:/bin", HOME: work, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-      });
-      if (ran.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${ran.stderr.toString()}`);
-      return ran.stdout.toString().trim();
-    };
-    git("init", "-q", "-b", "main");
-    writeFileSync(join(remote, "README.md"), "# fixture\n");
-    writeFileSync(
-      join(remote, "package.json"),
-      `${JSON.stringify({ name: "fixture", packageManager: "npm@10.9.0" }, null, 2)}\n`,
-    );
-    writeFileSync(join(remote, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}\n');
-    writeFileSync(join(remote, ".gitignore"), "node_modules\n.next\n.env\n");
-    git("add", "-A");
-    git("-c", "user.name=f", "-c", "user.email=f@example.invalid", "commit", "-qm", "fixture");
-    git("config", "uploadpack.allowAnySHA1InWant", "true");
-    sha = git("rev-parse", "HEAD");
+    const remote = makeRemote(work);
+    sha = remote.sha;
     report = await runGate({
-      projects: [{ name: "fixture", url: `file://${remote}`, sha }],
+      projects: [{ name: "fixture", url: remote.url, sha }],
       tmp: work,
       log: () => {},
     });
@@ -182,4 +228,94 @@ describeT1("gate-m1 on a fixture project", () => {
     expect(readdirSync(work).filter((name) => name.startsWith("plainport-gate-"))).toEqual([]);
     expect(existsSync(report.root)).toBe(false);
   });
+});
+
+// The gate's FAIL side (I2): a plainport that loses work after a good onload, a commit that does not exist, a Ctrl-C.
+describeT1("gate-m1 fails when work is lost, and cleans up after itself", () => {
+  const work = join(scratch, "t1-fail");
+  let remote: { url: string; sha: string };
+  let real: string;
+
+  beforeAll(() => {
+    remote = makeRemote(work);
+    real = join(work, "real", "plainport");
+    const built = Bun.spawnSync(
+      buildCommand(process.execPath, join(import.meta.dir, ".."), { outfile: real }),
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    if (built.exitCode !== 0) throw new Error(built.stderr.toString());
+  }, 120_000);
+
+  /** A plainport that runs the real one, then does `after` in the project folder when an onload succeeded. */
+  const shim = (name: string, after: string): string => {
+    const path = join(work, `${name}.sh`);
+    writeFileSync(
+      path,
+      [
+        "#!/bin/sh",
+        `PLAINPORT_TOOLS_DIR="$(dirname "$0")" '${real}' "$@"`,
+        "code=$?",
+        `if [ "$1" = onload ] && [ $code -eq 0 ]; then cd "$PWD"/work/* && ${after}; fi`,
+        "exit $code",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const gate = (binary: string, sha = remote.sha) =>
+    runGate({ projects: [{ name: "fixture", url: remote.url, sha }], tmp: work, binary, log: () => {} });
+  const leftovers = () => readdirSync(work).filter((n) => n.startsWith("plainport-gate-"));
+
+  test("a .env lost after the onload fails the gate", async () => {
+    const report = await gate(shim("drop-env", "rm .env"));
+    expect(report.ok).toBe(false);
+    expect(report.projects[0]?.problems).toContain("missing .env");
+    expect(leftovers()).toEqual([]);
+  }, 180_000);
+
+  test("a stash lost after the onload fails the gate", async () => {
+    const report = await gate(
+      shim("drop-stash", "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git update-ref -d refs/stash"),
+    );
+    expect(report.ok).toBe(false);
+    expect(report.projects[0]?.problems.some((p) => p.startsWith("git differs"))).toBe(true);
+    expect(leftovers()).toEqual([]);
+  }, 180_000);
+
+  test("a commit the remote does not have fails the clone cleanly and removes the temp root", async () => {
+    const report = await gate(real, "0".repeat(40));
+    expect(report.ok).toBe(false);
+    expect(report.projects[0]?.problems[0]).toStartWith("git fetch");
+    expect(existsSync(report.root)).toBe(false);
+    expect(leftovers()).toEqual([]);
+  }, 60_000);
+
+  test("Ctrl-C removes the temp root and exits 130", async () => {
+    const tmp = join(work, "sigint");
+    mkdirSync(tmp, { recursive: true });
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "gate-m1.ts"),
+        "--projects",
+        `${remote.url}@${remote.sha}`,
+        "--binary",
+        real,
+        "--min-free-gb",
+        "0",
+      ],
+      { env: { ...process.env, TMPDIR: tmp }, stdout: "pipe", stderr: "pipe" },
+    );
+    const deadline = Date.now() + 60_000;
+    while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
+    expect(readdirSync(tmp)).toHaveLength(1);
+    await Bun.sleep(300);
+    child.kill("SIGINT");
+    expect(await child.exited).toBe(130);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 120_000);
 });
