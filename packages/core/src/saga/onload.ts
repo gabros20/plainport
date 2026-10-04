@@ -51,7 +51,13 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { type CatalogRead, catalogReader, headUncertain } from "../catalog/head.ts";
+import {
+  type CatalogRead,
+  catalogReader,
+  type HeadDoubt,
+  headUncertain,
+  unfoldedSnapshot,
+} from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
@@ -342,19 +348,29 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
     const state = await catalog();
     if (!state.ok) return state;
-    // A newer snapshot this device knows of that no readable event names (D86): only a snapshot asked for by name goes
-    // on, and the stub that names the newer one stays.
+    // A newer snapshot this device knows of that no readable event names (D86): only that snapshot, asked for by name,
+    // goes on; it is found in the repository by its op tag, restored, and its stub removed as usual.
     const doubt = doubtOf(state.value);
-    if (doubt !== undefined && req.snapshot === undefined) return fail(doubt);
+    if (doubt !== undefined && req.snapshot !== doubt.newest) return fail(doubt.finding);
     const project = state.value.projects[id];
     if (project === undefined) {
-      return fail(finding("project.not-found", notInStore()));
+      return fail(doubt?.finding ?? finding("project.not-found", notInStore()));
     }
     const head = headOf(project);
     if (!head.ok) return head;
     const over = head.value;
     const snapshot = req.snapshot ?? over;
-    const made = project.snapshots[snapshot];
+    let made: { event?: string; stored: Record<string, string> } | undefined = project.snapshots[snapshot];
+    if (made === undefined && doubt !== undefined) {
+      const found = await unfoldedSnapshot(store.engine, {
+        id,
+        snapshot,
+        discarded: project.discarded,
+        address: ref.address,
+      });
+      if (!found.ok) return found;
+      made = { stored: { [store.name]: found.value } };
+    }
     if (made === undefined) {
       return fail(
         finding("snapshot.not-found", {
@@ -413,7 +429,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
 
     const occupied = await occupiedBy(project, over);
     if (occupied !== undefined) return occupied;
-    const stubPath = ref.dir === undefined || doubt !== undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
+    const stubPath = ref.dir === undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
     const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
     const placed = await landingChecks(rootFolder);
     if (!placed.ok) return placed;
@@ -448,7 +464,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         engine: store.engine,
         store: store.blob,
         stored,
-        event: made.event,
+        ...(made.event === undefined ? {} : { event: made.event }),
         ctx,
         op,
         nearest: placed.value,
@@ -464,7 +480,7 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       stripped = listed.value.stripped;
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
-      const produced = await producedBy(store.blob, made.event);
+      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
       files = produced?.stats.files ?? 0;
       bytes = produced?.stats.bytes ?? 0;
     }
@@ -523,14 +539,15 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
   }
 
   /** catalog.head-uncertain when the read may lack the event naming the stub's or the registry's snapshot (D86). */
-  function doubtOf(read: CatalogRead): Finding | undefined {
+  function doubtOf(read: CatalogRead): HeadDoubt | undefined {
     const known = [
       stub?.ok ? stub.value.snapshot : undefined,
       registered.ok ? registered.value.projects[id]?.base : undefined,
     ];
     return headUncertain(read, id, known, ref.address, {
       what: "nothing was restored",
-      instead: `to go on anyway, name the snapshot: plainport onload ${shellWord(ref.address)} --snapshot <id> (the stub that names the newer one stays)`,
+      instead: (newest) =>
+        `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
     });
   }
 
@@ -806,8 +823,9 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
           `re-run plainport onload ${shellWord(ref.address)} once the store answers; it takes over the restored copy`,
         ),
       );
-    const doubtNow = req.snapshot === undefined ? doubtOf(fresh.value) : undefined;
-    if (doubtNow !== undefined) return saga.keep(fail(doubtNow));
+    const doubtNow = doubtOf(fresh.value);
+    if (doubtNow !== undefined && journal.snapshot !== doubtNow.newest)
+      return saga.keep(fail(doubtNow.finding));
     const project = fresh.value.projects[id];
     const head = project === undefined ? fail(finding("project.not-found", notInStore())) : headOf(project);
     if (!head.ok && head.finding.code === "catalog.incomplete") return saga.keep(head);

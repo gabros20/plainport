@@ -30,6 +30,7 @@ import { type Journal, type OnloadJournal, readJournals } from "../journal/index
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { recover } from "../recover/recover.ts";
 import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
@@ -1728,19 +1729,46 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     const second = await offload();
     const newest = (await storeEvents()).find((e) => e.type === "offloaded" && e.snapshot === second.op);
     if (newest === undefined) throw new Error("no offloaded event for the second snapshot");
-    store.data.set(`meta/v1/events/${newest.id}.json`, new TextEncoder().encode(bytes(newest.id)));
+    const key = `meta/v1/events/${newest.id}.json`;
+    const original = store.data.get(key) as Uint8Array;
+    store.data.set(key, new TextEncoder().encode(bytes(newest.id)));
     mirror = memoryBlobStore({ createIfAbsent: true });
-    return { first, second, hidden: newest.id };
+    /** The event readable again, as after an upgrade or a sync. */
+    const reveal = () => {
+      store.data.set(key, original);
+      mirror = memoryBlobStore({ createIfAbsent: true });
+    };
+    return { first, second, hidden: newest.id, reveal };
   };
   const malformed = () => '{"v":1,"id":"';
   const unsupported = (id: string) =>
     `${JSON.stringify({ v: 1, id, type: "merged", at: new Date().toISOString() })}\n`;
 
+  const expectStillShelved = async (second: { op: string }) => {
+    expect(existsSync(dir)).toBe(false);
+    expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+    expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
+    expect(engine.restores).toHaveLength(1);
+  };
+
+  /** Invariants 1–3 on this device, and 4–6 on the store's events and snapshots. */
+  const expectAllInvariants = async (before: string[]) => {
+    await expectInvariants();
+    expect(
+      catalogInvariantViolations({
+        events: await storeEvents(),
+        snapshotsBefore: before,
+        snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  };
+
   for (const [kind, bytes] of [
     ["malformed", malformed],
     ["unsupported", unsupported],
   ] as const) {
-    test(`a ${kind} newest event: the default onload refuses with catalog.head-uncertain and changes nothing`, async () => {
+    test(`a ${kind} newest event: the default onload refuses with catalog.head-uncertain, naming --snapshot <S2>`, async () => {
       const { first, second, hidden } = await hideNewest(bytes);
       const result = await onload();
       expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
@@ -1748,43 +1776,64 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
       expect(result.finding.message).toContain(second.op);
       expect(result.finding.message).toContain(hidden);
       expect(result.finding.message).toContain(`its head ${first.op}`);
-      expect(result.finding.fix).toContain("plainport onload work:web --snapshot <id>");
-      expect(existsSync(dir)).toBe(false);
-      expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
-      expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
-      expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
-      expect(engine.restores).toHaveLength(1);
+      expect(result.finding.fix).toContain(`plainport onload work:web --snapshot ${second.op}`);
+      await expectStillShelved(second);
     });
 
-    test(`a ${kind} newest event: --snapshot restores the one named and keeps the stub of the newer one`, async () => {
+    test(`a ${kind} newest event: --snapshot with the older head refuses the same way`, async () => {
       const { first, second } = await hideNewest(bytes);
+      const result = await onload({ snapshot: first.op });
+      expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+      expect(!result.ok && result.finding.fix).toContain(`--snapshot ${second.op}`);
+      await expectStillShelved(second);
+    });
+
+    test(`a ${kind} newest event: --snapshot <S2> restores S2 from its tag and removes its stub; invariants hold`, async () => {
+      const { second } = await hideNewest(bytes);
       const before = engine.repository.snapshots.map((s) => s.info.id);
-      const result = value(await onload({ snapshot: first.op }));
-      expect(result).toMatchObject({ snapshot: first.op, over: first.op });
-      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
-      const stub = JSON.parse(readFileSync(`${dir}.plainport`, "utf8"));
-      expect(stub.snapshot).toBe(second.op);
-      // The kept stub is the one departure from invariant 2 (a stub only while shelved): it is the newer evidence.
-      expect(
-        (
-          await invariantViolations({
-            now: new Date(),
-            paths: box.paths,
-            device: device.id,
-            project: { id: await projectId(), dir },
-            roots: [join(box.home, "work")],
-            store: { name: "ssd", blob: store, engine },
-            stripped: ["node_modules"],
-          })
-        ).filter((v) => !v.includes("stub")),
-      ).toEqual([]);
-      expect(
-        catalogInvariantViolations({
-          events: await storeEvents(),
-          snapshotsBefore: before,
-          snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
-        }),
-      ).toEqual([]);
+      const result = value(await onload({ snapshot: second.op }));
+      expect(result).toMatchObject({ snapshot: second.op });
+      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+      expect(existsSync(`${dir}.plainport`)).toBe(false);
+      expect((await storeEvents()).filter((e) => e.type === "onloaded").at(-1)).toMatchObject({
+        base: second.op,
+      });
+      await expectAllInvariants(before);
+    });
+  }
+
+  for (const step of ONLOAD_STEPS) {
+    test(`--snapshot <S2> under doubt, crashed at ${step}: recover settles it and invariants 1–6 hold`, async () => {
+      const { second, reveal } = await hideNewest(malformed);
+      const before = engine.repository.snapshots.map((s) => s.info.id);
+      const crash = testHost({ faults: { at: step } });
+      await expect(onload({ snapshot: second.op, hydrate: false }, {}, crash)).rejects.toBeInstanceOf(
+        InjectedFault,
+      );
+      const recovered = await recover({
+        host: testHost(),
+        paths: box.paths,
+        device,
+        env: env(),
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener,
+        openMirror: async () => ({ ok: true, value: mirror }),
+        log: () => {},
+      });
+      expect(recovered.ok ? [] : [recovered.finding.code]).toEqual([]);
+      // Either way the project ends whole: S2 in place without its stub (invariants hold even while its event is
+      // unreadable), or rolled back and still shelved under S2's stub, exactly the state the doubt began in, whose
+      // invariants hold once S2's event reads again.
+      if (existsSync(dir)) {
+        expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+        expect(existsSync(`${dir}.plainport`)).toBe(false);
+        await expectAllInvariants(before);
+      } else {
+        expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.op);
+        expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+      }
+      reveal();
+      await expectAllInvariants(before);
     });
   }
 

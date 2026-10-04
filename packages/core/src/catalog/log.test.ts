@@ -604,12 +604,16 @@ describe("catalog: a fold that left out events is uncertain (D86)", () => {
         PROJECT,
         [known],
         "work:web",
-        {
-          what: "nothing was restored",
-          instead: "name a snapshot",
-        },
+        { what: "nothing was restored", instead: (newest) => `restore ${newest}` },
       );
-      expect(doubt).toMatchObject({ code: "catalog.head-uncertain", severity: "block" });
+      expect(doubt).toMatchObject({
+        newest: known,
+        finding: {
+          code: "catalog.head-uncertain",
+          severity: "block",
+          fix: expect.stringContaining(`restore ${known}`),
+        },
+      });
       expect(
         headCheck({ ...again.state, uncertain: again.uncertain }, PROJECT, known, "work:web"),
       ).toMatchObject({
@@ -628,7 +632,7 @@ describe("catalog: a fold that left out events is uncertain (D86)", () => {
     const read = await load(store, mirror);
     expect(read.uncertain).toEqual([ids(3)]);
     const state = { ...read.state, uncertain: read.uncertain };
-    const said = { what: "nothing was restored", instead: "name a snapshot" };
+    const said = { what: "nothing was restored", instead: (newest: string) => `restore ${newest}` };
     expect(headUncertain(state, PROJECT, [known, offloaded(1).snapshot], "work:web", said)).toBeUndefined();
     expect(headUncertain(state, PROJECT, [undefined], "work:web", said)).toBeUndefined();
     store.data.delete(`meta/v1/events/${ids(3)}.json`);

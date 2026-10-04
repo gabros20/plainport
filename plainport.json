@@ -4157,7 +4157,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 6,
-      "summary": "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. Upgrade plainport or sync the store, or name a snapshot with --snapshot, which keeps the stub that names the newer one (D86)"
+      "summary": "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)"
     },
     {
       "code": "catalog.incomplete",

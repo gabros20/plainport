@@ -562,3 +562,47 @@ describe("restore: release fixes (I9, rule 7)", () => {
     expect(await readStagingRecords(testHost(), box.paths)).toEqual([]);
   });
 });
+
+describe("restore: a newer snapshot the catalog cannot read (D86)", () => {
+  /** S1, then S2 shelved; S2's offloaded event made unreadable and the mirror emptied. */
+  const hideNewest = async () => {
+    const first = await offload();
+    await waitTrashGone();
+    await onload();
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    await waitTrashGone();
+    const newest = (await storeEvents()).find(
+      (e) => e.type === "offloaded" && e.snapshot === second.snapshot,
+    );
+    if (newest === undefined) throw new Error("no offloaded event for the second snapshot");
+    store.data.set(`meta/v1/events/${newest.id}.json`, new TextEncoder().encode('{"v":1,"id":"'));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    return { first, second };
+  };
+
+  test("without --snapshot it refuses with catalog.head-uncertain, naming --snapshot <S2>; nothing is written", async () => {
+    const { first, second } = await hideNewest();
+    const was = await untouched();
+    const to = join(box.home, "old/web");
+    const result = await runRestore(deps(), { project: await ref(), to });
+    expect(!result.ok && [result.exitCode, result.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!result.ok && result.finding.message).toContain(`its head ${first.snapshot}`);
+    expect(!result.ok && result.finding.fix).toContain(
+      `plainport restore work:web --snapshot ${second.snapshot} --to <path>`,
+    );
+    expect(existsSync(to)).toBe(false);
+    expect(await untouched()).toEqual(was);
+  });
+
+  test("--snapshot <S2> restores the newer snapshot from its tag; an older one by name still restores", async () => {
+    const { first, second } = await hideNewest();
+    const newer = join(box.home, "old/web-2");
+    value(await runRestore(deps(), { project: await ref(), snapshot: second.snapshot, to: newer }));
+    expect(readFileSync(join(newer, "src/main.ts"), "utf8")).toBe("export const main = 2;\n");
+    const older = join(box.home, "old/web-1");
+    value(await runRestore(deps(), { project: await ref(), snapshot: first.snapshot, to: older }));
+    expect(readFileSync(join(older, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(JSON.parse(readFileSync(`${dir}.plainport`, "utf8")).snapshot).toBe(second.snapshot);
+  });
+});

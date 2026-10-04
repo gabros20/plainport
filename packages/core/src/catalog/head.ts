@@ -5,10 +5,13 @@
 //
 // A fold that left out an event it could not read or use is not known to be whole (D86): when the snapshot this
 // device knows of a project (its stub's, its registry entry's base) is named by no readable event, the head the fold
-// shows may be older than one that exists, so a head-dependent default refuses with catalog.head-uncertain.
+// shows may be older than one that exists, so a head-dependent default refuses with catalog.head-uncertain. The way on
+// is that newest known snapshot, named with --snapshot: its restic snapshot is found by its op tag (unfoldedSnapshot),
+// so onload restores it and removes its stub as usual; any other snapshot is refused while the doubt stands.
 
 import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import type { BlobStore } from "../ports/blob-store.ts";
+import type { Engine, RunContext } from "../ports/engine.ts";
 import type { CatalogProject, CatalogState } from "./fold.ts";
 import { loadCatalog } from "./log.ts";
 
@@ -55,29 +58,68 @@ const named = (project: CatalogProject | undefined, snapshot: string): boolean =
     project.discarded.includes(snapshot) ||
     project.missing.includes(snapshot));
 
+export interface HeadDoubt {
+  finding: Finding;
+  /** The newest snapshot this device knows that no readable event names: the one --snapshot may restore. */
+  newest: string;
+}
+
 /**
  * catalog.head-uncertain (D86) when the read left out events that may change state and a snapshot this device knows
  * of the project (`known`: its stub's, its registry entry's base) is named by none of the readable ones; else
- * undefined. `said.what` says what was not done ("nothing was restored"), `said.instead` the way on that keeps the
- * newer evidence.
+ * undefined. `said.what` says what was not done ("nothing was restored"), `said.instead` the way on, given the
+ * newest such snapshot.
  */
 export const headUncertain = (
   read: CatalogState & { uncertain?: readonly string[] },
   id: string,
   known: readonly (string | undefined)[],
   address: string,
-  said: { what: string; instead: string },
-): Finding | undefined => {
+  said: { what: string; instead: (newest: string) => string },
+): HeadDoubt | undefined => {
   const uncertain = read.uncertain ?? [];
   if (uncertain.length === 0) return undefined;
   const project = read.projects[id];
-  const unnamed = [...new Set(known.filter((s): s is string => s !== undefined && !named(project, s)))];
-  if (unnamed.length === 0) return undefined;
+  const unnamed = [
+    ...new Set(known.filter((s): s is string => s !== undefined && !named(project, s))),
+  ].sort();
+  const newest = unnamed.at(-1);
+  if (newest === undefined) return undefined;
   const latest = project?.head ?? null;
-  return finding("catalog.head-uncertain", {
-    message: `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
-    fix: `upgrade plainport if a newer version wrote ${uncertain.length === 1 ? "that event" : "those events"}, or connect the store that holds a whole copy of ${uncertain.length === 1 ? "it" : "them"}; ${said.instead}`,
-  });
+  return {
+    newest,
+    finding: finding("catalog.head-uncertain", {
+      message: `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
+      fix: `${said.instead(newest)}; or upgrade plainport if a newer version wrote ${uncertain.length === 1 ? "that event" : "those events"}`,
+    }),
+  };
+};
+
+/**
+ * The restic id of `snapshot`, a snapshot of project `id` whose event the catalog could not read (D86): the one
+ * snapshot in the repository tagged with its op, leaving out any the catalog names as discarded. snapshot.not-found
+ * when there is none, or more than one to choose from.
+ */
+export const unfoldedSnapshot = async (
+  engine: Engine,
+  options: { id: string; snapshot: string; discarded: readonly string[]; address: string; ctx?: RunContext },
+): Promise<Result<string>> => {
+  const listed = await engine.list(
+    { tags: ["plainport", `plainport:project=${options.id}`, `plainport:op=${options.snapshot}`] },
+    options.ctx,
+  );
+  if (!listed.ok) return listed;
+  const found = listed.value.filter((s) => !options.discarded.includes(s.id)).map((s) => s.id);
+  if (found.length === 1) return ok(found[0] as string);
+  return fail(
+    finding("snapshot.not-found", {
+      message:
+        found.length === 0
+          ? `the repository holds no snapshot tagged as ${options.snapshot} of ${options.address}, and the catalog cannot read the event that names it; nothing was restored`
+          : `the repository holds ${found.length} snapshots tagged as ${options.snapshot} of ${options.address} (${found.join(", ")}), and the event that says which one was kept cannot be read; nothing was restored`,
+      fix: "upgrade plainport if a newer version wrote the unreadable event; until then restore an older snapshot side by side: plainport restore <project> --snapshot <id> --to <path>",
+    }),
+  );
 };
 
 export type HeadCheck = { kind: "ok" } | { kind: "moved" | "incomplete"; finding: Finding };
@@ -92,9 +134,9 @@ export const headCheck = (
   // A fold that may lack the event naming this copy's base cannot say whether the head moved (D86).
   const uncertain = headUncertain(state, id, [base], address, {
     what: "nothing was offloaded",
-    instead: "meanwhile keep this folder as it is",
+    instead: () => "keep this folder as it is until the catalog reads whole",
   });
-  if (uncertain !== undefined) return { kind: "incomplete", finding: uncertain };
+  if (uncertain !== undefined) return { kind: "incomplete", finding: uncertain.finding };
   const project = state.projects[id];
   const kept = project !== undefined && (project.heads.length > 0 || project.conflicts.length > 0);
   if (project !== undefined && project.missing.length > 0) {

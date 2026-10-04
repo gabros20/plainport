@@ -23,7 +23,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader } from "../catalog/head.ts";
+import { catalogReader, headUncertain, unfoldedSnapshot } from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
@@ -151,8 +151,25 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       ([, e]) => e.root === ref.root && e.path === ref.path,
     )?.[0] ??
     Object.entries(read.value.projects).find(([, p]) => p.root === rootId && p.path === ref.path)?.[0];
+  // A newer snapshot this device knows of that no readable event names (D86): the head is not known, so a restore
+  // without --snapshot never hands back an older tree as the head; that newest snapshot, named, is found by its tag.
+  const doubt =
+    id === undefined
+      ? undefined
+      : headUncertain(
+          read.value,
+          id,
+          [stub?.ok ? stub.value.snapshot : undefined, registered.value.projects[id]?.base],
+          ref.address,
+          {
+            what: "nothing was restored",
+            instead: (newest) => `restore that newest snapshot by name: ${command(newest)}`,
+          },
+        );
+  if (doubt !== undefined && req.snapshot === undefined) return fail(doubt.finding);
   const project = id === undefined ? undefined : read.value.projects[id];
   if (project === undefined) {
+    if (doubt !== undefined) return fail(doubt.finding);
     return fail(
       finding("project.not-found", {
         message: `store ${store.name} holds no snapshot of ${ref.address}`,
@@ -162,7 +179,17 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
   }
   const snapshot = req.snapshot ?? headOf(project);
   if (typeof snapshot !== "string") return snapshot;
-  const made = project.snapshots[snapshot];
+  let made: { event?: string; stored: Record<string, string> } | undefined = project.snapshots[snapshot];
+  if (made === undefined && snapshot === doubt?.newest) {
+    const found = await unfoldedSnapshot(store.engine, {
+      id: id as string,
+      snapshot,
+      discarded: project.discarded,
+      address: ref.address,
+    });
+    if (!found.ok) return found;
+    made = { stored: { [store.name]: found.value } };
+  }
   const stored = made?.stored[store.name];
   if (made === undefined || stored === undefined) {
     const others = made === undefined ? [] : Object.keys(made.stored);
@@ -180,7 +207,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     );
   }
   // What is restored, fixed here where it is known to exist.
-  const chosen = { snapshot, stored, event: made.event };
+  const chosen = { snapshot, stored, ...(made.event === undefined ? {} : { event: made.event }) };
   phase("resolve", "end");
 
   phase("preflight", "start");
@@ -272,7 +299,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       engine: store.engine,
       store: store.blob,
       stored: chosen.stored,
-      event: chosen.event,
+      ...(chosen.event === undefined ? {} : { event: chosen.event }),
       ctx,
       op,
       nearest: parent,
