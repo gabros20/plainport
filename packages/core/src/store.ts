@@ -127,17 +127,6 @@ export interface SetUpStoreOptions {
 
 type SetUpOptions = Omit<SetUpStoreOptions, "mint">;
 
-/** Whether `path` is a folder: undefined when nothing is there. */
-const folderAt = async (io: LocalIo, path: string): Promise<boolean | undefined> => {
-  try {
-    return (await io.fs.stat(path)).kind === "dir";
-  } catch (error) {
-    const code = systemErrorCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
-};
-
 const unreachableAt = (name: string, root: string, detail: string) =>
   fail(
     finding("store.unreachable", {
@@ -146,6 +135,38 @@ const unreachableAt = (name: string, root: string, detail: string) =>
       paths: [root],
     }),
   );
+
+/**
+ * Whether `path` is a folder: undefined when nothing is there; store.unreachable when it cannot be looked at (a failing
+ * or locked disk), never an exception (AGENTS.md rule 7).
+ */
+const folderAt = async (
+  io: LocalIo,
+  path: string,
+  name: string,
+  root: string,
+): Promise<Result<boolean | undefined>> => {
+  try {
+    return ok((await io.fs.stat(path)).kind === "dir");
+  } catch (error) {
+    const code = systemErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return ok(undefined);
+    return unreachableAt(name, root, `${path} cannot be looked at (${code})`);
+  }
+};
+
+/** The store's folder and its parent, checked: the folder's state, or store.unreachable when it cannot hold a store. */
+const storeFolder = async (io: LocalIo, name: string, root: string): Promise<Result<boolean | undefined>> => {
+  const parent = dirname(root);
+  const above = await folderAt(io, parent, name, root);
+  if (!above.ok) return above;
+  if (above.value !== true)
+    return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
+  const here = await folderAt(io, root, name, root);
+  if (!here.ok) return here;
+  if (here.value === false) return unreachableAt(name, root, `${root} is not a folder`);
+  return here;
+};
 
 const openWithSecret = async (io: LocalIo, options: SetUpOptions): Promise<Result<OpenedStore>> => {
   const password = await resolveSecret(
@@ -172,11 +193,9 @@ export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise
   const pinned = registry.value.stores?.[name];
   if (pinned === undefined) return ok(null);
   const root = storeRoot(store, paths.home);
-  const parent = dirname(root);
-  if ((await folderAt(io, parent)) !== true)
-    return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
-  const here = await folderAt(io, root);
-  if (here === false) return unreachableAt(name, root, `${root} is not a folder`);
+  const folder = await storeFolder(io, name, root);
+  if (!folder.ok) return folder;
+  const here = folder.value;
   const changed = (found: string | null) => {
     const refused = identityChanged(pinned, found, `store at ${root}`);
     return fail({
@@ -201,12 +220,15 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   const pin = await checkStorePin(io, options);
   if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
-  const parent = dirname(root);
-  if ((await folderAt(io, parent)) !== true)
-    return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
-  const here = await folderAt(io, root);
-  if (here === false) return unreachableAt(name, root, `${root} is not a folder`);
-  if (here === undefined) await io.fs.mkdirp(root);
+  const folder = await storeFolder(io, name, root);
+  if (!folder.ok) return folder;
+  if (folder.value === undefined) {
+    try {
+      await io.fs.mkdirp(root);
+    } catch (error) {
+      return unreachableAt(name, root, `${root} could not be made (${systemErrorCode(error)})`);
+    }
+  }
 
   const open = await openWithSecret(io, options);
   if (!open.ok) return open;

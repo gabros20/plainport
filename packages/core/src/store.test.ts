@@ -145,3 +145,45 @@ describe("setUpStore's identity pin (D85)", () => {
     expect(disks.size).toBe(0);
   });
 });
+
+describe("setUpStore on a disk that fails I/O (rule 7)", () => {
+  const failing = (method: "stat" | "mkdirp", at: string, code: string) => {
+    const real = testHost();
+    return {
+      ...real,
+      fs: {
+        ...real.fs,
+        [method]: async (path: string, ...rest: unknown[]) => {
+          if (path === at) throw Object.assign(new Error(`${code}: injected`), { code });
+          return (real.fs[method] as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest);
+        },
+      },
+    };
+  };
+  const setUpWith = (io: ReturnType<typeof testHost>) =>
+    setUpStore(io, {
+      paths: box.paths,
+      env: { PLAINPORT_STORE_PASSWORD: "pw" },
+      name: "ssd",
+      store: { kind: "local", path: "~/ssd/store" },
+      opener,
+      mint: () => ulid(),
+    });
+
+  test("a store folder that cannot be looked at is store.unreachable, never an exception", async () => {
+    const result = await setUpWith(failing("stat", join(box.home, "ssd/store"), "EIO"));
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("cannot be looked at (EIO)"),
+    ]);
+  });
+
+  test("a store folder that cannot be made (a read-only volume) is store.unreachable", async () => {
+    const result = await setUpWith(failing("mkdirp", join(box.home, "ssd/store"), "EROFS"));
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("could not be made (EROFS)"),
+    ]);
+    expect(await pinned()).toBeUndefined();
+  });
+});
