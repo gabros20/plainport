@@ -3,7 +3,12 @@
 Notable changes to plainport, newest first. The format follows [Keep a Changelog](https://keepachangelog.com).
 The *why* behind decisions lives in the ADRs (`docs/adr/`); this file records *what changed*.
 
-## [Unreleased]
+## [0.1.1] — 2026-10-10
+
+### Fixed
+- `scripts/install`: a Ctrl-C during an install no longer leaves the new version current. The install used to finish
+  and switch `current` before handling the signal, then exit 130 saying nothing was installed. It now checks for the
+  signal before staging and again just before activation, leaves `current` unchanged and removes the new version.
 
 ## [0.1.0] — 2026-10-09
 
