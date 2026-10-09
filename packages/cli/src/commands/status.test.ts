@@ -9,6 +9,7 @@ import { fsBlobStore } from "@plainport/blob-fs";
 import { parseJsonLines } from "@plainport/contract";
 import { nodeLocalIo } from "@plainport/core";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
+import { QUIET_GIT_ENV } from "../../../core/src/testing/git-fixture.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../../../core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
@@ -402,6 +403,7 @@ describe("status and ls: fix wave r1", () => {
           PATH,
           HOME: box.home,
           GIT_CONFIG_NOSYSTEM: "1",
+          ...QUIET_GIT_ENV,
           GIT_AUTHOR_NAME: "t",
           GIT_AUTHOR_EMAIL: "t@x",
           GIT_COMMITTER_NAME: "t",

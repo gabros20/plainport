@@ -6,6 +6,7 @@ import { isUlid, nodeLocalIo, PLAN_TTL_MS, PlanSchema, StubSchema, ulid } from "
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
 import { describeT1 } from "../../../../test/tiers.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
+import { QUIET_GIT_ENV } from "../../../core/src/testing/git-fixture.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
 import {
   captureTree,
@@ -137,7 +138,12 @@ describe("offload: dry run", () => {
   /** The project as a git repository, with git's own environment kept inside the sandbox. */
   const gitRepo = () => {
     const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: box.home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...QUIET_GIT_ENV,
+      },
     });
     expect(git.exitCode).toBe(0);
   };
@@ -221,7 +227,12 @@ describe("offload: dry run", () => {
 
   const lockedRepo = () => {
     const git = Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web")], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: box.home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...QUIET_GIT_ENV,
+      },
     });
     expect(git.exitCode).toBe(0);
     box.file("work/web/.git/index.lock");
@@ -492,7 +503,12 @@ describe("offload: a real run", () => {
 
   test("a blocker exits 6; --allow <code> overrides an allowable one", async () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir()], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: box.home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...QUIET_GIT_ENV,
+      },
     });
     expect(git.exitCode).toBe(0);
     box.file("work/web/.git/index.lock");

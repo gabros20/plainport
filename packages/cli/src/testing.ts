@@ -18,6 +18,7 @@ import {
   fakeEngine,
   fakeRepository,
 } from "../../core/src/testing/fake-engine.ts";
+import { QUIET_GIT_ENV } from "../../core/src/testing/git-fixture.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { help } from "./commands/help.ts";
 import { REGISTRY } from "./commands/index.ts";
@@ -270,7 +271,7 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
     mkdirSync(join(home, dir), { recursive: true });
   }
   const git = Bun.spawnSync(["git", "init", "-q", join(home, "work/clients/acme/web")], {
-    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1" },
+    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
   if (git.exitCode !== 0) throw new Error(`git init failed: ${git.stderr.toString()}`);
   const ports = sandboxPorts(home);
@@ -289,7 +290,7 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   mkdirSync(api, { recursive: true });
   writeFileSync(join(api, "README.md"), "# api\n");
   const apiGit = Bun.spawnSync(["git", "init", "-q", api], {
-    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1" },
+    env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
   if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
   const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });

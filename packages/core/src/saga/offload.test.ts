@@ -38,6 +38,7 @@ import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
+import { QUIET_GIT_ENV } from "../testing/git-fixture.ts";
 import { childGuardEnv, SELF, testHost } from "../testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
@@ -525,7 +526,7 @@ describe("offload: verification", () => {
 describe("offload: findings", () => {
   const lockRepo = () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir], {
-      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
     });
     expect(git.exitCode).toBe(0);
     box.file("work/web/.git/index.lock");
@@ -899,7 +900,7 @@ describe("offload: nested registered projects (D53)", () => {
 describe("offload: fix wave r1", () => {
   const gitInit = () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir], {
-      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
     });
     expect(git.exitCode).toBe(0);
   };
@@ -1771,7 +1772,7 @@ describe("offload: fix wave r3 (D50)", () => {
 
   test("--allow is applied to an approved plan: a plan made with --allow git.locked runs with it", async () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir], {
-      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
     });
     expect(git.exitCode).toBe(0);
     box.file("work/web/.git/index.lock");
@@ -1806,7 +1807,7 @@ describe("offload: fix wave r3 (D50)", () => {
 
   test("git's fsmonitor daemon is stopped through gitEnv, before the plan's scan (D33, D34, D52)", async () => {
     const git = Bun.spawnSync(["git", "init", "-q", dir], {
-      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
     });
     expect(git.exitCode).toBe(0);
     const socket = join(dir, ".git", "fsmonitor--daemon.ipc");
@@ -1985,7 +1986,7 @@ describe("offload: fix wave q1 (D52)", () => {
   };
   const gitRepo = (path: string) => {
     const git = Bun.spawnSync(["git", "init", "-q", path], {
-      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" },
+      env: { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
     });
     expect(git.exitCode).toBe(0);
   };
@@ -2191,7 +2192,7 @@ describe("offload: fix wave q1 (D52)", () => {
       const nested = join(dir, "vendor/lib");
       box.file("work/web/vendor/lib/README.md", "lib\n");
       gitRepo(nested);
-      const gitEnv = { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1" };
+      const gitEnv = { PATH, HOME: box.home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV };
       // The daemons are found only through what they hold inside this test's own sandbox (lsof +D on the project
       // folder), never by a machine-wide process search, so no daemon outside the sandbox is ever signalled.
       const sandboxDaemons = (): number[] =>

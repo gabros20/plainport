@@ -23,6 +23,19 @@ export interface GitFixture {
   cleanup(): void;
 }
 
+/**
+ * git's background auto-maintenance and auto-gc never run in a test's repository: they write and remove files
+ * (.git/objects/maintenance.lock, packs) under a tree a test walks or compares, at times no test controls (CI flake).
+ * Set through the environment, so every git a test starts, and plainport's own git calls under it, see it.
+ */
+export const QUIET_GIT_ENV: Readonly<Record<string, string>> = {
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "maintenance.auto",
+  GIT_CONFIG_VALUE_0: "false",
+  GIT_CONFIG_KEY_1: "gc.auto",
+  GIT_CONFIG_VALUE_1: "0",
+};
+
 export const makeGitFixture = (prefix = "plainport-git-"): GitFixture => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   const home = join(root, ".home");
@@ -31,6 +44,7 @@ export const makeGitFixture = (prefix = "plainport-git-"): GitFixture => {
   const gitEnv = {
     ...env,
     GIT_CONFIG_NOSYSTEM: "1",
+    ...QUIET_GIT_ENV,
     GIT_AUTHOR_NAME: "Test",
     GIT_AUTHOR_EMAIL: "test@example.invalid",
     GIT_COMMITTER_NAME: "Test",
