@@ -1,6 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -16,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
 import { describeT1 } from "../test/tiers.ts";
 import {
@@ -400,7 +401,6 @@ describe("installVersion and rollback", () => {
 });
 
 const script = join(import.meta.dir, "install");
-const version = readFileSync(join(import.meta.dir, "../VERSION"), "utf8").trim();
 
 describe("scripts/install, expected failures", () => {
   const run = (args: string[], path: string) => {
@@ -434,10 +434,57 @@ describe("scripts/install, expected failures", () => {
   });
 });
 
+/**
+ * This working tree copied into `dir` and committed there with VERSION set to `pinned`, its node_modules linked to
+ * this checkout's. The end-to-end tests install from it, so they hold whatever VERSION this checkout is at and however
+ * dirty its tree is: a release VERSION reuses its one folder on a second install, and refuses a dirty tree.
+ */
+const pinnedCheckout = (dir: string, pinned: string): string => {
+  const repo = join(import.meta.dir, "..");
+  const run = (cwd: string, ...args: string[]): string => {
+    const ran = Bun.spawnSync(
+      ["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    if (ran.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${ran.stderr.toString()}`);
+    return ran.stdout.toString();
+  };
+  for (const path of run(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")) {
+    if (path === "" || !existsSync(join(repo, path))) continue;
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    cpSync(join(repo, path), join(dir, path), { verbatimSymlinks: true });
+  }
+  // The workspace packages' links are relative, so they resolve inside the copy, and through it to the shared store.
+  symlinkSync(join(repo, "node_modules"), join(dir, "node_modules"));
+  for (const name of readdirSync(join(repo, "packages"))) {
+    const modules = join(repo, "packages", name, "node_modules");
+    if (existsSync(modules))
+      cpSync(modules, join(dir, "packages", name, "node_modules"), {
+        recursive: true,
+        verbatimSymlinks: true,
+      });
+  }
+  writeFileSync(join(dir, "VERSION"), `${pinned}\n`);
+  run(dir, "init", "-q");
+  writeFileSync(join(dir, ".git/info/exclude"), "/node_modules\n");
+  run(dir, "add", "-A");
+  run(dir, "-c", "commit.gpgsign=false", "commit", "-q", "-m", `fixture at ${pinned}`);
+  return dir;
+};
+
 // The real script: builds the binary through scripts/build.ts into temp prefixes, with stand-in restic and rclone.
-// Each test has its own prefix and install, so they hold in any order or alone.
+// Each test has its own prefix and install, so they hold in any order or alone. They install from a copy of this
+// checkout pinned at a -dev VERSION, so two installs are two builds and the release commit runs them unchanged.
 describeT1("scripts/install end to end", () => {
   const top = mkdtempSync(join(scratch, "e2e-"));
+  const version = "0.0.1-dev";
+  let script = "";
+  beforeAll(() => {
+    script = join(pinnedCheckout(join(top, "checkout"), version), "scripts/install");
+  });
   const tools = join(top, "tools");
   mkdirSync(tools, { recursive: true });
   for (const name of ["restic", "rclone"]) {
