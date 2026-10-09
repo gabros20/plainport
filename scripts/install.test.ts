@@ -48,14 +48,14 @@ const stageFake =
   };
 
 describe("naming a build", () => {
-  test("a release installs under its version; a dev build under its version, build time and commit", () => {
+  test("a release installs under its version; a dev build under its version, build time and commit", async () => {
     expect(versionName("0.1.0", "abc1234", new Date("2026-10-04T12:34:56Z"))).toBe("0.1.0");
     expect(versionName("0.1.0-dev", "abc1234", new Date("2026-10-04T12:34:56Z"))).toBe(
       "0.1.0-dev+20261004123456.abc1234",
     );
   });
 
-  test("a dirty tree marks a dev build .dirty and refuses a release", () => {
+  test("a dirty tree marks a dev build .dirty and refuses a release", async () => {
     const now = new Date("2026-10-04T12:34:56Z");
     expect(planName({ version: "0.1.0-dev", commit: "abc1234", dirty: true, now })).toEqual({
       ok: true,
@@ -70,7 +70,7 @@ describe("naming a build", () => {
     if (!refused.ok) expect(refused.message).toContain("commit or stash");
   });
 
-  test("a release outside a git checkout (no commit) is refused", () => {
+  test("a release outside a git checkout (no commit) is refused", async () => {
     const refused = planName({ version: "0.1.0", commit: undefined, dirty: false });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.message).toContain("not a git checkout");
@@ -80,7 +80,7 @@ describe("naming a build", () => {
     });
   });
 
-  test("every SemVer pre-release names a version the installer owns, consistently with versionName (R3-M3)", () => {
+  test("every SemVer pre-release names a version the installer owns, consistently with versionName (R3-M3)", async () => {
     const now = new Date("2026-10-04T12:34:56Z");
     for (const version of ["0.1.0", "0.2.0-rc.1", "1.0.0-beta.2.x-y", "0.1.0-dev"]) {
       const named = planName({ version, commit: "abc1234", dirty: false, now });
@@ -96,13 +96,13 @@ describe("naming a build", () => {
       expect(isVersionName(name)).toBe(false);
   });
 
-  test("a VERSION that is not SemVer is refused with its fix (R3-M3)", () => {
+  test("a VERSION that is not SemVer is refused with its fix (R3-M3)", async () => {
     const refused = planName({ version: "0.2", commit: "abc1234", dirty: false });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.message).toContain("VERSION");
   });
 
-  test("tracked changes anywhere and untracked files under packages/ make the tree dirty", () => {
+  test("tracked changes anywhere and untracked files under packages/ make the tree dirty", async () => {
     expect(dirtyFromStatus("")).toBe(false);
     expect(dirtyFromStatus("?? notes.txt\n?? .orchestrate/x.md\n")).toBe(false);
     expect(dirtyFromStatus(" M README.md\n")).toBe(true);
@@ -111,9 +111,9 @@ describe("naming a build", () => {
 });
 
 describe("installVersion and rollback", () => {
-  test("installs a read-only version tree behind current, with bin/plainport pointing through current", () => {
+  test("installs a read-only version tree behind current, with bin/plainport pointing through current", async () => {
     const prefix = fresh();
-    const first = installVersion(prefix, "0.1.0", stageFake("one"));
+    const first = await installVersion(prefix, "0.1.0", stageFake("one"));
     expect(first).toEqual({
       ok: true,
       version: "0.1.0",
@@ -131,41 +131,41 @@ describe("installVersion and rollback", () => {
     expect(readState(prefix)).toEqual({ current: "0.1.0", previous: undefined, versions: ["0.1.0"] });
   });
 
-  test("a second version records the first as the rollback target and keeps both", () => {
+  test("a second version records the first as the rollback target and keeps both", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
-    const second = installVersion(prefix, "0.2.0", stageFake("two"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    const second = await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(second).toMatchObject({ ok: true, version: "0.2.0", previous: "0.1.0", reused: false });
     expect(readState(prefix)).toEqual({ current: "0.2.0", previous: "0.1.0", versions: ["0.1.0", "0.2.0"] });
     expect(readFileSync(layout(prefix).bin, "utf8")).toContain("echo two");
   });
 
-  test("a third version prunes everything but current and the rollback target", () => {
+  test("a third version prunes everything but current and the rollback target", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
-    const third = installVersion(prefix, "0.3.0", stageFake("three"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
+    const third = await installVersion(prefix, "0.3.0", stageFake("three"));
     expect(third).toMatchObject({ ok: true, previous: "0.2.0", pruned: ["0.1.0"] });
     expect(readState(prefix)).toEqual({ current: "0.3.0", previous: "0.2.0", versions: ["0.2.0", "0.3.0"] });
     expect(rollback(prefix)).toEqual({ ok: true, from: "0.3.0", to: "0.2.0" });
   });
 
-  test("--rollback swaps current and previous, and a second rollback swaps them back", () => {
+  test("--rollback swaps current and previous, and a second rollback swaps them back", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(rollback(prefix)).toEqual({ ok: true, from: "0.2.0", to: "0.1.0" });
     expect(readState(prefix)).toMatchObject({ current: "0.1.0", previous: "0.2.0" });
     expect(readFileSync(layout(prefix).bin, "utf8")).toContain("echo one");
     expect(rollback(prefix)).toEqual({ ok: true, from: "0.1.0", to: "0.2.0" });
   });
 
-  test("a version already installed from the same commit is activated again without staging", () => {
+  test("a version already installed from the same commit is activated again without staging", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"), { commit: "aaa1111" });
-    installVersion(prefix, "0.2.0", stageFake("two"), { commit: "bbb2222" });
+    await installVersion(prefix, "0.1.0", stageFake("one"), { commit: "aaa1111" });
+    await installVersion(prefix, "0.2.0", stageFake("two"), { commit: "bbb2222" });
     let staged = false;
-    const again = installVersion(
+    const again = await installVersion(
       prefix,
       "0.1.0",
       () => {
@@ -177,20 +177,20 @@ describe("installVersion and rollback", () => {
     expect(staged).toBe(false);
   });
 
-  test("a version already installed from another commit is refused, never reused as if it were this one", () => {
+  test("a version already installed from another commit is refused, never reused as if it were this one", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"), { commit: "aaa1111" });
-    const other = installVersion(prefix, "0.1.0", stageFake("other"), { commit: "ccc3333" });
+    await installVersion(prefix, "0.1.0", stageFake("one"), { commit: "aaa1111" });
+    const other = await installVersion(prefix, "0.1.0", stageFake("other"), { commit: "ccc3333" });
     expect(other.ok).toBe(false);
     if (!other.ok) expect(other.message).toContain("aaa1111");
     expect(readFileSync(layout(prefix).bin, "utf8")).toContain("echo one");
   });
 
-  test("a failed stage leaves the install as it was and no staging folder behind", () => {
+  test("a failed stage leaves the install as it was and no staging folder behind", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const before = readState(prefix);
-    const failed = installVersion(prefix, "0.3.0", () => {
+    const failed = await installVersion(prefix, "0.3.0", () => {
       throw new Error("build broke");
     });
     expect(failed.ok).toBe(false);
@@ -198,9 +198,9 @@ describe("installVersion and rollback", () => {
     expect(readdirSync(layout(prefix).versions).filter((n) => n.startsWith(".staging-"))).toEqual([]);
   });
 
-  test("an install sweeps the staging folders and temp links an interrupted install left, and nothing else", () => {
+  test("an install sweeps the staging folders and temp links an interrupted install left, and nothing else", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const paths = layout(prefix);
     chmodSync(paths.versions, 0o755);
     mkdirSync(join(paths.versions, ".staging-AbC123/inner"), { recursive: true });
@@ -209,7 +209,7 @@ describe("installVersion and rollback", () => {
     symlinkSync(join(paths.current, "plainport"), `${paths.bin}.tmp-123-456`);
     writeFileSync(join(paths.share, "notes.txt"), "the owner's");
     writeFileSync(join(prefix, "bin", "other-tool"), "not ours");
-    expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(true);
+    expect((await installVersion(prefix, "0.2.0", stageFake("two"))).ok).toBe(true);
     expect(readdirSync(paths.versions).sort()).toEqual(["0.1.0", "0.2.0"]);
     expect(readdirSync(paths.share).sort()).toEqual(["current", "notes.txt", "previous", "versions"]);
     expect(readdirSync(join(prefix, "bin")).sort()).toEqual(["other-tool", "plainport"]);
@@ -228,9 +228,9 @@ describe("installVersion and rollback", () => {
     return { dir, modes };
   };
 
-  test("prune and sweep never follow a symlink: links in versions/ survive and their targets keep their modes (R2-I1)", () => {
+  test("prune and sweep never follow a symlink: links in versions/ survive and their targets keep their modes (R2-I1)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const paths = layout(prefix);
     chmodSync(paths.versions, 0o755);
     const a = outside();
@@ -238,8 +238,8 @@ describe("installVersion and rollback", () => {
     symlinkSync(a.dir, join(paths.versions, "dev"));
     symlinkSync(a.dir, join(paths.versions, "0.0.9"));
     symlinkSync(b.dir, join(paths.versions, ".staging-AbC123"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
-    const third = installVersion(prefix, "0.3.0", stageFake("three"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
+    const third = await installVersion(prefix, "0.3.0", stageFake("three"));
     expect(third).toMatchObject({ ok: true, pruned: ["0.1.0"] });
     if (third.ok) {
       expect(third.notices).toContain(
@@ -255,92 +255,92 @@ describe("installVersion and rollback", () => {
     expect(b.modes()).toEqual([0o700, 0o700, 0o600]);
   });
 
-  test("prune leaves a foreign file and a foreign folder in versions/ alone, version-shaped or not (R2-I1)", () => {
+  test("prune leaves a foreign file and a foreign folder in versions/ alone, version-shaped or not (R2-I1)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const paths = layout(prefix);
     chmodSync(paths.versions, 0o755);
     writeFileSync(join(paths.versions, "README"), "the owner's notes");
     mkdirSync(join(paths.versions, "9.9.9"));
     writeFileSync(join(paths.versions, "9.9.9", "plainport"), "another tool's");
     mkdirSync(join(paths.versions, "scratch"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
-    installVersion(prefix, "0.3.0", stageFake("three"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
+    await installVersion(prefix, "0.3.0", stageFake("three"));
     expect(readdirSync(paths.versions).sort()).toEqual(["0.2.0", "0.3.0", "9.9.9", "README", "scratch"]);
     expect(readFileSync(join(paths.versions, "9.9.9", "plainport"), "utf8")).toBe("another tool's");
   });
 
-  test("a prune that fails after activation is a notice, and the install still succeeds (R2-M2)", () => {
+  test("a prune that fails after activation is a notice, and the install still succeeds (R2-M2)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
     // An injected removal fault stands in for EPERM (a uchg flag, another owner) on every platform.
     const remove = (path: string) => {
       throw Object.assign(new Error(`EPERM: operation not permitted, rm '${path}'`), { code: "EPERM" });
     };
-    const third = installVersion(prefix, "0.3.0", stageFake("three"), undefined, { remove });
+    const third = await installVersion(prefix, "0.3.0", stageFake("three"), undefined, { remove });
     expect(third).toMatchObject({ ok: true, version: "0.3.0", pruned: [] });
     if (third.ok) expect(third.notices.some((n) => n.startsWith("prune of 0.1.0 failed: EPERM"))).toBe(true);
     expect(readState(prefix)).toMatchObject({ current: "0.3.0", previous: "0.2.0" });
     expect(readState(prefix).versions).toEqual(["0.1.0", "0.2.0", "0.3.0"]);
   });
 
-  test("a second install while one holds the lock is refused, and the lock goes when an install ends (R2-M7)", () => {
+  test("a second install while one holds the lock is refused, and the lock goes when an install ends (R2-M7)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const lock = join(layout(prefix).share, ".install.lock");
     expect(existsSync(lock)).toBe(false);
     mkdirSync(lock);
-    const refused = installVersion(prefix, "0.2.0", stageFake("two"));
+    const refused = await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.message).toContain("another scripts/install is running");
     expect(rollback(prefix).ok).toBe(false);
     rmSync(lock, { recursive: true });
-    expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(true);
+    expect((await installVersion(prefix, "0.2.0", stageFake("two"))).ok).toBe(true);
   });
 
-  test("a lock whose recorded pid is alive is refused with the exact rm -r to run (R3-M1)", () => {
+  test("a lock whose recorded pid is alive is refused with the exact rm -r to run (R3-M1)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const lock = join(layout(prefix).share, ".install.lock");
     mkdirSync(lock);
     writeFileSync(join(lock, "pid"), `${process.pid}\n`);
-    const refused = installVersion(prefix, "0.2.0", stageFake("two"));
+    const refused = await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.message).toContain(`rm -r '${lock}'`);
     rmSync(lock, { recursive: true });
   });
 
-  test("a lock whose recorded pid is gone is taken over, with a notice (R3-M1)", () => {
+  test("a lock whose recorded pid is gone is taken over, with a notice (R3-M1)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const lock = join(layout(prefix).share, ".install.lock");
     const dead = Bun.spawnSync(["/bin/sh", "-c", "echo $$"], { stdout: "pipe" }).stdout.toString().trim();
     mkdirSync(lock);
     writeFileSync(join(lock, "pid"), `${dead}\n`);
-    const taken = installVersion(prefix, "0.2.0", stageFake("two"));
+    const taken = await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(taken).toMatchObject({ ok: true, version: "0.2.0" });
     if (taken.ok) expect(taken.notices).toContain(`took over a stale lock: pid ${dead} is gone (${lock})`);
     expect(existsSync(lock)).toBe(false);
   });
 
-  test("a lock with no pid file is taken over once it is a minute old, and refused while younger (R3-M1)", () => {
+  test("a lock with no pid file is taken over once it is a minute old, and refused while younger (R3-M1)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     const lock = join(layout(prefix).share, ".install.lock");
     mkdirSync(lock);
-    expect(installVersion(prefix, "0.2.0", stageFake("two")).ok).toBe(false);
+    expect((await installVersion(prefix, "0.2.0", stageFake("two"))).ok).toBe(false);
     const old = new Date(Date.now() - 120_000);
     utimesSync(lock, old, old);
-    const taken = installVersion(prefix, "0.2.0", stageFake("two"));
+    const taken = await installVersion(prefix, "0.2.0", stageFake("two"));
     expect(taken.ok).toBe(true);
     if (taken.ok) expect(taken.notices.some((n) => n.startsWith("took over a stale lock"))).toBe(true);
   });
 
-  test("a prune that fails partway keeps build.json, so the folder stays the installer's and the next prune finishes it (R3-M2)", () => {
+  test("a prune that fails partway keeps build.json, so the folder stays the installer's and the next prune finishes it (R3-M2)", async () => {
     const prefix = fresh();
-    installVersion(prefix, "0.1.0", stageFake("one"));
-    installVersion(prefix, "0.2.0", stageFake("two"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.2.0", stageFake("two"));
     const dir = join(layout(prefix).versions, "0.1.0");
     // An rm that fails on the binary: everything it reached before build.json may be gone, build.json is not.
     const rm = (path: string) => {
@@ -350,15 +350,15 @@ describe("installVersion and rollback", () => {
     expect(() => removeVersion(dir, rm)).toThrow("EPERM");
     expect(existsSync(join(dir, "build.json"))).toBe(true);
     expect(readState(prefix).versions).toContain("0.1.0");
-    const third = installVersion(prefix, "0.3.0", stageFake("three"));
+    const third = await installVersion(prefix, "0.3.0", stageFake("three"));
     expect(third).toMatchObject({ ok: true, pruned: ["0.1.0"] });
     if (third.ok) expect(third.notices).toEqual([]);
     expect(existsSync(dir)).toBe(false);
   });
 
-  test("a failed stage whose cleanup also fails returns one message naming both, not an exception (R3-M4)", () => {
+  test("a failed stage whose cleanup also fails returns one message naming both, not an exception (R3-M4)", async () => {
     const prefix = fresh();
-    const result = installVersion(
+    const result = await installVersion(
       prefix,
       "0.1.0",
       () => {
@@ -378,23 +378,56 @@ describe("installVersion and rollback", () => {
     }
   });
 
-  test("a current that is not a link fails with a message, not an exception", () => {
+  test("a signal seen at the checkpoint before activation leaves current unchanged and removes the new version", async () => {
+    const prefix = fresh();
+    await installVersion(prefix, "0.1.0", stageFake("one"));
+    let checked = 0;
+    const result = await installVersion(prefix, "0.2.0", stageFake("two"), undefined, {
+      stopped: () => (++checked >= 2 ? "SIGINT" : undefined),
+    });
+    expect(checked).toBe(2); // once before the stage, once after it, before activation
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.message).toBe("interrupted by SIGINT before activation; nothing was installed");
+    expect(readState(prefix)).toEqual({ current: "0.1.0", previous: undefined, versions: ["0.1.0"] });
+    expect(readdirSync(layout(prefix).versions)).toEqual(["0.1.0"]);
+    expect(existsSync(join(layout(prefix).share, ".install.lock"))).toBe(false);
+  });
+
+  test("a signal seen before the stage stages nothing", async () => {
+    const prefix = fresh();
+    let staged = false;
+    const result = await installVersion(
+      prefix,
+      "0.1.0",
+      () => {
+        staged = true;
+      },
+      undefined,
+      { stopped: () => "SIGTERM" },
+    );
+    expect(result.ok).toBe(false);
+    expect(staged).toBe(false);
+    expect(readState(prefix).current).toBeUndefined();
+  });
+
+  test("a current that is not a link fails with a message, not an exception", async () => {
     const prefix = fresh();
     mkdirSync(join(layout(prefix).current, "x"), { recursive: true });
-    const result = installVersion(prefix, "0.1.0", stageFake("one"));
+    const result = await installVersion(prefix, "0.1.0", stageFake("one"));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain(layout(prefix).current);
   });
 
-  test("rollback with nothing to roll back to, and a foreign bin/plainport, are refused", () => {
+  test("rollback with nothing to roll back to, and a foreign bin/plainport, are refused", async () => {
     const prefix = fresh();
     expect(rollback(prefix).ok).toBe(false);
-    installVersion(prefix, "0.1.0", stageFake("one"));
+    await installVersion(prefix, "0.1.0", stageFake("one"));
     expect(rollback(prefix)).toMatchObject({ ok: false });
     const foreign = fresh();
     mkdirSync(join(foreign, "bin"), { recursive: true });
     writeFileSync(join(foreign, "bin/plainport"), "not ours");
-    const refused = installVersion(foreign, "0.1.0", stageFake("one"));
+    const refused = await installVersion(foreign, "0.1.0", stageFake("one"));
     expect(refused.ok).toBe(false);
     expect(readFileSync(join(foreign, "bin/plainport"), "utf8")).toBe("not ours");
   });
@@ -413,13 +446,13 @@ describe("scripts/install, expected failures", () => {
   };
   const withBun = `${join(process.execPath, "..")}:/usr/bin:/bin`;
 
-  test("without bun, the wrapper names the fix", () => {
+  test("without bun, the wrapper names the fix", async () => {
     const ran = run(["--prefix", fresh()], "/usr/bin:/bin");
     expect(ran.code).toBe(1);
     expect(ran.err).toContain("scripts/install: bun not found; install Bun");
   });
 
-  test("an unknown flag prints usage, not a stack trace", () => {
+  test("an unknown flag prints usage, not a stack trace", async () => {
     const ran = run(["--nope"], withBun);
     expect(ran.code).toBe(2);
     expect(ran.err).toContain("scripts/install:");
@@ -427,7 +460,7 @@ describe("scripts/install, expected failures", () => {
     expect(ran.err).not.toContain("    at ");
   });
 
-  test("missing tools name fetch-tools", () => {
+  test("missing tools name fetch-tools", async () => {
     const ran = run(["--prefix", fresh(), "--tools", join(scratch, "no-tools")], withBun);
     expect(ran.code).toBe(1);
     expect(ran.err).toContain("bun scripts/fetch-tools.ts");
@@ -502,7 +535,7 @@ describeT1("scripts/install end to end", () => {
     return { code: ran.exitCode, out: ran.stdout.toString(), err: ran.stderr.toString() };
   };
 
-  test("installs the built binary with restic and rclone beside it, and plainport --version runs", () => {
+  test("installs the built binary with restic and rclone beside it, and plainport --version runs", async () => {
     const prefix = join(top, "one");
     const first = install(prefix);
     expect(first.code).toBe(0);
@@ -567,10 +600,39 @@ describeT1("scripts/install end to end", () => {
     expect(await new Response(child.stderr).text()).toContain("interrupted");
     expect(staging()).toEqual([]);
     expect(existsSync(join(layout(prefix).share, ".install.lock"))).toBe(false);
-    expect(readState(prefix).current).toBeUndefined();
+    expect(readState(prefix)).toEqual({ current: undefined, previous: undefined, versions: [] });
   }, 120_000);
 
-  test("an installed dev build never walks up into a checkout, and its missing-tool fix says to reinstall (N1)", () => {
+  test("a Ctrl-C no child dies of still stops the install before activation (the CI path)", async () => {
+    // Only the install process gets the signal, as when the build step's child outlives it: the install goes on with
+    // no child killed, and must still see the signal before it activates.
+    const prefix = join(top, "sigint-late");
+    const pause = join(top, "sigint-late.pause");
+    const child = Bun.spawn([script, "--prefix", prefix, "--tools", tools], {
+      env: {
+        ...env,
+        PATH: `${join(process.execPath, "..")}:/usr/bin:/bin`,
+        PLAINPORT_INSTALL_TEST_PAUSE_FILE: pause,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      const deadline = Date.now() + 60_000;
+      while (!existsSync(pause) && child.exitCode === null && Date.now() < deadline) await Bun.sleep(10);
+      expect(existsSync(pause)).toBe(true);
+      process.kill(child.pid, "SIGINT");
+      await Bun.sleep(100);
+    } finally {
+      rmSync(pause, { force: true });
+    }
+    expect(await child.exited).toBe(130);
+    expect(await new Response(child.stderr).text()).toContain("before activation; nothing was installed");
+    expect(readState(prefix)).toEqual({ current: undefined, previous: undefined, versions: [] });
+    expect(existsSync(join(layout(prefix).share, ".install.lock"))).toBe(false);
+  }, 120_000);
+
+  test("an installed dev build never walks up into a checkout, and its missing-tool fix says to reinstall (N1)", async () => {
     // A checkout-looking folder above the prefix: an installed build must never walk up into it.
     const n1 = join(top, "n1");
     mkdirSync(n1, { recursive: true });

@@ -308,7 +308,7 @@ const NO_PID_STALE_MS = 60_000;
  * ends. A lock whose pid is gone, or that has no pid file and is a minute old, is taken over with a notice; a live
  * one is refused with the exact command that removes it.
  */
-const withLock = <T>(paths: Layout, notices: string[], run: () => Outcome<T>): Outcome<T> => {
+const takeLock = (paths: Layout, notices: string[]): Outcome<{ lock: string }> => {
   const lock = join(paths.share, ".install.lock");
   const take = (): "taken" | "held" => {
     try {
@@ -350,12 +350,30 @@ const withLock = <T>(paths: Layout, notices: string[], run: () => Outcome<T>): O
   active.lock = lock;
   try {
     writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+  } catch (error) {
+    releaseLock(lock);
+    return { ok: false, message: `writing ${lock}/pid failed: ${(error as Error).message}` };
+  }
+  return { ok: true, lock };
+};
+
+const releaseLock = (lock: string): void => {
+  rmSync(lock, { recursive: true, force: true });
+  active.lock = undefined;
+};
+
+const withLock = <T>(paths: Layout, notices: string[], run: () => Outcome<T>): Outcome<T> => {
+  const held = takeLock(paths, notices);
+  if (!held.ok) return held;
+  try {
     return run();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
-    active.lock = undefined;
+    releaseLock(held.lock);
   }
 };
+
+/** One turn of the event loop, so a signal that arrived during synchronous work reaches its handler. */
+const yieldTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
  * Removes one installed version so that a failure partway leaves it recognisably the installer's: everything else
@@ -396,19 +414,34 @@ export type Installed = {
   notices: string[];
 };
 
-export const installVersion = (
+export const installVersion = async (
   prefix: string,
   version: string,
   stage: (dir: string) => void,
   build?: { commit: string },
-  /** Test seam: how a pruned version or a failed staging folder is removed, so a failed removal can be injected. */
-  seams: { remove?: (path: string) => void } = {},
-): Outcome<Installed> => {
+  seams: {
+    /** Test seam: how a pruned version or a failed staging folder is removed, so a failed removal can be injected. */
+    remove?: (path: string) => void;
+    /** The signal that should stop the install, if one arrived (main's handlers); asked before the stage and again
+     * before activation, each time after one turn of the event loop so a pending signal is seen. */
+    stopped?: () => string | undefined;
+  } = {},
+): Promise<Outcome<Installed>> => {
   const paths = layout(prefix);
   const problem = linkProblem(paths);
   if (problem !== undefined) return { ok: false, message: problem };
   const notices: string[] = [];
-  return withLock(paths, notices, (): Outcome<Installed> => {
+  const stopped = async (): Promise<string | undefined> => {
+    if (seams.stopped === undefined) return undefined;
+    await yieldTurn();
+    return seams.stopped();
+  };
+  const held = takeLock(paths, notices);
+  if (!held.ok) return held;
+  try {
+    const before = await stopped();
+    if (before !== undefined)
+      return { ok: false, message: `interrupted by ${before}; nothing was installed` };
     try {
       mkdirSync(paths.versions, { recursive: true });
       mkdirSync(join(paths.prefix, "bin"), { recursive: true });
@@ -451,6 +484,20 @@ export const installVersion = (
         return { ok: false, message: `staging ${version} failed: ${(error as Error).message}${cleanup}` };
       }
     }
+    // Ctrl-C at any point before activation leaves current as it was, and the version this install made goes.
+    const late = await stopped();
+    if (late !== undefined) {
+      let cleanup = "";
+      try {
+        if (!reused) removeVersion(dir);
+      } catch (error) {
+        cleanup = `; removing ${dir} failed: ${(error as Error).message} (the next install prunes it)`;
+      }
+      return {
+        ok: false,
+        message: `interrupted by ${late} before activation; nothing was installed${cleanup}`,
+      };
+    }
     const current = linkedVersion(paths.current);
     const previous = current === version ? linkedVersion(paths.previous) : current;
     try {
@@ -469,7 +516,9 @@ export const installVersion = (
       seams.remove ?? ((path) => removeVersion(path)),
     );
     return { ok: true, version, previous, reused, pruned, notices };
-  });
+  } finally {
+    releaseLock(held.lock);
+  }
 };
 
 /** Makes previous current again, and records the version it replaces as the new previous. */
@@ -538,15 +587,19 @@ function stop(message: string, code = 1): never {
 
 /** Set when the build was stopped by Ctrl-C or SIGTERM: the install then exits 130. */
 let interrupted = false;
+/** The signal that arrived while an install held the lock, which installVersion checks before it activates. */
+let signalled: NodeJS.Signals | undefined;
 
-const main = (): void => {
-  // Ctrl-C reaches the whole foreground group: the build dies, the staging failure path cleans up and main exits
-  // 130. A signal that lands while no child runs removes the lock and the staging folder here.
+const main = async (): Promise<void> => {
+  // Ctrl-C reaches the whole foreground group. A child it kills (the build) fails the stage, which cleans up, and
+  // main exits 130. Bun runs this handler only between turns of the event loop, so while an install holds the lock
+  // it only records the signal: installVersion yields a turn and asks before it activates, so a Ctrl-C at any point
+  // before activation leaves current as it was. Outside an install it exits at once.
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.on(signal, () => {
-      if (active.staging !== undefined) removeInstall(active.staging);
-      if (active.lock !== undefined) rmSync(active.lock, { recursive: true, force: true });
-      console.error(`scripts/install: interrupted by ${signal}; nothing was installed`);
+      signalled ??= signal;
+      if (active.lock !== undefined) return;
+      console.error(`scripts/install: interrupted by ${signal}`);
       process.exit(130);
     });
   const root = resolve(import.meta.dir, "..");
@@ -597,7 +650,7 @@ const main = (): void => {
   const named = planName({ version, commit, dirty: dirtyFromStatus(git(root, "status", "--porcelain")) });
   if (!named.ok) stop(named.message);
 
-  const installed = installVersion(
+  const installed = await installVersion(
     prefix,
     named.name,
     (dir) => {
@@ -637,8 +690,9 @@ const main = (): void => {
         );
     },
     { commit: full || "unknown" },
+    { stopped: () => signalled },
   );
-  if (!installed.ok) stop(installed.message, interrupted ? 130 : 1);
+  if (!installed.ok) stop(installed.message, interrupted || signalled !== undefined ? 130 : 1);
   const paths = layout(prefix);
   console.log(
     `plainport ${installed.version} ${installed.reused ? "was already installed and is current again" : "installed"} in ${join(paths.versions, basename(installed.version))}`,
@@ -652,7 +706,7 @@ const main = (): void => {
 
 if (import.meta.main) {
   try {
-    main();
+    await main();
   } catch (error) {
     stop(`unexpected failure: ${(error as Error).message}`);
   }

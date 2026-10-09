@@ -61,8 +61,8 @@ with a notice. It first sweeps the `.staging-*` folders and `.tmp-*` links an in
 rules. A failed prune after a good install is a notice and exits 0; prune removes `build.json` last, so a prune that fails
 partway is retried by the next install. An mkdir lock (`share/plainport/.install.lock`, holding its pid) keeps installs
 and rollbacks one at a time: a lock whose pid is gone, or that names no pid and is a minute old, is taken over with a
-notice; a live one is refused with the exact `rm -r` to run if no install is running. Ctrl-C during an install exits
-130 and leaves no lock and no staging folder. VERSION may hold any SemVer version (`0.2.0-rc.1` installs as such). A plainport still running from a version pruned under it (two installs
+notice; a live one is refused with the exact `rm -r` to run if no install is running. Ctrl-C at any point before activation exits
+130, leaves `current` as it was and no lock, staging folder or new version behind. VERSION may hold any SemVer version (`0.2.0-rc.1` installs as such). A plainport still running from a version pruned under it (two installs
 during one run) loses the restic beside it; the operation stops and `plainport recover` settles it. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
 and skips that check. `scripts/install --rollback` makes the previous version current again; `--prefix <dir>`
 replaces `~/.local`. Tests use only temp prefixes.
