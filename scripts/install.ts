@@ -602,6 +602,23 @@ const main = (): void => {
     named.name,
     (dir) => {
       const outfile = join(dir, "plainport");
+      // Test seam (scripts/install.test.ts): wait inside the build step while this file exists, so a test's Ctrl-C
+      // lands here deterministically. The wait is a child of the foreground group, as the build is.
+      const pause = process.env.PLAINPORT_INSTALL_TEST_PAUSE_FILE;
+      if (pause) {
+        writeFileSync(pause, `${process.pid}\n`);
+        const waited = Bun.spawnSync([
+          "/bin/sh",
+          "-c",
+          'while [ -e "$1" ]; do sleep 0.05; done',
+          "sh",
+          pause,
+        ]);
+        if (waited.signalCode === "SIGINT" || waited.signalCode === "SIGTERM") {
+          interrupted = true;
+          throw new Error(`interrupted by ${waited.signalCode} during the build`);
+        }
+      }
       const built = Bun.spawnSync(buildCommand(process.execPath, root, { outfile, installed: true }), {
         cwd: root,
         stdout: "pipe",

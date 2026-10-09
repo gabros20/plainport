@@ -538,19 +538,31 @@ describeT1("scripts/install end to end", () => {
 
   test("Ctrl-C during the build exits 130 and leaves no lock and no staging folder (R3-M1)", async () => {
     const prefix = join(top, "sigint");
+    // The install waits inside its build step while this file exists (a test seam), so the signal lands there, never
+    // after activation, however fast the build is.
+    const pause = join(top, "sigint.pause");
     const child = Bun.spawn([script, "--prefix", prefix, "--tools", tools], {
-      env: { ...env, PATH: `${join(process.execPath, "..")}:/usr/bin:/bin` },
+      env: {
+        ...env,
+        PATH: `${join(process.execPath, "..")}:/usr/bin:/bin`,
+        PLAINPORT_INSTALL_TEST_PAUSE_FILE: pause,
+      },
       stdout: "pipe",
       stderr: "pipe",
       detached: true,
     });
     const versions = layout(prefix).versions;
-    const deadline = Date.now() + 60_000;
     const staging = () =>
       existsSync(versions) ? readdirSync(versions).filter((n) => n.startsWith(".staging-")) : [];
-    while (staging().length === 0 && Date.now() < deadline) await Bun.sleep(10);
-    expect(staging()).toHaveLength(1);
-    process.kill(-child.pid, "SIGINT"); // the terminal's Ctrl-C reaches the whole foreground group
+    try {
+      const deadline = Date.now() + 60_000;
+      while (!existsSync(pause) && child.exitCode === null && Date.now() < deadline) await Bun.sleep(10);
+      expect(existsSync(pause)).toBe(true);
+      expect(staging()).toHaveLength(1);
+      process.kill(-child.pid, "SIGINT"); // the terminal's Ctrl-C reaches the whole foreground group
+    } finally {
+      rmSync(pause, { force: true });
+    }
     expect(await child.exited).toBe(130);
     expect(await new Response(child.stderr).text()).toContain("interrupted");
     expect(staging()).toEqual([]);
