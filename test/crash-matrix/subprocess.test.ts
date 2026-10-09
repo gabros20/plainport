@@ -39,7 +39,7 @@ import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { localStores } from "../../packages/cli/src/stores.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import type { RecoveryReport } from "../../packages/core/src/recover/recover.ts";
-import { captureTree, type TreeCapture } from "../../packages/core/src/testing/invariants.ts";
+import { captureTree, namesIn, type TreeCapture } from "../../packages/core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandbox.ts";
 import { hostTarget } from "../../packages/core/src/tools.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
@@ -405,7 +405,7 @@ class RowRun {
       return;
     }
     const trash = join(this.root, ".plainport-trash");
-    for (const op of existsSync(trash) ? readdirSync(trash) : []) {
+    for (const op of namesIn(trash)) {
       const moved = join(trash, op, "web");
       if (existsSync(moved)) this.released = captureTree(moved);
     }

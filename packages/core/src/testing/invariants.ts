@@ -26,6 +26,7 @@ import { join } from "node:path";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogState, foldCatalog } from "../catalog/fold.ts";
 import { readEvents, storeEventLog } from "../catalog/log.ts";
+import { systemErrorCode } from "../io.ts";
 import { type Journal, JournalSchema, journalFile } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
@@ -81,14 +82,26 @@ const projectJournals = (subject: InvariantSubject): Journal[] => {
     .filter((j): j is Journal => j !== undefined && j.project.id === subject.project.id);
 };
 
+/**
+ * The names in a folder, or none once it is gone. An offload's detached delete removes the emptied trash holder
+ * whenever it finishes, so checking that a holder exists and then listing it races that delete (Linux CI, 0.1.0).
+ */
+export const namesIn = (dir: string): string[] => {
+  try {
+    return readdirSync(dir);
+  } catch (error) {
+    if (systemErrorCode(error) === "ENOENT") return [];
+    throw error;
+  }
+};
+
 /** Trash and staging folders whose operation is finished: no journal, or released with its deadline passed. */
 const leftovers = (subject: InvariantSubject, now: Date): string[] => {
   const found: string[] = [];
   for (const root of subject.roots) {
     for (const holder of [".plainport-trash", ".plainport-staging"]) {
       const dir = join(root, holder);
-      if (!existsSync(dir)) continue;
-      for (const name of readdirSync(dir)) {
+      for (const name of namesIn(dir)) {
         const journal = readJournal(subject.paths, name);
         const open =
           journal !== undefined &&

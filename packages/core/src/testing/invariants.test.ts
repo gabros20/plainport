@@ -1,10 +1,13 @@
 // Invariants 4–6 on a catalog (catalogInvariantViolations): what the crash matrix asserts after every recover.
 
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { foldCatalog } from "../catalog/fold.ts";
 import { ulid } from "../ulid.ts";
-import { catalogInvariantViolations } from "./invariants.ts";
+import { catalogInvariantViolations, namesIn } from "./invariants.ts";
 
 const device = ulid();
 const other = ulid();
@@ -152,5 +155,23 @@ describe("catalogInvariantViolations", () => {
     expect(check([offloaded(first), discarded(failed, restic("a"))], [restic("a")])).toEqual([
       `invariant 6: ${failed} is discarded although an offloaded event names it`,
     ]);
+  });
+});
+
+// An offload's detached delete removes the emptied trash holder whenever it finishes; a check-then-list of the
+// holder raced it and threw ENOENT out of invariant 3 on Linux CI (release 0.1.0).
+describe("namesIn: listing a holder a detached delete may remove", () => {
+  test("a folder that is gone lists nothing; one that is there lists its names; a file still throws", () => {
+    const dir = mkdtempSync(join(tmpdir(), "plainport-names-in-"));
+    try {
+      mkdirSync(join(dir, "holder/op"), { recursive: true });
+      writeFileSync(join(dir, "file"), "");
+      expect(namesIn(join(dir, "holder"))).toEqual(["op"]);
+      rmSync(join(dir, "holder"), { recursive: true });
+      expect(namesIn(join(dir, "holder"))).toEqual([]);
+      expect(() => namesIn(join(dir, "file"))).toThrow("ENOTDIR");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

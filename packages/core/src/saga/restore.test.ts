@@ -22,7 +22,7 @@ import { setUpStore } from "../store.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { testHost } from "../testing/host.ts";
-import { captureTree, type TreeCapture } from "../testing/invariants.ts";
+import { captureTree, namesIn, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { settledOffload } from "../testing/settle.ts";
@@ -171,7 +171,7 @@ const without = (tree: TreeCapture, prefix: string): TreeCapture =>
 
 const waitTrashGone = async () => {
   const holder = join(box.home, "work/.plainport-trash");
-  for (let i = 0; i < 400 && existsSync(holder) && readdirSync(holder).length > 0; i++) await Bun.sleep(25);
+  for (let i = 0; i < 400 && namesIn(holder).length > 0; i++) await Bun.sleep(25);
 };
 
 describe("restore: a snapshot side by side (D58)", () => {
