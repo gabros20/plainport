@@ -6,7 +6,7 @@ plainport was designed in a claude.ai conversation between 29 September and 2 Oc
 
 ## Where things stand
 
-- **M1 (local core) closed on 4 October 2026, release v0.1.0.** plainport offloads a project to a local store and onloads it back on one Mac:
+- **M1 (local core) closed on 4 October 2026, released as v0.1.0 on 9 October 2026.** plainport offloads a project to a local store and onloads it back on one Mac:
   - `offload`: plan, preflight, scan, restic snapshot, verify, then release into a trash that a detached delete or `gc` clears;
   - `onload`: restore into staging, verify, swap into place, then a frozen install through the Node plugin (npm, pnpm, Yarn Classic and Berry, Bun);
   - `recover` finishes or rolls back any interrupted operation from its journal;

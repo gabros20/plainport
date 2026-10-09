@@ -1,6 +1,6 @@
 # plainport roadmap
 
-4 October 2026 · M0 and M1 closed (`v0.1.0`), M2 next
+9 October 2026 · M0 and M1 closed (`v0.1.0`), M2 next
 
 This is the staged delivery plan for `docs/DESIGN.md`. Each milestone is split into phases, each phase into
 tasks that `/orchestrate` can run one by one. The milestone being built has a full plan file in `docs/plans/`; later
@@ -67,7 +67,7 @@ M0 is documentation only, so it closes with a commit and no release.
 
 ## M1 · Local core
 
-Done on 2026-10-04, released as `v0.1.0`. Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
+Done on 2026-10-04, released as `v0.1.0` on 2026-10-09. Full plan: [`docs/plans/M1-local-core.md`](plans/M1-local-core.md). Phases:
 
 1. **Scaffold, factory floor and toolchain.** Bun workspace with `core`, `contract`, `cli`, `engine-restic`,
    `blob-fs`, `eco-node`, `host-macos`; the four scripts; `VERSION`, `CHANGELOG.md`, `.bun-version`; Biome,
