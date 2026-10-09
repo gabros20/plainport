@@ -3,6 +3,8 @@
 Notable changes to plainport, newest first. The format follows [Keep a Changelog](https://keepachangelog.com).
 The *why* behind decisions lives in the ADRs (`docs/adr/`); this file records *what changed*.
 
+## [Unreleased]
+
 ## [0.1.1] — 2026-10-10
 
 ### Fixed
