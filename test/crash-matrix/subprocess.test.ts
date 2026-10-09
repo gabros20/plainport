@@ -611,28 +611,24 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
   //    kill would. If restic had already written its snapshot when it was frozen (a slow machine: the upload finished
   //    between the pack and the freeze), the attempt is the second case, not this one: it is run again, at most three
   //    times, and never passes as this case.
-  // 2. Committed: plainport is frozen as soon as its restic backup starts, restic runs to its end alone and writes its
-  //    snapshot, then plainport is killed before it could journal offload.snapshot.done. DESIGN's rule for the step
-  //    (roll back) and D28 (d) keep that snapshot in the repository, named by no event, never a head.
+  // 2. Committed: plainport is frozen as soon as its restic backup starts, restic runs alone until its snapshot file
+  //    is in the repository's snapshots/ (polled, with a deadline), then plainport is killed before it could journal
+  //    offload.snapshot.done. DESIGN's rule for the step (roll back) and D28 (d) keep that snapshot in the repository,
+  //    named by no event, never a head. An attempt in which restic wrote no snapshot misses this case's precondition:
+  //    it is run again, at most three times, and never passes.
   //
   // Both demand: recover rolled back (the rule allows nothing else but pending, which the row refuses), the folder is
-  // untouched, and a later offload succeeds over what the dead restic left (a lock, packs) and becomes the head.
+  // untouched, and a later offload succeeds over what the dead restic left (a lock, packs) and becomes the head. An
+  // attempt that missed its precondition is a setup misfire, reported as one, never as a product failure.
   macRow(
     `${MATRIX_POINTS.upload} · mid-upload SIGKILL of plainport and restic's process group`,
     async () => {
-      for (let attempt = 1; ; attempt++) {
-        try {
-          const { problems, leftover } = await uploadCrashRow("mid-upload");
-          expect(problems).toEqual([]);
-          // The kill really landed mid-upload: packs written, the dead restic's lock left, no snapshot yet.
-          expect(leftover.packs).toBeGreaterThan(0);
-          expect(leftover.locks).toBeGreaterThan(0);
-          expect(leftover.snapshots).toBe(0);
-          return;
-        } catch (error) {
-          if (!(error instanceof CommittedBeforeFreeze) || attempt === 3) throw error;
-        }
-      }
+      const { problems, leftover } = await uploadCrashRowRetried("mid-upload");
+      expect(problems).toEqual([]);
+      // The kill really landed mid-upload: packs written, the dead restic's lock left, no snapshot yet.
+      expect(leftover.packs).toBeGreaterThan(0);
+      expect(leftover.locks).toBeGreaterThan(0);
+      expect(leftover.snapshots).toBe(0);
     },
     TEST_MS,
   );
@@ -640,7 +636,7 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
   macRow(
     `${MATRIX_POINTS.upload} · restic committed its snapshot, plainport killed before journaling it`,
     async () => {
-      const { problems, leftover } = await uploadCrashRow("committed");
+      const { problems, leftover } = await uploadCrashRowRetried("committed");
       expect(problems).toEqual([]);
       expect(leftover.snapshots).toBe(1);
     },
@@ -648,8 +644,27 @@ describeT1("crash matrix, SIGKILL subprocess", () => {
   );
 });
 
-/** A mid-upload attempt in which restic had already written its snapshot when it was frozen. */
-class CommittedBeforeFreeze extends Error {}
+/** An attempt whose scenario's precondition did not happen: a setup misfire, not a product failure. */
+class PreconditionMissed extends Error {}
+
+/** An upload-crash row, run again when its precondition was missed, at most three times. */
+const uploadCrashRowRetried = async (mode: "mid-upload" | "committed") => {
+  const missed: string[] = [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await uploadCrashRow(mode);
+    } catch (error) {
+      if (!(error instanceof PreconditionMissed)) throw error;
+      missed.push(`attempt ${attempt}: ${error.message}`);
+      console.warn(
+        `crash matrix: the ${mode} row's precondition missed (${error.message}); running it again`,
+      );
+    }
+  }
+  throw new Error(
+    `setup misfire, not a product failure: the ${mode} precondition never held (${missed.join("; ")})`,
+  );
+};
 
 /** The restic backups a process is running: its restic children whose arguments say backup. */
 const backups = (parent: number): number[] =>
@@ -662,15 +677,14 @@ const backups = (parent: number): number[] =>
       .includes(" backup "),
   );
 
-/** Whether a process has ended (gone, or a zombie its frozen parent has not reaped). */
+/** Whether a process has ended: gone, or a zombie its frozen parent has not reaped (only a ps that answered says so). */
 const ended = (pid: number): boolean => {
-  const stat = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], {
+  if (!alive(pid)) return true;
+  const ps = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], {
     env: { PATH: "/usr/bin:/bin" },
     stdout: "pipe",
-  })
-    .stdout.toString()
-    .trim();
-  return stat === "" || stat.startsWith("Z");
+  });
+  return ps.exitCode === 0 && ps.stdout.toString().trim().startsWith("Z");
 };
 
 const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
@@ -690,14 +704,16 @@ const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
       });
       const child = r.spawn(offloadArgs);
       const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-      const deadline = Date.now() + 120_000;
+      // Generous: a loaded CI runner derives restic's key slowly.
+      const deadline = Date.now() + 180_000;
       let restic: number[] = [];
       const waitFor = async (what: string, done: () => boolean) => {
         while (!done()) {
           if (child.exitCode !== null || Date.now() > deadline) {
             r.stop();
             const [out, err] = await output;
-            throw new Error(`${what} never came (exit ${child.exitCode}): ${err}${out}`);
+            // The run outran the test (it ended, or the deadline passed, before the moment it needed): a misfire.
+            throw new PreconditionMissed(`${what} never came (exit ${child.exitCode}): ${err}${out}`);
           }
           await Bun.sleep(2);
         }
@@ -708,9 +724,22 @@ const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
       });
       for (const pid of restic) r.groups.add(pid);
       if (mode === "committed") {
-        // plainport stands still; restic runs to its end alone, and plainport never sees it finish.
+        // plainport stands still; restic runs alone until its snapshot is in the repository, and plainport never sees
+        // it finish. Then restic is given a moment to end (it unlocks after the snapshot); if it is still running,
+        // it is killed with its snapshot already written, which is the state this case needs.
         signal(child.pid, "SIGSTOP");
-        await waitFor("restic's end", () => restic.every(ended));
+        const snapshotted = () => countFiles(join(repo, "snapshots")) > 0;
+        while (!snapshotted() && !restic.every(ended) && Date.now() < deadline) await Bun.sleep(5);
+        if (!snapshotted()) {
+          r.stop();
+          throw new PreconditionMissed(
+            restic.every(ended)
+              ? "restic ended without writing a snapshot"
+              : "no snapshot within the deadline",
+          );
+        }
+        const settle = Date.now() + 30_000;
+        while (!restic.every(ended) && Date.now() < settle) await Bun.sleep(10);
       } else {
         await waitFor("a pack of the upload", () => countFiles(join(repo, "data")) > 0);
         signal(child.pid, "SIGSTOP");
@@ -727,7 +756,7 @@ const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
       while (restic.some(alive) && Date.now() < gone) await Bun.sleep(10);
       if (restic.some(alive)) throw new Error(`restic ${restic.join(", ")} outlived its SIGKILL`);
       if (mode === "mid-upload" && leftover.snapshots > 0)
-        throw new CommittedBeforeFreeze("restic had written its snapshot before it was frozen");
+        throw new PreconditionMissed("restic had written its snapshot before it was frozen");
     },
     after: async (r, crashedOp) => {
       const later = await r.run(offloadArgs);
