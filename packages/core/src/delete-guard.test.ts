@@ -1,7 +1,7 @@
 // The one guard before every recursive delete (D87): the tree itself decides, whatever config or spelling say.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
 import { deleteGuard } from "./delete-guard.ts";
@@ -194,19 +194,18 @@ describe("delete guard (D87)", () => {
     expect(await refusal()).toContain("store ssd");
   });
 
-  test("a 100k-file tree is walked in a bounded time", async () => {
-    // node_modules-like: 2,000 packages of 50 files in a few levels.
+  test("a node_modules-like tree of 5,000 files is walked whole: a store marker deep in it is found (T1 times 100k)", async () => {
     const big = box.dir("work/.plainport-trash/01ARYZ6S450000000000000000");
-    for (let p = 0; p < 2000; p++) {
+    for (let p = 0; p < 100; p++) {
       const pkg = join(big, "node_modules", `pkg-${p}`, "lib");
       mkdirSync(pkg, { recursive: true });
       for (let f = 0; f < 50; f++) writeFileSync(join(pkg, `f${f}.js`), "");
     }
-    const started = performance.now();
     expect(await refusal(big)).toBe("allowed");
-    const ms = Math.round(performance.now() - started);
-    console.log(`delete guard: 100,000 files in 4,001 folders walked in ${ms} ms`);
-    expect(ms).toBeLessThan(30_000);
-    expect(existsSync(big)).toBe(true);
-  }, 120_000);
+    box.file(
+      "work/.plainport-trash/01ARYZ6S450000000000000000/node_modules/pkg-73/lib/deep/meta/v1/store.json",
+      "{}",
+    );
+    expect(await refusal(big)).toContain("pkg-73/lib/deep is a store plainport made");
+  }, 30_000);
 });

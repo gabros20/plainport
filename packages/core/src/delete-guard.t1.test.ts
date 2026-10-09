@@ -2,7 +2,7 @@
 // is refused by the guard before anything is deleted, so neither the mounted volume's files nor the trash go.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { attachImage, type DiskImage } from "../../../test/disk-image.ts";
 import { describeT1 } from "../../../test/tiers.ts";
@@ -43,3 +43,30 @@ if (process.platform === "darwin") {
     });
   });
 }
+
+// D87's cost on a node_modules-sized tree, tracked over time: 100,000 files in 4,001 folders. T1, since a slow CI disk
+// spends most of it making the files; the budget is generous and the measured time is logged.
+describeT1("delete guard on a 100k-file tree (D87)", () => {
+  test("is walked whole within its budget (60 s), and the time is logged", async () => {
+    const box = makeSandbox("plainport-guard-100k-");
+    try {
+      box.file(".config/plainport/config.toml", 'version = 1\n[roots.work]\non = { mbp = "~/work" }\n');
+      const made = await ensureDevice(testHost(), box.paths, { role: "owner", name: "mbp" });
+      if (!made.ok) throw new Error(made.finding.message);
+      const big = box.dir("work/.plainport-trash/01ARYZ6S450000000000000000");
+      for (let p = 0; p < 2000; p++) {
+        const pkg = join(big, "node_modules", `pkg-${p}`, "lib");
+        mkdirSync(pkg, { recursive: true });
+        for (let f = 0; f < 50; f++) writeFileSync(join(pkg, `f${f}.js`), "");
+      }
+      const started = performance.now();
+      const result = await deleteGuard({ io: testHost(), paths: box.paths, env: { HOME: box.home } }, big);
+      const ms = Math.round(performance.now() - started);
+      console.log(`delete guard: 100,000 files in 4,001 folders walked in ${ms} ms`);
+      expect(result.ok ? "allowed" : result.finding.message).toBe("allowed");
+      expect(ms).toBeLessThan(60_000);
+    } finally {
+      box.cleanup();
+    }
+  }, 120_000);
+});
