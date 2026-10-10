@@ -204,60 +204,66 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     return { gated, wait: () => allRefused };
   };
 
-  test("when both candidates are visible before either lists, both end contested and nothing is published", async () => {
-    const w = world(NO_CREATE);
-    const { gated, wait } = bothVisible(w);
-    const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
-    for (const d of devices) d.target.blob = gated;
-    const results = await Promise.all(devices.map((d) => d.run()));
-    for (const r of results) {
-      const f = failed(r);
-      expect(f.finding.code).toBe("store.bootstrap-contested");
-      expect(f.finding.fix).toContain("every device");
-      expect(f.data).toMatchObject({ outcome: "contested", undecided: [] });
-    }
-    expect(w.store.data.has(STORE_IDENTITY_KEY)).toBe(false);
-    for (const d of devices) {
-      expect(await d.recorded()).toBeUndefined();
-      // Settled: a final contested leaves no journal, and its repository is left for store test to list.
-      expect(await d.journals()).toEqual([]);
-    }
-    expect([...w.repos.keys()].filter((k) => k.startsWith("repos/"))).toHaveLength(2);
-  });
+  for (const [route, options] of [
+    ["conditional create", {}],
+    ["sole candidate", NO_CREATE],
+  ] as const) {
+    test(`${route}: when both candidates are visible before either lists, both end contested and nothing is published`, async () => {
+      const w = world(options);
+      const { gated, wait } = bothVisible(w);
+      const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
+      for (const d of devices) d.target.blob = gated;
+      const results = await Promise.all(devices.map((d) => d.run()));
+      for (const r of results) {
+        const f = failed(r);
+        expect(f.finding.code).toBe("store.bootstrap-contested");
+        expect(f.finding.fix).toContain("every device");
+        expect(f.data).toMatchObject({ outcome: "contested", undecided: [] });
+      }
+      expect(w.store.data.has(STORE_IDENTITY_KEY)).toBe(false);
+      for (const d of devices) {
+        expect(await d.recorded()).toBeUndefined();
+        // Settled: a final contested leaves no journal, and its repository is left where it is.
+        expect(await d.journals()).toEqual([]);
+      }
+      expect([...w.repos.keys()].filter((k) => k.startsWith("repos/"))).toHaveLength(2);
+    });
 
-  test("a contested attempt writes nothing after its candidate but its own refusal", async () => {
-    const w = world(NO_CREATE);
-    const { gated, wait } = bothVisible(w);
-    const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
-    for (const d of devices) d.target.blob = gated;
-    const results = await Promise.all(devices.map((d) => d.run()));
-    const attempts = results.map((r) => (failed(r).data as { candidates: string[] }).candidates).at(0) ?? [];
-    expect(keysUnder(w.store, "")).toEqual(
-      attempts
-        .flatMap((id) => [`${STORE_CLAIMS_PREFIX}${id}.json`, `${STORE_CLAIMS_PREFIX}${id}.refused`])
-        .sort(),
-    );
-  });
+    test(`${route}: a contested attempt writes nothing after its candidate but its own refusal`, async () => {
+      const w = world(options);
+      const { gated, wait } = bothVisible(w);
+      const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
+      for (const d of devices) d.target.blob = gated;
+      const results = await Promise.all(devices.map((d) => d.run()));
+      const attempts =
+        results.map((r) => (failed(r).data as { candidates: string[] }).candidates).at(0) ?? [];
+      expect(keysUnder(w.store, "")).toEqual(
+        attempts
+          .flatMap((id) => [`${STORE_CLAIMS_PREFIX}${id}.json`, `${STORE_CLAIMS_PREFIX}${id}.refused`])
+          .sort(),
+      );
+    });
 
-  test("after a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win", async () => {
-    const w = world(NO_CREATE);
-    const { gated, wait } = bothVisible(w);
-    const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
-    for (const d of devices) d.target.blob = gated;
-    const results = await Promise.all(devices.map((d) => d.run()));
-    const fix = failed(results[0] as Result<BootstrapDone>).finding.fix ?? "";
-    // The fix names every file to remove; nothing else runs meanwhile.
-    for (const key of keysUnder(w.store, STORE_CLAIMS_PREFIX)) {
-      expect(fix).toContain(key);
-      await w.store.delete(key);
-    }
-    const [a] = devices as [(typeof devices)[0]];
-    a.target.blob = w.store;
-    const retry = done(await a.run());
-    expect(retry.outcome).toBe("published");
-    expect(publishedStore(w.store)?.id).toBe(retry.id);
-    expect(await a.recorded()).toBe(retry.id);
-  });
+    test(`${route}: after a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win`, async () => {
+      const w = world(options);
+      const { gated, wait } = bothVisible(w);
+      const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
+      for (const d of devices) d.target.blob = gated;
+      const results = await Promise.all(devices.map((d) => d.run()));
+      const fix = failed(results[0] as Result<BootstrapDone>).finding.fix ?? "";
+      // The fix names every file to remove; nothing else runs meanwhile.
+      for (const key of keysUnder(w.store, STORE_CLAIMS_PREFIX)) {
+        expect(fix).toContain(key);
+        await w.store.delete(key);
+      }
+      const [a] = devices as [(typeof devices)[0]];
+      a.target.blob = w.store;
+      const retry = done(await a.run());
+      expect(retry.outcome).toBe("published");
+      expect(publishedStore(w.store)?.id).toBe(retry.id);
+      expect(await a.recorded()).toBe(retry.id);
+    });
+  }
 
   test("the loser reports store.bootstrap-lost naming the winner, records nothing and never touches the winner's repository", async () => {
     const w = world(NO_CREATE);

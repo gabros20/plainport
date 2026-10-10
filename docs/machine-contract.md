@@ -278,9 +278,9 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
 | `store.locked` | block | no | 11 | Another plainport process on this device is setting this store up |
 | `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); fix is plainport init |
-| `store.root-claim-contested` | block | no | 8 | No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run |
-| `store.root-claim-undecided` | block | no | 6 | The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later |
+| `store.root-contested` | block | no | 8 | No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run |
 | `store.root-mismatch` | block | no | 6 | The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store |
+| `store.root-undecided` | block | no | 6 | The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later |
 | `store.secret-missing` | block | no | 6 | The store's repository password could not be read from its secret reference (env: or file: in M1) |
 | `store.semantics-unknown` | block | no | 6 | The store's semantics profile lacks a property this operation needs (read-after-write, whole publication, complete listings, durability…), or does not know it; the message names the property, the operation refuses before writing, and the store stays usable for what its profile allows (Q8) |
 | `store.setup-pending` | warn | no | 6 | init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable |

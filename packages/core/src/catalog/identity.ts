@@ -179,9 +179,26 @@ export const readStoreIdentity = async (store: BlobStore): Promise<Result<string
   const found = await inspect(store);
   if (!found.ok) return found;
   if (found.value.kind === "absent") return ok(null);
-  if (found.value.kind === "id") return ok(found.value.id);
+  if (found.value.kind === "id") return m1Only(found.value.descriptor);
   return refuse(found.value);
 };
+
+/**
+ * The id of a format-1 store. M1's paths (setup, the catalog, recover) bind restic at `repo/`, so on a format-2 store
+ * they would read, or `restic init`, a repository the store does not publish: they fail closed with store.unsupported
+ * before anything is written, until a format-2 store's `repo` is wired (Task 18). Bootstrap reads format 2 through
+ * readStoreDescriptor.
+ */
+const m1Only = (found: StoreDescriptor): Result<string> =>
+  found.format === 1
+    ? ok(found.id)
+    : fail(
+        finding("store.unsupported", {
+          message: `the store's ${STORE_IDENTITY_KEY} is format 2 (store ${found.id}, its repository at ${found.repo}), which this command cannot use yet: it reads format-1 stores only; nothing was written`,
+          fix: "use this store with a plainport version that sets up and reads format-2 stores, or point this name at a format-1 store",
+          paths: [STORE_IDENTITY_KEY],
+        }),
+      );
 
 /** What the store's identity file says (either format), null when it has none, or a failure as readStoreIdentity's. */
 export const readStoreDescriptor = async (store: BlobStore): Promise<Result<StoreDescriptor | null>> => {
@@ -204,7 +221,10 @@ export const ensureStoreIdentity = async (
 ): Promise<Result<{ id: string; created: boolean }>> => {
   const found = await inspect(store);
   if (!found.ok) return found;
-  if (found.value.kind === "id") return ok({ id: found.value.id, created: false });
+  if (found.value.kind === "id") {
+    const id = m1Only(found.value.descriptor);
+    return id.ok ? ok({ id: id.value, created: false }) : id;
+  }
   if (found.value.kind === "damaged" || (found.value.kind === "torn" && found.value.hasEvents))
     return refuse(found.value);
   const identity: StoreIdentityV1 = { v: 1, id: mint() };

@@ -149,13 +149,13 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
-      "store.root-claim-contested": {
+      "store.root-contested": {
         severity: "block",
         allowable: false,
         exitCode: 8,
         summary: expect.any(String),
       },
-      "store.root-claim-undecided": {
+      "store.root-undecided": {
         severity: "block",
         allowable: false,
         exitCode: 6,

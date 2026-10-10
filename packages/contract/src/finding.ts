@@ -612,19 +612,12 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
   },
-  "store.root-claim-contested": {
+  "store.root-contested": {
     severity: "block",
     allowable: false,
     exitCode: 8,
     summary:
       "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run",
-  },
-  "store.root-claim-undecided": {
-    severity: "block",
-    allowable: false,
-    exitCode: 6,
-    summary:
-      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later",
   },
   "store.root-mismatch": {
     severity: "block",
@@ -632,6 +625,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store",
+  },
+  "store.root-undecided": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later",
   },
   "store.secret-missing": {
     severity: "block",

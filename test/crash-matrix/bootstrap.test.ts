@@ -5,7 +5,11 @@
 // rule allows, with the store, the registry and the journal agreeing, and a second recovery with nothing to do.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { STORE_CLAIMS_PREFIX, STORE_IDENTITY_KEY } from "../../packages/core/src/catalog/identity.ts";
+import {
+  encodeStoreIdentityV2,
+  STORE_CLAIMS_PREFIX,
+  STORE_IDENTITY_KEY,
+} from "../../packages/core/src/catalog/identity.ts";
 import { InjectedFault } from "../../packages/core/src/ports/host.ts";
 import type { BootstrapRecoveryOutcome } from "../../packages/core/src/saga/bootstrap.ts";
 import {
@@ -93,6 +97,45 @@ describe("crash matrix: bootstrap", () => {
           const retry = await device.run();
           expect(retry.ok && retry.value.outcome).toBe("published");
         }
+      });
+    }
+  }
+});
+
+describe("crash matrix: bootstrap settles to lost", () => {
+  // Crashed while its election was open (before its own publication), the attempt finds on recovery that another
+  // device's attempt published meanwhile: it ends lost, records nothing and never reaches the winner's repository.
+  for (const [route, options] of ROUTES) {
+    for (const point of ["bootstrap.elect.start", "bootstrap.candidacy.written"] as const) {
+      test(`bootstrap · ${point} · a rival publishes before recovery · ${route}`, async () => {
+        const w = bootstrapWorld(options);
+        worlds.push(w);
+        const device = w.device("pw", { faults: { at: point } });
+        await expect(device.run()).rejects.toBeInstanceOf(InjectedFault);
+        const [attempt] = await device.journals();
+
+        const rival = ulid();
+        const theirs = w.device("rival").target.engineAt(`repos/${rival}`);
+        expect((await theirs.init()).ok).toBe(true);
+        await w.store.put(`${STORE_CLAIMS_PREFIX}${rival}.json`, record(rival, "candidate"));
+        await w.store.put(`${STORE_CLAIMS_PREFIX}${rival}.publishing`, record(rival, "publishing"));
+        await w.store.put(
+          STORE_IDENTITY_KEY,
+          encodeStoreIdentityV2({ id: rival, repo: `repos/${rival}`, seal: "none" }),
+        );
+
+        device.ports.faultAt = () => {};
+        const settled = await device.recover();
+        if (!settled.ok) throw new Error(settled.finding.message);
+        expect(settled.value.operations).toMatchObject([
+          { attempt, outcome: "lost", id: rival, finding: { code: "store.bootstrap-lost" } },
+        ]);
+        expect(await device.journals()).toEqual([]);
+        expect(await device.recorded()).toBeUndefined();
+        expect(publishedStore(w.store)?.id).toBe(rival);
+        expect(w.repos.get(`repos/${rival}`)?.access.every((a) => a.password === "rival")).toBe(true);
+        const again = await device.recover();
+        expect(again.ok && again.value.operations).toEqual([]);
       });
     }
   }

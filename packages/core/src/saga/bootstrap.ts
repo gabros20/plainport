@@ -515,7 +515,7 @@ const record = async (
       fail(
         finding("store.failed", {
           message: `store ${name}'s ${STORE_IDENTITY_KEY} ${back.value === null ? "is gone" : `names ${back.value.id}`}, not this attempt (${journal.op}), which published it; nothing was recorded`,
-          fix: `stop plainport on every device that uses the store ${name}, check ${STORE_IDENTITY_KEY} in the store (plainport never writes it twice), then run plainport recover`,
+          fix: `stop plainport on every device that uses the store ${name}, check ${STORE_IDENTITY_KEY} in the store (only the winning attempt writes it, and its recovery only completes a copy a crash tore), then run plainport recover`,
           paths: [STORE_IDENTITY_KEY],
         }),
       ),

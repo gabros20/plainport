@@ -229,7 +229,8 @@ Every recursive delete plainport makes goes through one guard (D87), run immedia
   repo/                      restic repository of an M1 store (format 1), and of one upgraded to format 2
   meta/v1/
     store.json               format 1 {v: 1, id}; format 2 {v: 2, id, repo, catalog: {seal}, format: 2}, published
-                             once by the winner of bootstrap's election ("Bootstrap" below)
+                             once by the winner of bootstrap's election ("Bootstrap" below; only the winner's own
+                             recovery completes a copy a crash tore, with the same bytes)
     store-claims/            bootstrap's candidates: <attempt>.json, <attempt>.publishing, <attempt>.refused (D99)
     root.json                the root the store serves {v: 1, root}, published once by the root claim's election
     root-claims/             the root claim's candidates, named by root id, as store-claims/
@@ -377,15 +378,22 @@ that is expected too.
 before, and a claim v0.1.x wrote create-only is a published winner), with candidates under `meta/v1/root-claims/`. The
 attempt's id is the root's ULID, which the offload records in `registry.json` before claiming, so a re-run stands
 again with the same id and the same root claiming from two devices is one attempt publishing one value. Won is the
-claim; lost names the root that holds it (`store.root-mismatch`); contested is `store.root-claim-contested` (exit 8,
-final, the quiesced cleanup) or `store.root-claim-undecided` (exit 6, re-run later).
+claim; lost names the root that holds it (`store.root-mismatch`); contested is `store.root-contested` (exit 8,
+final, the quiesced cleanup) or `store.root-undecided` (exit 6, re-run later).
 
 **Wiring.** The saga runs on the injected ports: the store's blob store, an engine at a location under the store's root
-(`engineAt`), the host's crash seam and a scheduler. The CLI reaches it with the remote engine targets (Task 18) and the
-`store` commands and `init` (Task 19), which also wire `recoverBootstraps` into `plainport recover`; until then M1's
-setup path still writes format 1. The crash matrix runs every bootstrap row (`BOOTSTRAP_ROWS`, from the exported steps,
-seams and branches) in-process, on a store with a proven conditional create and on one that elects by the
-sole-candidate rule.
+(`engineAt`), the host's crash seam and a scheduler. Task 18 wires it to the real engine and blob stores, wires
+`recoverBootstraps` into `plainport recover`, and runs the bootstrap crash rows again under a real kill (the subprocess
+variant); Task 19's `store add` and `init` start it. Until then M1's setup path writes format 1 only, and every M1 path
+that reads `store.json` (setup, the catalog, recover) refuses a format-2 store with `store.unsupported` before writing
+anything, since it would bind restic at `repo/` rather than the published `repo`. The crash matrix runs every bootstrap
+row (`BOOTSTRAP_ROWS`, from the exported steps, seams and branches) in-process, on a store with a proven conditional
+create and on one that elects by the sole-candidate rule, plus the rows that settle to `lost` (another attempt publishes
+while this one's election is open).
+
+The root claim's election writes reach the caller's crash seam through `after` too (D52). The claim runs before the
+offload's journal opens, after the root's id is recorded in `registry.json`, so a crash there is recovered by running the
+offload again: it stands with the same id, and its earlier decision stands.
 
 ## Machines: moving projects between devices
 

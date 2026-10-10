@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { InjectedFault } from "../ports/host.ts";
 import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
 import { claimStoreRoot, ROOT_CLAIM_KEY, ROOT_CLAIMS_PREFIX } from "./root-claim.ts";
@@ -42,7 +43,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     expect(results.filter((r) => r.ok && r.value.created).length).toBeLessThanOrEqual(1);
     if (roots.length === 0) {
       for (const r of results)
-        expect(r.ok ? "" : r.finding.code).toMatch(/^store\.root-claim-(contested|undecided)$/);
+        expect(r.ok ? "" : r.finding.code).toMatch(/^store\.root-(contested|undecided)$/);
       expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
     }
   });
@@ -62,24 +63,24 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
   const record = (id: string, decision: string) =>
     new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision })}\n`);
 
-  test("two roots that both stand and both refuse: store.root-claim-contested, nothing claimed, the fix is the quiesced cleanup", async () => {
+  test("two roots that both stand and both refuse: store.root-contested, nothing claimed, the fix is the quiesced cleanup", async () => {
     const store = memoryBlobStore();
     const [a, b] = [ulid(), ulid()];
     store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
     store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.refused`, record(b, "refused"));
     const result = await claimStoreRoot(store, a, { wait: async () => {} });
-    expect(result.ok ? "" : result.finding.code).toBe("store.root-claim-contested");
+    expect(result.ok ? "" : result.finding.code).toBe("store.root-contested");
     expect(result.ok ? "" : result.finding.fix).toContain("every device");
     expect(result.ok ? "" : result.finding.message).toContain(b);
     expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
   });
 
-  test("a rival root that has not decided yet: store.root-claim-undecided, re-run later, nothing removed", async () => {
+  test("a rival root that has not decided yet: store.root-undecided, re-run later, nothing removed", async () => {
     const store = memoryBlobStore();
     const [a, b] = [ulid(), ulid()];
     store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
     const result = await claimStoreRoot(store, a, { wait: async () => {} });
-    expect(result.ok ? "" : result.finding.code).toBe("store.root-claim-undecided");
+    expect(result.ok ? "" : result.finding.code).toBe("store.root-undecided");
     expect(result.ok ? "" : result.finding.message).toContain(b);
     expect(result.ok ? "" : result.finding.fix).toContain("re-run");
     expect(store.data.has(`${ROOT_CLAIMS_PREFIX}${b}.json`)).toBe(true);
@@ -161,5 +162,39 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     store.failNext("get");
     const result = await claimStoreRoot(store, ulid());
     expect(result.ok ? "" : result.finding.code).toBe("store.unreachable");
+  });
+
+  test("a crash right after each of the claim's election writes (D52 seams), then a re-run with the root's id, claims it", async () => {
+    for (const point of ["candidacy", "publishing", "publication"] as const) {
+      const store = memoryBlobStore();
+      const root = ulid();
+      const crashed = claimStoreRoot(store, root, {
+        wait: async () => {},
+        after: (write) => {
+          if (write === point) throw new InjectedFault(`offload.root-claim.${write}`);
+        },
+      });
+      await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+      const again = await claimStoreRoot(store, root, { wait: async () => {} });
+      expect(again.ok && again.value.root).toBe(root);
+      expect(text(store.data.get(ROOT_CLAIM_KEY))).toBe(claimFile(root));
+    }
+  });
+
+  test("a crash right after a root's refusal, then a re-run: the refusal stands, and it never claims", async () => {
+    const store = memoryBlobStore();
+    const [a, b] = [ulid(), ulid()];
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
+    const crashed = claimStoreRoot(store, a, {
+      wait: async () => {},
+      after: (write) => {
+        if (write === "refusal") throw new InjectedFault("offload.root-claim.refusal");
+      },
+    });
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+    store.data.delete(`${ROOT_CLAIMS_PREFIX}${b}.json`);
+    const again = await claimStoreRoot(store, a, { wait: async () => {} });
+    expect(again.ok ? "" : again.finding.code).toBe("store.root-contested");
+    expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
   });
 });

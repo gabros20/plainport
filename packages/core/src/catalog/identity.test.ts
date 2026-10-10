@@ -3,6 +3,7 @@ import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
 import {
   encodeStoreIdentityV2,
+  ensureStoreIdentity,
   readStoreDescriptor,
   readStoreIdentity,
   STORE_IDENTITY_KEY,
@@ -39,7 +40,13 @@ describe("store identity: format 1 and format 2 (Q2)", () => {
       ok: true,
       value: { format: 2, id, repo: `repos/${id}`, seal: "v1" },
     });
-    expect(await readStoreIdentity(store)).toEqual({ ok: true, value: id });
+    // M1's paths (setup, the catalog, recover) bind restic at repo/, so they fail closed on format 2 until its repo is
+    // wired (Task 18): only readStoreDescriptor, which bootstrap reads, accepts it.
+    const m1 = await readStoreIdentity(store);
+    expect(m1.ok ? "" : m1.finding.code).toBe("store.unsupported");
+    const ensured = await ensureStoreIdentity(store, () => ulid());
+    expect(ensured.ok ? "" : ensured.finding.code).toBe("store.unsupported");
+    expect(store.calls.put).toBe(0);
   });
 
   test("a format-2 file is strict: unknown keys, a repository outside the store's layout or a mismatched format refuse", async () => {
