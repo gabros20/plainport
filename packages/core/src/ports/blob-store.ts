@@ -199,7 +199,7 @@ export const requireEligible = (
   return fail(
     finding("store.semantics-unknown", {
       message: `the store ${context.store} cannot ${DOING[op]}: its ${lacks}; nothing was written for it`,
-      fix: `run plainport store test ${context.store} to measure the store, or use a store that provides ${verdictOf.missing.join(", ")}; the store stays usable for what its profile allows`,
+      fix: `use a store whose profile provides ${verdictOf.missing.join(", ")} for this (a local disk provides every property); the store ${context.store} stays usable for what its profile allows`,
     }),
   );
 };

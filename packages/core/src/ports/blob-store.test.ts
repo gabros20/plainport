@@ -136,7 +136,7 @@ describe("store semantics: refusals", () => {
     if (refused.ok) throw new Error("unreachable");
     expect(refused.finding.message).toContain("readAfterWrite");
     expect(refused.finding.message).toContain("nas");
-    expect(refused.finding.fix).toContain("plainport store test nas");
+    expect(refused.finding.fix).toContain("readAfterWrite");
   });
 
   test("a refused operation leaves the store usable for the others", () => {

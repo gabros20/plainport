@@ -203,7 +203,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     fail(
       finding("store.failed", {
         message: `the store ${name} did not show ${key} right after it was written, which its profile promises; nothing more was written`,
-        fix: `run plainport store test ${name} to measure the store again, then re-run`,
+        fix: `the store ${name} does not behave as its semantics profile says; re-run, and if it happens again use another store for this`,
         paths: [key],
       }),
     );

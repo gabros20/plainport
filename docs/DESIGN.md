@@ -263,7 +263,7 @@ A local disk shows a write at once, lists every file and renames whole. A bucket
 | `commit` | `append` and `elect` |
 | `release` (delete a local folder) | `commit` and `durability = durable`, or `durability = acked-unsynced` with Q21's post-grace proof |
 
-`unknown` fails every predicate that names the property. A missing or unknown `conditionalCreate` alone only routes elections to the sole-candidate fallback, so it is never what an election refuses on. An operation whose predicate fails refuses before writing with `store.semantics-unknown`, naming each property it lacks and its state, and the fix names `plainport store test <name>`.
+`unknown` fails every predicate that names the property. A missing or unknown `conditionalCreate` alone only routes elections to the sole-candidate fallback, so it is never what an election refuses on. An operation whose predicate fails refuses before writing with `store.semantics-unknown`, naming each property it lacks and its state; the fix names the properties a store must provide (a measuring command joins it when `store test` lands).
 
 **Publication rules** (`packages/core/src/catalog/publish.ts`).
 
