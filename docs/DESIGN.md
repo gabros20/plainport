@@ -205,7 +205,7 @@ A generic SDK would copy 30,000 to 300,000 small files one by one, with no dedup
 | [Flystorage](https://github.com/deltic-oss/flystorage) | TypeScript file-storage abstraction by the Flysystem author | None listed | Good API, but no compare-and-swap |
 | [unstorage](https://unstorage.unjs.io/drivers/s3) | unjs key-value layer with many drivers | None | Key-value, not files |
 
-The choice is low-risk because every adapter sits behind the six-method `BlobStore` interface (section below): `node:fs` for local disks and mounts, the peer's own RPC for devices running plainport, and rclone for buckets and SFTP. Swapping in OpenDAL later means writing one adapter.
+The choice is low-risk because every adapter sits behind the small `BlobStore` interface (section below; its semantics profile is in "Remote stores: consistency and publication"): `node:fs` for local disks and mounts, the peer's own RPC for devices running plainport, and rclone for buckets and SFTP. Swapping in OpenDAL later means writing one adapter.
 
 **Store kinds.** One store definition in config produces both the restic repository URL and the metadata location, so both layers always point at the same place.
 
@@ -234,6 +234,69 @@ Every recursive delete plainport makes goes through one guard (D87), run immedia
 ```
 
 The `Engine` interface keeps other engines possible later: rustic or Kopia, or a single-file `tar + zstd + age` engine for exports you can open with standard tools.
+
+## Remote stores: consistency and publication
+
+A local disk shows a write at once, lists every file and renames whole. A bucket or an SFTP server may not, and "S3-compatible" or "eventually consistent" says too little to build on (Q8). So every store states what it guarantees, each operation states what it needs, and an operation the store cannot support refuses, naming the property, while the store stays usable for the others.
+
+**The semantics profile.** `BlobStore.semantics()` returns typed properties (`StoreSemantics` in `packages/core/src/ports/blob-store.ts`). Each is a value with its evidence, `measured` (by `store test` on that store), `documented` (by the backend) or `asserted` (by the owner, or by plainport for its local stores), or it is `unknown`:
+
+| Property | Values | What it says |
+| --- | --- | --- |
+| `readAfterWrite` | yes, no | A get right after an acknowledged put sees it |
+| `listAfterWrite` | yes, no | A listing right after an acknowledged put names it |
+| `listComplete` | yes, no | A listing returns every key under the prefix, across every page |
+| `publication` | `atomic-put`, `temp-then-rename`, `in-place` | How `put` makes a value visible: the backend shows an object only when complete; or the adapter uploads to its own temporary and moves it onto the key (D98); or the bytes are written in place and a reader may see a torn prefix |
+| `conditionalCreate` | yes, no | `put(…, { ifNotExists })` is atomic: of racing writers exactly one creates the key |
+| `durability` | `durable`, `acked-unsynced`, `unknown` | Whether an acknowledged write survives the server's crash or power loss |
+| `cancellation` | `never-lands-late`, `may-land-late` | Whether a put that failed or was cancelled can still land afterwards |
+
+The profile's JSON Schema is published as `schemas/store-semantics.json`. `capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store kind whose properties are not yet measured reports `unknown` (rclone until Task 17).
+
+**Eligibility per operation.** One exported predicate each (`canRead`, `canAppend`, `canElect`, `canCommit`, `canRelease`):
+
+| Operation | Needs |
+| --- | --- |
+| `read` (catalog, `ls`) | a listing that works, which the call itself shows |
+| `append` | `publication ≠ in-place`, `readAfterWrite` |
+| `elect` | `conditionalCreate`, or `readAfterWrite ∧ listAfterWrite ∧ listComplete` |
+| `commit` | `append` and `elect` |
+| `release` (delete a local folder) | `commit` and `durability = durable`, or `durability = acked-unsynced` with Q21's post-grace proof |
+
+`unknown` fails every predicate that names the property. A missing or unknown `conditionalCreate` alone only routes elections to the sole-candidate fallback, so it is never what an election refuses on. An operation whose predicate fails refuses before writing with `store.semantics-unknown`, naming each property it lacks and its state; the fix names the properties a store must provide (a measuring command joins it when `store test` lands).
+
+**Q21's post-grace proof** (what admits an `acked-unsynced` store, such as SFTP, to release). The fault it covers is a server that acknowledged a write before syncing it and then lost it in a crash or power cut shortly after. Before release's checked delete of the trash (Q16), and no earlier than the conflict grace period after the commit:
+
+1. re-read the commit's catalog event from the store, fresh (not from the mirror), and check it is whole and is this operation's event;
+2. check that restic still lists the snapshot the event names, in the store's repository;
+3. only when both hold, delete. If either is missing, keep the trash and report `store.lost-write`; the folder is never deleted on the strength of a write that may not have reached the disk (D24).
+
+The same proof runs on every remote store, whatever its durability. The fault boundary: a server that loses acknowledged data later than the grace period is out of scope, as for any single store, since no later read could tell; Q21 accepts that residual, and only replication (M3) narrows it.
+
+**Publication rules** (`packages/core/src/catalog/publish.ts`).
+
+- An event is published whole, through `put` alone. The port's `put` is a whole, replacing write on every store that passes `append` (D98): an `atomic-put` backend shows an object only when complete, and a `temp-then-rename` adapter (rclone on SFTP) uploads to its own nonce-named temporary under a reserved prefix and moves it onto the key inside `put`, so a torn key is never visible under `meta/v1/events/`. The port has no rename and core never sees a temporary; core uses `put` and conditional create only.
+- **Unique writer.** An event key is a fresh ULID from its one writer; nobody else ever writes it.
+- **Idempotent retry.** A publish first reads the key and compares what is there with what it intends through an injected `SameEvent(existing, intended)` (R2-8): the same event is a no-op, another one is `store.key-exists`. So a lost acknowledgement (the write landed, the call failed) followed by a retry gives one event, not two. The plaintext catalog compares bytes; the codec compares opened events (Task 11). `SameEvent` returns a result: a failure (the existing object does not open) is returned as that failure, never as `store.key-exists`. A failed put whose read-back finds another event is `store.key-exists` and cannot land over it.
+- **A failed put is read back.** If the event is there, it was published. If it is absent on a store that never lands a put late (and shows writes at once), it never will be. Otherwise, and always on `may-land-late` (or `unknown`) stores, the failure carries `mayLand: true`: a cancelled put counts as possibly landed, and the caller must not act as if the event will never appear.
+- **Temporaries** belong to the adapter that made them: a `temp-then-rename` adapter's leftovers (a `put` that died between upload and move) are swept by age by `gc`, never by another write (D98).
+
+**The elected publication** (`elect` in `publish.ts`; Q9, D99) is the one rule bootstrap's `store.json` and the root claim use (Q9). An election names a published key, a candidates prefix (ending in "/", not containing the key), the attempt's id (letters, digits, "_" and "-") and the value to publish, which must name that id; anything else is a caller's bug and throws. It refuses exactly where `canElect` does, and its waits come from the caller's scheduler (no timer in core).
+
+**One protocol on every device.** Devices may hold different profiles of one store (each measures it into its own sidecar, Q4, and an unmeasured rclone store is `unknown`), so the route can never depend on the device: a device with a proven conditional create that skipped the candidates would not see a fallback device's candidacy, and both could win. Every attempt therefore follows the same steps, and only the final write follows the device's own profile. The invariant this rests on: each device's profile is true of the store (a property it does not know is `unknown`, never wrongly claimed).
+
+1. Read the published key. If it names a winner, the attempt has `won` (it names this attempt) or `lost` (it names another); a re-run of the same attempt is therefore safe.
+2. Write the candidacy `<candidates><id>.json` and list the candidates. A device without list-after-write (electing on its conditional create alone) counts its own candidacy even when the listing does not show it yet.
+   - As the sole candidate, write `<id>.publishing`, publish the value (a conditional create where this device's profile proves one, a plain put otherwise), and read it back. With strong visibility, of two candidates the later lister always sees the earlier one, so at most one is ever sole; where conditional create is proven it also bounds the winners to one should listings mislead.
+   - Seeing another candidate, write `<id>.refused` and read it back: this attempt never publishes, now or when re-run. If the refusal cannot be written or read back, the run ends with that error, never `contested`. Then re-read: a winner that turns up is `lost`; otherwise `contested`.
+
+The candidacy and the two decisions are the candidate record (D99): each file holds `{"v":1,"id":<attempt>,"decision":"candidate"|"publishing"|"refused"}` (`ElectionRecordSchema`, published as `schemas/election-record.json`). A decision counts only when its record validates and names the attempt and decision its file name says; a candidacy counts by its name alone, since an extra candidate only makes others refuse.
+
+`contested` has two forms (D99). It means no winner is published and this attempt refuses; it lists the visible candidates and the `undecided` ones, those without a refusal read back from the store, this attempt included. While any is undecided the outcome is not final: an undecided candidate may be a sole candidate that paused (a laptop asleep) between its listing and its publication, so the attempt says "re-run later", and its re-run ends `lost` if that candidate publishes. With none undecided, every visible candidate (this attempt's own refusal read back after its write) refuses (R2-7) and the outcome is final, provided this device's profile proves list-after-write and complete listings, because a candidate written after this attempt's listing lists after this candidacy was acknowledged, sees it and refuses. A device electing on its conditional create alone cannot make that argument (a lagging lister may still be sole, and win by its conditional create, which still bounds the winners to one), so its contested is never final: `undecided` keeps its own id and the fix says why; nothing is published, and the store needs the quiesced manual cleanup. No finite run of reads can make the undecided case final without a conditional write (a sole candidate can always pause between its last check and its write), so the markers make "every visible candidate refuses" something the store itself shows. A decision stands across re-runs: an attempt whose `.refused` is visible never publishes, and one whose `.publishing` was acknowledged (and has not refused) publishes even if others appeared since; a `.publishing` that failed is never acted on, so a refusal wins over it. Removing candidates by hand is safe only after stopping plainport on every device that uses the store, because files removed under a running election can let two attempts each be sole; the final contested outcome's fix says so and names the files. An attempt whose candidacy write failed and may still land stops; if it appears later it is undecided to others until that attempt's recovery re-runs and refuses.
+
+**A stable id, and the way out of undecided.** The caller journals the attempt's id before `elect` writes its candidacy, and recovery or a retry re-runs with that same id: only the same id can refuse or publish for an attempt, so a fresh id would leave the old candidacy undecided for everyone. Re-running an undecided attempt with its id decides it (it sees the others and refuses, or it was sole and publishes). If the attempt will never run again (its device is gone, its journal lost), an operator withdraws it: stop plainport on every device that uses the store and wait until none is running, then write its refusal on its behalf, `<candidates><id>.refused` holding exactly the record it would have written (`{"v":1,"id":<id>,"decision":"refused"}`), and re-run. A refusal wins over a `.publishing`, so the withdrawn attempt never publishes even if its device comes back. On a store whose writes may land late, a withdrawn attempt's cancelled publication can still appear; every attempt reads the published key first, so later attempts then see it as the winner. The undecided outcome's fix names the re-run and this rule; a command for it may come later. Since every device follows the candidate protocol, stores with a conditional create (S3, R2, a local disk) can also be left undecided by a crashed candidacy until a same-id re-run or a withdrawal; that is expected there too, not a fault.
+
+**Testing.** `testing/semantic-blob-store.ts` wraps the memory store with a switch for each weakness: delayed visibility, a listing that omits recent keys, a listing cut short, a torn in-place write (or a temp-then-rename `put` that tears only its own temporary), lost acknowledgements, and late landing after cancellation (a late conditional create keeps its condition). The contract suite is driven by each store's profile: create-only cases run only where conditional create is claimed, and a read or a listing right after a write is asserted at once only where read-after-write or list-after-write is claimed, otherwise after the fixture's settle or by polling within a bound. Its semantic cases probe what a profile claims (`semanticViolations`; whole publication is judged apart from visibility, a write that does not show within the polling bound is inconclusive rather than a violation, an I/O failure is an error and never a counterexample, every batch of probe writes settles before any failure is thrown, and every key the probe wrote is deleted by name, with a failed delete reported once all were tried) and check each predicate against what the backend expects: the local stores pass every one, a strong store without conditional create passes every one through the fallback, and an `acked-unsynced` store passes release only with Q21's proof. A fast-check scheduler runs every interleaving of two and three claimants on both final writes, mixed on one store (devices with and without a proven conditional create), with lost acknowledgements and with late landings: at most one ever wins, and a final `contested` never coexists with a win.
 
 ## Machines: moving projects between devices
 
@@ -1049,7 +1112,9 @@ export interface Engine {
 export interface BlobStore {
   // Every call returns a Result, as the Engine's do: an unmounted disk is store.unreachable, a create-only put on
   // an existing key is store.key-exists. A catalog is small, so list returns the whole listing, sorted by key.
-  capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean };
+  // put is a whole, replacing write; a temp-then-rename adapter does its temporary and move inside it (D98).
+  semantics(): StoreSemantics;                           // see "Remote stores: consistency and publication"
+  capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean }; // derived from semantics()
   get(key: string): Promise<Result<Uint8Array | null>>;
   put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<Result<{ etag?: string }>>;
   list(prefix: string): Promise<Result<{ key: string; size: number; etag?: string }[]>>;

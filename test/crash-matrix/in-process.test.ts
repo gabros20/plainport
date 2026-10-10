@@ -144,7 +144,7 @@ afterEach(async () => {
   } catch {}
   // A failed row may leave a detached delete running in the sandbox: let it finish before the sandbox goes.
   await settleJournals(box.paths).catch(() => {});
-  box.cleanup();
+  await box.cleanupSettled();
 });
 
 const env = () => ({ HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" });

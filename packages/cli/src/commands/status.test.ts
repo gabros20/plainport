@@ -78,7 +78,7 @@ beforeEach(async () => {
   box.file("work/api/package.json", `${JSON.stringify({ name: "api" })}\n`);
   box.file("work/api/README.md", "# api\n");
 });
-afterEach(() => box.cleanup());
+afterEach(() => box.cleanupSettled());
 
 const projectId = (path: string) => {
   const registry = JSON.parse(readFileSync(box.paths.registryFile, "utf8"));

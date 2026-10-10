@@ -38,6 +38,8 @@ export interface Sandbox {
   /** A folder with a `.git` directory, as `git init` would leave it. */
   repo(relative: string): string;
   cleanup(): void;
+  /** cleanup() for suites that offload: repeats the removal while a detached delete may still write (removeSettled). */
+  cleanupSettled(): Promise<void>;
 }
 
 export const makeSandbox = (prefix = "plainport-roots-"): Sandbox => {
@@ -65,5 +67,6 @@ export const makeSandbox = (prefix = "plainport-roots-"): Sandbox => {
       return join(home, relative);
     },
     cleanup: () => rmSync(home, { recursive: true, force: true, maxRetries: 3 }),
+    cleanupSettled: () => removeSettled(home),
   };
 };

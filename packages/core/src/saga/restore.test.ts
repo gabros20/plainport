@@ -82,7 +82,8 @@ beforeEach(async () => {
   dir = join(box.home, "work/web");
 });
 
-afterEach(() => box.cleanup());
+// Offloads here leave a detached delete that may still write into the sandbox.
+afterEach(() => box.cleanupSettled());
 
 const env = () => ({ HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" });
 

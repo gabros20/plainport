@@ -827,10 +827,15 @@ The protocol (Q9 b):
 The election has three outcomes (R2-7):
 - **Won:** publish.
 - **Lost:** a winner is published. Report `store.bootstrap-lost`, naming the winner.
-- **Contested:** no winner, since every visible candidate refuses. Report `store.bootstrap-contested`, naming the
-  candidates and the quiesced cleanup.
+- **Contested** (two forms, D99): no winner is published and this attempt refuses. Final when every visible
+  candidate refuses: report `store.bootstrap-contested`, naming the candidates and the quiesced cleanup. Undecided
+  when a visible candidate has not refused yet (it may still publish): report it as retry-later, naming the
+  undecided candidates, with no cleanup.
 
-A losing or contested attempt writes nothing after its candidate, and its repository is left for `store test` to list.
+A losing or contested attempt writes nothing after its candidate except, when contested, its own refusal marker
+(`<id>.refused`, part of the candidate record, D99), and its repository is left for `store test` to list. A
+contested outcome is final only when every visible candidate's refusal, this attempt's included, is read back;
+otherwise it names the undecided candidates and the attempt re-runs later (D99).
 The root claim is the same election under `meta/v1/root-claims/`, with the same three outcomes. Adopting an existing
 store authenticates its published repository with this device's password before recording it.
 
@@ -840,7 +845,9 @@ store authenticates its published repository with this device's password before 
   schedule makes both candidates visible before either lists, both end `contested` and nothing is published.
 - After a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win.
 - A kill at every bootstrap step, then `recover`, settles to "published by this attempt", "lost", "contested" or
-  "rolled back (nothing published)". These are the crash-matrix rows.
+  "rolled back (nothing published)". These are the crash-matrix rows. They include "killed after the candidacy on a
+  conditional-create store": another attempt is then undecided (D99) until the killed attempt's recovery re-runs with
+  its journaled id, which settles it.
 - A third device adopts the winner.
 - A format-1 local store is adopted without rewriting it.
 

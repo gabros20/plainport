@@ -11,6 +11,7 @@ export * from "./fold.ts";
 export * from "./head.ts";
 export * from "./identity.ts";
 export * from "./log.ts";
+export * from "./publish.ts";
 export * from "./root-claim.ts";
 export * from "./roots.ts";
 

@@ -122,14 +122,15 @@ beforeEach(async () => {
   released = undefined;
 });
 
-afterEach(() => {
+afterEach(async () => {
   // A test may leave a file unreadable; restore access so cleanup can remove it.
   for (const path of ["work/web/src", "work/web/src/main.ts", "work/web/secret.txt"]) {
     try {
       chmodSync(join(box.home, path), 0o755);
     } catch {}
   }
-  box.cleanup();
+  // A detached delete may still write into the sandbox.
+  await box.cleanupSettled();
 });
 
 const deps = (

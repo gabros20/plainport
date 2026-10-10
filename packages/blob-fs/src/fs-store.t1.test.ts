@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachImage, type DiskImage } from "../../../test/disk-image.ts";
 import { describeT1 } from "../../../test/tiers.ts";
-import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
+import { ALL_ELIGIBLE, blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { fsBlobStore } from "./index.ts";
 
@@ -41,13 +41,18 @@ if (process.platform === "darwin") {
       });
     });
 
-    blobStoreContract("exFAT", () => {
-      const dir = join(mount, `store-${next++}`);
-      mkdirSync(dir);
-      return {
-        store: fsBlobStore(testHost(), dir),
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
-      };
-    });
+    blobStoreContract(
+      "exFAT",
+      () => {
+        const dir = join(mount, `store-${next++}`);
+        mkdirSync(dir);
+        return {
+          store: fsBlobStore(testHost(), dir),
+          cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        };
+      },
+      // The 8 MB image holds about 950 small files: the listing probe stays well under that.
+      { eligibility: ALL_ELIGIBLE, listProbeKeys: 200 },
+    );
   });
 }

@@ -11,8 +11,11 @@ import { join } from "node:path";
 
 const LOCK = join(tmpdir(), "plainport-hdiutil.lock");
 const LOCK_WAIT_MS = 120_000;
-const TRANSIENT = /Resource busy|Resource temporarily unavailable|resource is busy|timed out/i;
+// Exit 16 is EAGAIN; with -quiet hdiutil prints nothing for it, so the exit code has to count as transient too.
+const TRANSIENT = /Resource busy|Resource temporarily unavailable|resource is busy|timed out|\(exit 16\)/i;
 const ATTEMPTS = 4;
+/** How long a detach keeps retrying a busy volume: the OS can hold it for a while after the last file closes. */
+const DETACH_BUDGET_MS = 30_000;
 
 const alive = (pid: number): boolean => {
   try {
@@ -57,8 +60,9 @@ export const withImageLock = async <T>(work: () => T | Promise<T>, lock = LOCK):
 /** One hdiutil call under the lock, retried on a transient refusal; a failure names the call and how long it took. */
 export const hdiutil = async (...args: string[]): Promise<void> => {
   const started = Date.now();
+  const patient = args[0] === "detach";
   let last = "";
-  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+  for (let attempt = 1; patient ? Date.now() - started < DETACH_BUDGET_MS : attempt <= ATTEMPTS; attempt++) {
     const run = await withImageLock(() =>
       Bun.spawnSync(["hdiutil", ...args], {
         env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
@@ -69,7 +73,7 @@ export const hdiutil = async (...args: string[]): Promise<void> => {
     if (run.exitCode === 0) return;
     last = `${run.stderr.toString().trim()} (exit ${run.exitCode})`;
     if (!TRANSIENT.test(last)) break;
-    await Bun.sleep(500 * attempt);
+    await Bun.sleep(Math.min(500 * attempt, 3000));
   }
   throw new Error(
     `hdiutil ${args.join(" ")} failed after ${((Date.now() - started) / 1000).toFixed(1)} s: ${last}`,
