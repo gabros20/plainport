@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
 import { writeAtomic } from "../atomic.ts";
+import { SealPolicySchema } from "../catalog/identity.ts";
 import { DurationSchema } from "../config/schema.ts";
 import { errorCode, type LocalIo, systemErrorCode } from "../io.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -138,6 +139,97 @@ export const JournalSchema = z
   .meta({ title: "Journal", description: "journal/<op>.json: a running or interrupted operation" });
 export type Journal = z.infer<typeof JournalSchema>;
 
+/**
+ * A bootstrap's journal (DESIGN.md "Bootstrap"): `journal/bootstrap/<attempt>.json`, apart from the projects' journals,
+ * since it belongs to no project and v0.1.x, which reads only `journal/<ulid>.json`, never sees it. `op` is the attempt's
+ * id, journaled before anything is written to the store: the repository's location (`repos/<op>`), the candidacy and
+ * the published store.json all carry it, and recovery re-runs the election with it (D99).
+ */
+export const BootstrapJournalSchema = z
+  .strictObject({
+    v: z.literal(1),
+    op: UlidSchema,
+    kind: z.literal("bootstrap"),
+    /** The last step reached, one of the saga's BOOTSTRAP_STEPS. */
+    step: StepSchema,
+    startedAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+    pid: z.int().positive(),
+    host: z.string().min(1),
+    /** The store by its name in config; it has no id until the election publishes one. */
+    store: z.strictObject({ name: z.string().min(1) }),
+    /** Where this attempt's restic repository lies under the store's root: repos/<op>. */
+    repo: z.string().regex(/^repos\/[0-9A-HJKMNP-TV-Z]{26}$/, "repos/<ULID>"),
+    /** The catalog's seal policy this attempt publishes when it wins (Q10). */
+    seal: SealPolicySchema,
+    history: z.array(z.strictObject({ step: StepSchema, at: z.iso.datetime() })),
+  })
+  .meta({
+    title: "BootstrapJournal",
+    description: "journal/bootstrap/<attempt>.json: a store setup's progress, for its recovery",
+  });
+export type BootstrapJournal = z.infer<typeof BootstrapJournalSchema>;
+
+export const bootstrapJournalDir = (paths: PlainportPaths): string => join(paths.journalDir, "bootstrap");
+export const bootstrapJournalFile = (paths: PlainportPaths, op: string): string =>
+  join(bootstrapJournalDir(paths), `${op}.json`);
+
+/** Writes a bootstrap's journal atomically: a crash leaves the previous version or this one. */
+export const writeBootstrapJournal = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  journal: BootstrapJournal,
+): Promise<void> => {
+  await io.fs.mkdirp(bootstrapJournalDir(paths));
+  await writeAtomic(io, bootstrapJournalFile(paths, journal.op), `${JSON.stringify(journal, null, 2)}\n`);
+};
+
+/** Removes a bootstrap's journal; one already gone is fine. */
+export const removeBootstrapJournal = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  op: string,
+): Promise<void> => {
+  try {
+    await io.fs.unlink(bootstrapJournalFile(paths, op));
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+};
+
+/** Every bootstrap journal on this device, oldest attempt first, and the files this version cannot read. */
+export const readBootstrapJournals = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+): Promise<{ journals: BootstrapJournal[]; unreadable: string[] }> => {
+  const dir = bootstrapJournalDir(paths);
+  let names: string[];
+  try {
+    names = await io.fs.readdir(dir);
+  } catch (error) {
+    if (systemErrorCode(error) === "ENOENT") return { journals: [], unreadable: [] };
+    throw error;
+  }
+  const journals: BootstrapJournal[] = [];
+  const unreadable: string[] = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json") || !isUlid(name.slice(0, -".json".length))) continue;
+    const path = join(dir, name);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await io.fs.readText(path));
+    } catch (error) {
+      if (error instanceof SyntaxError) parsed = undefined;
+      else if (systemErrorCode(error) === "ENOENT") continue;
+      else throw error;
+    }
+    const checked = BootstrapJournalSchema.safeParse(parsed);
+    if (checked.success && checked.data.op === name.slice(0, -".json".length)) journals.push(checked.data);
+    else unreadable.push(path);
+  }
+  return { journals, unreadable };
+};
+
 export const journalFile = (paths: PlainportPaths, op: string): string =>
   join(paths.journalDir, `${op}.json`);
 
@@ -245,6 +337,10 @@ export const rereadJournal = async (
 };
 
 /** JSON Schemas for the journal, published in schemas/ by `bun run contract`. */
-export const journalJsonSchemas = (): Record<"journal", Record<string, unknown>> => ({
+export const journalJsonSchemas = (): Record<"journal" | "bootstrap-journal", Record<string, unknown>> => ({
   journal: z.toJSONSchema(JournalSchema, { target: "draft-2020-12", io: "input" }) as Record<string, unknown>,
+  "bootstrap-journal": z.toJSONSchema(BootstrapJournalSchema, {
+    target: "draft-2020-12",
+    io: "input",
+  }) as Record<string, unknown>,
 });

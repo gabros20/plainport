@@ -3,11 +3,13 @@
 // tests run several devices (sandboxed homes, different passwords) against one semantic fake store.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import fc from "fast-check";
 import type { Failure, Result } from "@plainport/contract";
+import fc from "fast-check";
 import { STORE_CLAIMS_PREFIX, STORE_IDENTITY_KEY } from "../catalog/identity.ts";
-import { journalJsonSchemas } from "../journal/index.ts";
+import { journalJsonSchemas, readJournals, writeBootstrapJournal } from "../journal/index.ts";
+import { acquireLock } from "../lock.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
+import { InjectedFault } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import {
   type BootstrapWorld,
@@ -16,13 +18,13 @@ import {
   publishedStore,
   STORE_NAME,
 } from "../testing/bootstrap-world.ts";
-import { InjectedFault } from "../ports/host.ts";
 import { ulid } from "../ulid.ts";
-import { type BootstrapDone, BOOTSTRAP_STEPS } from "./bootstrap.ts";
+import { BOOTSTRAP_STEPS, type BootstrapDone } from "./bootstrap.ts";
 
 const RUNS = Number(process.env.PLAINPORT_FC_RUNS ?? 40);
 const NO_CREATE = { conditionalCreate: false } as const;
-const text = (bytes: Uint8Array | undefined) => (bytes === undefined ? undefined : new TextDecoder().decode(bytes));
+const text = (bytes: Uint8Array | undefined) =>
+  bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 
 let worlds: BootstrapWorld[] = [];
 const world = (...args: Parameters<typeof bootstrapWorld>): BootstrapWorld => {
@@ -98,47 +100,77 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
   ] as const) {
     test(`${route}: two initialisers with different passwords, delayed inits and lost acknowledgements publish at most one repository`, async () => {
       await fc.assert(
-        fc.asyncProperty(fc.scheduler(), fc.nat(6), fc.boolean(), async (s, lossAt, delayed) => {
-          const w = world(options);
-          // restic init at each attempt's own location, delayed by the scheduler (its config written late).
-          if (delayed) w.hooks.duringInit = s.scheduleFunction(async () => {});
-          let puts = 0;
-          const lossy: BlobStore = {
-            ...w.store,
-            put: async (key, data, opts) => {
-              if (puts++ === lossAt) w.store.loseAckNext();
-              return w.store.put(key, data, opts);
-            },
-          };
-          const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw));
-          for (const d of devices) d.target.blob = scheduled(lossy, s);
-          const results = await s.waitFor(Promise.all(devices.map((d) => d.run())));
-          // Whatever was left open is settled by each device's recovery (same attempt id), then nothing more runs.
-          for (const d of devices) d.target.blob = w.store;
-          for (let round = 0; round < 2; round++) for (const d of devices) await d.recover();
+        fc.asyncProperty(
+          fc.scheduler(),
+          fc.nat(6),
+          fc.boolean(),
+          fc.boolean(),
+          async (s, lossAt, delayed, together) => {
+            const w = world(options);
+            // restic init at each attempt's own location, delayed by the scheduler (its config written late).
+            if (delayed) w.hooks.duringInit = s.scheduleFunction(async () => {});
+            // Each device does local work (its journal) between store calls, which the scheduler does not order; with
+            // `together`, each election's first read waits for the other's, so the elections overlap call by call.
+            let arrived = 0;
+            let meet: () => void = () => {};
+            const met = new Promise<void>((resolve) => {
+              meet = resolve;
+            });
+            let puts = 0;
+            const lossy: BlobStore = {
+              ...w.store,
+              put: async (key, data, opts) => {
+                if (puts++ === lossAt) w.store.loseAckNext();
+                return w.store.put(key, data, opts);
+              },
+            };
+            // The meeting is outside the scheduled calls: the scheduler waits for each call it releases to finish. A
+            // device reads store.json once before its attempt begins, and again as its election's first read.
+            const inner = scheduled(lossy, s);
+            const meeting = (): BlobStore => {
+              let reads = 0;
+              return {
+                ...inner,
+                get: async (key) => {
+                  if (together && key === STORE_IDENTITY_KEY && ++reads === 2) {
+                    if (++arrived === 2) meet();
+                    await met;
+                  }
+                  return inner.get(key);
+                },
+              };
+            };
+            const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw));
+            for (const d of devices) d.target.blob = meeting();
+            const results = await s.waitFor(Promise.all(devices.map((d) => d.run())));
+            // Whatever was left open is settled by each device's recovery (same attempt id), then nothing more runs.
+            for (const d of devices) d.target.blob = w.store;
+            for (let round = 0; round < 2; round++) for (const d of devices) await d.recover();
 
-          const published = publishedStore(w.store);
-          const won = results.flatMap((r) => (r.ok && r.value.outcome === "published" ? [r.value.id] : []));
-          expect(won.length).toBeLessThanOrEqual(1);
-          const recorded = await Promise.all(devices.map((d) => d.recorded()));
-          const recorders = recorded.filter((id) => id !== undefined);
-          expect(recorders.length).toBeLessThanOrEqual(1);
-          if (published === undefined) {
-            expect(recorders).toEqual([]);
-            return;
-          }
-          // One repository is published, and only the device that initialised it ever reached it.
-          const winner = published.id as string;
-          expect(published.repo).toBe(`repos/${winner}`);
-          if (won.length === 1) expect(won[0]).toBe(winner);
-          for (const id of recorders) expect(id).toBe(winner);
-          const repo = w.repos.get(`repos/${winner}`);
-          expect(repo?.initialized).toBe(true);
-          const owner = repo?.password;
-          expect(new Set(repo?.access.map((a) => a.password))).toEqual(new Set([owner]));
-          for (const r of results)
-            if (!r.ok && r.finding.code === "store.bootstrap-lost") expect(r.finding.message).toContain(winner);
-        }),
+            const published = publishedStore(w.store);
+            const won = results.flatMap((r) => (r.ok && r.value.outcome === "published" ? [r.value.id] : []));
+            expect(won.length).toBeLessThanOrEqual(1);
+            const recorded = await Promise.all(devices.map((d) => d.recorded()));
+            const recorders = recorded.filter((id) => id !== undefined);
+            expect(recorders.length).toBeLessThanOrEqual(1);
+            if (published === undefined) {
+              expect(recorders).toEqual([]);
+              return;
+            }
+            // One repository is published, and only the device that initialised it ever reached it.
+            const winner = published.id as string;
+            expect(published.repo).toBe(`repos/${winner}`);
+            if (won.length === 1) expect(won[0]).toBe(winner);
+            for (const id of recorders) expect(id).toBe(winner);
+            const repo = w.repos.get(`repos/${winner}`);
+            expect(repo?.initialized).toBe(true);
+            const owner = repo?.password;
+            expect(new Set(repo?.access.map((a) => a.password))).toEqual(new Set([owner]));
+            for (const r of results)
+              if (!r.ok && r.finding.code === "store.bootstrap-lost")
+                expect(r.finding.message).toContain(winner);
+          },
+        ),
         { numRuns: RUNS },
       );
     }, 60_000);
@@ -201,7 +233,9 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     const results = await Promise.all(devices.map((d) => d.run()));
     const attempts = results.map((r) => (failed(r).data as { candidates: string[] }).candidates).at(0) ?? [];
     expect(keysUnder(w.store, "")).toEqual(
-      attempts.flatMap((id) => [`${STORE_CLAIMS_PREFIX}${id}.json`, `${STORE_CLAIMS_PREFIX}${id}.refused`]).sort(),
+      attempts
+        .flatMap((id) => [`${STORE_CLAIMS_PREFIX}${id}.json`, `${STORE_CLAIMS_PREFIX}${id}.refused`])
+        .sort(),
     );
   });
 
@@ -267,7 +301,12 @@ describe("bootstrap: adopting a published store", () => {
     const third = w.device("shared");
     const puts = w.store.calls.put;
     const adopted = done(await third.run());
-    expect(adopted).toMatchObject({ outcome: "adopted", id: winner.id, repo: `repos/${winner.id}`, format: 2 });
+    expect(adopted).toMatchObject({
+      outcome: "adopted",
+      id: winner.id,
+      repo: `repos/${winner.id}`,
+      format: 2,
+    });
     expect(await third.recorded()).toBe(winner.id);
     expect(w.store.calls.put).toBe(puts);
   });
@@ -393,5 +432,62 @@ describe("bootstrap: interrupted attempts", () => {
     expect(op?.finding?.fix).toContain("every device");
     expect(text(w.store.data.get(STORE_IDENTITY_KEY))).toBe('{"v":2,"id":"01');
     expect(await d.journals()).toHaveLength(1);
+  });
+});
+
+describe("bootstrap: one attempt per store at a time, apart from the projects' journals", () => {
+  test("a store being set up by another process on this device is store.locked, and nothing is written", async () => {
+    const w = world();
+    const d = w.device("pw");
+    await d.ports.io.fs.mkdirp(d.box.paths.locksDir);
+    const lock = `${d.box.paths.locksDir}/bootstrap-${Buffer.from(STORE_NAME).toString("hex")}.lock`;
+    const held = await acquireLock(d.ports.io, lock, {
+      timeoutMs: 0,
+      held: () => {
+        throw new Error("unexpected");
+      },
+    });
+    if (!held.ok) throw new Error(held.finding.message);
+    try {
+      expect(failed(await d.run()).finding.code).toBe("store.locked");
+      expect(w.store.calls.put).toBe(0);
+      expect(w.repos.size).toBe(0);
+    } finally {
+      await held.value.release();
+    }
+  });
+
+  test("an open bootstrap journal is invisible to the projects' journals, which v0.1.x reads", async () => {
+    const w = world();
+    const d = w.device("pw", { faults: { at: "bootstrap.candidacy.written" } });
+    await expect(d.run()).rejects.toBeInstanceOf(InjectedFault);
+    expect(await d.journals()).toHaveLength(1);
+    expect(await readJournals(d.ports.io, d.box.paths)).toEqual({ journals: [], unreadable: [], owners: {} });
+  });
+
+  test("a step this version does not know stays pending, never routed by default", async () => {
+    const w = world();
+    const d = w.device("pw");
+    const op = ulid();
+    const at = new Date().toISOString();
+    await writeBootstrapJournal(d.ports.io, d.box.paths, {
+      v: 1,
+      op,
+      kind: "bootstrap",
+      step: "bootstrap.later.step",
+      startedAt: at,
+      updatedAt: at,
+      pid: 1,
+      host: "h",
+      store: { name: STORE_NAME },
+      repo: `repos/${op}`,
+      seal: "none",
+      history: [],
+    });
+    const settled = await d.recover();
+    expect(settled.ok && settled.value.operations).toMatchObject([{ attempt: op, outcome: "pending" }]);
+    expect(settled.ok && settled.value.operations[0]?.finding?.code).toBe("journal.pending");
+    expect(await d.journals()).toEqual([op]);
+    expect(w.store.calls.put).toBe(0);
   });
 });

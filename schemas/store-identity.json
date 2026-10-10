@@ -1,23 +1,74 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "properties": {
-    "v": {
-      "type": "number",
-      "const": 1
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        }
+      },
+      "required": [
+        "v",
+        "id"
+      ],
+      "additionalProperties": false
     },
-    "id": {
-      "type": "string",
-      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
-      "title": "Ulid",
-      "description": "A ULID: 26 upper-case Crockford base32 characters"
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 2
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+          "title": "Ulid",
+          "description": "A ULID: 26 upper-case Crockford base32 characters"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^(?:repo|repos\\/[0-9A-HJKMNP-TV-Z]{26})$"
+        },
+        "catalog": {
+          "type": "object",
+          "properties": {
+            "seal": {
+              "type": "string",
+              "enum": [
+                "none",
+                "v1"
+              ]
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": false
+        },
+        "format": {
+          "type": "number",
+          "const": 2
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "repo",
+        "catalog",
+        "format"
+      ],
+      "additionalProperties": false
     }
-  },
-  "required": [
-    "v",
-    "id"
   ],
-  "additionalProperties": false,
   "title": "StoreIdentity",
-  "description": "meta/v1/store.json: a store's id, written once at setup"
+  "description": "meta/v1/store.json: a store's id (format 1), or its id, repository location and catalog seal policy (format 2), written once"
 }

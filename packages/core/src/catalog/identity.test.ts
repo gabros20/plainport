@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
-import { catalogJsonSchemas } from "./index.ts";
 import {
   encodeStoreIdentityV2,
   readStoreDescriptor,
@@ -9,6 +8,7 @@ import {
   STORE_IDENTITY_KEY,
   StoreIdentitySchema,
 } from "./identity.ts";
+import { catalogJsonSchemas } from "./index.ts";
 
 const put = (text: string) => {
   const store = memoryBlobStore();

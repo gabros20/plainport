@@ -131,7 +131,15 @@ export interface Election {
   store?: string;
   /** Waits between re-reads: the caller's scheduler (a timer in the CLI, a fake in tests). */
   wait(ms: number): Promise<void>;
+  /**
+   * The caller's crash seam right after each of this attempt's writes returns, whatever it returned: its candidacy,
+   * its `.publishing` or `.refused`, and its publication. A caller journals around elect, so the crash matrix kills
+   * the attempt here with the write landed and the journal before it (bootstrap's after-effect seams).
+   */
+  after?(write: ElectionWrite): void;
 }
+
+export type ElectionWrite = "candidacy" | "publishing" | "refusal" | "publication";
 
 export type ElectionOutcome =
   | { outcome: "won" }
@@ -321,6 +329,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
 
   const candidacy = keyOf(e.id, "candidate");
   const written = await store.put(candidacy, record(e.id, "candidate"));
+  e.after?.("candidacy");
   if (!written.ok) {
     const there = await store.get(candidacy);
     if (!there.ok || there.value === null) return written; // it may still land: a later election sees it, undecided
@@ -340,19 +349,23 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   if (!hasRefused && (mine.publishing.has(e.id) || others.length === 0)) {
     if (!mine.publishing.has(e.id)) {
       const intent = await store.put(keyOf(e.id, "publishing"), record(e.id, "publishing"));
+      e.after?.("publishing");
       if (!intent.ok) {
         const there = await store.get(keyOf(e.id, "publishing"));
         if (!there.ok || there.value === null || !isRecord(there.value, e.id, "publishing")) return intent; // never publish on an intent nobody can see
       }
     }
     // The final write is this device's only route choice: create-only where its profile proves it.
-    return afterWrite(await store.put(e.key, e.value, conditional ? { ifNotExists: true } : {}));
+    const publication = await store.put(e.key, e.value, conditional ? { ifNotExists: true } : {});
+    e.after?.("publication");
+    return afterWrite(publication);
   }
 
   if (!hasRefused) {
     // The refusal must be read back before anything is final (D99): a refusal that did not land leaves this attempt
     // free to act on a .publishing still in flight, so a failure here ends the run with the error, never contested.
     const refusal = await store.put(keyOf(e.id, "refused"), record(e.id, "refused"));
+    e.after?.("refusal");
     const back = await store.get(keyOf(e.id, "refused"));
     if (!back.ok) return back;
     if (back.value === null || !isRecord(back.value, e.id, "refused")) {

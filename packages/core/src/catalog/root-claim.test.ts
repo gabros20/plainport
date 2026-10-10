@@ -7,7 +7,7 @@ const text = (bytes: Uint8Array | undefined) =>
   bytes === undefined ? undefined : new TextDecoder().decode(bytes);
 const claimFile = (root: string) => `${JSON.stringify({ v: 1, root })}\n`;
 
-describe("the store's root claim (D50)", () => {
+describe("root-claim: the store's root claim (D50, Q9)", () => {
   test("an unclaimed store is claimed for the root, create-only", async () => {
     const store = memoryBlobStore();
     const root = ulid();

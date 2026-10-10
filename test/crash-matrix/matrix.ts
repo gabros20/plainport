@@ -15,13 +15,6 @@ import {
   type RecoveryOutcome,
 } from "../../packages/core/src/recover/recover.ts";
 import {
-  OFFLOAD_AFTER_EFFECT,
-  OFFLOAD_BRANCHES,
-  OFFLOAD_STEPS,
-  type OffloadAfterEffect,
-  type OffloadStep,
-} from "../../packages/core/src/saga/offload.ts";
-import {
   BOOTSTRAP_AFTER_EFFECT,
   BOOTSTRAP_BRANCHES,
   BOOTSTRAP_RECOVERY,
@@ -30,6 +23,13 @@ import {
   type BootstrapRecoveryOutcome,
   type BootstrapStep,
 } from "../../packages/core/src/saga/bootstrap.ts";
+import {
+  OFFLOAD_AFTER_EFFECT,
+  OFFLOAD_BRANCHES,
+  OFFLOAD_STEPS,
+  type OffloadAfterEffect,
+  type OffloadStep,
+} from "../../packages/core/src/saga/offload.ts";
 import {
   ONLOAD_AFTER_EFFECT,
   ONLOAD_BRANCHES,
@@ -220,12 +220,20 @@ export const BOOTSTRAP_ROWS: readonly BootstrapRow[] = (() => {
     const step = (Object.hasOwn(seams, point) ? seams[point] : point) as BootstrapStep;
     if (!BOOTSTRAP_STEPS.includes(step)) throw new Error(`${point}: ${step} is not a bootstrap step`);
     const rule = BOOTSTRAP_RECOVERY[step];
-    return { scenario, point, step, rule, outcomes: BOOTSTRAP_RULE_OUTCOMES[rule], name: `${point} · ${scenario}` };
+    return {
+      scenario,
+      point,
+      step,
+      rule,
+      outcomes: BOOTSTRAP_RULE_OUTCOMES[rule],
+      name: `${point} · ${scenario}`,
+    };
   };
   const rows = points.filter((p) => !exclusive.has(p)).map((p) => row("plain", p));
   for (const [name, branch] of Object.entries(BOOTSTRAP_BRANCHES))
     for (const point of branch.reaches) {
-      if (!points.includes(point)) throw new Error(`branch ${name} reaches ${point}, which is no step or seam`);
+      if (!points.includes(point))
+        throw new Error(`branch ${name} reaches ${point}, which is no step or seam`);
       rows.push(row(name as keyof typeof BOOTSTRAP_BRANCHES, point));
     }
   return rows;

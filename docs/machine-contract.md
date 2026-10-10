@@ -269,11 +269,17 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `root.synced-folder` | warn | yes | 6 | The root is inside an iCloud Drive or Dropbox folder, whose sync clients fight with node_modules and half-written files |
 | `root.unbound` | block | no | 6 | The root has no folder on this device; fix is plainport root bind <root> <path> |
 | `snapshot.not-found` | block | no | 4 | The catalog has no snapshot of the project with this id (--snapshot), or the store holds no copy of it; fix names the head or the store that holds it |
+| `store.bootstrap-contested` | block | no | 8 | Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is the quiesced cleanup it names (stop plainport on every device that uses the store, remove the candidates), then one re-run |
+| `store.bootstrap-lost` | block | no | 6 | Another attempt set the store up first and published its repository, which this attempt never touches; the message names the winner, and a re-run with that store's password adopts it |
+| `store.bootstrap-undecided` | block | no | 6 | Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused and keeps its journal, so a later re-run (or plainport recover) ends it lost or contested |
 | `store.failed` | block | no | 1 | A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error |
 | `store.identity-changed` | block | no | 6 | The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced |
 | `store.inside-project` | block | no | 6 | A local store and a project overlap (the store lies inside the project's folder, or the project inside the store), compared by real path: an offload would move the store into the trash with the folder and delete its snapshots, so setup, offload and its release refuse; move one of them (D83) |
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
+| `store.locked` | block | no | 11 | Another plainport process on this device is setting this store up |
 | `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); fix is plainport init |
+| `store.root-claim-contested` | block | no | 8 | No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run |
+| `store.root-claim-undecided` | block | no | 6 | The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later |
 | `store.root-mismatch` | block | no | 6 | The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store |
 | `store.secret-missing` | block | no | 6 | The store's repository password could not be read from its secret reference (env: or file: in M1) |
 | `store.semantics-unknown` | block | no | 6 | The store's semantics profile lacks a property this operation needs (read-after-write, whole publication, complete listings, durability…), or does not know it; the message names the property, the operation refuses before writing, and the store stays usable for what its profile allows (Q8) |

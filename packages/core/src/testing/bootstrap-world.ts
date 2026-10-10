@@ -4,6 +4,7 @@
 // can show a losing device never touched the winner's. Used only by *.test.ts files and their helpers.
 
 import type { Result } from "@plainport/contract";
+import { readBootstrapJournals } from "../journal/index.ts";
 import type { FaultPlan } from "../ports/host.ts";
 import { readRegistry } from "../registry.ts";
 import {
@@ -12,14 +13,17 @@ import {
   type BootstrapRecoveryReport,
   type BootstrapStore,
   type BootstrapTarget,
-  readBootstrapJournals,
   recoverBootstraps,
   runBootstrap,
 } from "../saga/bootstrap.ts";
 import { type FakeEngineHooks, type FakeRepository, fakeEngine, fakeRepository } from "./fake-engine.ts";
 import { testHost } from "./host.ts";
 import { makeSandbox, type Sandbox } from "./sandbox.ts";
-import { type SemanticBlobStore, type SemanticFakeOptions, semanticBlobStore } from "./semantic-blob-store.ts";
+import {
+  type SemanticBlobStore,
+  type SemanticFakeOptions,
+  semanticBlobStore,
+} from "./semantic-blob-store.ts";
 
 export const STORE_NAME = "archive";
 
@@ -43,7 +47,10 @@ export interface BootstrapWorld {
   repos: Map<string, FakeRepository>;
   /** Hooks every engine of every device shares (a paused or delayed init). */
   hooks: FakeEngineHooks;
-  device(password: string, options?: { faults?: FaultPlan; wait?: (ms: number) => Promise<void> }): BootstrapDevice;
+  device(
+    password: string,
+    options?: { faults?: FaultPlan; wait?: (ms: number) => Promise<void> },
+  ): BootstrapDevice;
   cleanup(): void;
 }
 
@@ -109,7 +116,11 @@ export const keysUnder = (store: { data: Map<string, Uint8Array> }, prefix: stri
   [...store.data.keys()].filter((k) => k.startsWith(prefix)).sort();
 
 /** The store's published store.json, parsed; undefined when there is none. */
-export const publishedStore = (store: { data: Map<string, Uint8Array> }): Record<string, unknown> | undefined => {
+export const publishedStore = (store: {
+  data: Map<string, Uint8Array>;
+}): Record<string, unknown> | undefined => {
   const bytes = store.data.get("meta/v1/store.json");
-  return bytes === undefined ? undefined : (JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>);
+  return bytes === undefined
+    ? undefined
+    : (JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>);
 };

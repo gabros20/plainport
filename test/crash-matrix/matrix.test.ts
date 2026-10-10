@@ -3,16 +3,16 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  BOOTSTRAP_AFTER_EFFECT,
+  BOOTSTRAP_BRANCHES,
+  BOOTSTRAP_STEPS,
+} from "../../packages/core/src/saga/bootstrap.ts";
+import {
   OFFLOAD_AFTER_EFFECT,
   OFFLOAD_BRANCHES,
   OFFLOAD_STEPS,
 } from "../../packages/core/src/saga/offload.ts";
 import { ONLOAD_AFTER_EFFECT, ONLOAD_BRANCHES, ONLOAD_STEPS } from "../../packages/core/src/saga/onload.ts";
-import {
-  BOOTSTRAP_AFTER_EFFECT,
-  BOOTSTRAP_BRANCHES,
-  BOOTSTRAP_STEPS,
-} from "../../packages/core/src/saga/bootstrap.ts";
 import { ALL_ROWS, BOOTSTRAP_ROWS, OFFLOAD_ROWS, ONLOAD_ROWS } from "./matrix.ts";
 
 describe("crash matrix rows", () => {
@@ -53,7 +53,9 @@ describe("crash matrix rows", () => {
 
   test("every bootstrap step and seam is crashed, each branch's points under its setup", () => {
     const crashed = new Set(BOOTSTRAP_ROWS.map((r) => r.point));
-    expect([...BOOTSTRAP_STEPS, ...Object.keys(BOOTSTRAP_AFTER_EFFECT)].filter((p) => !crashed.has(p))).toEqual([]);
+    expect(
+      [...BOOTSTRAP_STEPS, ...Object.keys(BOOTSTRAP_AFTER_EFFECT)].filter((p) => !crashed.has(p)),
+    ).toEqual([]);
     for (const [name, branch] of Object.entries(BOOTSTRAP_BRANCHES))
       for (const point of branch.reaches)
         expect(BOOTSTRAP_ROWS.some((r) => r.scenario === name && r.point === point)).toBe(true);
