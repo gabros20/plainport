@@ -1,0 +1,14 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "ls",
+    "-l",
+    "de43c924419aa8bd64ca88c974f887825f26e06288780f4b3c8a894baea0cae7"
+  ],
+  "exitCode": 0,
+  "stdout": "snapshot de43c924 of [/tmp/restic-fixture/src] at 2026-10-10 12:13:00.377907 +0200 CEST by fixture-user@fixture-host filtered by []:\n-rw-r--r--   501    20      6 2026-10-10 12:12:56 /a.txt\nLrwxr-xr-x   501    20      0 2026-10-10 12:12:56 /link -> a.txt\ndrwxr-xr-x   501    20      0 2026-10-10 12:12:56 /sub\n-rw-r--r--   501    20      1 2026-10-10 12:12:56 /sub/b\nLrwxr-xr-x   501    20      0 2026-10-10 12:12:56 /sub/odd -> name -> x -> y\n",
+  "stderr": ""
+}

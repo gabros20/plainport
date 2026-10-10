@@ -32,6 +32,7 @@ import {
   parseLine,
   parseSnapshots,
   parseTree,
+  parseVersion,
   type ResticLine,
 } from "./parse.ts";
 
@@ -300,15 +301,8 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
   const checkVersion = async (ctx: RunContext | undefined): Promise<Result<void>> => {
     const ran = await capture("version", ["--json"], ctx, false);
     if (!ran.ok) return ran;
-    const line = parseLine(ran.value.trim());
+    const line = parseVersion(ran.value.trim());
     if (!line.ok) return line;
-    if (line.value.message_type !== "version")
-      return fail(
-        finding("restic.output-invalid", {
-          message: "`restic version --json` printed no version line",
-          fix: "check that the restic binary is restic",
-        }),
-      );
     if (line.value.version === expected) return ok(undefined);
     return fail(
       finding("restic.version-mismatch", {

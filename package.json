@@ -15,6 +15,8 @@
     "format": "biome check --write .",
     "test": "bun run check:bun && bun test",
     "test:t1": "bun run check:bun && PLAINPORT_TEST_TIER=1 bun test",
+    "test:t2": "bun run check:bun && PLAINPORT_TEST_TIER=2 bun test",
+    "test:t3": "bun run check:bun && PLAINPORT_TEST_TIER=3 bun test",
     "build": "bun run check:bun && bun scripts/build.ts",
     "contract": "bun scripts/contract.ts",
     "secrets": "bun scripts/secrets.ts",

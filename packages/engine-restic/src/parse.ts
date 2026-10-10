@@ -118,6 +118,20 @@ const parseJson = <S extends z.ZodType>(schema: S, text: string, what: string): 
   return parsed.success ? ok(parsed.data) : invalid(what, z.prettifyError(parsed.error).slice(0, 500));
 };
 
+/**
+ * The one line `restic version --json` prints. message_type may be missing, as restic 0.17 printed it, so a too-old
+ * restic gets restic.version-mismatch rather than a parse error; every other field is still required.
+ */
+export const VersionOutput = z.object({
+  message_type: z.literal("version").optional(),
+  version: z.string().regex(/^\d+\.\d+\.\d+/),
+  go_version: z.string(),
+  go_os: z.string(),
+  go_arch: z.string(),
+});
+export const parseVersion = (text: string): Result<z.output<typeof VersionOutput>> =>
+  parseJson(VersionOutput, text, "`restic version --json` output");
+
 /** One JSON line of a `--json` command. */
 export const parseLine = (text: string): Result<ResticLine> => parseJson(ResticLine, text, "JSON line");
 

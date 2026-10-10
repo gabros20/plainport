@@ -3,18 +3,25 @@
 // the pinned restic from .tools/ against a tiny temp repository and writes fixtures/restic/<version>/<name>.json,
 // each {args, exitCode, stdout, stderr}. The temp folder, this machine's host name and user name are replaced by
 // placeholders, so fixtures carry nothing of the machine that recorded them. Everything temporary is deleted at the
-// end. Scripts may spawn directly (run decision D8).
+// end. `--restic <version>` records a restic of CI's version matrix instead, the one
+// `bun scripts/fetch-tools.ts --restic <version>` installed in .tools/matrix/. Scripts may spawn directly (run
+// decision D8).
 
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
 import { spawn, spawnSync } from "bun";
 import { hostTarget } from "../packages/core/src/tools.ts";
 import lock from "../tools.lock.json" with { type: "json" };
 
 const checkout = resolve(import.meta.dir, "..");
-const version = lock.tools.restic.version;
-const restic = join(checkout, ".tools", `${hostTarget()}`, "restic");
+const { values } = parseArgs({ args: Bun.argv.slice(2), options: { restic: { type: "string" } } });
+const version = values.restic ?? lock.tools.restic.version;
+const restic =
+  values.restic === undefined
+    ? join(checkout, ".tools", `${hostTarget()}`, "restic")
+    : join(checkout, ".tools", "matrix", `restic-${version}`, `${hostTarget()}`, "restic");
 const out = join(checkout, "fixtures", "restic", version);
 
 export const FIXTURE_ROOT = "/tmp/restic-fixture";

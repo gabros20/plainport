@@ -1,0 +1,84 @@
+# The T2 store containers (ADR-0018 "Environments as code"). Run them only through `scripts/testenv`, which
+# generates the credentials and keys for the run in .testenv/, passes them in, waits for every health check and
+# sets up Toxiproxy. Every image is pinned by digest and every port binds to 127.0.0.1. Ports come from one base,
+# by default derived from the checkout's path, so worktrees never collide (scripts/testenv.ts defaultsFor, portsFor).
+# testenv always passes every port; the :-defaults below only let compose parse the file without it.
+#
+# The S3 store is SeaweedFS: MinIO no longer publishes images (Docker Hub and Quay refuse the pull, 2026-10-10),
+# and the M2 plan names SeaweedFS as the fallback. `scripts/testenv restart minio` still names it.
+
+services:
+  s3:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command:
+      - mini
+      - -dir=/data
+      - -bucket=${PLAINPORT_T2_S3_BUCKET:?run scripts/testenv up}
+      - -admin.ui=false
+      - -webdav=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
+    environment:
+      # The admin identity, generated for the run. Without one SeaweedFS would allow anonymous access.
+      AWS_ACCESS_KEY_ID: ${PLAINPORT_T2_S3_ACCESS_KEY_ID:?run scripts/testenv up}
+      AWS_SECRET_ACCESS_KEY: ${PLAINPORT_T2_S3_SECRET_ACCESS_KEY:?run scripts/testenv up}
+    ports:
+      - 127.0.0.1:${PLAINPORT_T2_PORT_S3:-39100}:8333
+    healthcheck:
+      # Unsigned requests are refused with 403; any HTTP answer means the gateway is up.
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8333/ || exit 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 90
+
+  sftp:
+    # The alpine tag is published for linux/amd64 only; it runs under Rosetta on Apple silicon.
+    image: atmoz/sftp:alpine@sha256:7e439fabeae536fa254340724c042e11999924d906417dbb5c73602ad518813f
+    platform: linux/amd64
+    # user:password:uid:gid:dir. No password: the account is key only.
+    command: ["plainport::1001:1001:data"]
+    volumes:
+      - ${PLAINPORT_T2_SSH_DIR:?run scripts/testenv up}/id_ed25519.pub:/home/plainport/.ssh/keys/id_ed25519.pub:ro
+      - ${PLAINPORT_T2_SSH_DIR:?run scripts/testenv up}/host_ed25519:/etc/ssh/ssh_host_ed25519_key:ro
+      - ${PLAINPORT_T2_SSH_DIR:?run scripts/testenv up}/host_ed25519.pub:/etc/ssh/ssh_host_ed25519_key.pub:ro
+    ports:
+      - 127.0.0.1:${PLAINPORT_T2_PORT_SFTP:-39122}:22
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22 && head -c 4 <&3 | grep -q SSH"]
+      interval: 1s
+      timeout: 3s
+      retries: 90
+
+  rest:
+    # restic's rest-server, append-only, for M3's smoke tests.
+    image: restic/rest-server:0.14.0@sha256:d2aff06f47eb38637dff580c3e6bce4af98f386c396a25d32eb6727ec96214a5
+    environment:
+      OPTIONS: --append-only
+      PASSWORD_FILE: /etc/rest-server/htpasswd
+    volumes:
+      - ${PLAINPORT_T2_REST_HTPASSWD:?run scripts/testenv up}:/etc/rest-server/htpasswd:ro
+    ports:
+      - 127.0.0.1:${PLAINPORT_T2_PORT_REST:-39180}:8000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8000"]
+      interval: 1s
+      timeout: 3s
+      retries: 90
+
+  toxiproxy:
+    # In front of the S3 store and SFTP; scripts/testenv creates the proxies (s3 on 8101, sftp on 8122).
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    depends_on:
+      s3:
+        condition: service_healthy
+      sftp:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${PLAINPORT_T2_PORT_TOXIPROXY:-39174}:8474
+      - 127.0.0.1:${PLAINPORT_T2_PORT_S3_PROXIED:-39101}:8101
+      - 127.0.0.1:${PLAINPORT_T2_PORT_SFTP_PROXIED:-39123}:8122
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 1s
+      timeout: 3s
+      retries: 90

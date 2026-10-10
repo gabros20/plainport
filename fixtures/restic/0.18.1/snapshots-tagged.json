@@ -1,0 +1,15 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "snapshots",
+    "--json",
+    "--tag",
+    "plainport,plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD"
+  ],
+  "exitCode": 0,
+  "stdout": "[{\"time\":\"2026-10-10T12:13:00.377907+02:00\",\"tree\":\"5544a557a402f9935471e20161210e939806a89907f2fb5c4d55ca519ff9a14f\",\"paths\":[\"/tmp/restic-fixture/src\"],\"hostname\":\"fixture-host\",\"username\":\"fixture-user\",\"uid\":501,\"gid\":20,\"excludes\":[\"/tmp/restic-fixture/src/node_modules\"],\"tags\":[\"plainport\",\"plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD\"],\"program_version\":\"restic 0.18.1\",\"summary\":{\"backup_start\":\"2026-10-10T12:13:00.377907+02:00\",\"backup_end\":\"2026-10-10T12:13:01.106166+02:00\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":2202,\"data_added_packed\":1134,\"total_files_processed\":2,\"total_bytes_processed\":7},\"id\":\"de43c924419aa8bd64ca88c974f887825f26e06288780f4b3c8a894baea0cae7\",\"short_id\":\"de43c924\"},{\"time\":\"2026-10-10T12:13:01.126504+02:00\",\"parent\":\"de43c924419aa8bd64ca88c974f887825f26e06288780f4b3c8a894baea0cae7\",\"tree\":\"31147409ec800382c4a7045a8a3cc84189e99ad782b9fbf0a02b78a00853b9e2\",\"paths\":[\"/tmp/restic-fixture/src\"],\"hostname\":\"fixture-host\",\"username\":\"fixture-user\",\"uid\":501,\"gid\":20,\"excludes\":[\"/tmp/restic-fixture/src/node_modules\"],\"tags\":[\"plainport\",\"plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD\"],\"program_version\":\"restic 0.18.1\",\"summary\":{\"backup_start\":\"2026-10-10T12:13:01.126504+02:00\",\"backup_end\":\"2026-10-10T12:13:01.868653+02:00\",\"files_new\":0,\"files_changed\":0,\"files_unmodified\":1,\"dirs_new\":0,\"dirs_changed\":1,\"dirs_unmodified\":0,\"data_blobs\":0,\"tree_blobs\":2,\"data_added\":1752,\"data_added_packed\":869,\"total_files_processed\":1,\"total_bytes_processed\":6},\"id\":\"9e1c69355c86c5f4020f0627a993daf53530f6cc7cc183f78c76119ae44c75af\",\"short_id\":\"9e1c6935\"}]\n",
+  "stderr": ""
+}

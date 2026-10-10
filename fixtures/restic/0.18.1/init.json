@@ -1,0 +1,13 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "init",
+    "--json"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"message_type\":\"initialized\",\"id\":\"06b950fc97016f229ea8f05461bf81587462f00f39d13aba163745d4dad05ac4\",\"repository\":\"/tmp/restic-fixture/repo\"}\n",
+  "stderr": ""
+}
