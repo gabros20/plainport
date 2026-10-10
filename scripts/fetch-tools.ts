@@ -1,6 +1,9 @@
 // `bun scripts/fetch-tools.ts`: downloads the restic and rclone that tools.lock.json pins (ADR-0006) into
 // .tools/<os>-<arch>/, where packages/core's toolPath finds them for development and tests. Flags: --target
 // <os>-<arch> or --target all (default: this machine), --dest <dir> (default: .tools in the checkout).
+// `--restic <version>` fetches only that restic, from the lock's `matrix` section or the pin, into
+// .tools/matrix/restic-<version>/<os>-<arch>/ (default --dest), for CI's restic version matrix (ADR-0021); the
+// suites find it through PLAINPORT_RESTIC_MATRIX (test/tiers.ts). A version the lock does not list is refused.
 //
 // Every archive for every requested target is hashed in memory and checked against the lock before anything is
 // written, so a checksum mismatch or failed download anywhere leaves no file behind. Archives are then unpacked
@@ -36,44 +39,71 @@ export type LockTool = {
   format: "bz2" | "zip";
   targets: Record<Target, LockTarget>;
 };
-export type Lock = { tools: Record<ToolName, LockTool> };
+/** `matrix.restic`: the other restic versions CI tests the engine with; never bundled or used by plainport. */
+export type Lock = { tools: Record<ToolName, LockTool>; matrix: { restic: LockTool[] } };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const isHttps = (value: unknown): value is string =>
   typeof value === "string" && value.startsWith("https://");
 
+const parseTool = (
+  where: string,
+  tool: unknown,
+): { ok: true; tool: LockTool } | { ok: false; message: string } => {
+  const fail = (message: string) => ({ ok: false as const, message: `tools.lock.json: ${message}` });
+  if (!isRecord(tool)) return fail(`${where} is missing`);
+  const { version, checksums, format, targets } = tool;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version))
+    return fail(`${where}.version must be X.Y.Z`);
+  if (!isHttps(checksums)) return fail(`${where}.checksums must be an https:// url`);
+  if (format !== "bz2" && format !== "zip") return fail(`${where}.format must be bz2 or zip`);
+  if (!isRecord(targets)) return fail(`${where}.targets is missing`);
+  const parsed = {} as Record<Target, LockTarget>;
+  for (const target of TARGETS) {
+    const entry = targets[target];
+    const at = `${where}.targets.${target}`;
+    if (!isRecord(entry)) return fail(`${at} is missing`);
+    if (!isHttps(entry.url)) return fail(`${at}.url must be an https:// url`);
+    if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
+      return fail(`${at}.sha256 must be 64 lowercase hex digits`);
+    }
+    if (format === "zip" && typeof entry.member !== "string")
+      return fail(`${at}.member names the binary in the zip`);
+    parsed[target] = { url: entry.url, sha256: entry.sha256 };
+    if (typeof entry.member === "string") parsed[target].member = entry.member;
+  }
+  return { ok: true, tool: { version, checksums, format, targets: parsed } };
+};
+
 export const parseLock = (raw: unknown): { ok: true; lock: Lock } | { ok: false; message: string } => {
   const fail = (message: string) => ({ ok: false as const, message: `tools.lock.json: ${message}` });
   if (!isRecord(raw) || !isRecord(raw.tools)) return fail("expected an object with a `tools` object");
   const tools = {} as Record<ToolName, LockTool>;
   for (const name of TOOL_NAMES) {
-    const tool = raw.tools[name];
-    if (!isRecord(tool)) return fail(`${name} is missing`);
-    const { version, checksums, format, targets } = tool;
-    if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version))
-      return fail(`${name}.version must be X.Y.Z`);
-    if (!isHttps(checksums)) return fail(`${name}.checksums must be an https:// url`);
-    if (format !== "bz2" && format !== "zip") return fail(`${name}.format must be bz2 or zip`);
-    if (!isRecord(targets)) return fail(`${name}.targets is missing`);
-    const parsed = {} as Record<Target, LockTarget>;
-    for (const target of TARGETS) {
-      const entry = targets[target];
-      const where = `${name}.targets.${target}`;
-      if (!isRecord(entry)) return fail(`${where} is missing`);
-      if (!isHttps(entry.url)) return fail(`${where}.url must be an https:// url`);
-      if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
-        return fail(`${where}.sha256 must be 64 lowercase hex digits`);
-      }
-      if (format === "zip" && typeof entry.member !== "string")
-        return fail(`${where}.member names the binary in the zip`);
-      parsed[target] = { url: entry.url, sha256: entry.sha256 };
-      if (typeof entry.member === "string") parsed[target].member = entry.member;
-    }
-    tools[name] = { version, checksums, format, targets: parsed };
+    const parsed = parseTool(name, raw.tools[name]);
+    if (!parsed.ok) return parsed;
+    tools[name] = parsed.tool;
   }
-  return { ok: true, lock: { tools } };
+  const matrix: Lock["matrix"] = { restic: [] };
+  if (raw.matrix !== undefined) {
+    if (!isRecord(raw.matrix) || !Array.isArray(raw.matrix.restic)) {
+      return fail("matrix must be an object with a `restic` list");
+    }
+    for (const [index, entry] of raw.matrix.restic.entries()) {
+      const parsed = parseTool(`matrix.restic[${index}]`, entry);
+      if (!parsed.ok) return parsed;
+      matrix.restic.push(parsed.tool);
+    }
+  }
+  return { ok: true, lock: { tools, matrix } };
 };
+
+/** The restic of one version for the restic matrix: a `matrix` entry, or the pinned restic itself. */
+export const resticForMatrix = (lock: Lock, version: string): LockTool | undefined =>
+  lock.tools.restic.version === version
+    ? lock.tools.restic
+    : lock.matrix.restic.find((entry) => entry.version === version);
 
 export type Fetcher = (url: string) => Promise<Uint8Array>;
 
@@ -168,14 +198,20 @@ export const fetchTools = async (options: {
   targets: Target[];
   destRoot: string;
   fetcher?: Fetcher;
+  /** Fetch only these tools, at these versions (the restic matrix), instead of every tool the lock pins. */
+  only?: Partial<Record<ToolName, LockTool | undefined>>;
 }): Promise<FetchResult> => {
-  const { lock, targets, destRoot, fetcher = httpsFetcher } = options;
+  const { lock, targets, destRoot, fetcher = httpsFetcher, only } = options;
   const tools: FetchedTool[] = [];
   const pending: Pending[] = [];
+  const selected = TOOL_NAMES.flatMap((name): [ToolName, LockTool][] => {
+    if (only === undefined) return [[name, lock.tools[name]]];
+    const tool = only[name];
+    return tool === undefined ? [] : [[name, tool]];
+  });
 
   for (const target of targets) {
-    for (const name of TOOL_NAMES) {
-      const tool = lock.tools[name];
+    for (const [name, tool] of selected) {
       const entry = tool.targets[target];
       const path = join(destRoot, target, name);
       const pinPath = join(destRoot, target, `.${name}.pin`);
@@ -249,7 +285,7 @@ if (import.meta.main) {
   const root = resolve(import.meta.dir, "..");
   const { values } = parseArgs({
     args: Bun.argv.slice(2),
-    options: { target: { type: "string" }, dest: { type: "string" } },
+    options: { target: { type: "string" }, dest: { type: "string" }, restic: { type: "string" } },
   });
   function usage(message: string): never {
     console.error(`fetch-tools: ${message}`);
@@ -272,9 +308,23 @@ if (import.meta.main) {
     if (host === undefined) usage(`no pinned tools for ${process.platform}-${process.arch}`);
     targets = [host];
   }
-  const destRoot = resolve(values.dest ?? join(root, ".tools"));
+  let only: Partial<Record<ToolName, LockTool>> | undefined;
+  if (values.restic !== undefined) {
+    const restic = resticForMatrix(lock, values.restic);
+    if (restic === undefined) {
+      const listed = [...lock.matrix.restic.map((entry) => entry.version), lock.tools.restic.version];
+      usage(`restic ${values.restic} is not in tools.lock.json; the matrix has ${listed.join(", ")}`);
+    }
+    only = { restic };
+  }
+  const destRoot = resolve(
+    values.dest ??
+      (values.restic === undefined
+        ? join(root, ".tools")
+        : join(root, ".tools", "matrix", `restic-${values.restic}`)),
+  );
 
-  const result = await fetchTools({ lock, targets, destRoot });
+  const result = await fetchTools({ lock, targets, destRoot, ...(only === undefined ? {} : { only }) });
   if (!result.ok) {
     console.error(`fetch-tools: ${result.code}: ${result.message}`);
     process.exit(1);

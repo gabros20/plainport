@@ -883,7 +883,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       return { op: { ...entry(journal, "trash-kept", state), trash, keepUntil: journal.keepUntil } };
     }
     // One deleter at a time (D64): a live detached delete finishes it, journal included.
-    const deleting = await claimedReason(io, trash, deps.device.id);
+    const deleting = await claimedReason(host, trash, deps.device.id);
     if (deleting !== undefined) {
       deps.log("info", `the trash ${trash} is left: ${deleting}`);
       return { op: { ...entry(journal, "trash-kept", state), trash } };

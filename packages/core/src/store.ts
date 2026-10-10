@@ -20,6 +20,7 @@ import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
+import { type ProbeOptions, probeDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
@@ -126,6 +127,11 @@ export interface SetUpStoreOptions {
   store: Store;
   opener: StoreOpener;
   mint: () => string;
+  /**
+   * The deadline of every probe of the store's path before anything is written (D32): STORE_PROBE_DEADLINE_MS on the
+   * real timers by default; tests pass a fake scheduler.
+   */
+  probe?: ProbeOptions;
 }
 
 type SetUpOptions = Omit<SetUpStoreOptions, "mint">;
@@ -140,6 +146,26 @@ const unreachableAt = (name: string, root: string, detail: string) =>
   );
 
 /**
+ * store.unreachable for a probe that did not answer within its deadline (D32): a network mount that hangs. `what` names
+ * the probe, so the message points at the mount that hangs. The call itself cannot be cancelled and waits on in the
+ * background (deadline.ts).
+ */
+const hung = (name: string, root: string, what: string, seconds: number) =>
+  unreachableAt(name, root, `${what} did not answer within ${seconds} seconds (a network mount that hangs?)`);
+
+/** A probe (D32) under its deadline; store.unreachable naming `what` when it does not answer in time. */
+const bounded = async <T>(
+  work: Promise<Result<T>>,
+  what: string,
+  name: string,
+  root: string,
+  probe: ProbeOptions,
+): Promise<Result<T>> => {
+  const probed = await probeDeadline(work, probe);
+  return probed.timedOut ? hung(name, root, what, probed.seconds) : probed.value;
+};
+
+/**
  * Whether `path` is a folder: undefined when nothing is there; store.unreachable when it cannot be looked at (a failing
  * or locked disk), never an exception (AGENTS.md rule 7).
  */
@@ -148,9 +174,12 @@ const folderAt = async (
   path: string,
   name: string,
   root: string,
+  probe: ProbeOptions,
 ): Promise<Result<boolean | undefined>> => {
   try {
-    return ok((await io.fs.stat(path)).kind === "dir");
+    const probed = await probeDeadline(io.fs.stat(path), probe);
+    if (probed.timedOut) return hung(name, root, path, probed.seconds);
+    return ok(probed.value.kind === "dir");
   } catch (error) {
     const code = systemErrorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return ok(undefined);
@@ -159,13 +188,18 @@ const folderAt = async (
 };
 
 /** The store's folder and its parent, checked: the folder's state, or store.unreachable when it cannot hold a store. */
-const storeFolder = async (io: LocalIo, name: string, root: string): Promise<Result<boolean | undefined>> => {
+const storeFolder = async (
+  io: LocalIo,
+  name: string,
+  root: string,
+  probe: ProbeOptions = {},
+): Promise<Result<boolean | undefined>> => {
   const parent = dirname(root);
-  const above = await folderAt(io, parent, name, root);
+  const above = await folderAt(io, parent, name, root, probe);
   if (!above.ok) return above;
   if (above.value !== true)
     return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
-  const here = await folderAt(io, root, name, root);
+  const here = await folderAt(io, root, name, root, probe);
   if (!here.ok) return here;
   if (here.value === false) return unreachableAt(name, root, `${root} is not a folder`);
   return here;
@@ -196,7 +230,7 @@ export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise
   const pinned = registry.value.stores?.[name];
   if (pinned === undefined) return ok(null);
   const root = storeRoot(store, paths.home);
-  const folder = await storeFolder(io, name, root);
+  const folder = await storeFolder(io, name, root, options.probe);
   if (!folder.ok) return folder;
   const here = folder.value;
   const changed = (found: string | null) => {
@@ -223,18 +257,37 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   const pin = await checkStorePin(io, options);
   if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
-  // Never in plainport's own holders, whose folders gc deletes (D87).
-  const reserved = await notReserved(io, root, paths.home, `store ${name}'s folder`);
+  const probe = options.probe ?? {};
+  // Never in plainport's own holders, whose folders gc deletes (D87). Every probe of the store's path before anything
+  // is written has the deadline (D32): resolving it as much as looking at it.
+  const reserved = await bounded(
+    notReserved(io, root, paths.home, `store ${name}'s folder`),
+    `resolving ${root}`,
+    name,
+    root,
+    probe,
+  );
   if (!reserved.ok) return reserved;
-  const folder = await storeFolder(io, name, root);
+  const folder = await storeFolder(io, name, root, probe);
   if (!folder.ok) return folder;
   // Never inside, or holding, a registered project's folder: its offload would delete the store (D83).
-  const projects = await registeredFolders(io, paths, options.env);
-  if (!projects.ok) return projects;
-  for (const project of projects.value) {
-    const overlap = await storeOverlap(io, paths.home, project.folder, [{ name, root }]);
-    if (!overlap.ok) return overlap;
-  }
+  const overlaps = async (): Promise<Result<void>> => {
+    const projects = await registeredFolders(io, paths, options.env);
+    if (!projects.ok) return projects;
+    for (const project of projects.value) {
+      const overlap = await storeOverlap(io, paths.home, project.folder, [{ name, root }]);
+      if (!overlap.ok) return overlap;
+    }
+    return ok(undefined);
+  };
+  const apart = await bounded(
+    overlaps(),
+    `checking store ${name} against the registered projects' folders`,
+    name,
+    root,
+    probe,
+  );
+  if (!apart.ok) return apart;
   if (folder.value === undefined) {
     try {
       await io.fs.mkdirp(root);

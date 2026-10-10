@@ -325,6 +325,10 @@ const IN_PROGRESS_NAMES: Readonly<Record<string, string>> = {
   bisect: "a bisect",
 };
 
+/** How many tags the message names, and how many the finding lists as paths (the rest are counted). */
+const TAGS_NAMED = 5;
+const TAG_PATHS = 100;
+
 /** The steps a push of the branches leaves undone: commits on a detached HEAD and stashes each need one of their own. */
 const unpushedBesides = (git: GitFacts): string[] => {
   const { unpushed, stashes } = git;
@@ -348,24 +352,29 @@ const unpushedBesides = (git: GitFacts): string[] => {
  * The fix covers each kind of work the message names.
  */
 export const unpushedFinding = (git: GitFacts): Finding | undefined => {
-  const { unpushed, stashes } = git;
+  const { unpushed, stashes, unpushedTags: tags } = git;
   const stashText = plural(stashes, "stash", "stashes");
   const what = [
     ...(unpushed.commits > 0 ? [plural(unpushed.commits, "commit")] : []),
     ...(stashes > 0 ? [stashText] : []),
+    ...(tags.length > 0 ? [plural(tags.length, "tag")] : []),
   ];
-  /** One commit or one stash, and nothing else, takes a singular verb. */
-  const one = unpushed.commits + stashes === 1;
+  /** One commit, stash or tag, and nothing else, takes a singular verb. */
+  const one = unpushed.commits + stashes + tags.length === 1;
   const remote = git.remotes[0] ?? "origin";
   const besides = unpushedBesides(git);
+  // The tags are the finding's paths, as refs (D69).
+  const named = tags.length === 0 ? {} : { paths: tags.slice(0, TAG_PATHS).map((t) => `refs/tags/${t}`) };
   if (git.remotes.length === 0) {
     if (what.length === 0) return undefined;
     return finding("git.unpushed", {
       message: `the repository has no remote, so its ${andList(what)} ${one ? "exists" : "exist"} only in this folder`,
       fix: [
         "add a remote and push to keep a second copy: git remote add origin <url> && git push -u origin --all",
+        ...(tags.length > 0 ? ["git push origin --tags"] : []),
         ...besides,
       ].join("; "),
+      ...named,
     });
   }
   if (!git.remoteBranches) {
@@ -374,8 +383,10 @@ export const unpushedFinding = (git: GitFacts): Finding | undefined => {
       message: `none of the branches of ${andList(git.remotes)} have been fetched, so its ${andList(what)} ${one ? "is" : "are"} not known to be on a remote`,
       fix: [
         `git fetch ${shellWord(remote)}, then push what is missing: git push -u ${shellWord(remote)} --all`,
+        ...(tags.length > 0 ? [`git push ${shellWord(remote)} --tags`] : []),
         ...besides,
       ].join("; "),
+      ...named,
     });
   }
   const counted = new Set(unpushed.branches.map((b) => b.name));
@@ -396,6 +407,12 @@ export const unpushedFinding = (git: GitFacts): Finding | undefined => {
       `${bare.length === 1 ? "branch" : "branches"} ${andList(bare)} ${bare.length === 1 ? "is" : "are"} on no remote`,
     );
   if (stashes > 0) parts.push(`${stashText} ${stashes === 1 ? "exists" : "exist"} only in this folder`);
+  if (tags.length > 0) {
+    const shown = tags.slice(0, TAGS_NAMED);
+    parts.push(
+      `${plural(tags.length, "tag")} (${andList(shown)}${tags.length > shown.length ? ", …" : ""}) ${tags.length === 1 ? "is" : "are"} on no remote`,
+    );
+  }
   if (parts.length === 0) return undefined;
   const localOnly = new Set(git.localOnly);
   const toTrack = [...unpushed.branches.map((b) => b.name).filter((n) => localOnly.has(n)), ...bare];
@@ -404,9 +421,16 @@ export const unpushedFinding = (git: GitFacts): Finding | undefined => {
       .filter((b) => !localOnly.has(b.name) && b.remote !== undefined)
       .map((b) => `git push ${shellWord(b.remote as string)} ${shellWord(b.name)}`),
     ...(toTrack.length > 0 ? [`git push -u ${shellWord(remote)} ${words(toTrack)}`] : []),
+    ...(tags.length > 0
+      ? [
+          tags.length > TAGS_NAMED
+            ? `git push ${shellWord(remote)} --tags`
+            : `git push ${shellWord(remote)} ${words(tags)}`,
+        ]
+      : []),
     ...besides,
   ];
-  return finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; ") });
+  return finding("git.unpushed", { message: parts.join("; "), fix: fixes.join("; "), ...named });
 };
 
 /** Findings from the scan's results. */

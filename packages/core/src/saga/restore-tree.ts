@@ -4,14 +4,23 @@
 // space the restore needs (fs.no-space); restoreVerified restores into the staging folder and compares the staged tree
 // with the listing (verify.mismatch). Neither swaps anything into place: the caller renames the staging folder.
 
-import { dirname, join } from "node:path";
-import { type Failure, fail, finding, ok, type Phase, type Result, shellWord } from "@plainport/contract";
+import { basename, dirname, join } from "node:path";
+import {
+  type Failure,
+  type Finding,
+  fail,
+  finding,
+  ok,
+  type Phase,
+  type Result,
+  shellWord,
+} from "@plainport/contract";
 import { CatalogEventSchema } from "../catalog/events.ts";
 import { STORE_EVENTS_PREFIX } from "../catalog/log.ts";
 import { makeInHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
-import type { Engine, RunContext } from "../ports/engine.ts";
+import type { Engine, EntryMeta, RunContext } from "../ports/engine.ts";
 import { scanTree } from "../scan/walk.ts";
 import { writeFailed } from "./journaled.ts";
 import { verifyListing } from "./verify.ts";
@@ -81,6 +90,30 @@ const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Res
 };
 
 /**
+ * ignoresCase without writing (a preview, D71): the nearest ancestor of `folder` (itself included) on the same volume
+ * whose name has a letter, looked up with its letters swapped in case in its parent. undefined when no folder on that
+ * volume can tell (the volume's root, a path of digits). Limit: it looks for a sibling of that folder, so a volume
+ * mounted at a case-folded sibling name can answer wrongly.
+ */
+const ignoresCaseReadOnly = async (io: LocalIo, folder: string): Promise<Result<boolean | undefined>> => {
+  try {
+    const dev = (await io.fs.stat(folder)).dev;
+    for (let at = folder; dirname(at) !== at; at = dirname(at)) {
+      if ((await io.fs.stat(at)).dev !== dev) break;
+      const name = basename(at);
+      const swapped = [...name]
+        .map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()))
+        .join("");
+      if (swapped === name) continue;
+      return ok((await kindAt(io, join(dirname(at), swapped))) !== undefined);
+    }
+    return ok(undefined);
+  } catch (error) {
+    return unreadable(folder, error, "whether its volume ignores case is unknown");
+  }
+};
+
+/**
  * Folds a name as a case-insensitive volume compares it (APFS, HFS+): letter case and Unicode normalization (NFC/NFD)
  * both, so two names that differ in either one would land on one file there.
  */
@@ -89,6 +122,11 @@ const foldCaseAndForm = (path: string): string => path.normalize("NFC").toLowerC
 export interface SnapshotTotals {
   files: number;
   bytes: number;
+  /** The space the restore needs on the landing volume, and what is free there (fs.no-space compares them). */
+  needed: number;
+  free: number;
+  /** The bytes of dependencies the offload stripped and the install puts back, as its event recorded them. */
+  strippedBytes: number;
   /** The project folder's own mode, from the offloaded event (D55). */
   rootMode?: number;
   /** How many paths the offload stripped, from its event (D73); absent when the event cannot be read or does not say. */
@@ -117,6 +155,12 @@ export const checkSnapshot = async (options: {
   elsewhere: string;
   /** Whether the dependencies the offload stripped will be installed there too (onload); restore never does. */
   dependencies?: boolean;
+  /**
+   * A preview (D71): nothing is written, so a case probe is a lookup in `nearest`, and what would refuse the restore
+   * (fs.case-collision, fs.no-space) is pushed to `problems` while the totals are still returned. Each entry also
+   * goes to `onEntry`.
+   */
+  preview?: { problems: Failure[]; warnings: Finding[]; onEntry(entry: EntryMeta): void };
 }): Promise<Result<SnapshotTotals>> => {
   const { io, nearest, address } = options;
   let files = 0;
@@ -127,6 +171,7 @@ export const checkSnapshot = async (options: {
   const listed = await options.engine.entries(
     options.stored,
     (entry) => {
+      options.preview?.onEntry(entry);
       if (entry.type === "file") {
         files++;
         bytes += entry.size ?? 0;
@@ -141,11 +186,25 @@ export const checkSnapshot = async (options: {
   if (!listed.ok) return listed;
   const collisions = [...groups.values()];
   if (collisions.length > 0) {
-    const insensitive = await ignoresCase(io, options.holder, options.op);
+    const insensitive = options.preview
+      ? await ignoresCaseReadOnly(io, nearest)
+      : await ignoresCase(io, options.holder, options.op);
     if (!insensitive.ok) return insensitive;
-    if (insensitive.value) {
+    if (insensitive.value === undefined && options.preview !== undefined) {
+      options.preview.warnings.push(
+        finding("fs.case-unknown", {
+          message: `the snapshot holds names that differ only by case (${collisions
+            .slice(0, 3)
+            .map((c) => c.sort().join(" and "))
+            .join(
+              "; ",
+            )}), and ${nearest} has no folder name with a letter to tell whether its volume ignores case; the onload probes it`,
+          paths: collisions.flat().sort().slice(0, 100),
+        }),
+      );
+    } else if (insensitive.value !== false) {
       const names = collisions.flat().sort();
-      return fail(
+      const refused = fail(
         finding("fs.case-collision", {
           message: `the snapshot holds names that differ only by case or Unicode form (${collisions
             .slice(0, 5)
@@ -157,6 +216,8 @@ export const checkSnapshot = async (options: {
           paths: names.slice(0, 100),
         }),
       );
+      if (options.preview === undefined) return refused;
+      options.preview.problems.push(refused);
     }
   }
   // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
@@ -166,24 +227,33 @@ export const checkSnapshot = async (options: {
   // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore
   // already holds part of it in staging, and verification still catches a short one, so it is not counted again.
   const needed = Math.ceil((bytes + stripped + files * 2048) * 1.1);
-  let free: number;
+  let free = 0;
+  let freeKnown = true;
   try {
     free = await io.fs.freeBytes(nearest);
   } catch (error) {
-    return unreadable(nearest, error, "its free space is unknown; nothing was restored");
+    const unknown = unreadable(nearest, error, "its free space is unknown; nothing was restored");
+    if (options.preview === undefined) return unknown;
+    options.preview.problems.push(unknown);
+    freeKnown = false;
   }
-  if (!options.resuming && free < needed) {
-    return fail(
+  if (!options.resuming && freeKnown && free < needed) {
+    const refused = fail(
       finding("fs.no-space", {
         message: `${address} needs about ${needed} bytes on the volume of ${nearest} (the snapshot's ${bytes}, ${stripped} of dependencies and a 10% margin), and ${free} are free; nothing was restored`,
         fix: `free some space (plainport offload another project, or empty the trash), or land it on another volume: ${options.elsewhere}`,
         paths: [nearest],
       }),
     );
+    if (options.preview === undefined) return refused;
+    options.preview.problems.push(refused);
   }
   return ok({
     files,
     bytes,
+    needed,
+    free,
+    strippedBytes: stripped,
     ...(rootMode === undefined ? {} : { rootMode }),
     ...(made?.stats.stripped === undefined ? {} : { stripped: made.stats.stripped }),
   });

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Result } from "@plainport/contract";
 import {
   appendEvent,
   type CatalogEvent,
@@ -22,6 +23,8 @@ import {
   PathGuard,
   readEvents,
   resolvePaths,
+  type Scheduler,
+  STORE_PROBE_DEADLINE_MS,
   storeEventLog,
   ulid,
 } from "@plainport/core";
@@ -261,5 +264,117 @@ describe("blob-fs carries the catalog", () => {
       state: online.value.state,
       syncedAt: now.toISOString(),
     });
+  });
+});
+
+describe("a store folder on a network mount that hangs (D32)", () => {
+  /** A stat that never returns, as on a hung SMB or NFS mount, counting its calls. */
+  const hungStat = () => {
+    let calls = 0;
+    const hung: LocalIo = {
+      ...io,
+      fs: {
+        ...io.fs,
+        stat: () => {
+          calls++;
+          return new Promise(() => {});
+        },
+      },
+    };
+    return { hung, calls: () => calls };
+  };
+  /** A fake scheduler whose timers fire at once, recording the deadline each was given. */
+  const atOnce = () => {
+    const deadlines: number[] = [];
+    const scheduler: Scheduler = {
+      setTimer: (fire, ms) => {
+        deadlines.push(ms);
+        queueMicrotask(fire);
+        return undefined;
+      },
+      clearTimer: () => {},
+    };
+    return { scheduler, deadlines };
+  };
+  const expectHung = (result: Result<unknown>) =>
+    expect(result.ok ? "ok" : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("did not answer within 10 seconds"),
+    ]);
+
+  test("calls made together share one root probe, which fails as store.unreachable at the deadline (10 s by default)", async () => {
+    const dir = temp();
+    try {
+      const { hung, calls } = hungStat();
+      const { scheduler, deadlines } = atOnce();
+      const store = fsBlobStore(hung, dir, { scheduler });
+      const results = await Promise.all([
+        store.get("meta/x"),
+        store.list("meta/"),
+        store.put("meta/y", new Uint8Array()),
+      ]);
+      for (const result of results) expectHung(result);
+      expect([calls(), deadlines]).toEqual([1, [STORE_PROBE_DEADLINE_MS]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("while a timed-out probe still hangs, every later call is store.unreachable at once, with no new stat", async () => {
+    const dir = temp();
+    try {
+      const { hung, calls } = hungStat();
+      const { scheduler, deadlines } = atOnce();
+      const store = fsBlobStore(hung, dir, { scheduler });
+      expectHung(await store.get("meta/x"));
+      expectHung(await store.get("meta/x"));
+      expectHung(await store.list("meta/"));
+      expect([calls(), deadlines.length]).toEqual([1, 1]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("once the hung stat answers, the next call probes again", async () => {
+    const dir = temp();
+    try {
+      let answer: () => Promise<unknown> = async () => {};
+      let calls = 0;
+      const slow: LocalIo = {
+        ...io,
+        fs: {
+          ...io.fs,
+          stat: (path: string) => {
+            calls++;
+            if (calls > 1) return io.fs.stat(path);
+            return new Promise((resolve) => {
+              answer = () => {
+                const real = io.fs.stat(path);
+                resolve(real);
+                return real;
+              };
+            });
+          },
+        },
+      };
+      // The first probe's timer fires at once; later ones never do, so they wait for their stat.
+      let fire = true;
+      const scheduler: Scheduler = {
+        setTimer: (expire) => {
+          if (fire) queueMicrotask(expire);
+          return undefined;
+        },
+        clearTimer: () => {},
+      };
+      const store = fsBlobStore(slow, dir, { scheduler });
+      expectHung(await store.get("meta/x"));
+      fire = false;
+      await answer();
+      await Bun.sleep(0);
+      expect(await store.get("meta/x")).toEqual({ ok: true, value: null });
+      expect(calls).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

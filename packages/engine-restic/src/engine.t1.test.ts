@@ -1,4 +1,5 @@
 // T1: the engine against the real pinned restic on a tiny temp repository (ADR-0018). `bun run test:t1` runs it.
+// CI's restic matrix runs it on other restic versions too, through PLAINPORT_RESTIC_MATRIX (test/tiers.ts).
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
@@ -18,7 +19,7 @@ import { join } from "node:path";
 import type { Result } from "@plainport/contract";
 import { type Engine, type EntryMeta, toolPath } from "@plainport/core";
 import { testHost } from "@plainport/host-macos/testing";
-import { describeT1 } from "../../../test/tiers.ts";
+import { describeT1, resticUnderTest } from "../../../test/tiers.ts";
 import { resticEngine } from "./engine.ts";
 
 const TIMEOUT = 60_000;
@@ -51,6 +52,7 @@ describeT1("restic engine: the real restic on a temp repository", () => {
   let src: string;
   let engine: Engine;
   const ctx = { op: "t1" };
+  const matrix = resticUnderTest();
 
   const make = (password: string, repository = join(root, "repo")): Engine =>
     resticEngine({
@@ -61,6 +63,7 @@ describeT1("restic engine: the real restic on a temp repository", () => {
       env: { PATH: "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp") },
       cacheDir: join(root, "cache"),
       retryLock: null,
+      ...(matrix === undefined ? {} : { expectedVersion: matrix.version }),
     });
   let resticPath: string;
 
@@ -87,9 +90,11 @@ describeT1("restic engine: the real restic on a temp repository", () => {
     symlinkSync("c -> d", join(src, "sub", "a -> b"));
     symlinkSync("tar\nget ", join(src, "sub", "new\nline"));
     symlinkSync("tar\r", join(src, "sub", "cr-link"));
-    const found = await toolPath(host, "restic", { env: {} });
-    if (!found.ok) throw new Error(found.finding.message);
-    resticPath = found.value.path;
+    if (matrix === undefined) {
+      const found = await toolPath(host, "restic", { env: {} });
+      if (!found.ok) throw new Error(found.finding.message);
+      resticPath = found.value.path;
+    } else resticPath = matrix.path;
     engine = make("t1-password");
   });
 

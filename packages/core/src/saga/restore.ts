@@ -203,7 +203,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       address: ref.address,
     });
     if (!found.ok) return found;
-    made = { stored: { [store.name]: found.value } };
+    made = { stored: { [store.name]: found.value.id } };
   }
   const stored = made?.stored[store.name];
   if (made === undefined || stored === undefined) {

@@ -1,0 +1,14 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "cat",
+    "tree",
+    "de43c924419aa8bd64ca88c974f887825f26e06288780f4b3c8a894baea0cae7:/"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"nodes\":[{\"name\":\"a.txt\",\"type\":\"file\",\"mode\":420,\"mtime\":\"2026-10-10T12:12:56.593516669+02:00\",\"atime\":\"2026-10-10T12:12:56.593516669+02:00\",\"ctime\":\"2026-10-10T12:12:56.593516669+02:00\",\"uid\":501,\"gid\":20,\"user\":\"fixture-user\",\"group\":\"staff\",\"inode\":384855500,\"device_id\":16777229,\"size\":6,\"links\":1,\"extended_attributes\":[{\"name\":\"com.apple.provenance\",\"value\":\"AQIAdnBToLwn3KU=\"}],\"content\":[\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\"]},{\"name\":\"link\",\"type\":\"symlink\",\"mode\":134218221,\"mtime\":\"2026-10-10T12:12:56.593756587+02:00\",\"atime\":\"2026-10-10T12:12:56.593756587+02:00\",\"ctime\":\"2026-10-10T12:12:56.593775046+02:00\",\"uid\":501,\"gid\":20,\"user\":\"fixture-user\",\"group\":\"staff\",\"inode\":384855503,\"device_id\":16777229,\"links\":1,\"linktarget\":\"a.txt\",\"extended_attributes\":[{\"name\":\"com.apple.provenance\",\"value\":\"AQIAdnBToLwn3KU=\"}],\"content\":null},{\"name\":\"sub\",\"type\":\"dir\",\"mode\":2147484141,\"mtime\":\"2026-10-10T12:12:56.593808713+02:00\",\"atime\":\"2026-10-10T12:12:56.593808713+02:00\",\"ctime\":\"2026-10-10T12:12:56.593808713+02:00\",\"uid\":501,\"gid\":20,\"user\":\"fixture-user\",\"group\":\"staff\",\"inode\":384855498,\"device_id\":16777229,\"extended_attributes\":[{\"name\":\"com.apple.provenance\",\"value\":\"AQIAdnBToLwn3KU=\"}],\"content\":null,\"subtree\":\"bdef200c282f4037358af784ad9008daec0f35d531c5234608c48c061b17f456\"}]}\n",
+  "stderr": ""
+}

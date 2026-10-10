@@ -730,6 +730,7 @@ describe("preflight: the git.unpushed finding, by case (q1)", () => {
     changed: [],
     unpushed: { commits: 0, branches: [], detachedHead: 0 },
     localOnly: [],
+    unpushedTags: [],
     stashes: 0,
     inProgress: [],
     remotes: ["origin"],
@@ -796,6 +797,24 @@ describe("preflight: the git.unpushed finding, by case (q1)", () => {
       ["git remote add origin <url>"],
     ],
     [
+      "only tags on no remote",
+      { unpushedTags: ["v1.0.0", "v1.1.0"] },
+      "2 tags (v1.0.0 and v1.1.0) are on no remote",
+      ["git push origin v1.0.0 v1.1.0"],
+    ],
+    [
+      "one tag, with a commit and no remote",
+      {
+        remotes: [],
+        remoteBranches: false,
+        unpushed: { commits: 1, branches: [{ name: "main", commits: 1 }], detachedHead: 0 },
+        localOnly: ["main"],
+        unpushedTags: ["v1"],
+      },
+      "the repository has no remote, so its 1 commit and 1 tag exist only in this folder",
+      ["git remote add origin <url>", "git push origin --tags"],
+    ],
+    [
       "remote never fetched, one stash: the verb agrees",
       { remoteBranches: false, stashes: 1 },
       "none of the branches of origin have been fetched, so its 1 stash is not known to be on a remote",
@@ -809,6 +828,14 @@ describe("preflight: the git.unpushed finding, by case (q1)", () => {
       for (const fix of fixes) expect(found?.fix).toContain(fix);
     });
   }
+
+  test("the tags are the finding's paths, as refs, at most a hundred (D69)", () => {
+    const tags = Array.from({ length: 120 }, (_, i) => `v${i}`);
+    const found = unpushedFinding(facts({ unpushedTags: tags }));
+    expect(found?.paths).toHaveLength(100);
+    expect(found?.paths?.[0]).toBe("refs/tags/v0");
+    expect(found?.message).toContain("120 tags");
+  });
 });
 
 describe("preflight: a host lookup that throws (task 17 concern 2)", () => {

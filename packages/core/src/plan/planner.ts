@@ -362,6 +362,8 @@ export const prepareOffload = async (
     // The included fingerprint (D53): the strip set left out, its kind beside it.
     fingerprint: includedFingerprint(tree, stripped),
     fp: FINGERPRINT_VERSION,
+    git: scanned.value.git !== undefined,
+    ...(nested.length === 0 ? {} : { nested }),
     include: {
       files,
       bytes,

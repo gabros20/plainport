@@ -18,7 +18,7 @@
 // and `plainport hydrate` (runHydrate) retries. `plainport dehydrate` (runDehydrate) is the way back: it removes the
 // installed dependencies a plugin claims and git does not track, nothing else.
 
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -32,7 +32,7 @@ import {
 } from "@plainport/contract";
 import type { ConfigLoader } from "../config/load.ts";
 import { deleteGuard } from "../delete-guard.ts";
-import { systemErrorCode } from "../io.ts";
+import { type LocalFs, systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { dehydrateSet } from "../plan/planner.ts";
 import type { HostChecks } from "../ports/checks.ts";
@@ -43,6 +43,7 @@ import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { refreshIndex } from "../scan/git.ts";
+import type { Manifest } from "../scan/manifest.ts";
 import { scanTree } from "../scan/walk.ts";
 import { secretVariables } from "../store.ts";
 import { ulid } from "../ulid.ts";
@@ -56,6 +57,8 @@ export type HydrateStepReport = {
   ok: boolean;
   /** The install's exit code when it ran and failed; null when a signal ended it. */
   exitCode?: number | null;
+  /** Set when Corepack supplied the package manager (its shim is what `command` ran). */
+  via?: "corepack";
 };
 
 export type HydrateReport = {
@@ -94,6 +97,12 @@ const INSTALL_IDLE_MS = 10 * 60_000;
 const INSTALL_TIMEOUT_MS = 60 * 60_000;
 const VERSION_TIMEOUT_MS = 30_000;
 
+/**
+ * Corepack must never wait on a prompt to download a package manager, nor write the manager it used into the
+ * project's package.json (M2 Task 3). Set after the user's own values, whatever they are.
+ */
+const COREPACK_POLICY = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", COREPACK_ENABLE_AUTO_PIN: "0" } as const;
+
 /** Variables only plainport and its engines read: a store password or a restic or rclone setting may be among them. */
 const PRIVATE_PREFIXES = ["PLAINPORT_", "RESTIC_", "RCLONE_"];
 
@@ -111,7 +120,7 @@ const installEnv = (env: Env, secrets: readonly string[] = []): Record<string, s
       !secrets.includes(name)
     )
       out[name] = value;
-  return out;
+  return { ...out, ...COREPACK_POLICY };
 };
 
 /** Where a program is on the env's PATH, if it is anywhere. */
@@ -121,6 +130,47 @@ const onPath = async (host: HostPorts, env: Env, name: string): Promise<string |
     if (await host.fs.executable(join(folder, name))) return join(folder, name);
   }
   return undefined;
+};
+
+const COREPACK_MANAGERS: ReadonlySet<string> = new Set(["pnpm", "yarn", "npm"]);
+
+/**
+ * Whether the package manager the install will run is Corepack's shim: a link that resolves into the corepack
+ * package. It is looked up the way the install finds it: through the version manager's own environment when the
+ * install is wrapped, else on the install's PATH.
+ */
+const suppliedByCorepack = async (
+  host: HostPorts,
+  env: Record<string, string>,
+  toolchain: Toolchain,
+  name: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<boolean> => {
+  // Corepack shims only these three; anything else is never asked about.
+  if (!COREPACK_MANAGERS.has(name)) return false;
+  try {
+    let found: string | undefined;
+    if (toolchain.manager === undefined) found = await onPath(host, env, name);
+    else {
+      const argv = toolchain.wrap(["sh", "-c", `command -v ${shellWord(name)}`]);
+      const ran = await host.run({
+        command: argv[0] as string,
+        args: argv.slice(1),
+        cwd,
+        env,
+        timeoutMs: VERSION_TIMEOUT_MS,
+        idleTimeoutMs: VERSION_TIMEOUT_MS,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (ran.ok && ran.value.exitCode === 0) found = ran.value.stdout.text.trim().split("\n")[0];
+    }
+    return (
+      found !== undefined && found !== "" && (await host.fs.realpath(found)).split(sep).includes("corepack")
+    );
+  } catch {
+    return false; // a path the host refuses or cannot read: not credited to Corepack
+  }
 };
 
 export interface Toolchain {
@@ -326,6 +376,9 @@ export const hydrateProject = async (
     if (deps.signal?.aborted) return stopped(steps);
     const argv = toolchain.wrap(step.argv);
     const cwd = step.path === "" ? dir : join(dir, ...step.path.split("/"));
+    const via = (await suppliedByCorepack(host, env, toolchain, step.argv[0] as string, cwd, deps.signal))
+      ? { via: "corepack" as const }
+      : {};
     const where = step.path === "" ? address : `${address} (${step.path})`;
     const ran = await host.run({
       command: argv[0] as string,
@@ -338,7 +391,7 @@ export const hydrateProject = async (
       log: { op, emit: (event) => deps.log(event.level, event.message) },
     });
     if (!ran.ok) {
-      steps.push({ path: step.path, command: step.command, ok: false });
+      steps.push({ path: step.path, command: step.command, ok: false, ...via });
       if (ran.finding.code === "process.cancelled" || deps.signal?.aborted) return stopped(steps);
       return failed(
         `${where} is restored, but ${step.command} could not run: ${ran.finding.message}`,
@@ -350,7 +403,7 @@ export const hydrateProject = async (
     }
     const { exitCode, signal: killed } = ran.value;
     if (exitCode !== 0) {
-      steps.push({ path: step.path, command: step.command, ok: false, exitCode });
+      steps.push({ path: step.path, command: step.command, ok: false, exitCode, ...via });
       return failed(
         `${where} is restored, but ${step.command} ${
           exitCode === null ? `was ended by ${killed}` : `failed with exit code ${exitCode}`
@@ -358,7 +411,7 @@ export const hydrateProject = async (
         steps,
       );
     }
-    steps.push({ path: step.path, command: step.command, ok: true });
+    steps.push({ path: step.path, command: step.command, ok: true, ...via });
   }
   // The index's stat data is stale after a restore: one refresh, so the first git status is not slow.
   if (manifest.get(".git") !== undefined) {
@@ -371,6 +424,100 @@ export const hydrateProject = async (
   }
   phase("hydrate", "end");
   return { report: { status: steps.length === 0 ? "none" : "installed", steps, untrusted } };
+};
+
+export type HydratePlanStep = {
+  /** The install root, relative to the project; "" is the project folder. */
+  path: string;
+  /** The install as a person would type it, e.g. npm ci. */
+  command: string;
+  /** The package manager it runs (the first word of the command). */
+  packageManager: string;
+  /** Set when the manager the install will run is Corepack's shim; absent when that cannot be told before the restore. */
+  via?: "corepack";
+};
+
+/** What an onload would install (onload --dry-run, D71). */
+export type HydratePlan = {
+  /** install: these commands run. reused: the folder comes back with its dependencies. skipped: not asked for. none: nothing to install. */
+  status: "install" | "reused" | "skipped" | "none";
+  reason?: string;
+  steps: HydratePlanStep[];
+  /**
+   * With steps: the toolchain the install meets. `pinnedBy` lists the version files in the snapshot (.nvmrc,
+   * .node-version, .tool-versions, mise.toml); `manager` is the version manager on PATH that would activate the pinned
+   * version (mise, fnm or Volta). Their contents, and package.json's packageManager and engines, are read after the
+   * restore, so the versions themselves are not shown.
+   */
+  toolchain?: { pinnedBy: string[]; manager?: string };
+  /**
+   * Always false: what the project file asks to run that this version never runs (D54) is read from the restored
+   * .plainport.toml, so a preview cannot say; `untrusted` is deliberately absent, never an empty list.
+   */
+  untrustedKnown: false;
+};
+
+const VERSION_FILES = [".nvmrc", ".node-version", ".tool-versions", "mise.toml", ".mise.toml"];
+
+/**
+ * The install an onload would run for a snapshot not yet restored (D71), from its file list alone: the plugins
+ * see the snapshot's entries but every file reads as missing, so the package manager comes from the lockfiles and
+ * the commands are the frozen installs those choose. Nothing is run beyond looking for the version managers and
+ * Corepack on PATH, and nothing is written.
+ */
+export const previewHydrate = async (
+  deps: { host: HostPorts; plugins: readonly EcosystemPlugin[]; env: Env },
+  manifest: Manifest,
+  dir: string,
+): Promise<HydratePlan> => {
+  const { host } = deps;
+  const absent = Object.assign(new Error("not restored yet"), { code: "ENOENT" });
+  // Every call on this file system answers "not there": the snapshot is not restored, so whatever stands at the
+  // landing path is not the project and a plugin must never read it.
+  const fs = new Proxy({} as LocalFs, {
+    get: (_, method) => (typeof method === "string" ? async () => Promise.reject(absent) : undefined),
+  });
+  const steps: HydrateStep[] = [];
+  for (const plugin of deps.plugins) {
+    const detection = await plugin.detect({ dir, manifest, fs });
+    if (detection === null) continue;
+    steps.push(...(await plugin.hydrate({ dir, manifest, fs, detection })).steps);
+  }
+  if (steps.length === 0) {
+    return {
+      status: "none",
+      reason: "no ecosystem plugin finds dependencies to install",
+      steps: [],
+      untrustedKnown: false,
+    };
+  }
+  const pinnedBy = VERSION_FILES.filter((name) => manifest.get(name)?.type === "file");
+  let manager: string | undefined;
+  if (pinnedBy.length > 0)
+    for (const name of MANAGERS) {
+      if ((await onPath(host, deps.env, name)) !== undefined) {
+        manager = name;
+        break;
+      }
+    }
+  const env = installEnv(deps.env);
+  const planned: HydratePlanStep[] = [];
+  for (const step of steps) {
+    const name = step.argv[0] as string;
+    // A version manager around the install may swap the tool: Corepack is then known only after the restore.
+    const via =
+      manager === undefined &&
+      (await suppliedByCorepack(host, env, { wrap: (argv) => [...argv], findings: [] }, name, dir))
+        ? { via: "corepack" as const }
+        : {};
+    planned.push({ path: step.path, command: step.command, packageManager: name, ...via });
+  }
+  return {
+    status: "install",
+    steps: planned,
+    toolchain: { pinnedBy, ...(manager === undefined ? {} : { manager }) },
+    untrustedKnown: false,
+  };
 };
 
 /** Records whether the project's dependencies are installed (registry.json `unhydrated`). */

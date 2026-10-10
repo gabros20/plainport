@@ -27,6 +27,7 @@ import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog 
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { type Journal, type OnloadJournal, readJournals } from "../journal/index.ts";
+import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
@@ -35,6 +36,7 @@ import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { setUpStore } from "../store.ts";
+import { bytesOf } from "../testing/bytes.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { makeGitFixture } from "../testing/git-fixture.ts";
@@ -61,6 +63,7 @@ import {
   type OnloadRequest,
   type OnloadStep,
   onloadSwapped,
+  previewOnload,
   runOnload,
 } from "./onload.ts";
 
@@ -1858,6 +1861,24 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     });
   }
 
+  test("--snapshot <S2> with S2's offloaded event unreadable gives the folder its mode from the snapshot's tag (Q5 ii)", async () => {
+    chmodSync(dir, 0o700);
+    const { second } = await hideNewest(malformed);
+    value(await onload({ snapshot: second.op, hydrate: false }));
+    expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe("700");
+    const tagged = engine.repository.snapshots.find((s) => s.info.tags.includes(`plainport:op=${second.op}`));
+    expect(tagged?.info.tags).toContain("plainport:mode=0700");
+  });
+
+  test("--snapshot <S2> whose snapshot has no mode tag (an older writer) says the folder's mode is unknown", async () => {
+    chmodSync(dir, 0o700);
+    const { second } = await hideNewest(malformed);
+    for (const s of engine.repository.snapshots)
+      (s.info as { tags: string[] }).tags = s.info.tags.filter((t) => !t.startsWith("plainport:mode="));
+    value(await onload({ snapshot: second.op, hydrate: false }));
+    expect(logs.some((l) => l.includes(dir) && l.includes("mode") && l.includes("unknown"))).toBe(true);
+  });
+
   test("a skipped event that leaves the known snapshot named does not stop the default onload", async () => {
     await offload();
     value(await onload());
@@ -1960,5 +1981,291 @@ describe("onload: a first offload whose only event is unreadable (D88)", () => {
         snapshotsNow: engine.repository.snapshots.map((s) => s.info.id),
       }),
     ).toEqual([]);
+  });
+});
+
+const storeBytes = (): Record<string, string> =>
+  Object.fromEntries(
+    [...store.data.entries()].map(([key, bytes]) => [key, createHash("sha256").update(bytes).digest("hex")]),
+  );
+
+describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
+  /** Runs the preview and checks it wrote nothing: the sandbox and the store are byte-identical after it. */
+  const preview = async (req: Partial<OnloadRequest> = {}, over: Partial<OnloadDeps> = {}) => {
+    const sandbox = bytesOf(box.home);
+    const held = storeBytes();
+    const result = await previewOnload(deps(over), {
+      project: await ref(req.project?.address ?? "work:web"),
+      ...req,
+    });
+    expect(bytesOf(box.home)).toEqual(sandbox);
+    expect(storeBytes()).toEqual(held);
+    return result;
+  };
+
+  test("a restore from the store: the snapshot, the head it is written over, the landing folder, the space and the install", async () => {
+    const off = await offload();
+    // A first read fills this device's event mirror (D45); the preview after it is a pure read.
+    value(await previewOnload(deps(), { project: await ref() }));
+    const got = value(await preview());
+    expect(got).toMatchObject({
+      kind: "onload",
+      project: "work:web",
+      store: "ssd",
+      snapshot: off.op,
+      over: off.op,
+      dir,
+      restored: "restore",
+      findings: [],
+      hydrate: {
+        status: "install",
+        steps: [{ path: "", command: "npm ci", packageManager: "npm" }],
+        untrustedKnown: false,
+      },
+    });
+    // Unknown, not none: the project file is read after the restore.
+    expect("untrusted" in got.hydrate).toBe(false);
+    expect(got.why).toContain("store");
+    expect(got.files).toBeGreaterThan(0);
+    expect(got.bytes).toBeGreaterThan(0);
+    expect(got.space.needed).toBeGreaterThan(got.bytes);
+    expect(got.space.free).toBeGreaterThan(0);
+    // The stub stays and nothing was restored or installed.
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(pmLog)).toBe(false);
+  });
+
+  test("a kept trash is a reuse: where it would be renamed back from, and why; nothing is installed", async () => {
+    config('[offload]\nkeepLocalFor = "24h"');
+    const off = await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    const got = value(await preview());
+    const trash = join(box.home, "work/.plainport-trash", off.op, "web");
+    expect(got).toMatchObject({
+      restored: "reuse",
+      snapshot: off.op,
+      over: off.op,
+      dir,
+      reused: { from: trash, offload: off.op },
+      hydrate: { status: "reused", steps: [] },
+      space: { needed: 0 },
+    });
+    expect(got.why).toContain("renamed back");
+    expect(existsSync(join(trash, "src/main.ts"))).toBe(true);
+  });
+
+  test("--to and an older snapshot always restore from the store, and the preview says why", async () => {
+    config('[offload]\nkeepLocalFor = "24h"');
+    await offload();
+    box.dir("elsewhere");
+    value(await previewOnload(deps(), { project: await ref() }));
+    const to = value(await preview({ to: join(box.home, "elsewhere/web") }));
+    expect(to).toMatchObject({ restored: "restore", dir: join(box.home, "elsewhere/web") });
+    expect(to.why).toContain("--to");
+  });
+
+  test("--no-hydrate shows no install, and says that is why", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    const got = value(await preview({ hydrate: false }));
+    expect(got.hydrate).toMatchObject({ status: "skipped", steps: [] });
+    expect(got.hydrate.reason).toContain("--no-hydrate");
+  });
+
+  test("an occupied landing folder is a block finding: exit 6 with the preview as data (D38)", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    box.file("work/web/other.txt", "hello\n");
+    const got = await preview();
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect([got.exitCode, got.finding.code]).toEqual([6, "path.occupied"]);
+    expect(got.data).toMatchObject({
+      kind: "onload",
+      restored: "restore",
+      dir,
+      findings: [{ severity: "block", code: "path.occupied" }],
+    });
+  });
+
+  test("another device's lease is a warn finding in the preview; under leases = strict a block with exit 8", async () => {
+    const off = await offload();
+    const id = await projectId();
+    const root = foldCatalog(await storeEvents()).projects[id]?.root as string;
+    value(
+      await appendEvent(storeEventLog(store), {
+        v: 1,
+        id: ulid(),
+        type: "onloaded",
+        device: ulid(),
+        at: new Date().toISOString(),
+        op: ulid(),
+        project: id,
+        root,
+        path: "web",
+        base: off.op,
+        over: off.op,
+      }),
+    );
+    value(await previewOnload(deps(), { project: await ref() }));
+    const warned = value(await preview());
+    expect(warned.findings.map((f) => `${f.severity} ${f.code}`)).toEqual(["warn lease.held"]);
+    config('[onload]\nleases = "strict"');
+    const strict = await preview();
+    expect(!strict.ok && [strict.exitCode, strict.finding.code]).toEqual([8, "lease.held"]);
+    expect(!strict.ok && strict.data).toMatchObject({
+      restored: "restore",
+      findings: [{ code: "lease.held" }],
+    });
+  });
+
+  test("an onload stopped before its swap is reported: resumed for the same snapshot and folder, rolled back otherwise", async () => {
+    await offload();
+    const crash = testHost({ faults: { at: "onload.restored" } });
+    await expect(onload({}, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    const [stopped] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+    const same = value(await preview());
+    expect(same.pending).toEqual({ op: stopped?.op as string, step: "onload.restored", action: "resume" });
+    box.dir("elsewhere");
+    const other = value(await preview({ to: join(box.home, "elsewhere/web") }));
+    expect(other.pending).toEqual({
+      op: stopped?.op as string,
+      step: "onload.restored",
+      action: "roll-back",
+    });
+    // Nothing was resumed or rolled back by looking: the journal and staging folder are still there.
+    expect(((await readJournals(testHost(), box.paths)).journals as OnloadJournal[])[0]?.op).toBe(
+      stopped?.op,
+    );
+  });
+
+  test("an onload stopped after its swap refuses as the run does: journal.pending, exit 6, recover first", async () => {
+    await offload();
+    const crash = testHost({ faults: { at: "onload.swapped" } });
+    await expect(onload({}, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    const run = await onload();
+    const got = await preview();
+    if (run.ok || got.ok) throw new Error("both must refuse");
+    expect([got.exitCode, got.finding.code, got.finding.fix]).toEqual([
+      run.exitCode,
+      run.finding.code,
+      run.finding.fix,
+    ]);
+    expect(got.exitCode).toBe(6);
+    expect(!got.ok && got.finding.fix).toContain("plainport recover");
+    // The folder it already moved into place does not make the preview say "move it aside" first.
+    expect(!got.ok && (got.data as { findings: { code: string }[] }).findings[0]?.code).toBe(
+      "journal.pending",
+    );
+  });
+
+  test("a live process holding the project's lock refuses as the run does: project.locked, exit 11", async () => {
+    await offload();
+    const id = await projectId();
+    const lock = await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+      timeoutMs: 0,
+      held: () => {
+        throw new Error("not held yet");
+      },
+      now: () => new Date(),
+    });
+    expect(lock.ok).toBe(true);
+    try {
+      const got = await preview();
+      expect(!got.ok && [got.exitCode, got.finding.code]).toEqual([11, "project.locked"]);
+      expect(!got.ok && got.data).toMatchObject({ kind: "onload", restored: "restore" });
+    } finally {
+      if (lock.ok) await lock.value.release();
+    }
+  });
+
+  /** The host with some file system calls replaced, everything else the real test host's. */
+  const withFs = (overrides: Record<string, unknown>): HostPorts => {
+    const real = testHost();
+    const fs = new Proxy(real.fs, {
+      get: (t, k, r) => (k in overrides ? overrides[k as string] : Reflect.get(t, k, r)),
+    });
+    return new Proxy(real, { get: (t, k, r) => (k === "fs" ? fs : Reflect.get(t, k, r)) });
+  };
+
+  test("a free-space read that throws is one more blocker: the ones already found survive", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    box.file("work/web/other.txt", "hello\n");
+    const failing = withFs({
+      freeBytes: async () => {
+        throw Object.assign(new Error("input/output error"), { code: "EIO" });
+      },
+    });
+    const got = await previewOnload(deps({}, failing), { project: await ref() });
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    const codes = (got.data as { findings: { code: string }[] }).findings.map((f) => f.code);
+    // The occupied folder comes first, as the run meets it; the unreadable volume is reported beside it.
+    expect(codes).toEqual(["path.occupied", "fs.unreadable"]);
+    expect(got.finding.code).toBe("path.occupied");
+    expect((got.data as { space: { free: number } }).space.free).toBe(0);
+  });
+
+  test("names differing only by case, on a volume no folder name can answer for, warn fs.case-unknown (never block)", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    engine.hooks.listing = (entries) => [
+      ...entries,
+      { ...(entries.find((e) => e.path === "src/main.ts") as (typeof entries)[number]), path: "src/MAIN.ts" },
+    ];
+    // The landing folder's nearest existing ancestor is named only with digits and every folder above it reports
+    // another device, so there is nothing to look a swapped-case name up against.
+    const digits = join(box.home, "work/2024");
+    mkdirSync(digits, { recursive: true });
+    const nameless = withFs({
+      stat: async (path: string) => {
+        const stat = await testHost().fs.stat(path);
+        return { ...stat, dev: path === digits ? 1 : 2 };
+      },
+    });
+    const got = value(
+      await previewOnload(deps({}, nameless), { project: await ref(), to: join(digits, "7") }),
+    );
+    expect(got.findings.map((f) => `${f.severity} ${f.code}`)).toEqual(["warn fs.case-unknown"]);
+    expect(got.findings[0]?.paths).toEqual(["src/MAIN.ts", "src/main.ts"]);
+  });
+
+  test("the preview's phases are paired, on a success and on a refusal", async () => {
+    await offload();
+    box.file("work/web/other.txt", "x");
+    events = [];
+    const refused = await previewOnload(deps(), { project: await ref() });
+    expect(refused.ok).toBe(false);
+    rmSync(join(dir, "other.txt"));
+    rmSync(dir, { recursive: true });
+    const done = await previewOnload(deps(), {
+      project: await ref(),
+      snapshot: "01M40X7EC1DTXN87AJ4SH74DK6",
+    });
+    expect(done.ok).toBe(false);
+    const open: string[] = [];
+    for (const e of events) {
+      if (e.type !== "phase") continue;
+      if (e.status === "start") open.push(e.phase);
+      else expect(open.pop()).toBe(e.phase);
+    }
+    expect(open).toEqual([]);
+    events = [];
+    value(await previewOnload(deps(), { project: await ref() }));
+    expect(
+      events.filter((e) => e.type === "phase").map((e) => e.type === "phase" && `${e.phase} ${e.status}`),
+    ).toEqual(["resolve start", "resolve end", "preflight start", "preflight end"]);
+  });
+
+  test("a snapshot the catalog does not hold fails plainly, with no preview", async () => {
+    await offload();
+    const got = await preview({ snapshot: "01M40X7EC1DTXN87AJ4SH74DK6" });
+    expect(!got.ok && [got.exitCode, got.finding.code, got.data]).toEqual([
+      4,
+      "snapshot.not-found",
+      undefined,
+    ]);
   });
 });

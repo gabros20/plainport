@@ -18,6 +18,7 @@ import { dirname, resolve } from "node:path";
 import { type Finding, fail, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
 import { createExclusive, TEMP_SUFFIX, tempPathFor } from "./atomic.ts";
+import { fromThisBoot } from "./boot.ts";
 import { errorCode, type LocalIo } from "./io.ts";
 
 export const LockHolderSchema = z.strictObject({
@@ -130,7 +131,8 @@ const isStale = async (io: LocalIo, owner: LockHolder | undefined): Promise<bool
 export const liveHolder = async (io: LocalIo, path: string): Promise<LockHolder | undefined> => {
   const holder = (await readLock(io, path))?.holder;
   if (holder === undefined || holder.host !== io.proc.hostname()) return undefined;
-  if (!(Date.parse(holder.startedAt) >= io.proc.bootedAtMs())) return undefined;
+  // A lock records no boot session (its format stays M1's), so this is M1's rule, shared with the trash claim.
+  if (!fromThisBoot(io.proc, { startedAt: Date.parse(holder.startedAt) }, undefined)) return undefined;
   return (await isStale(io, holder)) ? undefined : holder;
 };
 

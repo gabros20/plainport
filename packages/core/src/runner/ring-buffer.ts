@@ -6,8 +6,13 @@ export class RingBuffer {
   private end = 0;
   private total = 0;
 
-  constructor(readonly capacity: number) {
+  /** observe, a test seam, is handed the backing buffer (runner.ts's bufferProbe). */
+  constructor(
+    readonly capacity: number,
+    observe?: (buffer: Uint8Array) => void,
+  ) {
     this.buffer = new Uint8Array(capacity);
+    observe?.(this.buffer);
   }
 
   push(chunk: Uint8Array): void {
@@ -23,6 +28,13 @@ export class RingBuffer {
   /** How many bytes were written but no longer fit. */
   get droppedBytes(): number {
     return Math.max(0, this.total - this.capacity);
+  }
+
+  /** Overwrites every kept byte with zeros and starts empty again (a sensitive run's end). */
+  wipe(): void {
+    this.buffer.fill(0);
+    this.end = 0;
+    this.total = 0;
   }
 
   /** The kept bytes, oldest first. */

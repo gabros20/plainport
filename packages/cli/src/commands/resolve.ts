@@ -25,7 +25,8 @@ const EXPLICIT_PATH = /^(\.{1,2}(\/|$)|\/|~(\/|$))/;
 
 /** What core's views read, for this command. */
 export const viewDeps = (ctx: CommandContext, paths: PlainportPaths, device: Device): ViewDeps => ({
-  io: ctx.io,
+  // The host's boot session says whether a trash's claim is live after a clock step (Q5 i).
+  io: { ...ctx.io, bootSession: () => ctx.system.bootSession() },
   paths,
   env: ctx.env,
   device,

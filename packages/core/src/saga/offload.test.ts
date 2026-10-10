@@ -260,6 +260,8 @@ describe("offload: the happy path", () => {
       "plainport:path=web",
       `plainport:op=${result.op}`,
       "plainport:kind=offload",
+      // The folder's own mode (Q5 ii), as its offloaded event's rootMode records it.
+      `plainport:mode=${(events.find((e) => e.type === "offloaded") as { rootMode: number }).rootMode.toString(8).padStart(4, "0")}`,
     ]);
     const snapshot = engine.repository.snapshots[0];
     expect(snapshot?.entries.map((e) => e.path).sort()).toEqual([
@@ -452,6 +454,19 @@ describe("offload: an edit during the upload", () => {
     expect(new TextDecoder().decode(second?.data.get("src/main.ts"))).toBe("export const main = 2;\n");
     expect(logs.join("\n")).toContain("changed while the snapshot was made");
     await expectInvariants();
+  });
+
+  test("a chmod of the folder itself during the upload: its tag and its event record the same mode (Q5 ii)", async () => {
+    chmodSync(dir, 0o755);
+    engine.hooks.duringSnapshot = () => chmodSync(dir, 0o700);
+    const result = value(await offload());
+    const offloaded = (await storeEvents()).find((e) => e.type === "offloaded") as { rootMode?: number };
+    const tags = engine.repository.snapshots.at(-1)?.info.tags ?? [];
+    expect([offloaded.rootMode?.toString(8), tags.filter((t) => t.startsWith("plainport:mode="))]).toEqual([
+      "755",
+      ["plainport:mode=0755"],
+    ]);
+    expect(result.op).toBeDefined();
   });
 
   test("an edit during the retry too fails with verify.changed (exit 7); nothing is deleted", async () => {

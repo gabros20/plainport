@@ -1,0 +1,13 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "check",
+    "--json"
+  ],
+  "exitCode": 11,
+  "stdout": "{\"message_type\":\"summary\",\"num_errors\":1,\"broken_packs\":null,\"suggest_repair_index\":false,\"suggest_prune\":false}\n",
+  "stderr": "{\"message_type\":\"exit_error\",\"code\":11,\"message\":\"unable to create lock in backend: repository is already locked by PID 71051 on fixture-host by fixture-user (UID 501, GID 20)\\nlock was created at 2026-10-10 12:13:11 (540.541ms ago)\\nstorage ID ac4fd4e5\\nthe `unlock` command can be used to remove stale locks\"}\n"
+}

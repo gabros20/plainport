@@ -18,6 +18,7 @@ bun install
 bun run typecheck && bun run lint
 bun test              # T0: unit, fakes, in-process crash matrix
 bun run test:t1       # adds real restic and rclone (after `bun scripts/fetch-tools.ts`)
+bun run test:t2       # adds the store containers (after `scripts/testenv up`)
 bun run contract      # regenerates plainport.json, schemas/ and completions/; commit the result (CI runs --check)
 bun run build && ./dist/plainport --version
 ```
@@ -66,6 +67,59 @@ notice; a live one is refused with the exact `rm -r` to run if no install is run
 during one run) loses the restic beside it; the operation stops and `plainport recover` settles it. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
 and skips that check. `scripts/install --rollback` makes the previous version current again; `--prefix <dir>`
 replaces `~/.local`. Tests use only temp prefixes.
+
+### Test environments (T2, T3)
+
+Suites are tagged by tier in `test/tiers.ts`: `describeT1` (real binaries), `describeT2` (the store containers) and
+`describeT3` (the real R2 and B2 buckets and the Mac mini, M2 Task 28). `bun run test:t2` sets
+`PLAINPORT_TEST_TIER=2` and `test:t3` sets 3; each tier includes the ones below it. Below its tier a suite is
+skipped; at its tier, a T2 or T3 suite whose environment is missing fails and names the command to run. It never
+skips silently. A T2 environment must also be live: the gate checks, with one `docker inspect`, that the containers
+`up` recorded are still there and healthy, so a stale `.testenv/` (after a prune or a reboot) fails the same way.
+
+`scripts/testenv` brings the T2 environment up and down; never build one by hand.
+
+- `up` starts `compose.yaml`: an S3 store, SFTP (`atmoz/sftp`, one key-only user), `restic/rest-server
+  --append-only` (smoke only, for M3) and Toxiproxy in front of the S3 store and SFTP. Every image is pinned by
+  digest and every port binds to `127.0.0.1`. It waits for every health check, reaches each service
+  from the host, directly and through Toxiproxy, and writes `.testenv/` (gitignored, mode 0700): `env.json` with the
+  endpoints and the credentials generated for the run, the SFTP keys, a sandbox `known_hosts` and an ssh config.
+  Suites read it with `loadTestEnv()` from `scripts/testenv.ts`. A second `up` changes nothing and clears every
+  fault. MinIO no longer publishes images, so the S3 store is SeaweedFS 4.48 (run decision D94); `minio` still names it.
+- `down` removes the containers, their volumes and network, and `.testenv/`. Running it twice is fine. It refuses,
+  before stopping anything, when `.testenv/` holds a file it did not write.
+- `status`, `env` (shell exports: `eval "$(scripts/testenv env)"`), and `restart <service>`, which restarts one
+  container without recreating it, for durability tests.
+- `fault <s3|sftp> <profile|clear>`, or `applyProfile()` from a test, applies a named Toxiproxy profile: `cut`
+  (reset both ways), `latency` (250 ms each way), `slow-close` (the close arrives 1.5 s late) and `lost-ack` (the
+  request reaches the store whole, then the client gets a reset instead of the response; meaningful on the S3
+  proxy only, since on SFTP the server speaks first and the reset lands in the SSH handshake, like `cut`).
+- One environment per checkout: the default project (`plainport-testenv-<hash>`) and port base (30000 to 58900)
+  come from a hash of the checkout's path, so worktrees running T2 at once never share containers or ports. `up` and
+  `down` refuse a project whose containers another checkout started (compose's `working_dir` label).
+- `--dir`, `--project` and `--port-base` run a second environment beside the first; the T2 smoke test does that,
+  on a port base taken from its pid. `PLAINPORT_TESTENV_DIR` and `PLAINPORT_TESTENV_PROJECT` set the default folder
+  and project.
+- `logs` prints the last 200 lines of each container's log; CI runs it when a T2 step failed, before `down`.
+- Every child testenv starts has a deadline (15 minutes for `compose up`, which may pull images; 10 s for the T2
+  gate's `docker inspect`), and CI's jobs have `timeout-minutes`, so a wedged Docker fails a run instead of
+  hanging it.
+
+Tests run under a sandbox `HOME`, where the docker CLI finds neither its context nor its compose plugin, so `up`
+records both in `env.json` and T2 tests pass them to their children (`dockerEnv()`). GitHub's macOS runners have no
+Docker: CI runs T2 in the `linux` job only.
+
+`scripts/testenv linux [-- <command>]` is the reproducible Linux test recipe: `bun run test:t1` (or the command)
+in the pinned `oven/bun` image of `.bun-version`, with `--init`, as the unprivileged `bun` user, on a copy of the
+checkout without `node_modules`, `.tools` or its git history (the copy is a fresh one-commit repository). It prints
+its known gaps first: Debian's git has no fsmonitor daemon, there are no Node.js package managers, and it runs arm64
+on Apple silicon. On 2026-10-10 those two gaps were its only failures (1,744 pass).
+
+**The restic matrix.** CI's `restic-matrix` job runs `engine-restic`'s T1 suite on the latest restic 0.18 and the
+pin: plainport supports restic 0.18.0 or later (run decision D93; 0.17 prints `check --json` as text). `tools.lock.json`'s `matrix` section holds the older versions' checksums;
+`bun scripts/fetch-tools.ts --restic <version>` fetches one (refusing a mismatch) into
+`.tools/matrix/restic-<version>/`, and `PLAINPORT_RESTIC_MATRIX=<version>` makes the suite use it.
+`bun scripts/record-restic-fixtures.ts --restic <version>` records its fixtures into `fixtures/restic/<version>/`.
 
 ### The crash matrix
 

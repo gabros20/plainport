@@ -289,3 +289,43 @@ describe("home tripwire: cleanup", () => {
     });
   }
 });
+
+describe("home tripwire: temp folder leaks", () => {
+  for (const leak of [false, true, "mkdir"] as const) {
+    test(`a run that ${leak === false ? "removes" : "leaves"} its plainport-* temp folder${leak === "mkdir" ? " made with mkdirSync" : ""} ${leak === false ? "passes" : "fails"}`, () => {
+      const tmp = mkdtempSync(join(sandbox, "child-tmp-"));
+      onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+      const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/temp-leak.fixture.ts"], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          TMPDIR: tmp,
+          PLAINPORT_FIXTURE_LEAK: leak === false ? "0" : leak === true ? "1" : "mkdir",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = run.stdout.toString() + run.stderr.toString();
+      expect(run.exitCode === 0).toBe(leak === false);
+      if (leak !== false) expect(output).toMatch(/left 1 temp folder.*plainport-leak-/s);
+      // The check removes what it found, so a leak never piles up.
+      expect(readdirSync(tmp)).toEqual([]);
+    });
+  }
+
+  test("a folder another process made or shares (EEXIST, recursive mkdir inside it, a .lock) is neither blamed nor removed", () => {
+    const tmp = mkdtempSync(join(sandbox, "child-tmp-"));
+    onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+    mkdirSync(join(tmp, "plainport-shared-owner"));
+    mkdirSync(join(tmp, "plainport-shared.lock"));
+    const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/temp-leak.fixture.ts"], {
+      cwd: repoRoot,
+      env: { ...process.env, TMPDIR: tmp, PLAINPORT_FIXTURE_LEAK: "shared" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(run.stdout.toString() + run.stderr.toString()).not.toContain("temp folder leak");
+    expect(run.exitCode).toBe(0);
+    expect(readdirSync(tmp).sort()).toEqual(["plainport-shared-owner", "plainport-shared.lock"]);
+  });
+});

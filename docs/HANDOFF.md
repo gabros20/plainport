@@ -103,32 +103,32 @@ Out of scope until later: devices and moves (M3), agent adapters and the kit (M4
 
 ## Carried into M2
 
-Open minors from the M1 reviews that are worth tracking. Each was checked against the code or `git log` on 2026-10-10; items fixed in the release waves are left out, and so is anything under Known limits. No contract or install items remain open.
+M2 phase 1 (Tasks 1–5, merged to `main` on 10 October 2026) closed the core-safety, gate, eval, temp-leak, Linux-recipe and non-git items that used to be listed here. What is still open:
 
 **Core safety**
 
-- **Orphan trash claim.** A kill between the journal's removal and the claim's removal (D67) leaves an `<op>.claim` with no trash folder, and nothing sweeps it. `gc` should remove claims whose trash is gone and whose claimer is dead.
-- **Trash claim boot window (N13).** `trash-claim.ts` treats a 120 s difference as the same boot, so a clock step after boot can make a live claim read as an earlier boot's and let a second deleter run. The worst case is a second delete of already-committed trash. The fix needs a boot-session id in the host port and a claim schema change.
-- **`rootMode` under an uncertain head.** `onload --snapshot S` cannot restore the folder's recorded mode when the event that holds it is the unreadable one (D86).
-- **Package managers may download themselves.** Hydration inherits the user's environment, so with Corepack a version check or install can fetch the package manager (network and disk). Set a Corepack download policy for installs.
+- **Lock boot session.** The project lock's "since this boot" check still uses M1's clock rule, so a clock step can make a running operation look interrupted (D63). Fixing it needs a lock format change.
+- **`restore --snapshot S` under an uncertain head** does not apply the snapshot's `plainport:mode` tag yet (`onload --snapshot S` does).
+- **`recover`'s lost-fork-event path** reads the folder's mode at recovery time, not snapshot time; the journal holds no snapshot-time mode.
+- **Orphan-claim sweep edges:** torn claim files are kept rather than removed; the sweep's probes on a hung root have no deadline; it inherits D64's cross-device rule.
 
-**Gate and eval**
+**Contract**
 
-- **Gate coverage.** `scripts/gate-m1.ts` compares type, mode, content hash and link target, not hard-link identity, xattrs, ACLs or flags. It accepts onload exit 10 as well as 0, with a later state check as the backstop. Its raw `--out` JSON is not attached to the release notes. Peak RSS is the larger of plainport's tree and restic.
-- **Eval scoring.** `passed` in `evals/agent-smoke/scorer.ts` requires zero contract issues, which is stricter than the four objective checks. Split it into `passed` (objective) and `clean` (no confusion), and record the split as a decision.
+- **Compatibility matrix row (D96):** Task 7 adds the row for `onload --dry-run`'s optional fields (`Plan.git`, `Plan.nested`, `git.unpushed.paths` for tags, `commands[onload].plan`, `pending`, `untrustedKnown` as a constant `false`).
+
+**Secrets (for Tasks 15 and 19)**
+
+- Callers of the sensitive runner use `classifyStderr`/`codeOf` and `bytesInclude`; reviews of Tasks 15 and 19 check that no caller decodes or quotes stderr or `privateOutput` (D92).
 
 **Tests and flake watch**
 
 - **T1 under load:** the cli onload round trip waits on a slow detached delete, and the crash-matrix "restic committed" row timed out once. Both passed alone and in the final full run.
 - **T1 under load:** the recover D64 `offload.release.detached` test failed once and passed 3 of 3 on rerun.
-- **`recover.test.ts` in the Linux container:** one unexplained failure in 80 runs (the first run, log not kept). The 40 logged runs at 674cc4a were green.
-- **A reproducible Linux test recipe.** A local `oven/bun` container run showed 32 runner and scan failures that the GitHub Ubuntu runner does not. The container needs `docker --init` (zombie reaping) and has no git fsmonitor daemon, which accounts for 17 of them. Put the recipe in `scripts/testenv` with the M2 test environments.
-- **Temp folder leak.** The suite leaves `plainport-example-*` folders in `$TMPDIR` (`packages/cli/src/testing.ts`).
+- **Linux xattrs:** the tree comparison's Linux xattr path (`llistxattr`/`lgetxattr`) has no Linux test of its own yet.
 
 **UX**
 
-- **Git background maintenance** creating or removing lock files during an offload changes the fingerprint. The offload retries once, then refuses (fail closed, nothing lost). Exclude `.git/*.lock` from the fingerprint, or stop maintenance the way D52 stops fsmonitor.
-- **Non-git projects.** The offload plan lists no gitignored files; add a human line, "not a git repository: every file travels except stripped dependency folders".
+- **Git background maintenance** creating or removing lock files during an offload changes the fingerprint. The offload retries once, then refuses (fail closed, nothing lost). Deferred (Q5 iii).
 
 ## Loose ends
 

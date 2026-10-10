@@ -7,17 +7,31 @@
 // - when the child exits on its own but leaves processes in its group, those are stopped the same way.
 // Expected failures (cannot start, deadlines, cancelled) come back as Results with a finding. Exceptions mean bugs:
 // an onLine or log callback that throws stops the group first, then propagates.
+// A sensitive run (output that may hold a secret, AGENTS.md rule 9) keeps its output out of every line, event, message
+// and error, and overwrites what it held when it ends; see RunSpec.sensitive.
 //
-// Known limits: a grandchild that calls setsid() leaves the group and is out of reach; a group whose last member
+// Known limits: a sensitive run overwrites only the bytes it read: when a pipe held open past the drain makes it cancel
+// its readers, whatever was still queued inside the stream (Bun's pipe buffer) is dropped unread, not overwritten,
+// and lives until it is collected. A grandchild that calls setsid() leaves the group and is out of reach; a group whose last member
 // exits between our liveness check and our KILL could, in theory, have its id reused by a new group in that
 // instant; and if plainport itself is SIGKILLed, its children keep running (macOS has no parent-death signal), which
 // the journal and `recover` exist for.
 
 import { basename } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
+import type { ZodType } from "zod";
 import { errorCode } from "../io.ts";
 import { RingBuffer } from "./ring-buffer.ts";
-import type { ChildProcess, OutputStream, OutputTail, RunOutcome, RunSpec, Spawner } from "./types.ts";
+import type {
+  ChildProcess,
+  OutputStream,
+  OutputTail,
+  RunOutcome,
+  RunSpec,
+  Spawner,
+  StderrClasses,
+  TypedStderrClasses,
+} from "./types.ts";
 
 /** Defaults for the per-call settings in RunSpec; each is overridable per call. Reasons are in the report and
  * in RunSpec's comments. */
@@ -156,6 +170,13 @@ class LineSplitter {
   }
 }
 
+/**
+ * A test seam: when set, observe gets every buffer a run's capture and private collectors allocate (capture chunks, a
+ * sensitive stderr ring, the copy handed to classifyStderr), so a test can check they were overwritten once the run
+ * ended. Not exported from the package; never set outside tests.
+ */
+export const bufferProbe: { observe?: (bytes: Uint8Array) => void } = {};
+
 /** One stream's bounded tail and its lines. A callback that throws is reported once, then lines stop. */
 class Collector {
   private readonly ring: RingBuffer;
@@ -219,13 +240,55 @@ class Collector {
 }
 
 /**
+ * One stream of a sensitive run: no lines, no log events, no tail, only a byte count. stderr keeps its newest bytes
+ * when classifyStderr will read them; stdout keeps none (the capture holds it). wipe() overwrites what it kept.
+ */
+export class PrivateCollector {
+  bytes = 0;
+  private readonly ring: RingBuffer | undefined;
+  /** Once wiped it takes nothing more: a read that resumes after the run ended keeps no copy. */
+  private sealed = false;
+
+  constructor(keep: number | undefined) {
+    this.ring = keep === undefined ? undefined : new RingBuffer(keep, bufferProbe.observe);
+  }
+
+  push(chunk: Uint8Array): void {
+    if (this.sealed) return;
+    this.bytes += chunk.length;
+    this.ring?.push(chunk);
+  }
+
+  end(): void {}
+
+  /** Never the text: a sensitive outcome's tails stay empty. */
+  tail(): OutputTail {
+    return { text: "", droppedBytes: 0 };
+  }
+
+  /** A copy of the kept bytes, for the caller to overwrite once used. */
+  kept(): Uint8Array {
+    const bytes = this.ring?.bytes() ?? new Uint8Array(0);
+    bufferProbe.observe?.(bytes);
+    return bytes;
+  }
+
+  wipe(): void {
+    this.sealed = true;
+    this.ring?.wipe();
+  }
+}
+
+/**
  * All of stdout, up to a hard cap. Past it, the bytes are let go, the run fails (never a shortened ok), and bytes()
  * throws, so no partial capture can reach a caller.
  */
-class Capture {
+export class Capture {
   private chunks: Uint8Array[] = [];
   private size = 0;
   overflowed = false;
+  /** Set by seal(): a read that resumes after the run ended keeps no copy. */
+  private sealed = false;
 
   constructor(
     private readonly maxBytes: number,
@@ -233,16 +296,31 @@ class Capture {
   ) {}
 
   push(chunk: Uint8Array): void {
-    if (this.overflowed) return;
+    if (this.overflowed || this.sealed) return;
     if (this.size + chunk.length > this.maxBytes) {
       this.overflowed = true;
-      this.chunks = [];
-      this.size = 0;
+      this.wipe();
       this.onOverflow();
       return;
     }
-    this.chunks.push(chunk.slice());
+    // A copy the capture owns: a Node Buffer's slice() would share the chunk's memory, which the pump overwrites.
+    const copy = new Uint8Array(chunk);
+    bufferProbe.observe?.(copy);
+    this.chunks.push(copy);
     this.size += chunk.length;
+  }
+
+  /** Overwrites every kept chunk with zeros and lets them go. */
+  wipe(): void {
+    for (const chunk of this.chunks) chunk.fill(0);
+    this.chunks = [];
+    this.size = 0;
+  }
+
+  /** wipe(), for good: the run has ended (a sensitive run's wipers). */
+  seal(): void {
+    this.sealed = true;
+    this.wipe();
   }
 
   bytes(): Uint8Array {
@@ -290,6 +368,26 @@ export const capturedOutput = (
 };
 
 /**
+ * A sensitive run's captured stdout parsed as JSON, and checked against `schema` when given; undefined when it is not
+ * UTF-8 JSON or does not match. Never JSON.parse it bare, nor report a schema's issues: JSON.parse's errors quote the
+ * input ("Unexpected identifier …") and a schema's issues can too, which would carry a secret into a message. The
+ * caller names its own finding for undefined.
+ */
+export const parseSensitiveJson = <T = unknown>(
+  bytes: Uint8Array,
+  schema?: ZodType<T>,
+): { value: T } | undefined => {
+  try {
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (schema === undefined) return { value: value as T };
+    const parsed = schema.safeParse(value);
+    return parsed.success ? { value: parsed.data } : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * Reads a stream to its end (or until cancelled) into the collector. A read that fails ends the pump and is
  * reported to onError: what was read is kept, but the stream is not known to be whole. It never rejects.
  */
@@ -299,6 +397,8 @@ const pump = async (
   onChunk: () => void,
   onError: (error: unknown) => void,
   readers: { cancel(): Promise<void> }[],
+  /** A sensitive run: each chunk is overwritten once the collector has taken what it keeps. */
+  wipe: boolean,
 ): Promise<void> => {
   const reader = stream.getReader();
   readers.push(reader);
@@ -308,6 +408,7 @@ const pump = async (
       if (done) break;
       onChunk();
       collector.push(value);
+      if (wipe) value.fill(0);
     }
   } catch (error) {
     onError(error);
@@ -335,38 +436,94 @@ const lastOutput = (stdout: OutputTail, stderr: OutputTail): string => {
   return `; its last output: ${text.length > TAIL_CHARS_IN_MESSAGE ? `…${text.slice(-TAIL_CHARS_IN_MESSAGE)}` : text}`;
 };
 
+/** What a sensitive run's failure may say about its output: how much there was, never what. */
+const byteCounts = (stdout: number, stderr: number): string =>
+  `; it printed ${stdout} bytes on stdout and ${stderr} bytes on stderr`;
+
+/** An error's code for a sensitive run's message: only a plain one (ENOENT, EIO); anything else may be text. */
+const plainCode = (error: unknown): string => {
+  const code = errorCode(error);
+  return code !== undefined && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "unknown";
+};
+
+/**
+ * A sensitive caller's stderr classifier, typed so its codes are a closed union, with codeOf to read the chosen code
+ * back from an outcome as that union (undefined when none was chosen or it is not one of the codes).
+ */
+export const stderrClasses = <const C extends string>(
+  codes: readonly C[],
+  classify: (stderr: Uint8Array) => C,
+): TypedStderrClasses<C> => ({
+  codes,
+  classify,
+  codeOf: (outcome) => {
+    const code = outcome.privateOutput?.stderrCode;
+    return codes.find((declared) => declared === code);
+  },
+});
+
+/** Whether the bytes hold `needle`'s UTF-8 bytes: for a classifier, which never decodes stderr into a string. */
+export const bytesInclude = (bytes: Uint8Array, needle: string): boolean =>
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(new TextEncoder().encode(needle));
+
+/** classifyStderr's code for the kept stderr, which is overwritten after; a misbehaving classifier is a bug. */
+const classified = (label: string, classes: StderrClasses, stderr: Uint8Array): string => {
+  let code: string;
+  try {
+    code = classes.classify(stderr);
+  } catch {
+    // Not rethrown, nor kept as a cause: its message may quote stderr.
+    throw new Error(
+      `runProcess: ${label}'s classifyStderr threw; its error is not shown, as it may quote stderr`,
+    );
+  } finally {
+    stderr.fill(0);
+  }
+  if (!classes.codes.includes(code))
+    throw new Error(`runProcess: ${label}'s classifyStderr returned a code it did not declare`);
+  return code;
+};
+
 const spawnFailed = (spec: RunSpec, error: unknown): Failure => {
   const reason = error instanceof Error ? error.message : String(error);
   const code = errorCode(error);
   return fail(
     finding("process.spawn-failed", {
-      message: `could not start ${spec.command} in ${spec.cwd}: ${reason}${code === undefined || reason.includes(code) ? "" : ` (${code})`}`,
+      // A sensitive run names the error's code only: its text is not the runner's to vouch for.
+      message: spec.sensitive
+        ? `could not start ${basename(spec.command)} in ${spec.cwd} (${plainCode(error)})${byteCounts(0, 0)}`
+        : `could not start ${spec.command} in ${spec.cwd}: ${reason}${code === undefined || reason.includes(code) ? "" : ` (${code})`}`,
       fix: `check that ${spec.command} exists and is executable, and that ${spec.cwd} is a folder`,
       paths: [spec.command, spec.cwd],
     }),
   );
 };
 
-const incompleteFailure = (label: string, incomplete: Incomplete): Failure => {
+/** How much a sensitive run's streams printed; undefined for a run that is not sensitive. */
+type Quiet = { stdout: number; stderr: number } | undefined;
+
+/** quiet: a sensitive run, whose message gives byte counts and a plain code only. */
+const incompleteFailure = (label: string, incomplete: Incomplete, quiet: Quiet): Failure => {
+  const counts = quiet === undefined ? "" : byteCounts(quiet.stdout, quiet.stderr);
   switch (incomplete.why) {
     case "held-open":
       return fail(
         finding("process.output-incomplete", {
-          message: `${label} exited, but a process outside its group kept its stdout open, so its output could not be read to the end`,
+          message: `${label} exited, but a process outside its group kept its stdout open, so its output could not be read to the end${counts}`,
           fix: "find what the command left running in the background (a daemon, an ssh master), stop it, then run the command again",
         }),
       );
     case "leftovers":
       return fail(
         finding("process.output-incomplete", {
-          message: `${label} exited but left processes running in its group, which were stopped; one of them may still have been writing to its stdout, so its output cannot be taken as whole`,
+          message: `${label} exited but left processes running in its group, which were stopped; one of them may still have been writing to its stdout, so its output cannot be taken as whole${counts}`,
           fix: "find what the command starts in the background and does not wait for, stop or disable it, then run the command again",
         }),
       );
     case "read-error":
       return fail(
         finding("process.output-incomplete", {
-          message: `${label}'s ${incomplete.stream} could not be read to the end: ${describeError(incomplete.error)}`,
+          message: `${label}'s ${incomplete.stream} could not be read to the end: ${quiet === undefined ? describeError(incomplete.error) : `${plainCode(incomplete.error)}${counts}`}`,
           fix: "run the command again; if it repeats, check the disk and the terminal plainport runs in",
         }),
       );
@@ -377,10 +534,12 @@ const stoppedFailure = (
   stop: Exclude<Stop, "error" | "incomplete">,
   label: string,
   settings: Settings & { captureMaxBytes?: number },
-  stdout: OutputTail,
-  stderr: OutputTail,
+  /** What the output may contribute: a default run's tails (lastOutput), a sensitive run's byte counts. */
+  output: { tails: [OutputTail, OutputTail] } | { quiet: NonNullable<Quiet> },
 ): Failure => {
-  const said = lastOutput(stdout, stderr);
+  // The counts also go on the stops that never quote output, for a sensitive run.
+  const counts = "quiet" in output ? byteCounts(output.quiet.stdout, output.quiet.stderr) : "";
+  const said = "quiet" in output ? counts : lastOutput(...output.tails);
   switch (stop) {
     case "idle":
       return fail(
@@ -408,25 +567,68 @@ const stoppedFailure = (
     case "too-large":
       return fail(
         finding("process.output-too-large", {
-          message: `${label} printed more than ${settings.captureMaxBytes} bytes on stdout, more than the caller can take whole, and was stopped`,
+          message: `${label} printed more than ${settings.captureMaxBytes} bytes on stdout, more than the caller can take whole, and was stopped${counts}`,
           fix: "narrow what the command lists (a sub-folder, a filter), or raise the capture limit for this call",
         }),
       );
   }
 };
 
+type RunSettings = Settings & { captureMaxBytes?: number };
+
 /** Runs one child to completion through the spawner. See the file comment for what it guarantees. */
 export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Result<RunOutcome>> => {
-  const settings = { ...settingsOf(spec), captureMaxBytes: spec.capture?.maxBytes };
+  const base = settingsOf(spec);
+  // A sensitive run always captures stdout: its bound defaults to outputLimitBytes.
+  const settings: RunSettings = {
+    ...base,
+    captureMaxBytes: spec.capture?.maxBytes ?? (spec.sensitive ? base.outputLimitBytes : undefined),
+  };
   if (spec.capture !== undefined) positive("capture.maxBytes", spec.capture.maxBytes);
   if (spec.wholeStdout && spec.onLine === undefined)
     throw new RangeError("runProcess: wholeStdout needs onLine");
   if (spec.wholeStdout && spec.capture !== undefined)
     throw new RangeError("runProcess: wholeStdout and capture exclude each other");
+  if (spec.classifyStderr !== undefined && !spec.sensitive)
+    throw new RangeError("runProcess: classifyStderr is for sensitive runs");
+  if (spec.sensitive && (spec.onLine !== undefined || spec.wholeStdout))
+    throw new RangeError(
+      "runProcess: a sensitive run takes no onLine or wholeStdout; its output reaches no callback",
+    );
   const label = basename(spec.command);
-  const empty: OutputTail = { text: "", droppedBytes: 0 };
-  if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, empty, empty);
+  if (spec.signal?.aborted) {
+    const empty: OutputTail = { text: "", droppedBytes: 0 };
+    return stoppedFailure(
+      "cancelled",
+      label,
+      settings,
+      spec.sensitive ? { quiet: { stdout: 0, stderr: 0 } } : { tails: [empty, empty] },
+    );
+  }
 
+  const stdin = typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin;
+  const wipers: (() => void)[] = [];
+  try {
+    return await runChild(spawner, spec, settings, label, stdin, wipers);
+  } finally {
+    if (spec.sensitive) {
+      for (const wipe of wipers) wipe();
+      // Only the copy the runner made: a caller's own bytes are the caller's to overwrite.
+      if (typeof spec.stdin === "string") stdin?.fill(0);
+    }
+  }
+};
+
+/** runProcess once its spec is checked; a sensitive run registers in `wipers` every buffer it holds. */
+const runChild = async (
+  spawner: Spawner,
+  spec: RunSpec,
+  settings: RunSettings,
+  label: string,
+  stdin: Uint8Array | undefined,
+  wipers: (() => void)[],
+): Promise<Result<RunOutcome>> => {
+  const sensitive = spec.sensitive === true;
   const started = performance.now();
   let child: ChildProcess;
   try {
@@ -435,7 +637,7 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       args: spec.args ?? [],
       cwd: spec.cwd,
       env: spec.env,
-      stdin: typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin,
+      stdin,
     });
   } catch (error) {
     return spawnFailed(spec, error);
@@ -481,24 +683,40 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
 
   const onError = (error: unknown): void => requestStop("error", error);
   let lineTooLong = false;
-  const stdout = new Collector(
-    "stdout",
-    settings,
-    label,
-    spec,
-    onError,
-    spec.wholeStdout
-      ? () => {
-          lineTooLong = true;
-          requestStop("line-too-long");
-        }
-      : undefined,
-  );
-  const stderr = new Collector("stderr", settings, label, spec, onError);
+  const quiet = sensitive
+    ? {
+        stdout: new PrivateCollector(undefined),
+        // stderr is kept only for a classifier to read; without one, it is counted and let go.
+        stderr: new PrivateCollector(
+          spec.classifyStderr === undefined ? undefined : settings.outputLimitBytes,
+        ),
+      }
+    : undefined;
+  const stdout =
+    quiet?.stdout ??
+    new Collector(
+      "stdout",
+      settings,
+      label,
+      spec,
+      onError,
+      spec.wholeStdout
+        ? () => {
+            lineTooLong = true;
+            requestStop("line-too-long");
+          }
+        : undefined,
+    );
+  const stderr = quiet?.stderr ?? new Collector("stderr", settings, label, spec, onError);
   const capture =
-    spec.capture === undefined
+    settings.captureMaxBytes === undefined
       ? undefined
-      : new Capture(spec.capture.maxBytes, () => requestStop("too-large"));
+      : new Capture(settings.captureMaxBytes, () => requestStop("too-large"));
+  if (quiet !== undefined)
+    wipers.push(
+      () => quiet.stderr.wipe(),
+      () => capture?.seal(),
+    );
   const stdoutSink = {
     push: (chunk: Uint8Array): void => {
       stdout.push(chunk);
@@ -522,18 +740,19 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
         type: "log",
         op: spec.log.op,
         level: "warn",
-        message: `${label}: ${stream} could not be read to the end: ${describeError(error)}`.slice(
-          0,
-          LOG_MESSAGE_MAX,
-        ),
+        message:
+          `${label}: ${stream} could not be read to the end: ${sensitive ? plainCode(error) : describeError(error)}`.slice(
+            0,
+            LOG_MESSAGE_MAX,
+          ),
       });
     } catch (thrown) {
       onError(thrown); // a log sink that throws is a bug, as for lines
     }
   };
   const pumps = Promise.all([
-    pump(child.stdout, stdoutSink, touch, onReadError("stdout"), readers),
-    pump(child.stderr, stderr, touch, onReadError("stderr"), readers),
+    pump(child.stdout, stdoutSink, touch, onReadError("stdout"), readers, sensitive),
+    pump(child.stderr, stderr, touch, onReadError("stderr"), readers, sensitive),
   ]);
 
   let exit: { code: number | null; signal: string | null } | undefined;
@@ -603,15 +822,28 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       else if (leftoversStopped) incomplete = { why: "leftovers" };
       if (incomplete !== undefined) reason = "incomplete";
     }
+    // A classifier reads stderr as a whole: a stderr cut by a failed read would be classified wrong (a cut "not signed
+    // in" read as "other"), so the run fails instead.
+    if (reason === undefined && spec.classifyStderr !== undefined && "stderr" in readErrors) {
+      incomplete = { why: "read-error", stream: "stderr", error: readErrors.stderr };
+      reason = "incomplete";
+    }
     finished = true;
   } finally {
     clearTimeout(idleTimer);
     clearTimeout(overallTimer);
     spec.signal?.removeEventListener("abort", onAbort);
     if (!finished) {
-      // Only when something above threw: never leave the group running, nor a reader on a pipe someone holds.
-      if (!groupStopped) await stopGroup();
-      for (const reader of readers) reader.cancel().catch(() => {});
+      // Only when something above threw: never leave the group running, nor a reader on a pipe someone holds. The
+      // readers are cancelled and the pumps given their drain even if stopping throws again, so no read resumes after
+      // a sensitive run's wipers (which also seal the buffers against one that does).
+      try {
+        if (!groupStopped) await stopGroup();
+      } finally {
+        readersCancelled = true;
+        for (const reader of readers) reader.cancel().catch(() => {});
+        await within(pumps, DRAIN_MS);
+      }
     }
   }
 
@@ -619,8 +851,25 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   if (stopError !== undefined || reason === "error") {
     throw stopError ?? new Error("runProcess: stopped for a callback error that was not recorded");
   }
-  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete);
-  if (reason !== undefined) return stoppedFailure(reason, label, settings, stdout.tail(), stderr.tail());
+  const counted: Quiet =
+    quiet === undefined ? undefined : { stdout: quiet.stdout.bytes, stderr: quiet.stderr.bytes };
+  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete, counted);
+  if (reason !== undefined) {
+    return stoppedFailure(
+      reason,
+      label,
+      settings,
+      counted === undefined ? { tails: [stdout.tail(), stderr.tail()] } : { quiet: counted },
+    );
+  }
+  // A sensitive run hands over stdout only when the child succeeded: other output is not the secret it was for.
+  const withheld = sensitive && (exit?.code !== 0 || (exit?.signal ?? null) !== null);
+  // Classified before stdout is copied out, so a classifier that throws leaves no copy behind.
+  const classes = spec.classifyStderr;
+  const stderrCode =
+    quiet === undefined || classes === undefined
+      ? undefined
+      : classified(label, classes, quiet.stderr.kept());
   return ok({
     exitCode: exit?.code ?? null,
     signal: exit?.signal ?? null,
@@ -628,6 +877,15 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     stderr: stderr.tail(),
     leftoversStopped,
     durationMs: Math.round(performance.now() - started),
-    ...(capture === undefined ? {} : { captured: capture.bytes() }),
+    ...(capture === undefined || withheld ? {} : { captured: capture.bytes() }),
+    ...(quiet === undefined
+      ? {}
+      : {
+          privateOutput: {
+            stdoutBytes: quiet.stdout.bytes,
+            stderrBytes: quiet.stderr.bytes,
+            ...(stderrCode === undefined ? {} : { stderrCode }),
+          },
+        }),
   });
 };

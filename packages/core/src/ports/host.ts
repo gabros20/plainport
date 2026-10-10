@@ -26,6 +26,11 @@ export interface HostPorts extends LocalIo {
    */
   faultAt(step: string): void;
   /**
+   * This host's boot session (boot.ts readBootSession): an id the kernel makes at every boot, which no clock step
+   * moves. Undefined when the platform has none or it cannot be read; read once per host and kept.
+   */
+  bootSession(): Promise<string | undefined>;
+  /**
    * Deletes an offload's trash folder, then its journal, from a detached process that outlives this command (DESIGN.md
    * "Offload process" step 8). The one sanctioned exception to the one process runner (D47): the command is fixed
    * and internal, it has no output to bound, and only a journaled trash path is accepted (`.../.plainport-trash/<op>`,

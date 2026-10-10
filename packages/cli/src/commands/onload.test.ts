@@ -21,6 +21,7 @@ import { nodeLocalIo } from "@plainport/core";
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
 import { z } from "zod";
 import { describeT1 } from "../../../../test/tiers.ts";
+import { bytesOf } from "../../../core/src/testing/bytes.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../../../core/src/testing/invariants.ts";
@@ -132,11 +133,12 @@ const offloaded = async (kept = false): Promise<string> => {
 };
 
 describe("onload: the command", () => {
-  test("onload is safe_write: it runs without --yes; --dry-run is refused (no preview yet)", async () => {
+  test("onload is safe_write: it runs without --yes, and --dry-run runs it as read (D18, D71)", async () => {
     const verdict = gate(["onload", "work:web"], REGISTRY, { approved: () => false });
     expect(verdict.ok && [verdict.command.risk, verdict.risk]).toEqual(["safe_write", "safe_write"]);
-    const dry = await cli(["onload", "work:web", "--dry-run"]);
-    expect(dry.code).toBe(2);
+    const dry = gate(["onload", "work:web", "--dry-run"], REGISTRY, { approved: () => false });
+    expect(dry.ok && [dry.command.risk, dry.risk]).toEqual(["safe_write", "read"]);
+    expect(REGISTRY.find((c) => c.name === "onload")?.dryRun).not.toBe(false);
   });
 
   test("restores the project, installs its dependencies and prints the envelope (--json)", async () => {
@@ -385,6 +387,103 @@ describe("onload: the command", () => {
   });
 });
 
+describe("onload --dry-run (M2 task 2, D71)", () => {
+  const planSchema = () => {
+    const command = REGISTRY.find((c) => c.name === "onload");
+    if (command === undefined || command.dryRun === false) throw new Error("onload has no dry run");
+    return command.dryRun.plan;
+  };
+
+  test("--json validates against the published preview schema and writes nothing: sandbox and store are byte-identical", async () => {
+    const snapshot = await offloaded();
+    // Reads fill this device's event mirror (D45); warm it, then nothing at all may change.
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.err).toBe("");
+    expect(run.code).toBe(0);
+    expect(bytesOf(box.home)).toEqual(before);
+    const lines = run.out.trim().split("\n");
+    const env = JSON.parse(lines.at(-1) as string);
+    expect(env).toMatchObject({ ok: true, verb: "onload" });
+    expect(planSchema().safeParse(env.data).success).toBe(true);
+    expect(env.data).toMatchObject({
+      kind: "onload",
+      project: "work:web",
+      store: "local",
+      snapshot,
+      over: snapshot,
+      dir: dir(),
+      restored: "restore",
+      findings: [],
+      hydrate: { status: "install", steps: [{ path: "", command: "npm ci", packageManager: "npm" }] },
+    });
+    expect(existsSync(dir())).toBe(false);
+    expect(existsSync(join(box.home, "pm.log"))).toBe(false);
+    // No plan is saved: a preview has nothing to approve.
+    expect(existsSync(box.paths.plansDir) ? readdirSync(box.paths.plansDir) : []).toEqual([]);
+  });
+
+  test("a kept trash previews as reuse, with the folder it would come back from", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const snapshot = await offloaded(true);
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    const trash = join(box.home, "work/.plainport-trash", snapshot, "web");
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(0);
+    expect(bytesOf(box.home)).toEqual(before);
+    const data = envelope(run.out).data;
+    expect(planSchema().safeParse(data).success).toBe(true);
+    expect(data).toMatchObject({
+      restored: "reuse",
+      reused: { from: trash, offload: snapshot },
+      hydrate: { status: "reused" },
+    });
+    const human = await cli(["onload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(`renamed back from ${trash}`);
+    expect(human.out).toContain("nothing would be restored or installed");
+  });
+
+  test("an occupied path blocks: exit 6, the finding in the error and the preview as data", async () => {
+    await offloaded();
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    box.file("work/web/other.txt", "hello\n");
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(6);
+    expect(bytesOf(box.home)).toEqual(before);
+    const env = envelope(run.out);
+    expect(env).toMatchObject({
+      ok: false,
+      error: { code: 6, finding: { code: "path.occupied" } },
+      data: { kind: "onload", restored: "restore", findings: [{ severity: "block", code: "path.occupied" }] },
+    });
+    expect(planSchema().safeParse(env.data).success).toBe(true);
+  });
+
+  test("the human preview names the snapshot, the head, the folder, the space and the install, and writes nothing", async () => {
+    const snapshot = await offloaded();
+    const run = await cli(["onload", "work:web", "--dry-run"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain(`work:web ← local, snapshot ${snapshot}\n`);
+    expect(run.out).toContain(`  into      ${dir()}`);
+    expect(run.out).toMatch(/ {2}restore {3}from the store: /);
+    expect(run.out).toMatch(/ {2}space {5}needs about .+ free/);
+    expect(run.out).toContain("  install   npm ci (npm)");
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  test("help onload and plainport.json describe the dry run", async () => {
+    const help = await cli(["help", "onload"]);
+    expect(help.out).toContain("--dry-run: previews without changing anything");
+    const manifest = JSON.parse(readFileSync(join(import.meta.dir, "../../../../plainport.json"), "utf8"));
+    const entry = manifest.commands.find((c: { name: string }) => c.name === "onload");
+    expect(entry.dryRun).toBe(true);
+    expect(entry.plan).not.toBeNull();
+  });
+});
+
 describe("dehydrate: the command", () => {
   test("removes the installed dependencies and nothing else; hydrate puts them back", async () => {
     const run = await cli(["dehydrate", "work:web", "--json"]);
@@ -483,6 +582,44 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
         stripped: ["node_modules"],
       }),
     ).toEqual([]);
+  }, 120_000);
+});
+
+describeT1("onload --dry-run with the real restic (M2 task 2, D71)", () => {
+  test("the preview leaves the sandbox and the store byte-identical, apart from restic's own cache", async () => {
+    const host = macosTestHost();
+    const env = {
+      HOME: box.home,
+      PATH: `${bin}:${PATH}`,
+      PLAINPORT_STORE_PASSWORD: "t1-pw",
+      FAKE_PM_LOG: join(box.home, "pm.log"),
+    };
+    const real = (): Ports => ({
+      ...ports(),
+      env,
+      system: host,
+      io: host,
+      stores: localStores(host, env),
+    });
+    const run = (argv: string[]) => capture(argv, REGISTRY, { ports: real() });
+    expect((await run(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"])).code).toBe(
+      0,
+    );
+    const off = await run(["offload", "work:web", "--store", "t1", "--yes", "--json"]);
+    expect(off.code).toBe(0);
+    const op = envelope(off.out).data.op as string;
+    for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+      await Bun.sleep(25);
+    // Warm this device's event mirror (D45) and restic's cache; the preview after it adds nothing to either.
+    expect((await run(["onload", "work:web", "--store", "t1", "--dry-run", "--json"])).code).toBe(0);
+    // restic's cache (the sandbox HOME's ~/.cache/plainport/restic) is the one thing a listing may touch.
+    const cache = (path: string) => path === ".cache" || path.startsWith(".cache/");
+    const before = bytesOf(box.home, cache);
+    const dry = await run(["onload", "work:web", "--store", "t1", "--dry-run", "--json"]);
+    expect(dry.code).toBe(0);
+    expect(envelope(dry.out).data).toMatchObject({ restored: "restore", snapshot: op, over: op });
+    expect(bytesOf(box.home, cache)).toEqual(before);
+    expect(existsSync(dir())).toBe(false);
   }, 120_000);
 });
 

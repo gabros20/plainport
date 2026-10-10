@@ -1,0 +1,19 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "backup",
+    "--json",
+    "--stdin-from-command",
+    "--stdin-filename",
+    "held",
+    "--",
+    "sleep",
+    "30"
+  ],
+  "exitCode": 1,
+  "stdout": "{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n{\"message_type\":\"status\",\"percent_done\":0,\"total_files\":1,\"current_files\":[\"/held\"]}\n",
+  "stderr": "\u001b[2Ksignal interrupt received, cleaning up\n{\"message_type\":\"exit_error\",\"code\":1,\"message\":\"Fatal: unable to save snapshot: context canceled\"}\n"
+}
