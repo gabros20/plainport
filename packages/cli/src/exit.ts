@@ -9,8 +9,10 @@ import { abandonedCalls } from "@plainport/core";
 export interface FinishDeps {
   /** How many calls a deadline gave up on are still running (core's abandonedCalls). */
   abandoned(): number;
-  /** The streams to flush before exiting. */
+  /** The streams to end, so their output reaches its readers, before exiting. */
   streams: readonly NodeJS.WritableStream[];
+  /** How long ending them may take; FLUSH_LIMIT_MS by default. */
+  flushLimitMs?: number;
   /** Sets the code the process ends with when the loop drains (process.exitCode). */
   setCode(code: number): void;
   exit(code: number): void;
@@ -25,12 +27,27 @@ const real = (): FinishDeps => ({
   exit: (code) => process.exit(code),
 });
 
-/** Ends the process with `code`: by draining, or, while an abandoned call is out, by exiting once output is flushed. */
+/** How long the output may take to reach its readers before the process exits anyway (a reader that went away). */
+export const FLUSH_LIMIT_MS = 2_000;
+
+/**
+ * Ends the process with `code`: by draining, or, while an abandoned call is out, by exiting once its output is out.
+ * The streams are ended, not just written to: in Bun a write's callback can fire before earlier writes reached a pipe,
+ * and exiting then cuts the output (a `--json` envelope that no longer parses). Nothing writes after the command's
+ * end, so ending them is safe. The wait is bounded, so a reader that is gone (EPIPE, a closed terminal) cannot hold
+ * the exit.
+ */
 export const finishProcess = async (code: number, deps: FinishDeps = real()): Promise<void> => {
   deps.setCode(code);
   if (deps.abandoned() === 0) return;
-  await Promise.all(
-    deps.streams.map((stream) => new Promise<void>((resolve) => stream.write("", () => resolve()))),
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, deps.flushLimitMs ?? FLUSH_LIMIT_MS);
+  });
+  const ended = Promise.all(
+    deps.streams.map((stream) => new Promise<void>((resolve) => stream.end(() => resolve()))),
   );
+  await Promise.race([ended, limit]);
+  clearTimeout(timer);
   deps.exit(code);
 };

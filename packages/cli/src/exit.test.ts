@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 /** A process that reads the FIFO (no writer: the read never returns) under a 200 ms deadline, then finishes. */
-const startProbe = (finish: string) => {
+const startProbe = (finish: string, laterReader = false) => {
   const script = join(dir, "probe.ts");
   writeFileSync(
     script,
@@ -41,7 +41,19 @@ const startProbe = (finish: string) => {
       `process.stdout.write(JSON.stringify(probed) + "\\n");\n` +
       `${finish}\n`,
   );
-  const child = Bun.spawn([process.execPath, script], {
+  // laterReader: stdout goes through a pipe that `sleep 1; wc -c` reads; the line printed is the byte count and the
+  // probe's own exit code.
+  const command = laterReader
+    ? [
+        "/bin/sh",
+        "-c",
+        `{ "$0" "$1"; echo $? > "$2"; } | { sleep 1; wc -c | tr -d ' '; }; cat "$2"`,
+        process.execPath,
+        script,
+        join(dir, "code"),
+      ]
+    : [process.execPath, script];
+  const child = Bun.spawn(command, {
     cwd: dir,
     env: { PATH: "/usr/bin:/bin", HOME: dir },
     stdout: "pipe",
@@ -64,6 +76,22 @@ describe("the process ends after an abandoned probe (D32)", () => {
     );
   });
 
+  test("a megabyte of output into a pipe read only later arrives whole before the exit, with its code", async () => {
+    // Sixteen 64 KiB writes: far more than a pipe holds, so they are still queued in the child when it finishes. The
+    // reader is a shell pipeline that starts reading a second later, as an agent's pipe may.
+    const child = startProbe(
+      'for (let i = 0; i < 16; i++) process.stdout.write("x".repeat(65_536));\n' +
+        "await finishProcess(probed.timedOut ? 4 : 0);",
+      true,
+    );
+    expect(await exitWithin(child, 10_000)).toBe(0);
+    const [count, code] = (await new Response(child.stdout as ReadableStream).text()).trim().split(/\s+/);
+    expect([Number(count), Number(code)]).toEqual([
+      '{"timedOut":true,"seconds":0.2}\n'.length + 16 * 65_536,
+      4,
+    ]);
+  });
+
   test("without it, the abandoned read keeps the process alive past its output (why finishProcess exists)", async () => {
     const child = startProbe("process.exitCode = probed.timedOut ? 4 : 0;");
     expect(await exitWithin(child, 2_000)).toBe("still running");
@@ -80,13 +108,12 @@ describe("the process ends after an abandoned probe (D32)", () => {
     expect(calls).toEqual(["code 3"]);
   });
 
-  test("with one, it flushes every stream, then exits with the code", async () => {
+  test("with one, it ends every stream, then exits with the code", async () => {
     const order: string[] = [];
     const stream = {
-      write: (_chunk: string, done: () => void) => {
-        order.push("flush");
+      end: (done: () => void) => {
+        order.push("end");
         done();
-        return true;
       },
     } as unknown as NodeJS.WritableStream;
     await finishProcess(4, {
@@ -95,6 +122,19 @@ describe("the process ends after an abandoned probe (D32)", () => {
       setCode: (code) => order.push(`code ${code}`),
       exit: (code) => order.push(`exit ${code}`),
     });
-    expect(order).toEqual(["code 4", "flush", "flush", "exit 4"]);
+    expect(order).toEqual(["code 4", "end", "end", "exit 4"]);
+  });
+
+  test("a stream that never finishes ending (its reader gone) holds the exit only until the limit", async () => {
+    const order: string[] = [];
+    const stuck = { end: () => order.push("end") } as unknown as NodeJS.WritableStream;
+    await finishProcess(4, {
+      abandoned: () => 1,
+      streams: [stuck],
+      flushLimitMs: 50,
+      setCode: () => {},
+      exit: (code) => order.push(`exit ${code}`),
+    });
+    expect(order).toEqual(["end", "exit 4"]);
   });
 });
