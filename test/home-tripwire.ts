@@ -303,6 +303,24 @@ for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
   }
 }
 
+// mkdir makes them too: a `plainport-*` folder under the temp directory, or anything inside one, counts.
+for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
+  for (const variant of ["mkdir", "mkdirSync"]) {
+    const original = target[variant];
+    if (typeof original !== "function") continue;
+    const wrapped = function (this: unknown, ...args: unknown[]) {
+      const path = toPath(args[0]);
+      if (path !== undefined && isUnder(tmp, path) && path !== tmp) {
+        const first = path.slice(tmp.length + 1).split(sep)[0] as string;
+        if (first.startsWith("plainport-")) madeTemp.add(join(tmp, first));
+      }
+      return (original as Fn).apply(this, args);
+    };
+    Object.assign(wrapped, original);
+    target[variant] = wrapped;
+  }
+}
+
 /** The temp folders this run made and left behind. */
 export const leakedTempFolders = (): string[] =>
   [...madeTemp].filter((dir) => (fs.existsSync as (path: string) => boolean)(dir));

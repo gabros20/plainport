@@ -14,9 +14,27 @@ test("exampleHome cleanup removes the whole folder, also after a command that to
   }
 });
 
-test("exampleHome cleanup removes the folder when the home's setup fails", async () => {
+test("exampleHome cleanup outlasts a writer that is delayed beyond a single look", async () => {
+  const home = await exampleHome();
+  // A detached child, like an offload's delete, that writes into the home 80 ms from now.
+  Bun.spawn(["sh", "-c", `sleep 0.08; mkdir -p "${home.home}/late" && echo x > "${home.home}/late/f"`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  home.cleanup();
+  await Bun.sleep(400);
+  expect(existsSync(home.home)).toBe(false);
+});
+
+test("exampleHome removes its folder when its setup throws", async () => {
   const before = new Set(await Array.fromAsync(new Bun.Glob("plainport-example-*").scan({ cwd: tmp() })));
-  await expect(exampleHome({ failSetup: true })).rejects.toThrow();
+  await expect(
+    exampleHome({
+      afterCreate: () => {
+        throw new Error("boom");
+      },
+    }),
+  ).rejects.toThrow("boom");
   const after = await Array.fromAsync(new Bun.Glob("plainport-example-*").scan({ cwd: tmp() }));
   expect(after.filter((name) => !before.has(name))).toEqual([]);
 });

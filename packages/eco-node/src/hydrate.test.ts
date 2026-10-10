@@ -12,8 +12,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -278,6 +280,28 @@ describe("hydrate: Corepack (M2 Task 3)", () => {
     expect(done.failure?.finding.message).toBeUndefined();
     expect(readFileSync(join(dir, "package.json")).equals(before)).toBe(true);
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["0 0"]);
+    expect(done.report.steps).toEqual([
+      { path: "", command: "pnpm install --frozen-lockfile", ok: true, via: "corepack" },
+    ]);
+  });
+
+  test("Corepack is credited by the package manager the wrapped install finds, not the caller's PATH", async () => {
+    // The version manager puts a Corepack-managed bin first; the caller's own PATH has a plain pnpm.
+    const wrapped = join(root, "wrapped-bin");
+    mkdirSync(wrapped);
+    corepackShim();
+    const shim = readlinkSync(join(bin, "pnpm"));
+    unlinkSync(join(bin, "pnpm"));
+    symlinkSync(shim, join(wrapped, "pnpm"));
+    fake("pnpm", "mkdir -p node_modules");
+    fake(
+      "fnm",
+      `PATH="${wrapped}:$PATH"; export PATH; while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; exec "$@"`,
+    );
+    const dir = project("pnpm");
+    writeFileSync(join(dir, ".nvmrc"), "20.11.0\n");
+    const done = await hydrate(dir, { ...offlineEnv(`${bin}:/usr/bin:/bin`), FAKE_LOG: join(root, "c.log") });
+    expect(done.failure?.finding.message).toBeUndefined();
     expect(done.report.steps).toEqual([
       { path: "", command: "pnpm install --frozen-lockfile", ok: true, via: "corepack" },
     ]);

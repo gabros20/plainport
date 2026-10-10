@@ -5,12 +5,12 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareTrees, hashTree } from "./tree-compare.ts";
+import { compareTrees, hashTree, type TreeSources } from "./tree-compare.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "plainport-tree-compare-"));
 const flagged: string[] = [];
 afterAll(() => {
-  for (const file of flagged) Bun.spawnSync(["chflags", "nouchg", file]);
+  for (const file of flagged) Bun.spawnSync(["chflags", "-h", "nouchg", file]);
   rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -104,5 +104,71 @@ describe("tree comparison", () => {
       "changed src/a.ts: hard links with src/b.ts → none",
       "missing src/b.ts",
     ]);
+  });
+
+  test.skipIf(!darwin)("a symlink's own flags are compared, not its target's", () => {
+    const one = make("sl-1");
+    const two = make("sl-2");
+    const set = Bun.spawnSync(["chflags", "-h", "uchg", join(one, "link")]);
+    if (set.exitCode !== 0) throw new Error(set.stderr.toString());
+    flagged.push(join(one, "link"));
+    expect(compareTrees(hashTree(one, []), hashTree(two, []))).toEqual(["changed link: flags uchg → none"]);
+  });
+
+  test("hard links are compared for every non-directory inode type", () => {
+    const fifo = (name: string, linked: boolean) => {
+      const dir = make(name);
+      expect(Bun.spawnSync(["mkfifo", join(dir, "pipe")]).exitCode).toBe(0);
+      if (linked) linkSync(join(dir, "pipe"), join(dir, "pipe2"));
+      else expect(Bun.spawnSync(["mkfifo", join(dir, "pipe2")]).exitCode).toBe(0);
+      return dir;
+    };
+    expect(compareTrees(hashTree(fifo("fi-1", true), []), hashTree(fifo("fi-2", false), []))).toEqual([
+      "changed pipe: hard links with pipe2 → none",
+      "changed pipe2: hard links with pipe → none",
+    ]);
+  });
+
+  describe("metadata that cannot be read fails the comparison, it is never empty", () => {
+    const failing: TreeSources = {
+      xattrs: {
+        list: () => ({ ok: false, reason: "EACCES" }),
+        get: () => ({ ok: true, value: Buffer.alloc(0) }),
+      },
+    };
+    test("a failed xattr listing names the path", () => {
+      const problems = compareTrees(hashTree(make("uf-1"), [], failing), hashTree(make("uf-2"), []));
+      expect(problems).toContain("unreadable doc.md: xattrs (EACCES)");
+      expect(problems.every((p) => p.startsWith("unreadable "))).toBe(true);
+    });
+    test("a failed xattr value read names the path", () => {
+      const sources: TreeSources = {
+        xattrs: {
+          list: () => ({ ok: true, value: ["user.a"] }),
+          get: () => ({ ok: false, reason: "ENODATA" }),
+        },
+      };
+      expect(compareTrees(hashTree(make("uv-1"), [], sources), hashTree(make("uv-2"), []))).toContain(
+        "unreadable doc.md: xattrs user.a (ENODATA)",
+      );
+    });
+    test("an xattr library that cannot be loaded fails every entry", () => {
+      const problems = compareTrees(hashTree(make("ul-1"), [], { xattrs: null }), hashTree(make("ul-2"), []));
+      expect(problems).toContain("unreadable doc.md: xattrs (no xattr library on this system)");
+      expect(problems).toContain("unreadable .: xattrs (no xattr library on this system)");
+    });
+    test.skipIf(!darwin)("a failed or misaligned flags call fails the comparison", () => {
+      let n = 0;
+      const bad = (run: TreeSources["stat"]) => {
+        n += 1;
+        return compareTrees(hashTree(make(`sf-${n}a`), [], { stat: run }), hashTree(make(`sf-${n}b`), []));
+      };
+      expect(bad(() => ({ exitCode: 1, stdout: "", stderr: "boom" }))).toContain(
+        "unreadable doc.md: flags (stat exited 1: boom)",
+      );
+      expect(bad(() => ({ exitCode: 0, stdout: "-\n", stderr: "" }))).toContain(
+        "unreadable doc.md: flags (stat output did not match the path)",
+      );
+    });
   });
 });

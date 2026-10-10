@@ -131,13 +131,40 @@ const onPath = async (host: HostPorts, env: Env, name: string): Promise<string |
   return undefined;
 };
 
-/** Whether `name` on the env's PATH is Corepack's shim: a link that resolves into the corepack package. */
-const suppliedByCorepack = async (host: HostPorts, env: Env, name: string): Promise<boolean> => {
+/**
+ * Whether the package manager the install will run is Corepack's shim: a link that resolves into the corepack
+ * package. It is looked up the way the install finds it: through the version manager's own environment when the
+ * install is wrapped, else on the install's PATH.
+ */
+const suppliedByCorepack = async (
+  host: HostPorts,
+  env: Record<string, string>,
+  toolchain: Toolchain,
+  name: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<boolean> => {
   try {
-    const found = await onPath(host, env, name);
-    return found !== undefined && (await host.fs.realpath(found)).split(sep).includes("corepack");
+    let found: string | undefined;
+    if (toolchain.manager === undefined) found = await onPath(host, env, name);
+    else {
+      const argv = toolchain.wrap(["sh", "-c", `command -v ${shellWord(name)}`]);
+      const ran = await host.run({
+        command: argv[0] as string,
+        args: argv.slice(1),
+        cwd,
+        env,
+        timeoutMs: VERSION_TIMEOUT_MS,
+        idleTimeoutMs: VERSION_TIMEOUT_MS,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (ran.ok && ran.value.exitCode === 0) found = ran.value.stdout.text.trim().split("\n")[0];
+    }
+    return (
+      found !== undefined && found !== "" && (await host.fs.realpath(found)).split(sep).includes("corepack")
+    );
   } catch {
-    return false; // a PATH entry the host refuses or cannot read: not credited to Corepack
+    return false; // a path the host refuses or cannot read: not credited to Corepack
   }
 };
 
@@ -343,10 +370,10 @@ export const hydrateProject = async (
   for (const step of installs) {
     if (deps.signal?.aborted) return stopped(steps);
     const argv = toolchain.wrap(step.argv);
-    const via = (await suppliedByCorepack(host, env, step.argv[0] as string))
+    const cwd = step.path === "" ? dir : join(dir, ...step.path.split("/"));
+    const via = (await suppliedByCorepack(host, env, toolchain, step.argv[0] as string, cwd, deps.signal))
       ? { via: "corepack" as const }
       : {};
-    const cwd = step.path === "" ? dir : join(dir, ...step.path.split("/"));
     const where = step.path === "" ? address : `${address} (${step.path})`;
     const ran = await host.run({
       command: argv[0] as string,
