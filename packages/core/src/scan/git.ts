@@ -50,6 +50,11 @@ export interface GitFacts {
   };
   /** Local branches with no upstream on a remote: none set, gone, or another local branch. */
   localOnly: string[];
+  /**
+   * Tags (short names, sorted) whose commit no remote-tracking branch holds, so no remote has them (D69). A tag on a
+   * commit a remote branch holds is not listed: whether that remote also has the tag takes the network.
+   */
+  unpushedTags: string[];
   stashes: number;
   inProgress: InProgress[];
   /** The remotes configured, fetched or not. */
@@ -322,6 +327,33 @@ export const inProgress = async (host: HostPorts, gitDir: string): Promise<Resul
   return ok(found);
 };
 
+/**
+ * The tags whose commit no remote-tracking branch holds (D69): the commits the tags reach that no remote does
+ * (`rev-list --tags --not --remotes`), matched with each tag's commit, an annotated tag's peeled. Tags on anything but
+ * a commit (a tree, a blob) hold no history and are left out.
+ */
+const unpushedTagsOf = async (host: HostPorts, dir: string, ctx: GitContext): Promise<Result<string[]>> => {
+  const refs = await git(host, dir, ctx, [
+    "for-each-ref",
+    "--format=%(refname:short)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)",
+    "refs/tags",
+  ]);
+  if (!refs.ok) return refs;
+  const commitOf = new Map<string, string[]>();
+  for (const line of records(refs.value, NL)) {
+    const [name = "", type = "", object = "", peeledType = "", peeled = ""] = line.split("\0");
+    const commit = type === "commit" ? object : peeledType === "commit" ? peeled : undefined;
+    if (name === "" || commit === undefined) continue;
+    commitOf.set(commit, [...(commitOf.get(commit) ?? []), name]);
+  }
+  if (commitOf.size === 0) return ok([]);
+  const held = await git(host, dir, ctx, ["rev-list", "--tags", "--not", "--remotes", "--"]);
+  if (!held.ok) return held;
+  const tags: string[] = [];
+  for (const commit of records(held.value, NL)) tags.push(...(commitOf.get(commit) ?? []));
+  return ok(tags.sort());
+};
+
 /** The facts for a folder with a .git; undefined when it has none. */
 export const gitFacts = async (
   host: HostPorts,
@@ -436,6 +468,8 @@ export const gitFacts = async (
     if (!out.ok) return out;
     detachedHead = Number(text(out.value).trim());
   }
+  const tags = await unpushedTagsOf(host, dir, ctx);
+  if (!tags.ok) return tags;
   const operations = await inProgress(host, gitDir);
   if (!operations.ok) return operations;
 
@@ -448,6 +482,7 @@ export const gitFacts = async (
     changed,
     unpushed: { commits: total.value, branches, detachedHead },
     localOnly,
+    unpushedTags: tags.value,
     stashes,
     inProgress: operations.value,
     remotes,

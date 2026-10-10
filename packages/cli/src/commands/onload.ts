@@ -2,13 +2,17 @@
 // change files only inside the roots, in ways plainport can regenerate (an onload lands only where nothing stands, and
 // dehydrate removes only installed dependencies). onload is core's onload saga: restore, verify, swap, then the
 // toolchain and the frozen install; a failed install exits 10 with the restored project and snapshot as the error's
-// data (D14), and `plainport hydrate` retries. None has a preview yet, so --dry-run is refused (D18).
+// data (D14), and `plainport hydrate` retries. onload --dry-run (always read, D18) previews the onload and writes
+// nothing, not even a plan: it says whether the folder is renamed back or restored, the snapshot and the head it goes
+// over, the landing folder, the space and the install; a block finding exits 6 (the lease under strict, 8) with the
+// preview as the error's data (D14, D38, D71). hydrate and dehydrate have no preview, so --dry-run is refused for them.
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { ok } from "@plainport/contract";
+import { FindingSchema, ok, type StreamEvent } from "@plainport/contract";
 import {
   ConfigLoader,
   expandHome,
+  previewOnload,
   resolveProject,
   runDehydrate,
   runHydrate,
@@ -83,6 +87,69 @@ const OnloadOutputSchema = z
   })
   .meta({ description: "The project onloaded; with exit 10, restored but not hydrated (D14)" });
 
+const OnloadPreviewSchema = z
+  .looseObject({
+    kind: z.literal("onload"),
+    project: z.string(),
+    store: z.string(),
+    snapshot: z.string().meta({ description: "The snapshot that would be restored" }),
+    over: z.string().meta({ description: "The head it would be written over; the copy's next base (D43)" }),
+    dir: z.string().meta({ description: "Where the project would land" }),
+    restored: z.enum(["reuse", "store"]).meta({
+      description:
+        "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. store: restored from the store",
+    }),
+    why: z.string().meta({ description: "Why it is one or the other" }),
+    reused: z
+      .looseObject({ from: z.string(), offload: z.string(), reason: z.string() })
+      .optional()
+      .meta({ description: "Only with restored: reuse: the trash folder and the offload that released it" }),
+    files: z.int().nonnegative(),
+    bytes: z.int().nonnegative(),
+    space: z.looseObject({ needed: z.int().nonnegative(), free: z.int().nonnegative() }).meta({
+      description:
+        "Bytes the restore needs on the landing volume (the snapshot, the dependencies the install puts back, per-file rounding and a 10% margin; 0 for a reuse) and the bytes free there",
+    }),
+    findings: z.array(FindingSchema).meta({
+      description:
+        "What preflight reports. A block finding refuses the onload: this is then the error's data and the exit code is the finding's (6; 8 for lease.held under leases = strict)",
+    }),
+    hydrate: z.looseObject({
+      status: z.enum(["install", "reused", "skipped", "none"]).meta({
+        description:
+          "install: these frozen installs run after the restore. reused: the folder comes back with its dependencies. skipped: --no-hydrate or onload.hydrate = false. none: nothing to install",
+      }),
+      reason: z.string().optional(),
+      steps: z.array(
+        z.looseObject({
+          path: z
+            .string()
+            .meta({ description: 'The install root, relative to the project; "" is the project' }),
+          command: z.string().meta({ description: "The frozen install, e.g. npm ci" }),
+          packageManager: z.string(),
+          via: z.literal("corepack").optional().meta({
+            description:
+              "Corepack supplies the package manager; installs run with its download prompt and auto-pin off",
+          }),
+        }),
+      ),
+      toolchain: z
+        .looseObject({
+          pinnedBy: z.array(z.string()).meta({
+            description:
+              "Version files in the snapshot (.nvmrc, .node-version, .tool-versions, mise.toml): the pinned versions are read after the restore",
+          }),
+          manager: z.string().optional().meta({
+            description:
+              "The version manager on PATH (mise, fnm or volta) that would activate the pinned node",
+          }),
+        })
+        .optional(),
+      untrusted: z.array(z.string()),
+    }),
+  })
+  .meta({ description: "What an onload would do (--dry-run): nothing was written (D71)" });
+
 const installs = (report: z.output<typeof HydrateReportSchema>): string =>
   report.steps
     .map(
@@ -90,6 +157,58 @@ const installs = (report: z.output<typeof HydrateReportSchema>): string =>
         `${s.path === "" ? s.command : `${s.command} in ${s.path}`}${s.via === "corepack" ? " via Corepack" : ""}`,
     )
     .join(", ");
+
+const row = (label: string, text: string): string => `  ${label.padEnd(10)}${text}`;
+
+/** The preview as a person reads it: the onload's target, where it lands, what it needs, the install, the findings. */
+const renderPreview = (preview: z.output<typeof OnloadPreviewSchema>): string => {
+  const lines = [`${preview.project} ← ${preview.store}, snapshot ${preview.snapshot} over ${preview.over}`];
+  lines.push(row("into", preview.dir));
+  if (preview.reused !== undefined) {
+    lines.push(row("reuse", `renamed back from ${preview.reused.from}; ${preview.reused.reason}`));
+    lines.push(
+      row("install", "nothing would be restored or installed: the folder keeps the dependencies it had"),
+    );
+  } else {
+    lines.push(
+      row(
+        "restore",
+        `from the store: ${preview.files.toLocaleString("en-US")} file${preview.files === 1 ? "" : "s"} · ${formatBytes(preview.bytes)}; ${preview.why}`,
+      ),
+    );
+    lines.push(
+      row(
+        "space",
+        `needs about ${formatBytes(preview.space.needed)}, ${formatBytes(preview.space.free)} free`,
+      ),
+    );
+    const { hydrate } = preview;
+    if (hydrate.status === "install") {
+      for (const step of hydrate.steps)
+        lines.push(
+          row(
+            "install",
+            `${step.path === "" ? step.command : `${step.command} in ${step.path}`} (${step.packageManager}${step.via === "corepack" ? " via Corepack" : ""})`,
+          ),
+        );
+      const tool = hydrate.toolchain;
+      if (tool !== undefined && tool.pinnedBy.length > 0)
+        lines.push(
+          row(
+            "toolchain",
+            `${tool.pinnedBy.join(", ")} pin${tool.pinnedBy.length === 1 ? "s" : ""} versions${tool.manager === undefined ? "; no version manager (mise, fnm, Volta) is on PATH, so the active versions are compared" : `; ${tool.manager} activates them`}`,
+          ),
+        );
+    } else {
+      lines.push(row("install", `none: ${hydrate.reason ?? hydrate.status}`));
+    }
+  }
+  for (const f of preview.findings) {
+    lines.push(row(f.severity, `${f.code}  ${f.message}`));
+    if (f.severity === "block" && f.fix !== undefined) lines.push(`${" ".repeat(14)}fix: ${f.fix}`);
+  }
+  return lines.join("\n");
+};
 
 const env = (ctx: CommandContext) => ctx.env;
 
@@ -111,7 +230,7 @@ export const onload = defineCommand({
   name: "onload",
   summary: "Restore a shelved project into place and reinstall its dependencies",
   risk: "safe_write",
-  dryRun: false,
+  dryRun: { plan: OnloadPreviewSchema, human: renderPreview },
   acceptsPlan: false,
   group: "projects",
   positionals: ["project"],
@@ -142,6 +261,11 @@ export const onload = defineCommand({
       argv: ["onload", "work:clients/acme/api", "--no-hydrate"],
       summary:
         "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them",
+    },
+    {
+      argv: ["onload", "work:clients/acme/api", "--dry-run"],
+      summary:
+        "Preview it and write nothing: whether the kept folder is renamed back (restored: reuse) or restored from the store, the snapshot and the head it goes over, the landing folder, the space needed, the findings and the installs. A block finding (an occupied path, too little space) exits 6 with the preview as data; lease.held is a warning, or a block under leases = strict",
     },
     {
       argv: ["onload", "work:clients/acme/api", "--to", "~/Developer/api", "--no-hydrate"],
@@ -184,31 +308,32 @@ export const onload = defineCommand({
     const found = await project(ctx, args.project);
     if (!found.ok) return found;
     const { paths, device, ref } = found.value;
+    const request = {
+      project: ref,
+      ...(args.to === undefined ? {} : { to: expandHome(args.to, paths.home, ctx.cwd) }),
+      ...(args.snapshot === undefined ? {} : { snapshot: args.snapshot }),
+      ...(args["no-hydrate"] === true ? { hydrate: false } : {}),
+      ...(ctx.store === undefined ? {} : { store: ctx.store }),
+    };
+    const deps = {
+      host: ctx.system,
+      plugins: ctx.plugins,
+      paths,
+      device,
+      env: ctx.env,
+      loader: new ConfigLoader(ctx.io, paths),
+      opener: ctx.stores,
+      openMirror: (storeId: string) => openEventMirror(ctx.io, paths, storeId),
+      emit: (event: StreamEvent) => ctx.output.emit(event),
+      log: (level: "debug" | "info" | "warn", message: string) => ctx.output.log(level, message),
+      signal: ctx.signal,
+      now: () => ctx.clock.now(),
+    };
+    // --dry-run previews: it takes no lock, writes no plan and stops nothing, so it needs no signal hold (D71).
+    if (ctx.dryRun) return previewOnload(deps, request);
     const release = ctx.holdSignal();
     try {
-      const done = await runOnload(
-        {
-          host: ctx.system,
-          plugins: ctx.plugins,
-          paths,
-          device,
-          env: ctx.env,
-          loader: new ConfigLoader(ctx.io, paths),
-          opener: ctx.stores,
-          openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
-          emit: (event) => ctx.output.emit(event),
-          log: (level, message) => ctx.output.log(level, message),
-          signal: ctx.signal,
-          now: () => ctx.clock.now(),
-        },
-        {
-          project: ref,
-          ...(args.to === undefined ? {} : { to: expandHome(args.to, paths.home, ctx.cwd) }),
-          ...(args.snapshot === undefined ? {} : { snapshot: args.snapshot }),
-          ...(args["no-hydrate"] === true ? { hydrate: false } : {}),
-          ...(ctx.store === undefined ? {} : { store: ctx.store }),
-        },
-      );
+      const done = await runOnload(deps, request);
       return done.ok ? ok({ ...done.value, exitCode: 0 as const }) : done;
     } finally {
       release();

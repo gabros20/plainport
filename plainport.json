@@ -1857,6 +1857,18 @@
                 ],
                 "additionalProperties": {}
               },
+              "git": {
+                "description": "Whether the project folder is a git repository of its own. False: no .git, so git lists nothing as gitignored and every file travels except the stripped dependency folders. Absent in a plan an older plainport made",
+                "type": "boolean"
+              },
+              "nested": {
+                "description": "Repositories inside the project folder, relative and sorted: they travel as files, their own .git included. Absent when there are none (also the git.nested-repos finding)",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
               "strip": {
                 "type": "array",
                 "items": {
@@ -2269,6 +2281,18 @@
             ],
             "additionalProperties": {}
           },
+          "git": {
+            "description": "Whether the project folder is a git repository of its own. False: no .git, so git lists nothing as gitignored and every file travels except the stripped dependency folders. Absent in a plan an older plainport made",
+            "type": "boolean"
+          },
+          "nested": {
+            "description": "Repositories inside the project folder, relative and sorted: they travel as files, their own .git included. Absent when there are none (also the git.nested-repos finding)",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
           "strip": {
             "type": "array",
             "items": {
@@ -2549,7 +2573,7 @@
       "summary": "Restore a shelved project into place and reinstall its dependencies",
       "usage": "plainport onload <project> [--to <value>] [--snapshot <value>] [--no-hydrate]",
       "risk": "safe_write",
-      "dryRun": false,
+      "dryRun": true,
       "acceptsPlan": false,
       "group": "projects",
       "positionals": [
@@ -2778,7 +2802,245 @@
         "additionalProperties": {},
         "description": "The project onloaded; with exit 10, restored but not hydrated (D14)"
       },
-      "plan": null,
+      "plan": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "onload"
+          },
+          "project": {
+            "type": "string"
+          },
+          "store": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "The snapshot that would be restored"
+          },
+          "over": {
+            "type": "string",
+            "description": "The head it would be written over; the copy's next base (D43)"
+          },
+          "dir": {
+            "type": "string",
+            "description": "Where the project would land"
+          },
+          "restored": {
+            "type": "string",
+            "enum": [
+              "reuse",
+              "store"
+            ],
+            "description": "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. store: restored from the store"
+          },
+          "why": {
+            "type": "string",
+            "description": "Why it is one or the other"
+          },
+          "reused": {
+            "description": "Only with restored: reuse: the trash folder and the offload that released it",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "offload": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "offload",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
+          "files": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "space": {
+            "type": "object",
+            "properties": {
+              "needed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "free": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "needed",
+              "free"
+            ],
+            "additionalProperties": {},
+            "description": "Bytes the restore needs on the landing volume (the snapshot, the dependencies the install puts back, per-file rounding and a 10% margin; 0 for a reuse) and the bytes free there"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            },
+            "description": "What preflight reports. A block finding refuses the onload: this is then the error's data and the exit code is the finding's (6; 8 for lease.held under leases = strict)"
+          },
+          "hydrate": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "install",
+                  "reused",
+                  "skipped",
+                  "none"
+                ],
+                "description": "install: these frozen installs run after the restore. reused: the folder comes back with its dependencies. skipped: --no-hydrate or onload.hydrate = false. none: nothing to install"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The install root, relative to the project; \"\" is the project"
+                    },
+                    "command": {
+                      "type": "string",
+                      "description": "The frozen install, e.g. npm ci"
+                    },
+                    "packageManager": {
+                      "type": "string"
+                    },
+                    "via": {
+                      "description": "Corepack supplies the package manager; installs run with its download prompt and auto-pin off",
+                      "type": "string",
+                      "const": "corepack"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "command",
+                    "packageManager"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "toolchain": {
+                "type": "object",
+                "properties": {
+                  "pinnedBy": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Version files in the snapshot (.nvmrc, .node-version, .tool-versions, mise.toml): the pinned versions are read after the restore"
+                  },
+                  "manager": {
+                    "description": "The version manager on PATH (mise, fnm or volta) that would activate the pinned node",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "pinnedBy"
+                ],
+                "additionalProperties": {}
+              },
+              "untrusted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "status",
+              "steps",
+              "untrusted"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "kind",
+          "project",
+          "store",
+          "snapshot",
+          "over",
+          "dir",
+          "restored",
+          "why",
+          "files",
+          "bytes",
+          "space",
+          "findings",
+          "hydrate"
+        ],
+        "additionalProperties": {},
+        "description": "What an onload would do (--dry-run): nothing was written (D71)"
+      },
       "examples": [
         {
           "argv": [
@@ -2794,6 +3056,14 @@
             "--no-hydrate"
           ],
           "summary": "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them"
+        },
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api",
+            "--dry-run"
+          ],
+          "summary": "Preview it and write nothing: whether the kept folder is renamed back (restored: reuse) or restored from the store, the snapshot and the head it goes over, the landing folder, the space needed, the findings and the installs. A block finding (an occupied path, too little space) exits 6 with the preview as data; lease.held is a warning, or a block under leases = strict"
         },
         {
           "argv": [
@@ -4469,7 +4739,7 @@
       "severity": "warn",
       "allowable": true,
       "exitCode": 6,
-      "summary": "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy"
+      "summary": "Commits, stashes or tags exist only in this copy of the repository (a tag counts when no remote has its commit), so the snapshot becomes their only copy"
     },
     {
       "code": "git.unpushed-required",

@@ -132,11 +132,12 @@ const offloaded = async (kept = false): Promise<string> => {
 };
 
 describe("onload: the command", () => {
-  test("onload is safe_write: it runs without --yes; --dry-run is refused (no preview yet)", async () => {
+  test("onload is safe_write: it runs without --yes, and --dry-run runs it as read (D18, D71)", async () => {
     const verdict = gate(["onload", "work:web"], REGISTRY, { approved: () => false });
     expect(verdict.ok && [verdict.command.risk, verdict.risk]).toEqual(["safe_write", "safe_write"]);
-    const dry = await cli(["onload", "work:web", "--dry-run"]);
-    expect(dry.code).toBe(2);
+    const dry = gate(["onload", "work:web", "--dry-run"], REGISTRY, { approved: () => false });
+    expect(dry.ok && [dry.command.risk, dry.risk]).toEqual(["safe_write", "read"]);
+    expect(REGISTRY.find((c) => c.name === "onload")?.dryRun).not.toBe(false);
   });
 
   test("restores the project, installs its dependencies and prints the envelope (--json)", async () => {
@@ -382,6 +383,123 @@ describe("onload: the command", () => {
     const run = await cli(["onload", "work:web", "--snapshot", "01M40X7EC1DTXN87AJ4SH74DK6", "--json"]);
     expect(run.code).toBe(4);
     expect(envelope(run.out).error.finding.code).toBe("snapshot.not-found");
+  });
+});
+
+/** Every entry below a folder with its mode and a hash of its content or link target: byte-for-byte. */
+const bytesOf = (root: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const walk = (relative: string) => {
+    for (const name of readdirSync(relative === "" ? root : join(root, relative)).sort()) {
+      const path = relative === "" ? name : `${relative}/${name}`;
+      const full = join(root, path);
+      const stat = lstatSync(full);
+      const mode = (stat.mode & 0o7777).toString(8);
+      if (stat.isSymbolicLink()) out[path] = `link ${mode} ${readlinkSync(full)}`;
+      else if (stat.isDirectory()) {
+        out[path] = `dir ${mode}`;
+        walk(path);
+      } else out[path] = `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+    }
+  };
+  walk("");
+  return out;
+};
+
+describe("onload --dry-run (M2 task 2, D71)", () => {
+  const planSchema = () => {
+    const command = REGISTRY.find((c) => c.name === "onload");
+    if (command === undefined || command.dryRun === false) throw new Error("onload has no dry run");
+    return command.dryRun.plan;
+  };
+
+  test("--json validates against the published preview schema and writes nothing: sandbox and store are byte-identical", async () => {
+    const snapshot = await offloaded();
+    // Reads fill this device's event mirror (D45); warm it, then nothing at all may change.
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.err).toBe("");
+    expect(run.code).toBe(0);
+    expect(bytesOf(box.home)).toEqual(before);
+    const lines = run.out.trim().split("\n");
+    const env = JSON.parse(lines.at(-1) as string);
+    expect(env).toMatchObject({ ok: true, verb: "onload" });
+    expect(planSchema().safeParse(env.data).success).toBe(true);
+    expect(env.data).toMatchObject({
+      kind: "onload",
+      project: "work:web",
+      store: "local",
+      snapshot,
+      over: snapshot,
+      dir: dir(),
+      restored: "store",
+      findings: [],
+      hydrate: { status: "install", steps: [{ path: "", command: "npm ci", packageManager: "npm" }] },
+    });
+    expect(existsSync(dir())).toBe(false);
+    expect(existsSync(join(box.home, "pm.log"))).toBe(false);
+    // No plan is saved: a preview has nothing to approve.
+    expect(existsSync(box.paths.plansDir) ? readdirSync(box.paths.plansDir) : []).toEqual([]);
+  });
+
+  test("a kept trash previews as reuse, with the folder it would come back from", async () => {
+    writeFileSync(box.paths.configFile, 'version = 1\n[offload]\nkeepLocalFor = "24h"\n');
+    const snapshot = await offloaded(true);
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    const trash = join(box.home, "work/.plainport-trash", snapshot, "web");
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(0);
+    expect(bytesOf(box.home)).toEqual(before);
+    const data = envelope(run.out).data;
+    expect(planSchema().safeParse(data).success).toBe(true);
+    expect(data).toMatchObject({
+      restored: "reuse",
+      reused: { from: trash, offload: snapshot },
+      hydrate: { status: "reused" },
+    });
+    const human = await cli(["onload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(`renamed back from ${trash}`);
+    expect(human.out).toContain("nothing would be restored or installed");
+  });
+
+  test("an occupied path blocks: exit 6, the finding in the error and the preview as data", async () => {
+    await offloaded();
+    expect((await cli(["status", "work:web", "--json"])).code).toBe(0);
+    box.file("work/web/other.txt", "hello\n");
+    const before = bytesOf(box.home);
+    const run = await cli(["onload", "work:web", "--dry-run", "--json"]);
+    expect(run.code).toBe(6);
+    expect(bytesOf(box.home)).toEqual(before);
+    const env = envelope(run.out);
+    expect(env).toMatchObject({
+      ok: false,
+      error: { code: 6, finding: { code: "path.occupied" } },
+      data: { kind: "onload", restored: "store", findings: [{ severity: "block", code: "path.occupied" }] },
+    });
+    expect(planSchema().safeParse(env.data).success).toBe(true);
+  });
+
+  test("the human preview names the snapshot, the head, the folder, the space and the install, and writes nothing", async () => {
+    const snapshot = await offloaded();
+    const run = await cli(["onload", "work:web", "--dry-run"]);
+    expect(run.code).toBe(0);
+    expect(run.out).toContain(`work:web ← local, snapshot ${snapshot} over ${snapshot}`);
+    expect(run.out).toContain(`  into      ${dir()}`);
+    expect(run.out).toMatch(/ {2}restore {3}from the store: /);
+    expect(run.out).toMatch(/ {2}space {5}needs about .+ free/);
+    expect(run.out).toContain("  install   npm ci (npm)");
+    expect(existsSync(dir())).toBe(false);
+  });
+
+  test("help onload and plainport.json describe the dry run", async () => {
+    const help = await cli(["help", "onload"]);
+    expect(help.out).toContain("--dry-run: previews without changing anything");
+    const manifest = JSON.parse(readFileSync(join(import.meta.dir, "../../../../plainport.json"), "utf8"));
+    const entry = manifest.commands.find((c: { name: string }) => c.name === "onload");
+    expect(entry.dryRun).toBe(true);
+    expect(entry.plan).not.toBeNull();
   });
 });
 

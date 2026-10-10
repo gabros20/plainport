@@ -39,6 +39,7 @@ describe("scan: git facts", () => {
       changed: [],
       unpushed: { commits: 0, branches: [], detachedHead: 0 },
       localOnly: [],
+      unpushedTags: [],
       stashes: 0,
       inProgress: [],
       remotes: ["origin"],
@@ -101,6 +102,27 @@ describe("scan: git facts", () => {
     expect(got?.localOnly).toEqual(["feature/pricing", "merged-only"]);
     expect(got?.stashes).toBe(1);
     expect(got?.dirty).toBe(0);
+  });
+
+  test("tags whose commits no remote holds are found, annotated ones by the commit they point at (D69)", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.git(dir, "tag", "released");
+    fx.write(join(dir, "c1.txt"), "1\n");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "ahead");
+    fx.git(dir, "tag", "v2-light");
+    fx.git(dir, "tag", "-a", "-m", "annotated", "v2-note");
+    const got = await facts(dir);
+    // `released` is on a commit origin/main holds; the two tags on the commit it lacks are on no remote.
+    expect(got?.unpushedTags).toEqual(["v2-light", "v2-note"]);
+  });
+
+  test("a repository with no remote has every tag unpushed, and none when it has no tags", async () => {
+    const dir = fx.repo("web");
+    expect((await facts(dir))?.unpushedTags).toEqual([]);
+    fx.git(dir, "tag", "v1");
+    expect((await facts(dir))?.unpushedTags).toEqual(["v1"]);
   });
 
   test("without a remote every commit is unpushed", async () => {
@@ -183,6 +205,7 @@ describe("scan: git facts", () => {
       branch: "main",
       detached: false,
       unpushed: { commits: 0, branches: [], detachedHead: 0 },
+      unpushedTags: [],
     });
   });
 

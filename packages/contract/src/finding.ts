@@ -240,7 +240,7 @@ export const FINDINGS = Object.freeze({
     allowable: true,
     exitCode: 6,
     summary:
-      "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy",
+      "Commits, stashes or tags exist only in this copy of the repository (a tag counts when no remote has its commit), so the snapshot becomes their only copy",
   },
   "git.unpushed-required": {
     severity: "block",

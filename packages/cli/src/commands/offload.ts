@@ -58,6 +58,9 @@ export const renderPlan = (plan: Plan): string => {
       `${plan.include.files.toLocaleString("en-US")} file${plan.include.files === 1 ? "" : "s"} · ${formatBytes(plan.include.bytes)}`,
     ),
   );
+  // Without git, nothing says what is gitignored: say that all of it travels (HANDOFF, carried into M2).
+  if (plan.git === false)
+    lines.push(row("git", "not a git repository: every file travels except stripped dependency folders"));
   if (plan.strip.length > 0)
     lines.push(row("strip", plan.strip.map((s) => `${s.path} ${formatBytes(s.bytes)}`).join(" · ")));
   if (plan.include.largest.length > 0) {

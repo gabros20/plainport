@@ -213,7 +213,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `git.is-worktree` | block | no | 6 | The folder is a linked git worktree or submodule: its .git is only a pointer to a repository elsewhere |
 | `git.locked` | block | yes | 6 | The repository's index.lock exists: a git process is running or crashed |
 | `git.nested-repos` | info | no | 6 | Repositories inside the project (nested clones, submodules) travel as plain files, their own .git included; paths lists them |
-| `git.unpushed` | warn | yes | 6 | Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy |
+| `git.unpushed` | warn | yes | 6 | Commits, stashes or tags exist only in this copy of the repository (a tag counts when no remote has its commit), so the snapshot becomes their only copy |
 | `git.unpushed-required` | block | no | 6 | requirePushed is set and work exists only in this copy of the repository; it replaces git.unpushed (D30) |
 | `git.worktrees` | block | no | 6 | Linked worktrees of this repository live outside the folder; offloading would orphan them |
 | `hydrate.failed` | block | no | 10 | The files are restored but installing the dependencies failed (restored-unhydrated). The error's data is the command's output with the install that failed (onload's also names the snapshot, D14), and fix is plainport hydrate <project> |
@@ -293,15 +293,20 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 ## 6. The `--dry-run` contract
 
 A command that supports `--dry-run` treats it as a true preview: it builds and prints the plan, then stops. It
-writes nothing but its plan file: nothing in the project, its roots or any store changes, and the plan is saved to
-plainport's own state as `plans/<id>.json`, valid for an hour, so `plainport offload web --plan <id>` can run
-exactly that plan (run decision D36). Start-of-command housekeeping (D59) runs as notices only under
+writes nothing in the project, its roots or any store. `offload`'s dry run also saves its plan to plainport's own
+state as `plans/<id>.json`, valid for an hour, so `plainport offload web --plan <id>` can run exactly that plan
+(run decision D36); `onload --dry-run` (D71) saves nothing, since an onload needs no approval. Neither locks the
+project or journals anything; like every read, they may add events to this device's mirror of the store's catalog
+(D45). Start-of-command housekeeping (D59) runs as notices only under
 `--dry-run`, as it does for every read-class command: it prints on stderr which operations were interrupted, and
 deletes no trash whose `keepLocalFor` deadline has passed (D61); a write command, or `plainport gc`, does that.
 A `--dry-run` run is always a `read`, so it needs no `--yes`:
 `plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A plan that holds
 a `block` finding exits 6 (D38): its envelope is a failure whose `error.finding` is the first blocker and whose
-`data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. A command that has no preview refuses
+`data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. The
+same holds for `onload --dry-run`, whose `data` is the preview (`kind: "onload"`): `restored` (`reuse` or `store`)
+and why, the snapshot and the head it goes over, the landing folder, the space it needs, the findings and the
+hydrate plan. `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy

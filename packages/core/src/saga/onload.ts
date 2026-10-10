@@ -35,6 +35,11 @@
 //
 // ONLOAD_RECOVERY_NEEDS lists, step by step, the journal fields those rules read.
 //
+// previewOnload (onload --dry-run, D71) goes through the same resolution and preflight and stops before anything is
+// written: no lock, no journal, no staging folder, no case probe. It reports what the run would do, as a value, and a
+// block finding is the failure's finding with the preview as its data (D14, D38). The only thing it may write is
+// this device's event mirror, which any read does (D45).
+//
 // An injected fault (InjectedFault) is a simulated crash: nothing here catches it.
 
 import { dirname, join, resolve } from "node:path";
@@ -83,11 +88,18 @@ import type { StoreOpener } from "../ports/store.ts";
 import { noteStagingHolder } from "../recover/staging.ts";
 import { type ProjectRegistry, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
+import { ManifestBuilder } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
-import { type HydrateReport, hydrateProject, markHydrated } from "./hydrate.ts";
+import {
+  type HydratePlan,
+  type HydrateReport,
+  hydrateProject,
+  markHydrated,
+  previewHydrate,
+} from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
 import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "./release.ts";
@@ -223,6 +235,32 @@ export type OnloadOutcome = {
   hydrate: HydrateReport;
 };
 
+/** What `onload --dry-run` reports (D71): what the onload would do, written to nothing. */
+export type OnloadPreview = {
+  kind: "onload";
+  /** root:path. */
+  project: string;
+  store: string;
+  /** The snapshot that would be restored, and the head it would be written over. */
+  snapshot: string;
+  over: string;
+  /** Where the project would land. */
+  dir: string;
+  /** reuse: the same head's kept folder renamed back from the trash. store: restored from the store. */
+  restored: "reuse" | "store";
+  /** Why it is one or the other. */
+  why: string;
+  reused?: { from: string; offload: string; reason: string };
+  /** Files and bytes the snapshot holds. */
+  files: number;
+  bytes: number;
+  /** The space a restore needs on the landing volume (0 for a reuse) and what is free there. */
+  space: { needed: number; free: number };
+  /** Everything preflight would report: a block among them refuses the onload. */
+  findings: Finding[];
+  hydrate: HydratePlan;
+};
+
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** The nearest folder at or above `path` that exists. */
@@ -233,7 +271,18 @@ const nearestExisting = async (io: LocalIo, path: string): Promise<string> => {
 };
 
 /** Runs the onload; see the file comment. A failure before the swap changed nothing outside its staging folder. */
-export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<Result<OnloadOutcome>> => {
+export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<Result<OnloadOutcome>> =>
+  onloadFlow(deps, req, false) as Promise<Result<OnloadOutcome>>;
+
+/** What the onload would do, written to nothing (onload --dry-run, D71); see the file comment. */
+export const previewOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<Result<OnloadPreview>> =>
+  onloadFlow(deps, req, true) as Promise<Result<OnloadPreview>>;
+
+const onloadFlow = async (
+  deps: OnloadDeps,
+  req: OnloadRequest,
+  previewing: boolean,
+): Promise<Result<OnloadOutcome | OnloadPreview>> => {
   const { host, paths, device, signal } = deps;
   const io: LocalIo = host;
   const clock = (): Date => deps.now?.() ?? host.clock.now();
@@ -340,6 +389,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       }),
     );
   }
+  // A preview takes no lock and opens no journal: it changes nothing a lock would guard.
+  if (previewing) return previewLocked();
   const gate = { io, paths, clock, log: deps.log };
   return withProjectLock(gate, { id, address: ref.address }, (lock, resumed) => onloadLocked(lock, resumed), {
     related: nested,
@@ -347,7 +398,18 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     resume: (j, own) => own && j.kind === "onload" && BEFORE_SWAP.has(j.step),
   });
 
-  async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
+  /** What the onload restores: the project as the catalog folds it, the snapshot, the head it goes over, its copy here. */
+  interface Target {
+    project: CatalogProject;
+    snapshot: string;
+    over: string;
+    made: { event?: string; stored: Record<string, string> };
+    stored: string;
+    /** Set when the snapshot was found by its tag: the folder's mode as the tag records it (Q5 ii). */
+    tagged?: { rootMode?: number };
+  }
+
+  async function resolveTarget(): Promise<Result<Target>> {
     const state = await catalog();
     if (!state.ok) return state;
     // A newer snapshot this device knows of that no readable event names (D86): only that snapshot, asked for by name,
@@ -397,6 +459,172 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         }),
       );
     }
+    return ok({ project, snapshot, over, made, stored, ...(tagged === undefined ? {} : { tagged }) });
+  }
+
+  /** lease.held when another device holds the project (its severity is the catalogue's; strict refuses with exit 8). */
+  function leaseHeld(project: CatalogProject): Finding | undefined {
+    const lease = project.lease;
+    if (lease === null || lease.device === device.id) return undefined;
+    return finding("lease.held", {
+      message: `${ref.address} is onloaded on device ${lease.device} since ${lease.at}; a second working copy here can diverge from it, and the first of the two to offload wins (the other becomes a fork)`,
+      fix:
+        config.onload.leases === "strict"
+          ? `offload it on that device first, or set onload.leases = "warn" to onload it here anyway`
+          : `offload it on that device first, or keep in mind that two copies now exist`,
+    });
+  }
+
+  /**
+   * onload --dry-run (D71): the same resolution and preflight as the run, then a report instead of a restore. Nothing
+   * is locked, journaled, restored or probed. What would stop the onload is a finding in the report and the failure's
+   * own finding, exit code and all (the lease under "strict" exits 8, the rest 6); a failure with no report to give
+   * (an unknown snapshot, a store that does not answer) is returned as it is.
+   */
+  async function previewLocked(): Promise<Result<OnloadPreview>> {
+    const target = await resolveTarget();
+    if (!target.ok) return target;
+    const { project, snapshot, over, made, stored } = target.value;
+    const findings: Finding[] = [];
+    const blockers: Failure[] = [];
+    const held = leaseHeld(project);
+    if (held !== undefined) {
+      findings.push(held);
+      if (config.onload.leases === "strict") blockers.push(fail(held, 8));
+    }
+    const occupied = await occupiedBy(project, over);
+    if (occupied !== undefined) blockers.push(occupied);
+    const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
+    const placed = await landingChecks(rootFolder);
+    if (!placed.ok) blockers.push(placed);
+    let nearest = rootFolder;
+    try {
+      nearest = placed.ok ? placed.value : await nearestExisting(io, dirname(landing));
+    } catch (error) {
+      assertSystemError(error);
+    }
+
+    const reuse = snapshot === over && req.to === undefined ? await reusable(snapshot, landing) : undefined;
+    let files = 0;
+    let bytes = 0;
+    let needed = 0;
+    let stripped: number | undefined;
+    let hydratePlan: HydratePlan;
+    let free = 0;
+    try {
+      free = await io.fs.freeBytes(nearest);
+    } catch (error) {
+      blockers.push(unreadable(nearest, error, "its free space is unknown"));
+    }
+    const hydrating = req.hydrate !== false && config.onload.hydrate;
+    const skipped = (reason: string): HydratePlan => ({
+      status: "skipped",
+      reason,
+      steps: [],
+      untrusted: [],
+    });
+    const why = (): string => {
+      if (req.to !== undefined)
+        return "--to always restores from the store: a kept folder belongs to the project's own place";
+      if (snapshot !== over)
+        return `snapshot ${snapshot} is older than the head (${over}), and only the head's kept folder can be renamed back, so it is restored from the store`;
+      return `no kept folder of snapshot ${snapshot} stands in the trash (offload.keepLocalFor was 0, or it changed, was deleted or is being deleted), so it is restored from the store`;
+    };
+    let reused: OnloadPreview["reused"];
+    if (reuse !== undefined) {
+      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
+      files = produced?.stats.files ?? 0;
+      bytes = produced?.stats.bytes ?? 0;
+      reused = {
+        from: reuse.folder,
+        offload: reuse.op,
+        reason: `the folder offload ${reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+      };
+      hydratePlan = {
+        status: "reused",
+        reason:
+          "the folder comes back with the dependencies it had when it was offloaded, so nothing is installed",
+        steps: [],
+        untrusted: [],
+      };
+    } else {
+      const problems: Failure[] = [];
+      const listing = new ManifestBuilder();
+      const listed = await checkSnapshot({
+        io,
+        engine: store.engine,
+        store: store.blob,
+        stored,
+        ...(made.event === undefined ? {} : { event: made.event }),
+        ctx: { op, ...(signal === undefined ? {} : { signal }), emit: () => {} },
+        op,
+        nearest,
+        holder: join(rootFolder, STAGING_DIR),
+        resuming: false,
+        address: ref.address,
+        elsewhere: `plainport onload ${shellWord(ref.address)} --to <path>`,
+        preview: {
+          problems,
+          onEntry: (entry) => {
+            if (entry.type === "file" || entry.type === "dir" || entry.type === "symlink")
+              listing.add({
+                path: entry.path,
+                type: entry.type,
+                size: entry.size ?? 0,
+                mode: entry.mode,
+                mtimeNs: 0n,
+                ...(entry.linkTarget === undefined ? {} : { linkTarget: entry.linkTarget }),
+              });
+          },
+        },
+      });
+      if (!listed.ok) return listed;
+      blockers.push(...problems);
+      files = listed.value.files;
+      bytes = listed.value.bytes;
+      needed = listed.value.needed;
+      free = listed.value.free;
+      stripped = listed.value.stripped;
+      if (!hydrating) {
+        hydratePlan = skipped(
+          req.hydrate === false
+            ? `--no-hydrate: the files are restored as stored${stripped === 0 ? "; the offload stripped nothing, so the project is local" : "; plainport hydrate installs the dependencies later"}`
+            : "onload.hydrate is false in the configuration",
+        );
+      } else {
+        hydratePlan = await previewHydrate(
+          { host, plugins: deps.plugins, env: deps.env },
+          listing.finish(),
+          landing,
+        );
+      }
+    }
+    for (const f of blockers.map((b) => b.finding)) if (!findings.includes(f)) findings.push(f);
+
+    const preview: OnloadPreview = {
+      kind: "onload",
+      project: ref.address,
+      store: store.name,
+      snapshot,
+      over,
+      dir: landing,
+      restored: reuse === undefined ? "store" : "reuse",
+      why: reused === undefined ? why() : `renamed back from the trash, not restored: ${reused.reason}`,
+      ...(reused === undefined ? {} : { reused }),
+      files,
+      bytes,
+      space: { needed, free },
+      findings,
+      hydrate: hydratePlan,
+    };
+    const first = blockers[0];
+    return first === undefined ? ok(preview) : failWith(first.finding, preview, first.exitCode);
+  }
+
+  async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
+    const target = await resolveTarget();
+    if (!target.ok) return target;
+    const { project, snapshot, over, made, stored, tagged } = target.value;
 
     // An earlier onload that stopped before its swap: taken over when it restores the same snapshot to the same
     // folder, else rolled back now (its staging folder and journal), since nothing else of it changed anything.
@@ -423,15 +651,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     phase("resolve", "end");
 
     phase("preflight", "start");
-    const lease = project.lease;
-    if (lease !== null && lease.device !== device.id) {
-      const held = finding("lease.held", {
-        message: `${ref.address} is onloaded on device ${lease.device} since ${lease.at}; a second working copy here can diverge from it, and the first of the two to offload wins (the other becomes a fork)`,
-        fix:
-          config.onload.leases === "strict"
-            ? `offload it on that device first, or set onload.leases = "warn" to onload it here anyway`
-            : `offload it on that device first, or keep in mind that two copies now exist`,
-      });
+    const held = leaseHeld(project);
+    if (held !== undefined) {
       if (config.onload.leases === "strict") return fail(held, 8);
       report(held);
     }
