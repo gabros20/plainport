@@ -49,7 +49,7 @@ beforeEach(async () => {
   box.file("work/web/node_modules/vite/index.js", "x".repeat(612_000));
   box.file("work/web/dist/index.js", "x".repeat(2400));
 });
-afterEach(() => box.cleanup());
+afterEach(() => box.cleanupSettled());
 
 /** The project folder as it stood when release began: invariant 1 checks the committed snapshot against it. */
 let released: TreeCapture | undefined;

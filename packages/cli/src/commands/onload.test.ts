@@ -72,7 +72,7 @@ beforeEach(async () => {
   box.file("work/web/.env", "TOKEN=op://vault/item\n");
   box.file("work/web/node_modules/vite/index.js", "x".repeat(6000));
 });
-afterEach(() => box.cleanup());
+afterEach(() => box.cleanupSettled());
 
 const dir = () => join(box.home, "work/web");
 const ssd = () => join(box.home, "ssd");

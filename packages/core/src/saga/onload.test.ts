@@ -158,7 +158,8 @@ beforeEach(async () => {
   steps = [];
 });
 
-afterEach(() => box.cleanup());
+// Several tests offload without waiting for the detached delete; it writes into the sandbox after the test.
+afterEach(() => box.cleanupSettled());
 
 const env = (extra: Record<string, string> = {}) => ({
   HOME: box.home,
