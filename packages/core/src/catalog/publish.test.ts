@@ -1,23 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
-import { memoryBlobStore } from "../testing/memory-blob-store.ts";
-import { semanticBlobStore } from "../testing/semantic-blob-store.ts";
-import {
-  type Election,
-  type ElectionOutcome,
-  elect,
-  publishEvent,
-  sameBytes,
-  sweepTemporaries,
-  TEMP_PREFIX,
-} from "./publish.ts";
+import { FAKE_TEMP_PREFIX, semanticBlobStore } from "../testing/semantic-blob-store.ts";
+import { type Election, type ElectionOutcome, elect, publishEvent, sameBytes } from "./publish.ts";
 
 const encoder = new TextEncoder();
 const bytes = (text: string): Uint8Array => encoder.encode(text);
 const decode = (data: Uint8Array): string => new TextDecoder().decode(data);
 
-const OP = "01J00000000000000000000OP1";
 const EVENT_KEY = "meta/v1/events/01J0000000000000000000EV01.json";
 
 const keysOf = (store: { data: Map<string, Uint8Array> }, prefix = ""): string[] =>
@@ -26,23 +16,24 @@ const keysOf = (store: { data: Map<string, Uint8Array> }, prefix = ""): string[]
 describe("publish: an event is published whole", () => {
   test("an atomic-put store puts the key directly; the same event again is a no-op", async () => {
     const store = semanticBlobStore();
-    expect(
-      await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes }),
-    ).toEqual({ ok: true, value: { written: true } });
-    expect(
-      await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes }),
-    ).toEqual({ ok: true, value: { written: false } });
+    expect(await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes })).toEqual({
+      ok: true,
+      value: { written: true },
+    });
+    expect(await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes })).toEqual({
+      ok: true,
+      value: { written: false },
+    });
     expect(keysOf(store)).toEqual([EVENT_KEY]);
     expect(store.calls.put).toBe(1);
   });
 
   test("another event under the key is refused with store.key-exists and left as it was", async () => {
     const store = semanticBlobStore();
-    await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes });
+    await publishEvent(store, { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes });
     const other = await publishEvent(store, {
       key: EVENT_KEY,
       data: bytes("e2"),
-      op: OP,
       sameEvent: sameBytes,
     });
     expect(other).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
@@ -51,12 +42,11 @@ describe("publish: an event is published whole", () => {
 
   test("the comparison is the injected SameEvent, not the bytes (R2-8)", async () => {
     const store = semanticBlobStore();
-    await publishEvent(store, { key: EVENT_KEY, data: bytes("sealed-1"), op: OP, sameEvent: sameBytes });
+    await publishEvent(store, { key: EVENT_KEY, data: bytes("sealed-1"), sameEvent: sameBytes });
     const opened = (data: Uint8Array) => decode(data).split("-")[0];
     const again = await publishEvent(store, {
       key: EVENT_KEY,
       data: bytes("sealed-2"),
-      op: OP,
       sameEvent: (existing, intended) => opened(existing) === opened(intended),
     });
     expect(again).toEqual({ ok: true, value: { written: false } });
@@ -68,7 +58,6 @@ describe("publish: an event is published whole", () => {
     const refused = await publishEvent(store, {
       key: EVENT_KEY,
       data: bytes("e1"),
-      op: OP,
       sameEvent: sameBytes,
     });
     expect(refused).toMatchObject({ ok: false, finding: { code: "store.semantics-unknown" } });
@@ -76,34 +65,36 @@ describe("publish: an event is published whole", () => {
     expect(store.calls.put).toBe(0);
   });
 
-  test("a temp-then-rename store uploads to meta/v1/tmp/<op>-<nonce> and renames; no torn key is ever visible under events/", async () => {
-    const store = semanticBlobStore({ tornWrites: true, rename: true });
+  test("a temp-then-rename store's put moves its own temporary onto the key: no torn key is ever visible under events/", async () => {
+    const store = semanticBlobStore({ tornWrites: true, tempThenRename: true });
     const data = bytes("x".repeat(4096));
     const seen: string[] = [];
     let done = false;
     const observer = (async () => {
       while (!done) {
-        const listed = await store.list("meta/v1/");
+        const listed = await store.list("");
         if (listed.ok) for (const { key } of listed.value) seen.push(key);
         const got = await store.get(EVENT_KEY);
         if (got.ok && got.value !== null && got.value.length !== data.length) seen.push("TORN");
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     })();
-    const published = await publishEvent(store, { key: EVENT_KEY, data, op: OP, sameEvent: sameBytes });
+    const published = await publishEvent(store, { key: EVENT_KEY, data, sameEvent: sameBytes });
     done = true;
     await observer;
     expect(published).toEqual({ ok: true, value: { written: true } });
     expect(seen).not.toContain("TORN");
-    expect(seen.some((key) => key.startsWith(`${TEMP_PREFIX}${OP}-`))).toBe(true);
-    expect(keysOf(store, "meta/v1/")).toEqual([EVENT_KEY]);
+    expect(seen.some((key) => key.startsWith(FAKE_TEMP_PREFIX))).toBe(true);
+    expect(keysOf(store)).toEqual([EVENT_KEY]);
   });
 
   for (const profile of ["atomic-put", "temp-then-rename"] as const) {
     test(`${profile}: a lost acknowledgement followed by a retry gives one event, not two`, async () => {
-      const store = semanticBlobStore(profile === "atomic-put" ? {} : { tornWrites: true, rename: true });
-      store.loseAckNext(profile === "atomic-put" ? "put" : "rename");
-      const input = { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes };
+      const store = semanticBlobStore(
+        profile === "atomic-put" ? {} : { tornWrites: true, tempThenRename: true },
+      );
+      store.loseAckNext();
+      const input = { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes };
       const first = await publishEvent(store, input);
       // The publisher reads the key after a failed write: the event is there, so it is published.
       expect(first).toEqual({ ok: true, value: { written: true } });
@@ -115,7 +106,7 @@ describe("publish: an event is published whole", () => {
 
   test("a lost acknowledgement whose read-back also fails is retried by reading first: one event", async () => {
     const store = semanticBlobStore();
-    store.loseAckNext("put");
+    store.loseAckNext();
     // The read after the failed put fails too: the publisher cannot tell, so the write may have landed.
     const flaky: BlobStore = {
       ...store,
@@ -125,7 +116,7 @@ describe("publish: an event is published whole", () => {
         return put;
       },
     };
-    const input = { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes };
+    const input = { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes };
     expect(await publishEvent(flaky, input)).toMatchObject({ ok: false, mayLand: true });
     expect(await publishEvent(store, input)).toEqual({ ok: true, value: { written: false } });
     expect(store.calls.put).toBe(1);
@@ -135,7 +126,7 @@ describe("publish: an event is published whole", () => {
   test("may-land-late: a cancelled put counts as possibly landed, and lands later", async () => {
     const store = semanticBlobStore({ lateLanding: true });
     store.cancelNext();
-    const input = { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes };
+    const input = { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes };
     const cancelled = await publishEvent(store, input);
     expect(cancelled).toMatchObject({ ok: false, mayLand: true, finding: { code: "process.cancelled" } });
     store.settle();
@@ -148,23 +139,9 @@ describe("publish: an event is published whole", () => {
     const cancelled = await publishEvent(store, {
       key: EVENT_KEY,
       data: bytes("e1"),
-      op: OP,
       sameEvent: sameBytes,
     });
     expect(cancelled).toMatchObject({ ok: false, mayLand: false });
-  });
-
-  test("temporaries are swept only by their own operation's recovery", async () => {
-    const store = memoryBlobStore();
-    const other = "01J00000000000000000000OP2";
-    for (const key of [`${TEMP_PREFIX}${OP}-a1`, `${TEMP_PREFIX}${OP}-b2`, `${TEMP_PREFIX}${other}-c3`]) {
-      await store.put(key, bytes("t"));
-    }
-    expect(await sweepTemporaries(store, OP)).toEqual({
-      ok: true,
-      value: { removed: [`${TEMP_PREFIX}${OP}-a1`, `${TEMP_PREFIX}${OP}-b2`] },
-    });
-    expect(keysOf(store)).toEqual([`${TEMP_PREFIX}${other}-c3`]);
   });
 });
 
@@ -177,7 +154,6 @@ const election = (id: string, overrides: Partial<Election> = {}): Election => ({
   key: PUBLISHED,
   candidates: CANDIDATES,
   id,
-  op: id,
   value: bytes(`${JSON.stringify({ v: 1, winner: id })}\n`),
   winnerOf: (data) => {
     try {
@@ -214,7 +190,7 @@ describe("publish: the elected publication", () => {
 
     test(`${route}: a lost acknowledgement of the publication is still a win on retry`, async () => {
       const store = semanticBlobStore(options);
-      store.loseAckNext("put", route === "conditional create" ? 1 : 2);
+      store.loseAckNext(route === "conditional create" ? 1 : 3);
       const first = await elect(store, election("A"));
       const again = first.ok ? first : await elect(store, election("A"));
       expect(again).toEqual({ ok: true, value: { outcome: "won" } });
@@ -252,7 +228,7 @@ describe("publish: the elected publication", () => {
     const profile: StoreSemantics = { ...strong, conditionalCreate: "unknown" };
     const store = semanticBlobStore({ ...NO_CREATE, profile });
     expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
-    expect(keysOf(store, CANDIDATES)).toEqual([`${CANDIDATES}A.json`]);
+    expect(keysOf(store, CANDIDATES)).toEqual([`${CANDIDATES}A.json`, `${CANDIDATES}A.publishing`]);
   });
 
   test("when every candidate is visible before any listing, all end contested and nothing is published", async () => {
@@ -380,7 +356,7 @@ describe("publish: the elected publication", () => {
         await fc.assert(
           fc.asyncProperty(fc.scheduler(), fc.boolean(), async (s, lossy) => {
             const inner = semanticBlobStore(options);
-            if (lossy) inner.loseAckNext("put");
+            if (lossy) inner.loseAckNext();
             const store = scheduled(inner, s);
             const ids = Array.from({ length: n }, (_, i) => `C${i}`);
             const running = Promise.all(ids.map((id) => elect(store, election(id))));

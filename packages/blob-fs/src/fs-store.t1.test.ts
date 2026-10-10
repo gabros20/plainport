@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachImage, type DiskImage } from "../../../test/disk-image.ts";
 import { describeT1 } from "../../../test/tiers.ts";
-import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
+import { ALL_ELIGIBLE, blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { fsBlobStore } from "./index.ts";
 
@@ -52,7 +52,7 @@ if (process.platform === "darwin") {
         };
         // The 8 MB image holds about 950 small files: the listing probe stays well under that.
       },
-      { listProbeKeys: 200 },
+      { eligibility: ALL_ELIGIBLE, listProbeKeys: 200 },
     );
   });
 }

@@ -58,8 +58,10 @@ export const StoreSemanticsSchema = z
     /** A listing returns every key under the prefix, across every page. */
     listComplete: property(z.boolean()),
     /**
-     * How a value becomes visible: whole on a plain put (`atomic-put`), whole only through rename() of a temporary
-     * (`temp-then-rename`; a put is in place), or never whole (`in-place`: a reader may see a torn prefix).
+     * How put() makes a value visible: the backend shows an object only when complete (`atomic-put`); the adapter
+     * uploads to its own nonce-named temporary under a reserved prefix and moves it onto the key (`temp-then-rename`,
+     * D98: leftovers are swept by age, by gc); or the bytes are written in place and a reader may see a torn prefix
+     * (`in-place`). Either of the first two is a whole put.
      */
     publication: property(PublicationSchema),
     /** put(…, { ifNotExists: true }) is atomic: of racing writers exactly one creates the key. */
@@ -74,6 +76,14 @@ export const StoreSemanticsSchema = z
     description: "What a store guarantees, each property with its evidence (Q8)",
   });
 export type StoreSemantics = z.infer<typeof StoreSemanticsSchema>;
+
+/** The profile's JSON Schema, published in schemas/ by `bun run contract` (the per-store sidecar holds one, Q4). */
+export const storeSemanticsJsonSchemas = (): Record<"store-semantics", Record<string, unknown>> => ({
+  "store-semantics": z.toJSONSchema(StoreSemanticsSchema, { target: "draft-2020-12", io: "input" }) as Record<
+    string,
+    unknown
+  >,
+});
 export type SemanticProperty = keyof StoreSemantics;
 
 /** A store nothing is known about: it can be read, and nothing else. */
@@ -223,11 +233,6 @@ export interface BlobStore {
   stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
   /** Removes the key; a key that is not there is not an error. */
   delete(key: string): Promise<Result<void>>;
-  /**
-   * Moves `from` to `to`, appearing whole at `to`. Required where semantics().publication is `temp-then-rename`
-   * (catalog/publish.ts uploads to a temporary and renames); other stores need not have it.
-   */
-  rename?(from: string, to: string): Promise<Result<void>>;
 }
 
 const KEY_PATTERN = /^(?!\.\.?(?:\/|$))[^/\0]+(?:\/(?!\.\.?(?:\/|$))[^/\0]+)*$/;

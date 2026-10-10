@@ -1,14 +1,17 @@
-// The semantic fake (DESIGN.md "Remote stores: consistency and publication"): the memory store with a switch for
-// each way a remote store can be weaker than a local disk, so the catalog, the elected publication and their callers
-// are tested against every weakness before any adapter exists.
+// The semantic fake (DESIGN.md "Remote stores: consistency and publication"): the memory store wrapped with a switch
+// for each way a remote store can be weaker than a local disk, so the catalog, the elected publication and their
+// callers are tested against every weakness before any adapter exists. The memory store holds the bytes and does
+// the ordinary work (keys, create-only, failNext); the wrapper only adds the weakness switched on.
 //
 // - delayedVisibility: get and stat do not see a write (or its key's new value) until settle().
 // - listOmitsRecent: a listing leaves out keys created since the last settle().
 // - truncateListAt: a listing returns only its first n keys (a page the store forgot to follow).
 // - tornWrites: a put is in place: readers see the first half of the bytes while it is written, and tearNext() stops
-//   the next put there for good (a crash mid-write). With `rename`, rename() moves a key whole.
-// - loseAckNext(): the next put (or rename) lands, and the call fails (a lost acknowledgement).
-// - cancelNext(): the next put is cancelled and fails; with lateLanding it lands at the next settle(), else never.
+//   the next put there for good (a crash mid-write). With tempThenRename the put does what a temp-then-rename
+//   adapter does (D98): the torn bytes go to its own temporary under TEMP_PREFIX, which is moved onto the key whole.
+// - loseAckNext(): the next put lands, and the call fails (a lost acknowledgement).
+// - cancelNext(): the next put is cancelled and fails; with lateLanding it lands at the next settle(), else never. A
+//   late create-only put keeps its condition: it does not land on a key that exists by then.
 //
 // Its semantics() describe those switches honestly, unless `profile` is given: a test passes a profile that lies to
 // show that the contract's probes (semanticViolations) catch the weakness.
@@ -16,22 +19,23 @@
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import {
   assertBlobKey,
-  assertBlobPrefix,
-  type BlobEntry,
   type BlobStore,
   capabilitiesOf,
   type PutOptions,
   type StoreSemantics,
 } from "../ports/blob-store.ts";
-import { MEMORY_SEMANTICS } from "./memory-blob-store.ts";
+import { MEMORY_SEMANTICS, type MemoryBlobStore, memoryBlobStore } from "./memory-blob-store.ts";
+
+/** Where the fake's temp-then-rename put keeps its temporaries (an adapter's reserved prefix, D98). */
+export const FAKE_TEMP_PREFIX = "tmp/semantic-fake/";
 
 export interface SemanticFakeOptions {
   delayedVisibility?: boolean;
   listOmitsRecent?: boolean;
   truncateListAt?: number;
   tornWrites?: boolean;
-  /** The store has a rename that moves a key whole (with tornWrites: a temp-then-rename store). */
-  rename?: boolean;
+  /** With tornWrites: put() writes a temporary in place and moves it onto the key whole. */
+  tempThenRename?: boolean;
   lateLanding?: boolean;
   /** Whether put(…, { ifNotExists }) is offered; true by default. */
   conditionalCreate?: boolean;
@@ -40,21 +44,22 @@ export interface SemanticFakeOptions {
   profile?: StoreSemantics;
 }
 
-type Method = "get" | "put" | "list" | "stat" | "delete" | "rename";
+type Method = "get" | "put" | "list" | "stat" | "delete";
 
 export interface SemanticBlobStore extends BlobStore {
-  /** The bytes each key holds now, whatever readers are shown. */
+  /** The bytes each key holds now, whatever readers are shown (the memory store's). */
   readonly data: Map<string, Uint8Array>;
+  /** Calls made to the fake, by method. */
   readonly calls: Record<Method, number>;
   /** Everything delayed becomes visible, and cancelled puts land when lateLanding is on. */
   settle(): void;
-  /** The next `count` calls of `method` land, then fail with store.unreachable. */
-  loseAckNext(method?: "put" | "rename", count?: number): void;
+  /** The next `count` puts land, then fail with store.unreachable. */
+  loseAckNext(count?: number): void;
   /** The next put fails with process.cancelled without landing now. */
   cancelNext(): void;
   /** The next put leaves the first half of its bytes and fails with store.failed. */
   tearNext(): void;
-  /** The next call of `method` fails with `code` and does nothing. */
+  /** The next call of `method` fails with `code` and does nothing (the memory store's failNext). */
   failNext(method: Method, code?: "store.unreachable" | "store.failed"): void;
 }
 
@@ -64,7 +69,7 @@ const honestProfile = (options: SemanticFakeOptions): StoreSemantics => ({
   listAfterWrite: { value: !options.listOmitsRecent, evidence: "asserted" },
   listComplete: { value: options.truncateListAt === undefined, evidence: "asserted" },
   publication: {
-    value: !options.tornWrites ? "atomic-put" : options.rename ? "temp-then-rename" : "in-place",
+    value: !options.tornWrites ? "atomic-put" : options.tempThenRename ? "temp-then-rename" : "in-place",
     evidence: "asserted",
   },
   conditionalCreate: { value: options.conditionalCreate ?? true, evidence: "asserted" },
@@ -78,51 +83,69 @@ const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0
 
 export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBlobStore => {
   const semantics = options.profile ?? honestProfile(options);
-  const data = new Map<string, Uint8Array>();
+  const inner: MemoryBlobStore = memoryBlobStore({ createIfAbsent: options.conditionalCreate ?? true });
+  const data = inner.data;
   /** Keys written since the last settle(), with the value readers saw before (null: the key did not exist). */
   const before = new Map<string, Uint8Array | null>();
-  const late: [string, Uint8Array][] = [];
-  const calls: Record<Method, number> = { get: 0, put: 0, list: 0, stat: 0, delete: 0, rename: 0 };
-  const failing = new Map<Method, "store.unreachable" | "store.failed">();
-  const lostAcks = { put: 0, rename: 0 };
+  const late: { key: string; bytes: Uint8Array; opts: PutOptions }[] = [];
+  const calls: Record<Method, number> = { get: 0, put: 0, list: 0, stat: 0, delete: 0 };
+  let lostAcks = 0;
   let cancelPending = false;
   let tearPending = false;
+  let temporaries = 0;
 
-  const refused = (method: Method): Result<never> | undefined => {
-    calls[method]++;
-    const code = failing.get(method);
-    if (code === undefined) return undefined;
-    failing.delete(method);
-    return fail(finding(code, { message: `the semantic fake refused ${method} (failNext)` }));
-  };
-  const lostAck = (method: "put" | "rename"): Result<never> | undefined => {
-    if (lostAcks[method] === 0) return undefined;
-    lostAcks[method]--;
+  const lostAck = (): Result<never> | undefined => {
+    if (lostAcks === 0) return undefined;
+    lostAcks--;
     return fail(
-      finding("store.unreachable", { message: `the semantic fake lost the acknowledgement of a ${method}` }),
+      finding("store.unreachable", { message: "the semantic fake lost the acknowledgement of a put" }),
     );
   };
   const remember = (key: string): void => {
-    if (!before.has(key)) {
-      const held = data.get(key);
-      before.set(key, held === undefined ? null : held);
-    }
+    if (!before.has(key)) before.set(key, data.get(key) ?? null);
   };
-  /** What a reader is shown for `key`. */
-  const shown = (key: string): Uint8Array | undefined => {
-    if (options.delayedVisibility && before.has(key)) return before.get(key) ?? undefined;
-    return data.get(key);
+  /** Whether readers are still shown the old value of `key`. */
+  const hidden = (key: string): boolean => options.delayedVisibility === true && before.has(key);
+  const exists = (key: string): Result<never> =>
+    fail(finding("store.key-exists", { message: `${key} already exists`, paths: [key] }));
+
+  /** A torn put: half the bytes in place (at the key, or at a temporary moved on whole), then the rest. */
+  const tornPut = async (
+    key: string,
+    bytes: Uint8Array,
+    opts: PutOptions,
+  ): Promise<Result<{ etag?: string }>> => {
+    const target = options.tempThenRename ? `${FAKE_TEMP_PREFIX}${++temporaries}` : key;
+    const half = bytes.subarray(0, Math.floor(bytes.length / 2));
+    const started = await inner.put(target, half, target === key ? opts : {});
+    if (!started.ok) return started;
+    if (tearPending) {
+      tearPending = false;
+      return fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` }));
+    }
+    for (let i = 0; i < TORN_TICKS; i++) await tick();
+    if (target === key) {
+      data.set(key, bytes);
+    } else {
+      data.delete(target);
+      if (opts.ifNotExists && data.has(key)) return exists(key);
+      remember(key);
+      data.set(key, bytes);
+    }
+    return lostAck() ?? ok({});
   };
 
-  const store: SemanticBlobStore = {
+  return {
     data,
     calls,
     settle: () => {
       before.clear();
-      for (const [key, bytes] of late.splice(0)) data.set(key, bytes);
+      for (const { key, bytes, opts } of late.splice(0)) {
+        if (!(opts.ifNotExists && data.has(key))) data.set(key, bytes);
+      }
     },
-    loseAckNext: (method = "put", count = 1) => {
-      lostAcks[method] += count;
+    loseAckNext: (count = 1) => {
+      lostAcks += count;
     },
     cancelNext: () => {
       cancelPending = true;
@@ -130,101 +153,64 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
     tearNext: () => {
       tearPending = true;
     },
-    failNext: (method, code = "store.unreachable") => {
-      failing.set(method, code);
-    },
+    failNext: (method, code) => inner.failNext(method, code),
     semantics: () => semantics,
     capabilities: () => capabilitiesOf(semantics),
-    get: (key) => {
-      assertBlobKey(key);
-      const bytes = shown(key);
-      return Promise.resolve(refused("get") ?? ok(bytes === undefined ? null : new Uint8Array(bytes)));
+    get: async (key) => {
+      calls.get++;
+      const got = await inner.get(key);
+      if (!got.ok || !hidden(key)) return got;
+      const shown = before.get(key);
+      return ok(shown == null ? null : new Uint8Array(shown));
     },
-    stat: (key) => {
-      assertBlobKey(key);
-      const bytes = shown(key);
-      return Promise.resolve(refused("stat") ?? ok(bytes === undefined ? null : { size: bytes.length }));
+    stat: async (key) => {
+      calls.stat++;
+      const got = await inner.stat(key);
+      if (!got.ok || !hidden(key)) return got;
+      const shown = before.get(key);
+      return ok(shown == null ? null : { size: shown.length });
     },
-    list: (prefix) => {
-      assertBlobPrefix(prefix);
-      const no = refused("list");
-      if (no) return Promise.resolve(no);
-      let entries: BlobEntry[] = [...data.entries()]
-        .filter(([key]) => key.startsWith(prefix))
-        .filter(([key]) => !(options.listOmitsRecent && before.get(key) === null))
-        .map(([key, bytes]) => ({ key, size: bytes.length }))
-        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    list: async (prefix) => {
+      calls.list++;
+      const listed = await inner.list(prefix);
+      if (!listed.ok) return listed;
+      let entries = listed.value.filter(
+        (entry) => !(options.listOmitsRecent && before.get(entry.key) === null),
+      );
       if (options.truncateListAt !== undefined) entries = entries.slice(0, options.truncateListAt);
-      return Promise.resolve(ok(entries));
+      return ok(entries);
     },
     put: (key, bytes, opts: PutOptions = {}) => {
       assertBlobKey(key);
-      if (opts.ifMatch !== undefined) throw new Error("semanticBlobStore: ifMatch is not supported");
-      if (opts.ifNotExists && options.conditionalCreate === false) {
-        throw new Error("semanticBlobStore: ifNotExists on a store without conditional create");
-      }
-      const no = refused("put");
-      if (no) return Promise.resolve(no);
+      calls.put++;
       const copy = new Uint8Array(bytes);
       if (cancelPending) {
         cancelPending = false;
-        if (options.lateLanding) late.push([key, copy]);
+        if (options.lateLanding) late.push({ key, bytes: copy, opts });
         return Promise.resolve(
           fail(finding("process.cancelled", { message: `the put of ${key} was cancelled` })),
         );
       }
-      if (opts.ifNotExists && data.has(key)) {
-        return Promise.resolve(
-          fail(finding("store.key-exists", { message: `${key} already exists`, paths: [key] })),
-        );
-      }
-      remember(key);
-      const half = copy.subarray(0, Math.floor(copy.length / 2));
+      if (opts.ifNotExists && data.has(key)) return Promise.resolve(exists(key));
+      if (!(options.tempThenRename && options.tornWrites)) remember(key);
+      if (options.tornWrites) return tornPut(key, copy, opts);
       if (tearPending) {
         tearPending = false;
-        data.set(key, new Uint8Array(half));
-        return Promise.resolve(
-          fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` })),
-        );
+        return inner
+          .put(key, copy.subarray(0, Math.floor(copy.length / 2)), opts)
+          .then((started) =>
+            started.ok
+              ? fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` }))
+              : started,
+          );
       }
-      if (!options.tornWrites) {
-        data.set(key, copy);
-        return Promise.resolve(lostAck("put") ?? ok({}));
-      }
-      data.set(key, new Uint8Array(half));
-      return (async () => {
-        for (let i = 0; i < TORN_TICKS; i++) await tick();
-        data.set(key, copy);
-        return lostAck("put") ?? ok({});
-      })();
+      return inner.put(key, copy, opts).then((put) => (put.ok ? (lostAck() ?? put) : put));
     },
-    delete: (key) => {
-      assertBlobKey(key);
-      const no = refused("delete");
-      if (no) return Promise.resolve(no);
-      data.delete(key);
-      before.delete(key);
-      return Promise.resolve(ok(undefined));
+    delete: async (key) => {
+      calls.delete++;
+      const deleted = await inner.delete(key);
+      if (deleted.ok) before.delete(key);
+      return deleted;
     },
   };
-  if (options.rename) {
-    store.rename = (from, to) => {
-      assertBlobKey(from);
-      assertBlobKey(to);
-      const no = refused("rename");
-      if (no) return Promise.resolve(no);
-      const bytes = data.get(from);
-      if (bytes === undefined) {
-        return Promise.resolve(
-          fail(finding("store.failed", { message: `cannot rename ${from}: it is not there`, paths: [from] })),
-        );
-      }
-      remember(to);
-      data.set(to, bytes);
-      data.delete(from);
-      before.delete(from);
-      return Promise.resolve(lostAck("rename") ?? ok(undefined));
-    };
-  }
-  return store;
 };

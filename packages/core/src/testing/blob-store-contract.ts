@@ -2,18 +2,17 @@
 // call blobStoreContract with a factory; the suite covers what the catalog relies on: whole-value put and get,
 // create-only writes that refuse an existing key (exactly one winner among racing writers), sorted prefix listing
 // and idempotent delete. Its semantic cases (DESIGN.md "Remote stores: consistency and publication") check that what
-// a store's semantics() claims holds when probed, and that the local stores pass every operation's predicate.
+// a store's semantics() claims holds when probed, and that each operation's predicate gives what the backend expects
+// (every one for the local stores; release only with Q21's post-grace proof for an acked-unsynced store).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   type BlobStore,
-  canAppend,
-  canCommit,
-  canElect,
-  canRead,
-  canRelease,
   capabilitiesOf,
+  eligibility,
   type SemanticProperty,
+  STORE_OPERATIONS,
+  type StoreOperation,
   StoreSemanticsSchema,
 } from "../ports/blob-store.ts";
 
@@ -48,6 +47,25 @@ export interface SemanticProbeOptions {
   /** Keys the listing probe writes; a small volume (the exFAT image) passes fewer. */
   listProbeKeys?: number;
 }
+
+/**
+ * What a backend's profile should give each operation: eligible outright, eligible only with Q21's post-grace proof
+ * (release on an acked-unsynced store), or refused.
+ */
+export type Expected = "eligible" | "post-grace-proof" | "refused";
+
+export const ALL_ELIGIBLE: Readonly<Record<StoreOperation, Expected>> = Object.freeze({
+  read: "eligible",
+  append: "eligible",
+  elect: "eligible",
+  commit: "eligible",
+  release: "eligible",
+});
+
+export interface ContractOptions extends SemanticProbeOptions {
+  /** Per operation, what this backend's profile gives. */
+  eligibility: Readonly<Record<StoreOperation, Expected>>;
+}
 const PUBLICATION_PROBE_BYTES = 256 * 1024;
 
 const known = <T>(property: "unknown" | { value: T }): T | "unknown" =>
@@ -74,79 +92,79 @@ export const semanticViolations = async (
     return got.ok ? got.value : undefined;
   };
 
-  if (known(claims.readAfterWrite) === true) {
-    await put(`${base}raw`, bytes("raw"));
-    if (text((await getBytes(`${base}raw`)) ?? null) !== "raw") violations.push("readAfterWrite");
-  }
-  if (known(claims.listAfterWrite) === true) {
-    await put(`${base}law/one`, bytes("law"));
-    const listed = await store.list(`${base}law/`);
-    if (!listed.ok || !listed.value.some((entry) => entry.key === `${base}law/one`))
-      violations.push("listAfterWrite");
-  }
-  if (known(claims.listComplete) === true) {
-    const keys = Array.from(
-      { length: options.listProbeKeys ?? LIST_PROBE_KEYS },
-      (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
-    );
-    for (let i = 0; i < keys.length; i += 50) {
-      await Promise.all(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
+  try {
+    if (known(claims.readAfterWrite) === true) {
+      await put(`${base}raw`, bytes("raw"));
+      if (text((await getBytes(`${base}raw`)) ?? null) !== "raw") violations.push("readAfterWrite");
     }
-    faults?.settle();
-    const listed = await store.list(`${base}page/`);
-    if (!listed.ok || listed.value.length !== keys.length) violations.push("listComplete");
-  }
-  const publication = known(claims.publication);
-  if (publication === "atomic-put" || publication === "temp-then-rename") {
-    // An observer reads the key while it is written: it sees nothing or every byte, never a part.
-    const data = new Uint8Array(PUBLICATION_PROBE_BYTES).fill(7);
-    const key = `${base}whole`;
-    let done = false;
-    let torn = false;
-    const observer = (async () => {
-      while (!done) {
-        const seen = await getBytes(key);
-        if (seen != null && seen.length !== data.length) torn = true;
-        await new Promise((resolve) => setTimeout(resolve, 0));
+    if (known(claims.listAfterWrite) === true) {
+      await put(`${base}law/one`, bytes("law"));
+      const listed = await store.list(`${base}law/`);
+      if (!listed.ok || !listed.value.some((entry) => entry.key === `${base}law/one`))
+        violations.push("listAfterWrite");
+    }
+    if (known(claims.listComplete) === true) {
+      const keys = Array.from(
+        { length: options.listProbeKeys ?? LIST_PROBE_KEYS },
+        (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
+      );
+      for (let i = 0; i < keys.length; i += 50) {
+        await Promise.all(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
       }
-    })();
-    if (publication === "atomic-put") await put(key, data);
-    else if (store.rename === undefined) torn = true;
-    else {
-      await put(`${base}whole.tmp`, data);
-      value(await store.rename(`${base}whole.tmp`, key));
+      faults?.settle();
+      const listed = await store.list(`${base}page/`);
+      if (!listed.ok || listed.value.length !== keys.length) violations.push("listComplete");
     }
-    done = true;
-    await observer;
+    const publication = known(claims.publication);
+    if (publication === "atomic-put" || publication === "temp-then-rename") {
+      // An observer reads the key while it is written: it sees nothing or every byte, never a part.
+      const data = new Uint8Array(PUBLICATION_PROBE_BYTES).fill(7);
+      const key = `${base}whole`;
+      let done = false;
+      let torn = false;
+      const observer = (async () => {
+        while (!done) {
+          const seen = await getBytes(key);
+          if (seen != null && seen.length !== data.length) torn = true;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      })();
+      try {
+        await put(key, data);
+      } finally {
+        // Stopped and joined even when the write fails, so no read loop outlives the probe.
+        done = true;
+        await observer;
+      }
+      faults?.settle();
+      const final = await getBytes(key);
+      if (torn || final == null || final.length !== data.length) violations.push("publication");
+    }
+    if (known(claims.conditionalCreate) === true) {
+      const results = await Promise.all(
+        Array.from({ length: 5 }, (_, i) => store.put(`${base}cc`, bytes(`w${i}`), { ifNotExists: true })),
+      );
+      if (results.filter((result) => result.ok).length !== 1) violations.push("conditionalCreate");
+    }
+    if (faults !== undefined && known(claims.cancellation) === "never-lands-late") {
+      faults.cancelNext();
+      const cancelled = await store.put(`${base}late`, bytes("late"));
+      const before = await getBytes(`${base}late`);
+      faults.settle();
+      const after = await getBytes(`${base}late`);
+      if (!cancelled.ok && before === null && after != null) violations.push("cancellation");
+    }
+  } finally {
     faults?.settle();
-    const final = await getBytes(key);
-    if (torn || final == null || final.length !== data.length) violations.push("publication");
+    const left = await store.list(base);
+    if (left.ok) for (const { key } of left.value) await store.delete(key);
   }
-  if (known(claims.conditionalCreate) === true) {
-    const results = await Promise.all(
-      Array.from({ length: 5 }, (_, i) => store.put(`${base}cc`, bytes(`w${i}`), { ifNotExists: true })),
-    );
-    if (results.filter((result) => result.ok).length !== 1) violations.push("conditionalCreate");
-  }
-  if (faults !== undefined && known(claims.cancellation) === "never-lands-late") {
-    faults.cancelNext();
-    const cancelled = await store.put(`${base}late`, bytes("late"));
-    const before = await getBytes(`${base}late`);
-    faults.settle();
-    const after = await getBytes(`${base}late`);
-    if (!cancelled.ok && before === null && after != null) violations.push("cancellation");
-  }
-
-  faults?.settle();
-  const left = await store.list(base);
-  if (left.ok) for (const { key } of left.value) await store.delete(key);
   return violations;
 };
-
 export const blobStoreContract = (
   name: string,
   make: () => BlobStoreFixture | Promise<BlobStoreFixture>,
-  probe: SemanticProbeOptions = {},
+  options: ContractOptions,
 ): void => {
   describe(`${name}: BlobStore contract`, () => {
     let fixture: BlobStoreFixture;
@@ -235,12 +253,20 @@ export const blobStoreContract = (
     });
 
     test("semantics: what the profile claims holds when probed", async () => {
-      expect(await semanticViolations(store, undefined, probe)).toEqual([]);
+      expect(await semanticViolations(store, undefined, options)).toEqual([]);
     });
 
-    test("semantics: the store passes every operation's predicate", () => {
-      for (const can of [canRead, canAppend, canElect, canCommit, canRelease]) {
-        expect(can(store.semantics())).toEqual({ eligible: true });
+    test("semantics: each operation's predicate gives what this backend expects", () => {
+      const semantics = store.semantics();
+      for (const op of STORE_OPERATIONS) {
+        const expected = options.eligibility[op];
+        const plain = eligibility(op, semantics).eligible;
+        const proven = eligibility(op, semantics, { postGraceProof: true }).eligible;
+        expect({ op, plain, proven }).toEqual({
+          op,
+          plain: expected === "eligible",
+          proven: expected !== "refused",
+        });
       }
     });
 

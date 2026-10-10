@@ -12,6 +12,7 @@ import {
   configJsonSchemas,
   journalJsonSchemas,
   stagingJsonSchemas,
+  storeSemanticsJsonSchemas,
   trashClaimJsonSchemas,
 } from "@plainport/core";
 import { z } from "zod";
@@ -261,6 +262,7 @@ export const generateFiles = (registry: Registry): Map<string, string> => {
     ...catalogJsonSchemas(),
     ...journalJsonSchemas(),
     ...stagingJsonSchemas(),
+    ...storeSemanticsJsonSchemas(),
     ...trashClaimJsonSchemas(),
   };
   for (const name of Object.keys(schemas).sort()) {

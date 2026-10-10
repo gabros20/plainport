@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "readAfterWrite": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "listAfterWrite": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "listComplete": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "publication": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "atomic-put",
+                "temp-then-rename",
+                "in-place"
+              ]
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "conditionalCreate": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "durability": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "durable",
+                "acked-unsynced",
+                "unknown"
+              ]
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "cancellation": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "never-lands-late",
+                "may-land-late"
+              ]
+            },
+            "evidence": {
+              "type": "string",
+              "enum": [
+                "measured",
+                "documented",
+                "asserted"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "readAfterWrite",
+    "listAfterWrite",
+    "listComplete",
+    "publication",
+    "conditionalCreate",
+    "durability",
+    "cancellation"
+  ],
+  "additionalProperties": false,
+  "title": "StoreSemantics",
+  "description": "What a store guarantees, each property with its evidence (Q8)"
+}

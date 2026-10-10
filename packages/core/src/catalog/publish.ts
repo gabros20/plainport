@@ -1,9 +1,9 @@
-// Publication on a store (DESIGN.md "Remote stores: consistency and publication"): how a value reaches a key whole,
-// and the elected publication that bootstrap and the root claim share (Q9).
+// Publication on a store (DESIGN.md "Remote stores: consistency and publication"): how an event reaches its key
+// whole, and the elected publication that bootstrap and the root claim share (Q9).
 //
-// An event is published whole: an `atomic-put` store takes a plain put of the key; a `temp-then-rename` store takes
-// the bytes at `meta/v1/tmp/<op>-<nonce>` and a rename onto the key, so no torn key is ever visible under
-// `meta/v1/events/`. A temporary left by a failure is swept only by its own operation's recovery (sweepTemporaries).
+// The port's put() is a whole, replacing write on every store that passes `append` (D98): an `atomic-put` backend shows
+// an object only when complete, and a `temp-then-rename` adapter uploads to its own temporary and moves it onto the
+// key inside put(). Core uses put() and conditional create only, and never sees a temporary.
 //
 // An event key is a fresh ULID from its one writer, so nobody else writes it. A write's acknowledgement can be lost,
 // so a publish reads the key first and compares what is there through the injected SameEvent (R2-8): the same event
@@ -13,49 +13,11 @@
 import { type Failure, fail, finding, type Ok, ok, type Result } from "@plainport/contract";
 import { type BlobStore, requireEligible, semanticValue } from "../ports/blob-store.ts";
 
-/** Where temporaries go: `<op>-<nonce>` under it. */
-export const TEMP_PREFIX = "meta/v1/tmp/";
-
 /** Whether the value at a key is the event a writer intends (the codec compares opened events; Task 11). */
 export type SameEvent = (existing: Uint8Array, intended: Uint8Array) => boolean | Promise<boolean>;
 
 /** Byte equality: the SameEvent of a plaintext catalog, and the fake the tests use. */
 export const sameBytes: SameEvent = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
-
-const randomNonce = (): string =>
-  [...crypto.getRandomValues(new Uint8Array(6))].map((b) => b.toString(16).padStart(2, "0")).join("");
-
-export const temporaryKey = (op: string, nonce: string): string => `${TEMP_PREFIX}${op}-${nonce}`;
-
-export interface PublishContext {
-  /** The operation the write belongs to; it names the temporaries. */
-  op: string;
-  /** The store's name, for messages. */
-  store?: string;
-  /** The temporary's nonce; random by default. */
-  nonce?: () => string;
-}
-
-/** Writes `data` at `key` whole, as the store's publication allows; no read first. */
-const writeWhole = async (
-  store: BlobStore,
-  key: string,
-  data: Uint8Array,
-  context: PublishContext,
-): Promise<Result<void>> => {
-  const publication = semanticValue(store.semantics().publication);
-  if (publication === "atomic-put") {
-    const put = await store.put(key, data);
-    return put.ok ? ok(undefined) : put;
-  }
-  if (publication !== "temp-then-rename" || store.rename === undefined) {
-    throw new Error(`publish: ${key} cannot be written whole on this store; check canAppend first`);
-  }
-  const temporary = temporaryKey(context.op, (context.nonce ?? randomNonce)());
-  const put = await store.put(temporary, data);
-  if (!put.ok) return put;
-  return store.rename(temporary, key);
-};
 
 const keyExists = (key: string, store: string): Failure =>
   fail(
@@ -78,7 +40,7 @@ export type PublishFailure = Failure & {
  */
 export const publishEvent = async (
   store: BlobStore,
-  input: PublishContext & { key: string; data: Uint8Array; sameEvent: SameEvent },
+  input: { key: string; data: Uint8Array; sameEvent: SameEvent; store?: string },
 ): Promise<Ok<{ written: boolean }> | PublishFailure> => {
   const name = input.store ?? "in use";
   const semantics = store.semantics();
@@ -91,7 +53,7 @@ export const publishEvent = async (
       ? ok({ written: false })
       : { ...keyExists(input.key, name), mayLand: false };
   }
-  const written = await writeWhole(store, input.key, input.data, input);
+  const written = await store.put(input.key, input.data);
   if (written.ok) return ok({ written: true });
   // The acknowledgement may be all that was lost.
   const after = await store.get(input.key);
@@ -103,75 +65,79 @@ export const publishEvent = async (
   return { ...written, mayLand: !neverLate };
 };
 
-/** Removes the temporaries `op` left; only that operation's recovery calls it. */
-export const sweepTemporaries = async (
-  store: BlobStore,
-  op: string,
-): Promise<Result<{ removed: string[] }>> => {
-  const listed = await store.list(`${TEMP_PREFIX}${op}-`);
-  if (!listed.ok) return listed;
-  const removed: string[] = [];
-  for (const { key } of listed.value) {
-    const deleted = await store.delete(key);
-    if (!deleted.ok) return deleted;
-    removed.push(key);
-  }
-  return ok({ removed });
-};
-
 // --- The elected publication -------------------------------------------------------------------------------------
 
 export interface Election {
   /** The key the winner publishes, e.g. meta/v1/store.json. */
   key: string;
-  /** The prefix candidates are written under, ending in "/": `<candidates><id>.json`. */
+  /**
+   * The prefix candidates are written under, ending in "/". Each attempt writes `<id>.json` (its candidacy), then
+   * either `<id>.publishing` (it listed itself as the sole candidate and will publish) or `<id>.refused` (it saw
+   * another candidate and will never publish).
+   */
   candidates: string;
   /** This attempt's id (a ULID); the published value names it. */
   id: string;
-  /** The operation the attempt belongs to; it names temporaries. */
-  op: string;
   /** What this attempt publishes when it wins. */
   value: Uint8Array;
   /** The attempt a published value names; undefined for bytes that name none (torn, damaged, foreign). */
   winnerOf(published: Uint8Array): string | undefined;
-  /** The candidate's bytes; `{"v":1,"id":<id>}` by default. Only its name counts. */
-  candidate?: Uint8Array;
   /** The store's name, for messages. */
   store?: string;
-  /** Waits between re-reads; a timer by default. */
-  wait?: (ms: number) => Promise<void>;
+  /** Waits between re-reads: the caller's scheduler (a timer in the CLI, a fake in tests). */
+  wait(ms: number): Promise<void>;
 }
 
 export type ElectionOutcome =
   | { outcome: "won" }
   /** A winner is published, and named. */
   | { outcome: "lost"; winner: string }
-  /** No winner: every visible candidate refuses. Safe and expected (R2-7); the fix is the quiesced cleanup. */
-  | { outcome: "contested"; candidates: string[]; fix: string };
+  /**
+   * No winner is published and this attempt refuses: it will never publish. `undecided` names visible candidates
+   * that have not refused; while any is left this is not final (re-run later: it ends lost if one publishes). With
+   * none left every visible candidate refuses (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps.
+   */
+  | { outcome: "contested"; candidates: string[]; undecided: string[]; fix: string };
 
-/** How often a published value is read while it is unreadable or not there yet, and the wait between reads. */
+/** How often the published value or the candidates are read again, and the wait between reads. */
 const READS = 5;
 const WAIT_MS = 200;
 
 type Published = { kind: "absent" } | { kind: "winner"; winner: string } | { kind: "unreadable" };
 
+interface Candidates {
+  /** Every attempt with a candidacy, sorted. */
+  ids: string[];
+  refused: Set<string>;
+  publishing: Set<string>;
+}
+
+const CANDIDACY = ".json";
+const REFUSED = ".refused";
+const PUBLISHING = ".publishing";
+
+const marker = (bytes: string): Uint8Array => new TextEncoder().encode(`${bytes}\n`);
+
 /**
- * Holds the election and, when this attempt wins, publishes its value. Routes: a conditional create of the key where
- * the profile proves one; otherwise the sole-candidate rule: write a candidate, list the candidates, and publish only
- * as the sole candidate (or when the published key already names this attempt), then read back. A store whose
- * profile cannot elect or append refuses with store.semantics-unknown before writing anything.
+ * Holds the election and, when this attempt wins, publishes its value. A store whose profile fails canElect refuses
+ * with store.semantics-unknown before writing anything.
  *
- * A re-run of the same attempt (same id) is safe: its candidate is the same key, and a published value naming it is
- * a win.
+ * - Where conditional create is proven, the value is created conditionally and read back.
+ * - Otherwise (the sole-candidate rule, on a store with visibility both ways and complete listings): write the
+ *   candidacy, list. As the sole candidate, write `<id>.publishing`, publish, read back. Seeing another candidate,
+ *   write `<id>.refused` and never publish; the outcome is lost if a winner turns up while re-reading, else contested.
+ *
+ * Why contested can be final: a candidate written after this attempt's listing lists after this candidacy was
+ * acknowledged, so it sees it and refuses; so every attempt that could still be sole is visible here, and once each
+ * has refused nobody can publish. An attempt that has refused, or whose `.publishing` was acknowledged, keeps that
+ * decision when re-run (its recovery). A re-run of the same attempt (same id) is otherwise safe: the same keys, and a
+ * published value naming it is a win.
  */
 export const elect = async (store: BlobStore, e: Election): Promise<Result<ElectionOutcome>> => {
   const name = e.store ?? "in use";
   const semantics = store.semantics();
-  for (const op of ["elect", "append"] as const) {
-    const allowed = requireEligible(op, semantics, { store: name });
-    if (!allowed.ok) return allowed;
-  }
-  const wait = e.wait ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+  const allowed = requireEligible("elect", semantics, { store: name });
+  if (!allowed.ok) return allowed;
 
   const readPublished = async (): Promise<Result<Published>> => {
     const got = await store.get(e.key);
@@ -184,7 +150,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   const settled = async (): Promise<Result<Published>> => {
     let found = await readPublished();
     for (let reads = 1; found.ok && found.value.kind === "unreadable" && reads < READS; reads++) {
-      await wait(WAIT_MS);
+      await e.wait(WAIT_MS);
       found = await readPublished();
     }
     return found;
@@ -207,11 +173,11 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
         paths: [key],
       }),
     );
-  /** After the write: the published value names the winner, or the write failed / is not seen. */
+  /** After the publishing write: the published value names the winner, or the write failed / is not seen. */
   const afterWrite = async (write: Result<unknown>): Promise<Result<ElectionOutcome>> => {
     const found = await settled();
     if (found.ok && found.value.kind === "winner") return decided(found.value.winner);
-    if (!write.ok && !(write.finding.code === "store.key-exists")) return write;
+    if (!write.ok && write.finding.code !== "store.key-exists") return write;
     if (!found.ok) return found;
     return found.value.kind === "unreadable" ? unreadable() : notSeen(e.key);
   };
@@ -226,35 +192,73 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   }
 
   // The sole-candidate rule.
-  const candidateKey = `${e.candidates}${e.id}.json`;
-  const candidate = e.candidate ?? new TextEncoder().encode(`${JSON.stringify({ v: 1, id: e.id })}\n`);
-  const written = await writeWhole(store, candidateKey, candidate, { op: e.op });
-  if (!written.ok) {
-    const there = await store.get(candidateKey);
-    if (!there.ok || there.value === null) return written; // it may still land: a later election sees it, and is contested
-  }
-  const listed = await store.list(e.candidates);
-  if (!listed.ok) return listed;
-  const ids = listed.value
-    .map(({ key }) => key.slice(e.candidates.length))
-    .filter((rest) => rest.endsWith(".json") && !rest.includes("/"))
-    .map((rest) => rest.slice(0, -".json".length))
-    .sort();
-  if (!ids.includes(e.id)) return notSeen(candidateKey);
-  if (ids.length > 1) {
-    // Another candidate is visible: refuse, unless a winner turns up while re-reading.
-    for (let reads = 0; reads < READS; reads++) {
-      await wait(WAIT_MS);
-      const found = await readPublished();
-      if (!found.ok) return found;
-      if (found.value.kind === "winner") return decided(found.value.winner);
+  const keyOf = (id: string, suffix: string): string => `${e.candidates}${id}${suffix}`;
+  const listCandidates = async (): Promise<Result<Candidates>> => {
+    const listed = await store.list(e.candidates);
+    if (!listed.ok) return listed;
+    const ids = new Set<string>();
+    const refused = new Set<string>();
+    const publishing = new Set<string>();
+    for (const { key } of listed.value) {
+      const rest = key.slice(e.candidates.length);
+      if (rest.includes("/")) continue;
+      for (const [suffix, into] of [
+        [CANDIDACY, ids],
+        [REFUSED, refused],
+        [PUBLISHING, publishing],
+      ] as const) {
+        if (rest.endsWith(suffix) && rest.length > suffix.length) into.add(rest.slice(0, -suffix.length));
+      }
     }
-    const keys = ids.map((id) => `${e.candidates}${id}.json`);
-    return ok({
-      outcome: "contested",
-      candidates: ids,
-      fix: `stop plainport on every device that uses the store ${name} and wait until none is running, then remove the candidates ${keys.join(", ")} from the store and re-run on one device; removing them while any plainport process runs can elect two winners`,
-    });
+    return ok({ ids: [...ids].sort(), refused, publishing });
+  };
+
+  const candidacy = keyOf(e.id, CANDIDACY);
+  const written = await store.put(candidacy, marker(JSON.stringify({ v: 1, id: e.id })));
+  if (!written.ok) {
+    const there = await store.get(candidacy);
+    if (!there.ok || there.value === null) return written; // it may still land: a later election sees it, undecided
   }
-  return afterWrite(await writeWhole(store, e.key, e.value, { op: e.op }));
+  const listed = await listCandidates();
+  if (!listed.ok) return listed;
+  const mine = listed.value;
+  if (!mine.ids.includes(e.id)) return notSeen(candidacy);
+  const others = mine.ids.filter((id) => id !== e.id);
+
+  // A decision already taken by this attempt stands; refusal wins, since a `.publishing` that failed is never acted on.
+  const hasRefused = mine.refused.has(e.id);
+  if (!hasRefused && (mine.publishing.has(e.id) || others.length === 0)) {
+    if (!mine.publishing.has(e.id)) {
+      const intent = await store.put(keyOf(e.id, PUBLISHING), marker(JSON.stringify({ v: 1, id: e.id })));
+      if (!intent.ok) {
+        const there = await store.get(keyOf(e.id, PUBLISHING));
+        if (!there.ok || there.value === null) return intent; // never publish on an intent nobody can see
+      }
+    }
+    return afterWrite(await store.put(e.key, e.value));
+  }
+
+  if (!hasRefused) {
+    // Best effort: a refusal that does not land leaves this attempt undecided to others, which only delays them.
+    await store.put(keyOf(e.id, REFUSED), marker(JSON.stringify({ v: 1, id: e.id })));
+  }
+  let undecided: string[] = others;
+  let candidates = mine.ids;
+  for (let reads = 0; reads < READS; reads++) {
+    const found = await readPublished();
+    if (!found.ok) return found;
+    if (found.value.kind === "winner") return decided(found.value.winner);
+    const now = await listCandidates();
+    if (!now.ok) return now;
+    candidates = now.value.ids;
+    undecided = candidates.filter((id) => id !== e.id && !now.value.refused.has(id));
+    if (undecided.length === 0) break;
+    await e.wait(WAIT_MS);
+  }
+  const keys = candidates.flatMap((id) => [keyOf(id, CANDIDACY), keyOf(id, REFUSED), keyOf(id, PUBLISHING)]);
+  const fix =
+    undecided.length > 0
+      ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is`
+      : `stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
+  return ok({ outcome: "contested", candidates, undecided, fix });
 };

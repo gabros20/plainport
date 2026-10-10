@@ -28,7 +28,7 @@ import {
   storeEventLog,
   ulid,
 } from "@plainport/core";
-import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
+import { ALL_ELIGIBLE, blobStoreContract } from "../../core/src/testing/blob-store-contract.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { fsBlobStore, openEventMirror } from "./index.ts";
 
@@ -47,20 +47,28 @@ const withoutLinks = (code: string): LocalIo => ({
   },
 });
 
-blobStoreContract("blob-fs", () => {
-  const dir = temp();
-  return { store: fsBlobStore(io, dir), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-});
+blobStoreContract(
+  "blob-fs",
+  () => {
+    const dir = temp();
+    return { store: fsBlobStore(io, dir), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  },
+  { eligibility: ALL_ELIGIBLE },
+);
 
 // D41: where link() is refused, create-only falls back to an exclusive open, keeping exactly one winner.
 for (const code of ["EPERM", "ENOTSUP", "EOPNOTSUPP"]) {
-  blobStoreContract(`blob-fs without hard links (${code})`, () => {
-    const dir = temp();
-    return {
-      store: fsBlobStore(withoutLinks(code), dir),
-      cleanup: () => rmSync(dir, { recursive: true, force: true }),
-    };
-  });
+  blobStoreContract(
+    `blob-fs without hard links (${code})`,
+    () => {
+      const dir = temp();
+      return {
+        store: fsBlobStore(withoutLinks(code), dir),
+        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+      };
+    },
+    { eligibility: ALL_ELIGIBLE },
+  );
 }
 
 const bytes = (text: string) => new TextEncoder().encode(text);

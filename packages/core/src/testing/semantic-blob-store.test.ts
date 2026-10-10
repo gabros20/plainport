@@ -130,8 +130,8 @@ describe("semantic fake: each weakness is caught", () => {
     expect(canAppend(honest.semantics())).toEqual({ eligible: false, missing: ["publication"] });
   });
 
-  test("with a whole rename the torn store publishes temp-then-rename, and a rename is never seen torn", async () => {
-    const store = semanticBlobStore({ tornWrites: true, rename: true });
+  test("a temp-then-rename put tears only its own temporary: the key is never seen torn", async () => {
+    const store = semanticBlobStore({ tornWrites: true, tempThenRename: true });
     expect(store.semantics().publication).toMatchObject({ value: "temp-then-rename" });
     expect(await semanticViolations(store, store)).toEqual([]);
     expect(canAppend(store.semantics())).toEqual({ eligible: true });

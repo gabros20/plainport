@@ -246,12 +246,12 @@ A local disk shows a write at once, lists every file and renames whole. A bucket
 | `readAfterWrite` | yes, no | A get right after an acknowledged put sees it |
 | `listAfterWrite` | yes, no | A listing right after an acknowledged put names it |
 | `listComplete` | yes, no | A listing returns every key under the prefix, across every page |
-| `publication` | `atomic-put`, `temp-then-rename`, `in-place` | A plain put appears whole; or only a rename of a temporary appears whole (a put is in place); or nothing does |
+| `publication` | `atomic-put`, `temp-then-rename`, `in-place` | How `put` makes a value visible: the backend shows an object only when complete; or the adapter uploads to its own temporary and moves it onto the key (D98); or the bytes are written in place and a reader may see a torn prefix |
 | `conditionalCreate` | yes, no | `put(…, { ifNotExists })` is atomic: of racing writers exactly one creates the key |
 | `durability` | `durable`, `acked-unsynced`, `unknown` | Whether an acknowledged write survives the server's crash or power loss |
 | `cancellation` | `never-lands-late`, `may-land-late` | Whether a put that failed or was cancelled can still land afterwards |
 
-`capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store kind whose properties are not yet measured reports `unknown` (rclone until Task 17).
+The profile's JSON Schema is published as `schemas/store-semantics.json`. `capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store kind whose properties are not yet measured reports `unknown` (rclone until Task 17).
 
 **Eligibility per operation.** One exported predicate each (`canRead`, `canAppend`, `canElect`, `canCommit`, `canRelease`):
 
@@ -267,21 +267,23 @@ A local disk shows a write at once, lists every file and renames whole. A bucket
 
 **Publication rules** (`packages/core/src/catalog/publish.ts`).
 
-- An event is published whole. An `atomic-put` store takes a plain put of the key. A `temp-then-rename` store takes the bytes at `meta/v1/tmp/<op>-<nonce>` and a `rename` onto the key, so a torn key is never visible under `meta/v1/events/`. `BlobStore.rename` is required only of `temp-then-rename` stores.
+- An event is published whole, through `put` alone. The port's `put` is a whole, replacing write on every store that passes `append` (D98): an `atomic-put` backend shows an object only when complete, and a `temp-then-rename` adapter (rclone on SFTP) uploads to its own nonce-named temporary under a reserved prefix and moves it onto the key inside `put`, so a torn key is never visible under `meta/v1/events/`. The port has no rename and core never sees a temporary; core uses `put` and conditional create only.
 - **Unique writer.** An event key is a fresh ULID from its one writer; nobody else ever writes it.
 - **Idempotent retry.** A publish first reads the key and compares what is there with what it intends through an injected `SameEvent(existing, intended)` (R2-8): the same event is a no-op, another one is `store.key-exists`. So a lost acknowledgement (the write landed, the call failed) followed by a retry gives one event, not two. The plaintext catalog compares bytes; the codec compares opened events (Task 11).
 - **A failed put is read back.** If the event is there, it was published. If it is absent on a store that never lands a put late (and shows writes at once), it never will be. Otherwise, and always on `may-land-late` (or `unknown`) stores, the failure carries `mayLand: true`: a cancelled put counts as possibly landed, and the caller must not act as if the event will never appear.
-- **Temporaries** are swept only by their own operation's recovery (`sweepTemporaries(store, op)`), never by another operation or a timer.
+- **Temporaries** belong to the adapter that made them: a `temp-then-rename` adapter's leftovers (a `put` that died between upload and move) are swept by age by `gc`, never by another write (D98).
 
-**The elected publication** (`elect` in `publish.ts`) is the one rule bootstrap's `store.json` and the root claim use (Q9). An election names a published key, a candidates prefix, the attempt's id and the value to publish, which names its winner.
+**The elected publication** (`elect` in `publish.ts`) is the one rule bootstrap's `store.json` and the root claim use (Q9). An election names a published key, a candidates prefix, the attempt's id and the value to publish, which names its winner. It refuses exactly where `canElect` does, and its waits come from the caller's scheduler (no timer in core).
 
 1. Read the published key. If it names a winner, the attempt has `won` (it names this attempt) or `lost` (it names another); a re-run of the same attempt is therefore safe.
 2. Where `conditionalCreate` is proven, create the key conditionally and read it back.
-3. Otherwise, on a store passing `elect`: write the candidate `<candidates><id>.json` whole, list the candidates, and proceed only as the sole candidate; publish the value whole; read it back. With strong visibility, of two candidates the later lister always sees the earlier one, so at most one is ever sole.
+3. Otherwise (the sole-candidate rule, on a store with visibility both ways and complete listings) write the candidacy `<candidates><id>.json` and list the candidates.
+   - As the sole candidate, write `<id>.publishing`, publish the value, and read it back. With strong visibility, of two candidates the later lister always sees the earlier one, so at most one is ever sole.
+   - Seeing another candidate, write `<id>.refused`: this attempt never publishes, now or when re-run. Then re-read: a winner that turns up is `lost`; otherwise `contested`.
 
-The outcomes are `won`, `lost` (a winner is published, and it is named) and `contested`: no winner, because every visible candidate refuses. An attempt that sees another candidate re-reads the published key a few times before it settles on `contested`, since the sole candidate may be publishing. `contested` is a safe, expected outcome (R2-7): nothing is published, and the store needs the quiesced manual cleanup before anyone retries. Removing a candidate by hand is safe only after stopping plainport on every device that uses the store, because a candidate removed under a running election can let two attempts each be sole; the contested outcome's fix says so and names the candidate keys. An attempt whose candidate write failed and may still land stops; if the candidate appears later, a later election is contested, never doubly won.
+`contested` means no winner is published and this attempt refuses. It lists the visible candidates and the `undecided` ones, those that have not refused. While any is undecided the outcome is not final: an undecided candidate may be a sole candidate that paused (a laptop asleep) between its listing and its publication, so the attempt says "re-run later", and its re-run ends `lost` if that candidate publishes. With none undecided, every visible candidate refuses (R2-7) and the outcome is final, because a candidate written after this attempt's listing lists after this candidacy was acknowledged, sees it and refuses; nothing is published, and the store needs the quiesced manual cleanup. No finite run of reads can make the undecided case final without a conditional write (a sole candidate can always pause between its last check and its write), so the markers make "every visible candidate refuses" something the store itself shows. A decision stands across re-runs: an attempt whose `.refused` is visible never publishes, and one whose `.publishing` was acknowledged (and has not refused) publishes even if others appeared since; a `.publishing` that failed is never acted on, so a refusal wins over it. Removing candidates by hand is safe only after stopping plainport on every device that uses the store, because files removed under a running election can let two attempts each be sole; the final contested outcome's fix says so and names the files. An attempt whose candidacy write failed and may still land stops; if it appears later it is undecided to others until that attempt's recovery re-runs and refuses.
 
-**Testing.** `testing/semantic-blob-store.ts` wraps the memory store with a switch for each weakness: delayed visibility, a listing that omits recent keys, a listing cut short, a torn in-place write (with or without a whole rename), lost acknowledgements, and late landing after cancellation. The contract suite's semantic cases probe what a store's profile claims (`semanticViolations`), and the local stores pass every predicate. A fast-check scheduler runs every interleaving of two and three claimants on both routes, with and without a lost acknowledgement: at most one ever wins.
+**Testing.** `testing/semantic-blob-store.ts` wraps the memory store with a switch for each weakness: delayed visibility, a listing that omits recent keys, a listing cut short, a torn in-place write (or a temp-then-rename `put` that tears only its own temporary), lost acknowledgements, and late landing after cancellation (a late conditional create keeps its condition). The contract suite's semantic cases probe what a store's profile claims (`semanticViolations`) and check each predicate against what the backend expects: the local stores pass every one, and an `acked-unsynced` store passes release only with Q21's proof. A fast-check scheduler runs every interleaving of two and three claimants on both routes, with lost acknowledgements and with late landings: at most one ever wins, and a final `contested` never coexists with a win.
 
 ## Machines: moving projects between devices
 
@@ -1097,6 +1099,7 @@ export interface Engine {
 export interface BlobStore {
   // Every call returns a Result, as the Engine's do: an unmounted disk is store.unreachable, a create-only put on
   // an existing key is store.key-exists. A catalog is small, so list returns the whole listing, sorted by key.
+  // put is a whole, replacing write; a temp-then-rename adapter does its temporary and move inside it (D98).
   semantics(): StoreSemantics;                           // see "Remote stores: consistency and publication"
   capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean }; // derived from semantics()
   get(key: string): Promise<Result<Uint8Array | null>>;
@@ -1104,7 +1107,6 @@ export interface BlobStore {
   list(prefix: string): Promise<Result<{ key: string; size: number; etag?: string }[]>>;
   stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
   delete(key: string): Promise<Result<void>>;
-  rename?(from: string, to: string): Promise<Result<void>>; // whole; required where publication is temp-then-rename
 }
 
 export interface EcosystemPlugin {
