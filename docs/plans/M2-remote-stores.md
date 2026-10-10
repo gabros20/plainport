@@ -1,8 +1,9 @@
 # M2 · Remote stores: orchestrate plan
 
-Status: **draft, revision 2, waiting for the owner's approval.** Revised from gpt-6-astra's architecture review of
-revision 1 (`.orchestrate/review-m2-plan-astra.md`: 2 Critical, 16 Important, 1 Minor, 11 missing tasks); the table at
-the end maps every finding to where this plan resolves it. Run on branch `m2-remote-stores` once the owner decisions
+Status: **draft, waiting for the owner's approval.** Revised twice from gpt-6-astra's architecture reviews: round 1
+(`.orchestrate/review-m2-plan-astra.md`: 2 Critical, 16 Important, 1 Minor, 11 missing tasks) and round 2
+(`.orchestrate/review-m2-plan-astra-r2.md`: 6 Important, 2 Minor, R2-1 to R2-8). The tables at the end map every
+finding to where this plan resolves it. Run on branch `m2-remote-stores` once the owner decisions
 below are answered:
 
 ```text
@@ -41,20 +42,39 @@ is skipped (`catalog.event-skipped`); an unknown type is skipped too. Skipping f
 Planner: (a). Astra: the compatibility claim is overstated and mixed writers need an explicit exclusion policy, which
 (a) plus Q2 provides. **Recommendation: (a).**
 
-**Q2. Mixed versions and adopting M1 stores.** *Blocks Tasks 7, 8 and 19.* Nothing today stops a v0.1.x device from
-reading, or writing to, a store a v0.2 device writes M2-only content to.
-- (a) **Store format 2.** `meta/v1/store.json` at `v: 2` holds the store's identity, its repository location, its
-  catalog seal policy and its format. v0.1.x refuses a `store.json` it cannot parse, so format 2 excludes old readers
-  and writers by construction. Every store v0.2 creates is format 2. An M1 local store stays format 1, and v0.2
-  writes nothing to it that v0.1.1 cannot read (no `resolved` event, `stored` keyed by alias, no seal) until
-  `plainport store upgrade <name>` (`confirm`) replaces its `store.json` atomically. On a format-1 store, `resolve` and
-  sealing refuse with that command as the fix.
+**Q2. Mixed versions, adopting M1 stores, and rolling back.** *Blocks Tasks 7, 8 and 19.* Nothing today stops a v0.1.x
+device from reading, or writing to, a store a v0.2 device writes M2-only content to. And `store.json` stops only
+processes that start after it changes: a v0.1.1 offload that passed its checks before the upgrade can still append and
+release afterwards (astra R2-1).
+- (a) **Store format 2, a constrained upgrade, and rollback-proof retention.**
+  - *Format 2.* `meta/v1/store.json` at `v: 2` holds the store's identity, repository location, catalog seal policy and
+    format. v0.1.x refuses a `store.json` it cannot parse, so format 2 stops every v0.1.x process that starts after it.
+    Every store v0.2 creates is format 2. An M1 local store stays format 1, and v0.2 writes nothing to it that v0.1.1
+    cannot read until `store upgrade`. On a format-1 store, `resolve` and sealing refuse with `store upgrade` as the
+    fix.
+  - *The upgrade.* `plainport store upgrade <name>` (`confirm`) runs only when the store is quiescent, and refuses
+    otherwise (`store.not-quiescent`, naming the reason). The checks it can enforce:
+    1. no open journal and no live plainport lock on this device;
+    2. no lease, and no offload or onload started but not finished, held by another device in the store's catalog;
+    3. no event from another device within a quiet window (default 15 minutes) before the upgrade, re-checked after
+       writing a `meta/v1/upgrade-intent.json` marker that v0.2 refuses to bootstrap or offload over.
+
+    What it cannot see, the owner attests with `--others-stopped` (the fix lists the devices the catalog names): every
+    other device has no plainport running, detached deletes included.
+  - *The residual.* A v0.1.1 process on another device that held no lease (a first offload) and outlasts the window.
+    Its event is M1-shaped, so v0.2 still reads it (Q11), and it releases as M1 does: its snapshot is verified, but Q16's
+    grace does not apply to it. The owner signs this residual with Q16's.
+  - *Rollback.* Every trash v0.2 holds for Q16 (in grace or `conflict-retained`) is journaled at a step v0.1.1 does
+    not know, `offload.release.held`. v0.1.1's recover leaves an unknown step pending, and its `gc`, `gc --now` and
+    housekeeping never delete a trash whose journal they cannot settle. So a rollback cannot delete held trash. Task 7
+    proves this with the real binary.
 - (b) Say in HANDOFF that every device must run v0.2.
 - (c) Bump every event M2 writes to `v: 2`.
 
-Planner: (a). Astra: "HANDOFF prose is not a compatibility gate"; establish an enforceable exclusion or a constrained
-upgrade procedure, refuse in-place sealing until a migration exists. (a) is both, and Task 7 proves it with the real
-v0.1.1 binary. **Recommendation: (a).**
+Planner: (a). Astra, round 1: "HANDOFF prose is not a compatibility gate". Astra, round 2: format 2 is useful, but
+claiming old-client exclusion needs upgrade quiescence and rollback deletion exclusions; (a) now has both, and Task 7
+tests them with v0.1.1 paused before its append and before its release. **Recommendation: (a), accepting the stated
+residual.**
 
 **Q3. The `resolved` event type.** *Blocks Tasks 12 and 25.* M2 writes one new event type.
 - (a) `resolved` at `v: 1`, written only to format-2 stores (Q2).
@@ -109,14 +129,28 @@ supported in M2.** A config using these keys is refused by v0.1.x, so a rollback
 **Q8. Stores of unknown consistency.** *Blocks Task 6.* Astra: "S3-compatible", "has no conditional write" and
 "eventually consistent" are different properties, and the claim protocol and the catalog both rely on visibility,
 whole-write publication and complete listings.
-- (a) Every backend has a **semantics profile** (Task 6): read-after-write and list-after-write visibility, whole-write
-  publication method, listing completeness, conditional create, durability. A profile is measured (Task 17) or
-  documented by the provider (AWS S3, R2). A store whose profile is unknown or weak can be read, but bootstrap,
-  root claims and offload refuse (`store.semantics-unknown`). The owner may assert a profile per store in config
-  (`consistency = "strong"`), which `store test` reports as asserted, not measured.
+- (a) Every backend has a **semantics profile** (Task 6) of typed properties, each with its evidence (`measured`,
+  `documented`, `asserted`):
+  - read-after-write and list-after-write visibility (yes or no);
+  - listing completeness (yes or no);
+  - publication (`atomic-put`, `temp-then-rename` or `in-place`);
+  - conditional create (yes or no);
+  - durability on acknowledgement (`durable`, `acked-unsynced` or `unknown`);
+  - cancellation (`never-lands-late` or `may-land-late`).
+
+  Each **operation** has its own eligibility predicate over that profile (Task 6's table):
+  - reading the catalog needs only a working listing;
+  - appending an event needs whole publication and read-after-write;
+  - an election needs a conditional create, or visibility both ways plus complete listings;
+  - releasing a folder after a commit also needs durability admitted by Q21.
+
+  A missing conditional create is not a weakness on its own: it only routes elections to the fallback. A store that
+  fails a predicate refuses that operation (`store.semantics-unknown`, naming the property) and stays usable for the
+  others. The owner may assert a property per store in config, which `store test` reports as asserted.
 - (b) Allow any store, with a warning.
 
-Planner and astra: (a). **Recommendation: (a).**
+Planner and astra: (a); astra's round 2 asked for typed properties and per-operation eligibility (R2-6).
+**Recommendation: (a).**
 
 **Q9. Bootstrap and the root claim.** *Blocks Tasks 8 and 18.* Astra's Critical: two devices that both see no
 repository can both run `restic init` at one location; restic's absence check and its key and config writes are not
@@ -134,8 +168,12 @@ cover this, and needs stronger consistency than it stated.
 - (c) Revision 1's claim protocol, with no bootstrap protocol.
 
 Planner: (b). Astra: Q2(c) disagreed as written; the fix is an exclusive, recoverable bootstrap protocol covering
-identity, repository initialisation, root claim and seal configuration. **Recommendation: (b).** M1 local stores keep
-`repo/`; a format-2 `store.json` can also name `repo/`.
+identity, repository initialisation, root claim and seal configuration. Round 2 agrees, noting that contention may
+produce no winner. **Recommendation: (b).**
+
+The fallback can safely end with **no winner**: both candidates visible, both refuse. The store then needs the
+quiesced manual cleanup before anyone retries. M1 local stores keep `repo/`; a format-2 `store.json` can also name
+`repo/`.
 
 **Q10. Sealed catalog events.** *Blocks Tasks 10 and 20.*
 - *Key:* (a) HKDF-SHA256 from the repository's master key (`restic cat masterkey`); (b) a random per-store key held as
@@ -153,12 +191,22 @@ If the spec finds (a) unworkable, the task stops and the owner decides (b); ther
 **Q11. Snapshot locations by store id, not alias.** *Blocks Task 9.* `stored` maps a store's name to its restic
 snapshot id, and onload looks up `stored[<this device's name>]`, so two devices calling one store `archive` and `nas`
 cannot read each other's snapshots.
-- (a) On format-2 stores, `stored` is keyed by store id. On format-1 stores it keeps M1's alias. Reading a legacy
-  event, a single non-ULID key means the store the event was read from (true of every M1 event, since M1 never
-  copies snapshots), and anything else is resolved through this device's registry or left unknown.
-- (b) Defer to M3's replication.
+- (a) **Location by containment.** Until M3's replication, every snapshot event has exactly one `stored` entry, and
+  that entry always describes the store whose catalog holds the event. A reader therefore takes the location from the
+  store it read the event from and never interprets the key. Writers keep the rule:
+  - on format-2 stores the key is that store's id;
+  - on format-1 stores it is M1's alias, for v0.1.1;
+  - a test asserts both.
 
-Planner and astra: (a); astra says it must not wait for M3. **Recommendation: (a).**
+  An event with zero or several entries is skipped as unsupported and makes the fold uncertain until M3 defines
+  multi-store locations, with a discriminator such as a `v` bump. No key is ever classified by its shape, so a
+  ULID-shaped M1 alias is harmless.
+- (b) Classify keys by shape: a ULID is a store id, anything else an alias. Astra R2-5: M1 allows any store name, so
+  a ULID-shaped alias would be misread.
+- (c) Defer to M3's replication.
+
+Planner, round 1: (b). Astra: stable ids, yes; key shape, no; state and validate the containment rule. Planner, round
+2: agree. **Recommendation: (a).**
 
 **Q12. A project's home store before replication.** *Blocks Task 21.*
 - (a) An offload to store S refuses unless S's catalog holds this copy's base (or it is a first offload)
@@ -187,6 +235,23 @@ provider call.** A Keychain GUI prompt that is not answered in time is `store.se
 **Q15. `init --store-path` re-pointing an unreachable pinned name.** *Blocks Task 19.* Planner and astra: refuse it.
 Re-pointing an unplugged disk stays possible through `config.toml`, checked at use (D68). **Recommendation: refuse.**
 
+**Q21. Durability: which stores may delete a local folder after a commit.** *Blocks Tasks 6, 17 and 24.* Astra
+(R2-6): S3 providers document that an acknowledged write is durable. rclone's SFTP backend acknowledges after the
+server's rename, with no fsync, so a server crash shortly after the acknowledgement can lose the event or restic's
+packs while the local folder is already gone.
+- (a) Release (the delete) only on `durable` stores. SFTP stores can then take checkpoints and onload, but every
+  offload keeps its folder.
+- (b) **Admit `acked-unsynced` stores with proof that the write survived.** Before Q16's checked delete, re-read the
+  event and check that restic still lists the snapshot (`restic cat snapshot`), no earlier than the grace period after
+  the commit. Missing data keeps the trash and reports `store.lost-write`. The boundary, written into DESIGN: a server
+  that loses acknowledged data later than the grace period (a disk failure, say) is out of scope, as it is for any
+  single store.
+- (c) Admit SFTP with no extra check.
+
+Planner: (b). Astra did not pick an option: state the fault model, the evidence and any owner-approved exception, and
+make the gate refuse unsupported profiles. **Recommendation: (b).** The same proof runs on every remote store, since
+it costs one read after the grace. The gate checks that a store failing the predicate refuses offload's release.
+
 ### C. Races, leases and conflicts
 
 **Q16. What M2 promises in a race.** *Blocks Tasks 14, 23, 24 and 29.* Astra: no finite sequence of reads closes the
@@ -202,6 +267,10 @@ and B keeps its folder. Revision 1's "both folders kept" cannot be guaranteed.
   later. The promise: **a released folder is deleted only after a catalog read, taken at least the grace period after
   its commit, showed no fork naming its snapshot.** The residual: a fork appended after that read. A retained trash
   comes back through M1's reuse path: once `resolve` keeps its snapshot, `onload` renames it back.
+
+  Before the rename, a fork keeps the folder in place. After the rename, the trash is held under a durable
+  `offload.release.held` journal step, which settles nothing and blocks nothing but a second release. Task 24 gives
+  the whole state machine (astra R2-3).
 - (c) Exclusive coordination with fencing. This needs a conditional write on every store, so not in M2.
 
 Planner: (b). Astra: keep the extra check, but have the owner agree to a narrower guarantee or design coordination,
@@ -219,18 +288,27 @@ each seeing no holder; the fold then picks one lease, but both commands succeede
 Planner and astra: (a) for M2, stated plainly. **Recommendation: (a).**
 
 **Q18. `resolve`, the theirs refs, and their risk classes.** *Blocks Tasks 12, 25 and 26.*
-- `resolve <project> --keep <snapshot>` (`confirm`) appends `resolved {keep, over, supersedes?}` under Task 12's causal
-  model: concurrent incompatible resolutions stay conflicted until one supersedes both, and work made from a rejected
-  tip after a resolution conflicts again, never vanishes.
-- While this device holds a working copy, `--keep` must name that copy's recorded snapshot (Task 23 records it).
-- Read-only inspection is `status` (each head's device, time, size and base).
-- The theirs refs come from a separate `plainport compare <project>` (`safe_write`: it writes only refs under
-  `refs/plainport/theirs/`).
-- `resolve --both` waits for M3's fork format.
+- **`resolve <project> --keep <snapshot>`** (`confirm`) appends `resolved {keep, over, supersedes}` under Task 12's
+  causal model, which round 2 completed:
+  - `over` = the tips its fresh read observed, minus `keep`, so the event it writes passes the validation it is
+    judged by;
+  - `supersedes` = every active resolution of the project that read observed;
+  - resolutions form a dependency graph: invalid references, self-reference and cycles are invalid;
+  - concurrent incompatible resolutions stay conflicted until one supersedes both;
+  - every kept snapshot descending from a rejected tip and not itself rejected is a live tip again, whenever it was
+    made, so late work conflicts again and never vanishes.
+- **A working copy here.** While this device holds one, `--keep` must name that copy's recorded snapshot (Task 23).
+  `resolve` is allowed while this project's only open journals are held trash (`offload.release.held`).
+- **Read-only inspection** is `status` (each head's device, time, size and base).
+- **The theirs refs** come from a separate `plainport compare <project>` (`safe_write`). It writes, in one atomic
+  transaction, only `refs/plainport/theirs/<snapshot>/{worktree,index,HEAD}` and `…/heads/*`: sibling leaves, so
+  the refs can coexist (astra R2-4).
+- **`resolve --both`** waits for M3's fork format.
 
-Planner: revision 1 put the refs inside `resolve`. Astra: agree with `--keep` only, given complete causality and
-retained-copy bookkeeping; ref creation needs its own risk declaration and a read-only path. **Recommendation: as
-listed.**
+Planner: revision 1 put the refs inside `resolve`. Astra, round 1: agree with `--keep` only, given complete causality
+and retained-copy bookkeeping; ref creation needs its own risk declaration. Astra, round 2: "disagree as written",
+since production contradicted validation, `supersedes` had no rules, and the ref layout cannot exist. All three are
+fixed as above. **Recommendation: as listed.**
 
 **Q19. The T3 race across two Macs: the mini's test keys.** *Blocks Task 28.* (a) `op` signed in on the mini; (b) the
 laptop resolves the references and passes the values over SSH on stdin into the child's environment; (c) race two
@@ -592,17 +670,28 @@ Owns:
 - A new `packages/core/src/catalog/publish.ts`.
 
 Items:
-- **`StoreSemantics`**, one property each:
-  - read-after-write visibility;
-  - list-after-write visibility;
-  - listing completeness (pagination);
-  - whole-write publication (`atomic-put`, `temp-then-rename`, or none);
-  - conditional create (proven or not);
-  - durability after acknowledgement;
-  - cancellation (whether a cancelled put can still land).
+- **`StoreSemantics`** (Q8), typed properties, each with its evidence (`measured`, `documented`, `asserted`) or
+  `unknown`:
+  - `readAfterWrite` and `listAfterWrite` (boolean);
+  - `listComplete` (boolean; pagination returns every key);
+  - `publication` (`atomic-put | temp-then-rename | in-place`);
+  - `conditionalCreate` (boolean);
+  - `durability` (`durable | acked-unsynced | unknown`);
+  - `cancellation` (`never-lands-late | may-land-late`).
 
-  Each property is `strong | weak | unknown`, with a source (`measured`, `documented`, `asserted`). `capabilities()`
-  stays for compatibility and derives from it.
+  `capabilities()` stays for compatibility and derives from it.
+- **Eligibility per operation** (Q8, Q21), one exported predicate each, in a DESIGN table:
+
+  | Operation | Needs |
+  | --- | --- |
+  | `read` (catalog, `ls`) | a listing that works |
+  | `append` | `publication ≠ in-place`, `readAfterWrite` |
+  | `elect` | `conditionalCreate`, or `readAfterWrite ∧ listAfterWrite ∧ listComplete` |
+  | `commit` | `append` and `elect` |
+  | `release` (delete a local folder) | `commit` and `durability = durable`, or `durability = acked-unsynced` with Q21's post-grace proof |
+
+  `unknown` fails every predicate that names the property, and `may-land-late` makes a cancelled put count as possibly
+  landed. A missing `conditionalCreate` alone only routes elections to the fallback.
 - **The semantic fake** wraps the memory store with switches for each weakness: delayed visibility, a listing that
   omits recent keys, a torn in-place write, lost acknowledgements (the write lands, the call fails), and late landing
   after cancellation.
@@ -610,22 +699,27 @@ Items:
   - An event is published whole: `atomic-put` stores put directly; `temp-then-rename` stores upload to
     `meta/v1/tmp/<op>-<nonce>` and rename. A torn key is never visible under `meta/v1/events/`.
   - The unique-writer assumption is stated: an event key is a fresh ULID from its writer.
-  - A retry first reads the key and compares opened content, through Task 11's codec.
+  - A retry first reads the key and compares it through an injected `SameEvent(existing, intended)` interface
+    (R2-8). This task tests it with a byte-equality fake; Task 11 supplies the codec's opened-content comparison and
+    owns its acceptance test.
   - Temporaries are swept only by their own operation's recovery.
 - **The elected publication primitive** (`publish.ts`), the one rule bootstrap and the root claim use:
   - a conditional create when proven;
-  - otherwise, on a strong store, write a candidate, list, and proceed only as the sole candidate or when the
-    published key already names you; publish; read back;
-  - contested candidates refuse;
+  - otherwise, on a store passing `elect`: write a candidate, list, and proceed only as the sole candidate or when
+    the published key already names you; publish; read back;
+  - the outcomes are `won`, `lost` (a winner is published, and it is named) and `contested` (no winner: every visible
+    candidate refuses). `contested` is a safe, expected outcome (R2-7);
   - removing a candidate by hand needs every plainport process quiesced first, and the finding's fix says so.
-- **Refusals.** Destructive workflows refuse an `unknown` or `weak` profile (`store.semantics-unknown`, Q8).
+- **Refusals.** An operation whose predicate fails refuses with `store.semantics-unknown`, naming the property.
 
 ### Tests first
-- The contract suite gains semantic cases, and the memory and fs stores pass the strong profile.
-- Each fake weakness is caught by at least one test.
-- Every interleaving of two and three claimants (fast-check over schedules) admits at most one on a strong profile,
-  and the same schedules on a weak profile show why it refuses.
-- A lost acknowledgement followed by a retry gives one event, not two.
+- The contract suite gains semantic cases, and the memory and fs stores pass every predicate.
+- Each fake weakness is caught by at least one test, and each predicate refuses on the profile that lacks its
+  property.
+- Every interleaving of two and three claimants (fast-check over schedules) ends with **at most one** `won`; schedules
+  where all candidates become visible before any listing end `contested`; and the fallback refuses on a profile that
+  fails `elect`.
+- A lost acknowledgement followed by a retry gives one event, not two (with the byte-equality fake).
 
 ### Verification
 `bun test packages/core -t "publish|semantic|blob"`
@@ -670,6 +764,15 @@ Each row gives:
 - **Adoption (T1).** v0.2 opens an M1 local store, onloads and offloads on it, and v0.1.1 still reads everything v0.2
   wrote there (format 1 stays readable).
 - **Exclusion.** v0.1.1 refuses a format-2 `store.json` before writing anything.
+- **Running old clients (R2-1).** The real v0.1.1, built with the crash matrix's test hooks and paused with
+  `PLAINPORT_TEST_PAUSE_AT`, either before its event append or before its release.
+  - While it holds a lease, `store upgrade` refuses (`store.not-quiescent`).
+  - Without a lease (a first offload) and with `--others-stopped`, the upgrade proceeds. The resumed v0.1.1 appends an
+    M1-shaped event that v0.2 reads correctly (Q11), and its release behaves as M1's: the documented residual.
+  - The `upgrade-intent` marker blocks a v0.2 offload during the window.
+- **Rollback deletion (R2-1).** With trash held at `offload.release.held` (in grace and `conflict-retained`), v0.1.1's
+  `recover`, `gc`, `gc --now`, housekeeping at the start of a write command, and a detached delete it starts each
+  leave the held trash in place.
 - **Rollback.** v0.1.1 recovers a journal v0.2 left open on a format-1 store.
 - **Claims.** v0.1.1 parses a claim written beside a `.claim.boot`.
 - **Contract.** Every published schema in `schemas/` at v0.1.1 still validates v0.2's output for the same command (the
@@ -715,15 +818,23 @@ The protocol (Q9 b):
 6. Read it back.
 7. Record the id on this device.
 
-A loser stops before writing anything after its candidate and reports `store.bootstrap-lost`, naming the winner. Its
-repository is left for `store test` to list. The root claim is the same election under `meta/v1/root-claims/`.
-Adopting an existing store authenticates its published repository with this device's password before recording it.
+The election has three outcomes (R2-7):
+- **Won:** publish.
+- **Lost:** a winner is published. Report `store.bootstrap-lost`, naming the winner.
+- **Contested:** no winner, since every visible candidate refuses. Report `store.bootstrap-contested`, naming the
+  candidates and the quiesced cleanup.
+
+A losing or contested attempt writes nothing after its candidate, and its repository is left for `store test` to list.
+The root claim is the same election under `meta/v1/root-claims/`, with the same three outcomes. Adopting an existing
+store authenticates its published repository with this device's password before recording it.
 
 ### Tests first
 - Two simultaneous initialisers, with different passwords, delayed config writes and lost acknowledgements (Task 6's
-  fake), produce exactly one published repository, and the loser's commands never touch it.
-- A kill at every bootstrap step, then `recover`, settles to "published by this attempt", "lost" or "rolled back
-  (nothing published)". These are the crash-matrix rows.
+  fake), publish **at most one** repository. When one is published, the other's commands never touch it. When the
+  schedule makes both candidates visible before either lists, both end `contested` and nothing is published.
+- After a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win.
+- A kill at every bootstrap step, then `recover`, settles to "published by this attempt", "lost", "contested" or
+  "rolled back (nothing published)". These are the crash-matrix rows.
 - A third device adopts the winner.
 - A format-1 local store is adopted without rewriting it.
 
@@ -754,11 +865,14 @@ Owns:
 - The per-store sidecar (Q4) in a new `packages/core/src/stores-state.ts`.
 - DESIGN sections: "Catalog and data model" (the `stored` paragraph) and "Local state per machine".
 
-Rules:
-- A ULID key is a store id.
-- A single non-ULID key in an event read from store S means S.
-- Any other alias resolves through this device's registry, or stays unknown (`snapshot.not-found`).
-- The sidecar holds the seal pin, the semantics profile with its source, the last test, and the facts it was
+Rules (Q11, location by containment; R2-5):
+- A snapshot event with exactly one `stored` entry, read from store S, is located on S. The key is never
+  interpreted, so neither its shape nor this device's alias for S matters.
+- An event with zero or several entries is skipped as unsupported (`catalog.event-skipped`, reason
+  `stored-multiple`) and taints its project as uncertain, until M3 defines multi-store locations.
+- Writers keep the containment rule: one entry, keyed by S's id on format-2 stores and by this device's alias on
+  format-1 stores (for v0.1.1, which looks up `stored[<its alias>]`).
+- The sidecar holds the seal pin, the semantics profile with its evidence, the last test, and the facts it was
   measured against (endpoint, access kind, tool versions), and invalidates on any change.
 
 ### Tests first
@@ -766,6 +880,10 @@ Rules:
 - One store under two names on one device.
 - `local` and `sftp` access to the same store (D68) give one id.
 - A legacy M1 event read from S resolves to S.
+- A ULID-shaped M1 alias (a store named `01J…` that is not its id) resolves to S. It is read on one device, then
+  after `store upgrade`, then from another device with a different alias.
+- An event with two `stored` entries is skipped and taints its project.
+- Every event this build writes has one entry, keyed as above (a writer-side assertion run over the whole suite).
 - A changed root default while the old store is offline still finds the snapshot by id.
 - Sidecar invalidation, and an atomic write under a lock.
 
@@ -849,7 +967,9 @@ event files.
 
 - `encode(event, policy)` gives transport bytes. `decode(bytes, key, policy)` gives an event or a typed skip reason:
   torn, not JSON, schema, wrong id, unknown type, `unsealed-event`, `seal-failed`.
-- **Idempotent appends** compare opened events, so a sealed retry with a new nonce counts as the same event.
+- **Idempotent appends.** The codec implements Task 6's injected `SameEvent` interface by comparing opened events,
+  so a sealed retry with a new nonce counts as the same event. This task owns the acceptance test of that integration
+  (R2-8).
 - **The mirror** stores opened bytes, plus a record of each transport file's name and size, which M1's cache digest
   uses. Transport bytes and opened bytes are never confused.
 - **Recovery** reads through the codec, so recover works with an empty mirror on a sealed store.
@@ -884,28 +1004,56 @@ Astra's Important 7 and missing task 8; ADR-0009; D41, D43; Q3, Q18.
 
 ### Scope
 Owns `resolved` in `packages/core/src/catalog/events.ts` (`{v: 1, type: "resolved", project, root, path, keep, over:
-[ulid], supersedes?: [ulid]}`, written only to format-2 stores, Q2), its rule in `fold.ts`, and the DESIGN fold rules.
+[ulid], supersedes: [ulid]}`, written only to format-2 stores, Q2; `supersedes` may be empty), its rule in `fold.ts`,
+a pure `resolutionFor(state, keep)` that implements the production rule for Task 25, and the DESIGN fold rules.
 
-Rules:
-- A resolution is valid only if `keep` and every `over` are snapshots of the same project that the catalog holds, and
-  `keep ∉ over`. An invalid one is skipped with a finding and makes the fold uncertain.
-- A fork is settled when one non-superseded valid resolution names all its tips in `over ∪ {keep}`.
-- Two non-superseded resolutions that settle overlapping tips with different `keep` leave the project `conflicted`
-  (a resolution conflict). A resolution naming both in `supersedes` settles it.
-- Resolutions that agree on `keep` combine.
-- A snapshot made from a rejected tip after a resolution is a new fork against the kept line: work never vanishes.
-- A fork nested inside a settled one needs its own resolution.
+The model (Q18, completed for R2-2). It uses only the event set, never clocks or who observed what.
+
+1. **Validation.** A resolution R is *invalid* when:
+   - `over` is empty;
+   - `keep ∈ over`;
+   - any `keep`, `over` or `supersedes` reference belongs to another project, or is the wrong kind of event (a
+     `supersedes` entry must be a `resolved` event);
+   - R supersedes itself;
+   - R lies on a cycle of `supersedes` edges. A writer can only supersede events it read, so a cycle means a broken
+     or forged writer, and every resolution on it is invalid.
+
+   An invalid R is skipped with `catalog.event-skipped` (reason `resolution-invalid`) and taints its project as
+   uncertain. An R whose references are well formed but name a snapshot or resolution the catalog does not hold yet is
+   *incomplete*: like a missing base (D41), it makes the head incomplete until the events arrive.
+2. **Active resolutions** are the valid, complete ones that no valid resolution supersedes, directly or through a
+   chain.
+3. **Incompatibility.** Two active resolutions are incompatible when one's `keep` is in the other's `over`. Any
+   incompatible pair leaves the project `conflicted` (a resolution conflict, `head = null`) until a later resolution
+   supersedes both. Active resolutions with the same `keep`, or with disjoint concerns, combine.
+4. **Rejected snapshots** are the union of the active resolutions' `over` sets.
+5. **Live tips** are the snapshot tree's tips that are not rejected. A tip made from a rejected snapshot is not itself
+   rejected, so work made on a rejected line, whenever it was made and whoever knew of the resolution, is live and
+   conflicts again: it never vanishes. A continuation of the kept line is the single live tip, and the project stays
+   settled.
+6. **Status.**
+   - One live tip and no incompatible pair: settled, and the head is that tip.
+   - Two or more live tips: `conflicted`, and `heads` are the live tips.
+   - With no resolutions this is exactly M1's rule: two or more tips is a fork.
+7. **Production rule** (Task 25 writes only events this model judges valid):
+   - `keep` must be a live tip in the writer's fresh read;
+   - `over` = the live tips it read, minus `keep`;
+   - `supersedes` = every active resolution it read.
 
 ### Tests first
 An expected-outcome table, one row per history, each with the exact `status`, `head`, `heads` and `conflicts`:
 - a plain fork resolved;
-- competing resolutions (keep X and keep Y);
+- the kept line continued after the resolution (settled, head moves);
+- competing resolutions, keep X and keep Y (conflicted), then one superseding both (settled);
+- two resolutions agreeing on `keep` with different `over` sets (combined);
 - partial overlap;
-- stale then superseding;
-- a descendant of a rejected tip;
+- a delayed descendant of a rejected tip, made before the resolution but delivered after it (conflicted);
+- a descendant made after the resolution (conflicted);
 - a nested fork;
-- an invalid reference;
-- a resolution naming another project's snapshot.
+- invalid cases, each skipped and tainting: `keep ∈ over`, empty `over`, a `supersedes` naming another project's
+  resolution, a `supersedes` naming an `offloaded` event, self-supersession, a two-cycle, another project's snapshot;
+- incomplete cases: an unknown `over` snapshot, an unknown `supersedes` target (head incomplete until delivered);
+- the production rule's output, for every row where a writer acts, is valid under the validation rules.
 
 Then fast-check permutation invariance (1,000 cases) over histories built from those rows.
 
@@ -1145,11 +1293,18 @@ Measurements:
 - **SFTP through the system OpenSSH** (`--sftp-ssh`):
   - whether `moveto` is atomic and whether it refuses an existing target;
   - visibility;
-  - the durability boundary, stated plainly: rename after upload, with no fsync guarantee unless the server offers
-    `fsync@openssh.com`.
-- Each result goes into the backend's profile and the sidecar (`measured`).
+  - durability: `acked-unsynced`, since rclone's SFTP backend sends no fsync. It becomes `durable` only if a tested
+    adapter path actually invokes `fsync@openssh.com` and the server supports it; a server advertising the extension
+    is not enough (R2-6).
+- Each result goes into the backend's profile and the sidecar (`measured`). MinIO and AWS-style S3 are `durable` by
+  documentation, and the report cites the source.
 
 ### Tests first
+- **Eligibility per operation** on the measured profiles:
+  - SFTP passes `read`, `append`, `elect` and `commit`, and passes `release` only through Q21's post-grace proof;
+  - a profile forced to `publication: in-place` refuses `append`;
+  - one forced to `durability: unknown` refuses `release`, while its offload commits, keeps the trash and reports
+    why.
 - The contract and semantic suites on MinIO and SFTP.
 - Task 6's election on both: two processes, 50 rounds.
 - `lost-ack` on a put: the retry finds the landed event.
@@ -1196,7 +1351,10 @@ blob store.
 - T2 bootstrap: two processes with different passwords on one fresh MinIO prefix and one SFTP folder produce one
   repository, and the loser's restic is never pointed at the winner's.
 - A kill at each bootstrap step, then `recover`.
-- T2 single-device round trip: offload then onload of a fixture, byte-identical by Task 3's comparison.
+- T2 single-device round trip: offload then onload of a fixture, byte-identical by Task 3's comparison. Until Task 24
+  builds Q21's post-grace proof, the test's SFTP profile asserts `durability: durable` in its sandbox config (evidence
+  `asserted`). Without that assertion, the same offload commits and keeps its folder (`release` is refused), and a
+  test shows that too.
 - A `cut` mid-upload fails before the commit, with invariants 1 to 3 holding.
 
 ### Verification
@@ -1229,16 +1387,30 @@ and `stores.test`, and the regenerated contract files.
 - **`store list`** reads only; `--probe` also checks reachability.
 - **`store test`** measures the profile and writes it to the sidecar, reports `delete: denied | allowed |
   unreachable`, and lists losing bootstrap repositories and contested candidates with the manual steps (quiesce first).
-- **`store upgrade`** (Q2) moves a format-1 store to format 2 after checking that no journal on this device is open
-  against it. It refuses on a store whose `store.json` is not this device's pinned id.
+- **`store upgrade`** (Q2's constrained procedure, R2-1) moves a format-1 store to format 2. It refuses
+  (`store.not-quiescent`, naming the first reason) while any of these holds:
+  - this device has an open journal or a live plainport lock;
+  - the store's catalog shows a lease, or an unfinished offload or onload, held by another device;
+  - the catalog shows an event from another device within the quiet window;
+  - `--others-stopped` is missing. Its fix lists the devices the catalog names and says to stop plainport on each,
+    detached deletes included.
+
+  Otherwise it writes `meta/v1/upgrade-intent.json` (v0.2 refuses bootstrap and offload while the marker stands),
+  waits out the window, re-reads, and only then replaces `store.json` atomically and removes the marker. A re-read
+  that finds new foreign activity aborts and removes the marker. A crash leaves the marker, which `store upgrade`
+  resumes or `recover` clears. The store must hold this device's pinned id.
 - **`store remove`** behaves as Q13 says.
 - **`init`** shows folder sizes (D70) and refuses re-pointing per Q15.
-- New findings: `store.in-use`, `store.bootstrap-lost`, `store.root-contested`, `store.semantics-unknown`.
+- New findings: `store.in-use`, `store.bootstrap-lost`, `store.bootstrap-contested`, `store.root-contested`,
+  `store.semantics-unknown`, `store.not-quiescent`.
 
 ### Tests first
 - The risk gate and schema of every command.
 - `store add` is idempotent and leaves no secret in `managed.toml`.
-- `store upgrade`, then v0.1.1, refuses the store (compatibility row on).
+- `store upgrade`, then v0.1.1, refuses the store; Task 7's running-old-client and rollback-deletion rows are turned
+  on.
+- `store upgrade` refuses in each `store.not-quiescent` case, a crash at each step resumes or clears, and foreign
+  activity during the window aborts with the marker removed.
 - `remove` refuses while in use.
 - `test` on a delete-denying fake says `denied`, not "append-only".
 - `init` re-pointing an unreachable path refuses and writes nothing.
@@ -1393,26 +1565,35 @@ Q16, Q18; Task 14.
 Owns the fork paths of `packages/core/src/saga/{offload.ts,release.ts}`, their rules in `recover/recover.ts`, the
 offload command's exit-8 data (`detail`, Q6), and DESIGN's "Journal steps" and "Conflict at step 7".
 
-- **The fork before the commit** (M1's `diverged`) and the **fork after the commit** (release's re-read sees its own
-  snapshot in a fork) both:
-  - keep the folder and write no stub;
-  - set the registry entry's `base` to the operation's own snapshot (the kept copy's content as verified), which is
-    the existing field, so no format change;
-  - close the journal as `forked`, so D59 does not block `resolve`.
-- **Recover** from `committed` on re-reads the store first:
-  - a fork naming its snapshot settles as `forked`;
-  - no fork means it finishes release;
-  - an unreachable store means pending.
-  - A snapshot another device's resolution rejected also settles as `forked`: the copy is never released, and its next
-    offload reconflicts under Task 12's rule.
-- **Exit 8** carries `kind: "fork"` with `detail: "after-commit"` where it applies.
-- This task turns on schedules S2, S3 and S5. In S3, A's folder goes to the trash and B's stays; Task 24 adds the grace.
+**The fork state machine** (R2-3). One table in DESIGN, keyed by where the operation stands when the fork is seen.
+This task owns F1 and F2 and the hand-off into F3; Task 24 owns everything after F3.
+
+| Stage | When the fork is seen | Folder | Stub | Registry `base` | Journal |
+| --- | --- | --- | --- | --- | --- |
+| F1 | at the commit's head check (M1's `diverged`) | stays in place | none | the operation's own snapshot | closed as `forked` |
+| F2 | after the commit, before the rename: release's re-read, or recover's re-read at `committed` or at `release.trash` when the world shows no rename yet | stays in place | none | the operation's own snapshot | closed as `forked` |
+| F3 | after the rename (`release.moved` and later), or never seen before the rename | in the trash; the rename is never undone | written: this device did shelve the project (invariant 2, per device) | cleared as for any release | parked at `offload.release.held` with `{snapshot, reason: grace \| conflict}`; Task 24 settles it |
+
+Rules around the table:
+- In F1 and F2, `base` uses the existing registry field, so there is no format change. A closed journal means D59
+  never blocks `resolve`.
+- **Recover** from `committed` on re-reads the store first. An unreachable store leaves the operation pending, never
+  released. Where the re-read finds no fork, the release goes on into F3, held for the grace period (on remote stores).
+- **A snapshot another device's resolution rejected, seen in F2** (the remote-resolution-while-pending case), also
+  settles there: the folder stays with `base` = its own snapshot. The view shows the open condition `rejected-line`,
+  and its next offload is live work that conflicts again (Task 12, rule 5).
+- **Exit 8** carries `kind: "fork"` with `detail: "after-commit"` for F2.
+- This task turns on schedules S2, S3 and S5. In S3, A reaches F3 and B stays in F1 or F2.
 
 ### Tests first
 - The full sequence on both devices: fork → recover → `compare` (stubbed until Task 26) → `resolve --keep` (stubbed
   until Task 25) → edit → offload → onload on the other.
-- A remote resolution while a local journal is pending, then recover.
-- Crash rows for the re-read: killed between re-read and rename, store unreachable at the re-read.
+- A remote resolution while a local journal is pending (store down at `committed`), then recover with the store back:
+  F2, with `rejected-line`.
+- Each stage's row of the table, asserted by device (folder, stub, `base`, journal) after the live run and after
+  recover.
+- Crash rows for the re-read: killed between the re-read and the rename, the store unreachable at the re-read, and a
+  lost `release.moved` write (recover decides F2 or F3 from the world).
 - S2, S3 and S5 green, with their outcomes per device.
 
 ### Verification
@@ -1441,23 +1622,40 @@ Owns one checked-delete function that the detached delete, housekeeping, `gc` an
 It also owns `offload.conflictGrace` (config, default `15m` for remote stores and `0` for local ones), the
 `conflict-retained` trash state in views, and DESIGN's release and trash paragraphs.
 
-- **Release on a remote store** sets the trash's `keepUntil` to at least the commit plus the grace.
-- **The checked delete** reads the catalog fresh after the deadline:
-  - a fork naming the snapshot gives `conflict-retained`, never deleted while that holds;
-  - an unreachable store keeps the trash and retries later;
-  - a resolution keeping the snapshot makes it reusable by `onload` (M1's reuse path);
-  - a resolution rejecting it makes it deletable, since its snapshot is in the store.
-- **The stub** written at release stays. `onload` after resolve renames the trash back when it is the kept head.
+**The held-trash state machine** (F3 onwards, R2-3). The journal step is `offload.release.held`, a step v0.1.1 does
+not know, so a rollback never deletes held trash (Q2, Task 7's rows). It is durable, and it is the retention record
+M1's reuse path reads. The stub is written, as F3 says.
+
+| From | Event | To |
+| --- | --- | --- |
+| `held(grace)` | the checked read, at or after commit + grace, finds no fork naming the snapshot, and Q21's proof finds the event and the restic snapshot | `release.delete`: M1's detached delete, through D87 |
+| `held(grace)` | the checked read finds a fork naming the snapshot | `held(conflict)`, shown as `conflict-retained` |
+| `held(grace)` or `held(conflict)` | the store is unreachable, or the proof finds data missing (`store.lost-write`) | unchanged; retried later and reported |
+| `held(conflict)` | an active resolution keeps the snapshot (or a line made from it) | `held(grace)` with a fresh deadline. While it waits, `onload` of that head reuses the trash (M1's rename-back) and closes the journal |
+| `held(conflict)` | an active resolution rejects the snapshot | `held(grace)`, then deletable as above: the snapshot stays in the store and stays restorable |
+| any `held` | `onload` of the same head with the folder's verified fingerprint | renamed back, journal closed (M1 reuse) |
+
+Rules around the table:
+- **One checked-delete function**, which the detached delete, housekeeping, `gc` (including `gc --now`, which
+  shortens no grace) and `recover`'s delete-trash all call. None of them deletes a trash whose journal is not
+  `release.delete`.
+- **The journal gate.** D59's `journal.pending` does not count a `held` journal as unfinished. `resolve`, `compare`,
+  `onload` (reuse or restore) and read commands run while it stands. Another offload of the project is impossible
+  anyway, since the folder is shelved.
+- `offload.conflictGrace` defaults to `15m` on remote stores and `0` on local ones. With `0`, the step goes straight to
+  `release.delete` as in M1.
+- The `conflict-retained` state appears in views.
 - This task turns on schedule S8 (D87 with remote aliases). S3 is extended: B's append within the grace keeps A's
   trash.
 
 ### Tests first
-- Every entrance refuses to delete a forked trash.
+- Every row of the table, asserted by device.
+- Every entrance, including `gc --now`, refuses to delete a held trash.
 - The deadline is honoured under a stepped clock.
-- An unreachable store at delete time keeps the trash.
-- Reuse after `resolve --keep` of the retained snapshot.
-- Deletion after a rejection.
-- Crash rows at `trash.delete.checked`.
+- **Crash after the rename on the same device:** a competing append, then `recover` (`held(conflict)`), then
+  `resolve --keep` of the retained snapshot (allowed with the held journal open), then `onload` reuses the trash.
+- Deletion after a rejection, and the rejected snapshot restorable with `restore --snapshot`.
+- Crash rows at `trash.delete.checked` and at each transition.
 - S3 extended and S8, green.
 
 ### Verification
@@ -1486,8 +1684,11 @@ It also owns `status`'s per-head detail for a conflicted project, and the regene
 
 - **`resolve <project> --keep <snapshot>`** (`confirm`):
   - it requires a format-2 store;
-  - it reads fresh, takes the project lock, and refuses while a journal is open (fix: `recover`);
-  - `over` is the tips it observed, and `supersedes` every resolution its fresh read shows as competing;
+  - it reads fresh and takes the project lock;
+  - it refuses while an unfinished journal is open (fix: `recover`), but runs beside a `held` journal (Task 24);
+  - it builds its event with Task 12's `resolutionFor`: `keep` must be a live tip, `over` = the live tips read minus
+    `keep`, and `supersedes` = every active resolution read. A test asserts that every event it writes passes Task
+    12's validation (R2-2);
   - with a working copy here, `--keep` must be the registry's `base` for it (Task 23);
   - a re-run is a no-op;
   - it exits 0 with "nothing to resolve" when not conflicted.
@@ -1527,19 +1728,47 @@ Astra's Important 16; `docs/DESIGN.md` "Conflict at step 7", "Prior art → Tele
 Owns a new `packages/core/src/saga/compare.ts`, the `compare` command (`safe_write`), and the regenerated contract
 files.
 
-For each other head:
+**The ref layout** (R2-4): sibling leaves only, so every ref can coexist:
+
+```text
+refs/plainport/theirs/<snapshot>/HEAD       their HEAD commit, detached or not
+refs/plainport/theirs/<snapshot>/heads/*    their branches
+refs/plainport/theirs/<snapshot>/index      a commit of their staged index (absent when the index is unmerged)
+refs/plainport/theirs/<snapshot>/worktree   a commit of their working tree, parent = their HEAD
+```
+
+No ref is ever named `refs/plainport/theirs/<snapshot>` itself. `git diff HEAD
+refs/plainport/theirs/<id>/worktree` is the documented comparison.
+
+For each other head, objects are built first and refs published last:
 1. Restore it into a staging folder beside the project. This is unjournaled, as D60 has it, and cleanup goes through
    the guarded deleter.
-2. Import the objects of its `.git` read-only: its branches into `refs/plainport/theirs/<snapshot>/heads/*`, and its
-   `HEAD`, detached or not, into `…/HEAD`.
-3. Seed a temporary index from its own `.git/index`, so its staged state and tracked-but-now-ignored files stay
-   tracked. Commit that as `…/index`.
-4. Update the temporary index from the staged working tree. Blobs are hashed with `git hash-object --no-filters -w`
-   and entered with `update-index --index-info`, so no clean or smudge filter or attribute driver ever runs. Untracked
-   files are added only when not ignored, using `ls-files --others --exclude-standard` against the staging tree.
-5. Commit the result as `refs/plainport/theirs/<snapshot>`, with its `HEAD` as the parent.
+2. **Objects.** Copy into this repository every object the published refs will need:
+   - the objects reachable from their `HEAD` and branches (`rev-list --objects`);
+   - every blob their index references, including staged-only blobs no commit reaches (from `ls-files -s` over every
+     stage);
+
+   as one pack, `pack-objects` in staging into `unpack-objects` here. Nothing is fetched by ref, so no ref appears
+   yet.
+3. **Index.** Seed a temporary index from their `.git/index`, so staged state and tracked-but-now-ignored files stay
+   tracked.
+   - If it has no unmerged entries, write its tree and commit it for `…/index`.
+   - If it has unmerged entries, `…/index` is omitted, the unmerged paths are listed, and each one collapses to
+     stage 0 with the working-tree content for the next step.
+4. **Working tree.** Update the temporary index from the staged working tree. Blobs are hashed with `git hash-object
+   --no-filters -w` and entered with `update-index --index-info`, so no clean or smudge filter or attribute driver ever
+   runs. Untracked files are added only when not ignored (`ls-files --others --exclude-standard` against the staging
+   tree). Commit it for `…/worktree`, with their `HEAD` as the parent.
+5. **Publish.** One `git update-ref --stdin` transaction (`start`, then each `create` or `update` with its expected
+   old value, then `prepare` and `commit`) writes the whole set for that snapshot, and removes leaves of an earlier run
+   that this run did not produce.
+   - A crash before the commit leaves no new refs: only staging, which `gc` removes, and unreachable objects, which
+     `git gc` prunes.
+   - Git's files backend can still leave a set partly written if the process dies inside the commit. A set missing
+     any leaf it should have is reported as incomplete by `compare` and `status`, and a rerun replaces the whole set.
 
 Other rules:
+- `compare --clean` removes only `refs/plainport/theirs/**`.
 - Submodules stay as gitlinks and are listed.
 - Ignored files that differ are listed, never committed.
 - A non-git project refuses with a path list instead.
@@ -1549,10 +1778,14 @@ Other rules:
 - A canary in the other copy's `.env`, a repository-defined clean filter that would inject that `.env` into a tracked
   blob (its marker file is never created), and a tracked file now matched by `.gitignore`: none of them leaks, and the
   tracked file is not recorded as deleted.
-- A detached unpushed `HEAD` is reachable, and the staged-only change shows in `…/index`.
+- A detached unpushed `HEAD` is reachable. A staged-only blob that no commit reaches shows in `…/index`, and
+  `git fsck --connectivity-only` on this repository passes.
+- An unmerged index gives no `…/index`, lists its paths, and still produces `…/worktree`.
+- All four leaves coexist with branches named `index` and `worktree`, and `git for-each-ref refs/plainport` lists them.
 - The user's index bytes, `HEAD`, branches, stash, config and `git status --porcelain=v2` are identical before and
   after.
-- A crash mid-build leaves only staging, which `gc` removes.
+- A kill before the transaction leaves no new refs. A kill inside it is reported as incomplete. A rerun after either
+  replaces the set, and a rerun with no change is a no-op.
 
 ### Verification
 `bun test packages/core -t compare && bun run test:t1 -t compare && bun run contract`
@@ -1671,6 +1904,9 @@ Owns `scripts/gate-m2.ts` and its test, the gate report and the release commits.
 - **Store kinds.** Local (T1), MinIO and SFTP (T2, including MinIO with its conditional write switched off, so the
   non-conditional path races too), and R2 and B2 (T3) when Task 28 passed.
 - **Schedules S1 to S8**, each followed by Task 3's tree comparison and the per-device invariants 1 to 6.
+- **Eligibility (R2-6).** Profiles that fail a predicate (forced `publication: in-place`, `durability: unknown`, or
+  `elect` failing) refuse exactly the operations Task 6's table says, and their offloads keep their folders.
+  Successful round trips are claimed only for admitted profiles, with SFTP admitted through Q21's proof.
 - **End-to-end flow:** `compare`, `resolve --keep`, an offload, then onload on the other device, which ends `local`
   and byte-identical.
 - **Times.** One M1 demo project's times on each kind.
@@ -1726,3 +1962,16 @@ Every schedule passes on every available kind and the full suite is green. Then 
 | 18 · gate does not prove its claims | Task 14 (schedules, per-device invariants), Task 4 (`lost-ack`, restart), Task 17 (pagination, durability), Tasks 27–29; Q20 (invariant 6 scope) |
 | 19 · graph and ownership | Dependency graph, shared-file rules, Tasks 5, 15, 16 ordering; old Task 10 split into Tasks 10, 11, 20 |
 | Missing tasks 1–11 | 1 → Task 8 · 2 → Task 6 · 3 → Task 9 · 4 → Task 7 · 5 → Task 5 · 6 → Task 10 · 7 → Task 11 · 8 → Tasks 12, 23 · 9 → Task 13 · 10 → Task 14 · 11 → this revision's graph |
+
+## Where astra's round-2 findings are resolved
+
+| Finding | Resolved in |
+| --- | --- |
+| R2-1 · upgrade does not exclude running old clients; rollback deleters | Q2 (constrained, quiescent upgrade with an intent marker and a quiet window; owner attests other devices; stated residual; held trash at a step v0.1.1 leaves alone); Task 7 (real v0.1.1 paused before append and release; rollback `recover`, `gc`, `gc --now`, housekeeping, detached delete); Task 19 (`store.not-quiescent`); Task 24 (`offload.release.held`) |
+| R2-2 · resolution production contradicts validation; causality incomplete | Q18; Task 12 (validation of every reference including `supersedes`, cycles, active set, incompatibility, live tips, production rule `resolutionFor`, expected-outcome rows); Task 25 (writes only through `resolutionFor`, validity asserted) |
+| R2-3 · retained trash: recovery after rename, resolution, journal gate | Q16; Task 23 (fork stages F1 to F3); Task 24 (held-trash state machine; `held` journals do not block `resolve`, `compare` or `onload`; same-device crash → append → recover → resolve → reuse test); Task 25 |
+| R2-4 · comparison refs cannot coexist; index objects | Q18; Task 26 (sibling leaves `HEAD`, `heads/*`, `index`, `worktree`; staged-only blobs copied by pack; unmerged index; one ref transaction; incomplete sets reported; rerun tests) |
+| R2-5 · ULID-shaped legacy aliases | Q11 (location by containment; keys never interpreted; multi-entry events unsupported until M3); Task 9 (ULID-shaped alias tests; writer assertion) |
+| R2-6 · semantics admission does not decide backends; SFTP durability | Q8 (typed properties, per-operation eligibility); new Q21 (SFTP admitted through a post-grace proof, owner choice); Task 6 (eligibility table); Task 17 (measured `acked-unsynced`, predicate tests); Task 18 (asserted profile until Task 24); Task 24 (the proof); Task 29 (refusal asserted for profiles that fail) |
+| R2-7 · bootstrap tests demand a winner | Q9 (no-winner outcome); Task 6 (`won`, `lost`, `contested`); Task 8 (at most one published; contested outcome, cleanup and retry; crash rows) |
+| R2-8 · Task 6 depends on Task 11's codec | Task 6 (injected `SameEvent` with a byte-equality fake); Task 11 (codec implements it and owns the acceptance test) |
