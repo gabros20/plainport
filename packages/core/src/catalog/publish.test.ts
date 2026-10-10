@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fail, finding, ok } from "@plainport/contract";
 import fc from "fast-check";
 import { z } from "zod";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
@@ -16,6 +17,9 @@ import {
 const encoder = new TextEncoder();
 const bytes = (text: string): Uint8Array => encoder.encode(text);
 const decode = (data: Uint8Array): string => new TextDecoder().decode(data);
+
+/** fast-check runs per property. */
+const RUNS = 300;
 
 const EVENT_KEY = "meta/v1/events/01J0000000000000000000EV01.json";
 
@@ -56,10 +60,34 @@ describe("publish: an event is published whole", () => {
     const again = await publishEvent(store, {
       key: EVENT_KEY,
       data: bytes("sealed-2"),
-      sameEvent: (existing, intended) => opened(existing) === opened(intended),
+      sameEvent: (existing, intended) => ok(opened(existing) === opened(intended)),
     });
     expect(again).toEqual({ ok: true, value: { written: false } });
     expect(decode(store.data.get(EVENT_KEY) as Uint8Array)).toBe("sealed-1");
+  });
+
+  test("a failed put whose read-back finds another event is store.key-exists, and cannot land", async () => {
+    const store = semanticBlobStore();
+    const racing: BlobStore = {
+      ...store,
+      put: async (key) => {
+        await store.put(key, bytes("someone else's"));
+        return fail(finding("store.unreachable", { message: "lost" }));
+      },
+    };
+    const result = await publishEvent(racing, { key: EVENT_KEY, data: bytes("e1"), sameEvent: sameBytes });
+    expect(result).toMatchObject({ ok: false, mayLand: false, finding: { code: "store.key-exists" } });
+  });
+
+  test("a SameEvent that cannot tell (a codec failure) is returned as such, not as store.key-exists", async () => {
+    const store = semanticBlobStore();
+    await store.put(EVENT_KEY, bytes("sealed with another key"));
+    const result = await publishEvent(store, {
+      key: EVENT_KEY,
+      data: bytes("e1"),
+      sameEvent: () => fail(finding("store.failed", { message: "cannot open the existing event" })),
+    });
+    expect(result).toMatchObject({ ok: false, mayLand: false, finding: { code: "store.failed" } });
   });
 
   test("a store that cannot publish whole refuses with store.semantics-unknown and writes nothing", async () => {
@@ -264,10 +292,56 @@ describe("publish: the elected publication", () => {
     });
   }
 
-  test("the conditional route writes no candidate", async () => {
+  test("every route writes the candidacy: one protocol whatever this device's profile (quality r1)", async () => {
     const store = semanticBlobStore();
     await outcome(store, election("A"));
-    expect(keysOf(store, CANDIDATES)).toEqual([]);
+    expect(keysOf(store, CANDIDATES)).toEqual([`${CANDIDATES}A.json`, `${CANDIDATES}A.publishing`]);
+  });
+
+  test("a crash after the candidacy, then a re-run with the same id, reaches a final outcome", async () => {
+    const store = semanticBlobStore(NO_CREATE);
+    // A writes its candidacy and dies before it lists.
+    let crashed = false;
+    const dying: BlobStore = {
+      ...store,
+      list: async () => {
+        crashed = true;
+        throw new Error("killed");
+      },
+    };
+    await expect(elect(dying, election("A"))).rejects.toThrow("killed");
+    expect(crashed).toBe(true);
+    // B sees A undecided: not final, and its fix says how to get out.
+    const b = await outcome(store, election("B"));
+    expect(b).toMatchObject({ outcome: "contested", undecided: ["A"] });
+    if (b.outcome === "contested") {
+      expect(b.fix).toContain("same id");
+      expect(b.fix).toContain("every device");
+    }
+    // A's recovery re-runs with the journaled id: it sees B, refuses, and the election is final.
+    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: [] });
+    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: [] });
+  });
+
+  test("a refusal written on behalf of an attempt whose device is gone settles the election (the withdraw rule)", async () => {
+    const store = semanticBlobStore(NO_CREATE);
+    await store.put(`${CANDIDATES}GONE.json`, bytes('{"v":1,"id":"GONE","decision":"candidate"}'));
+    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: ["GONE"] });
+    // Every device quiesced, the operator withdraws GONE: its refusal record, exactly as GONE would write it.
+    await store.put(`${CANDIDATES}GONE.refused`, bytes('{"v":1,"id":"GONE","decision":"refused"}\n'));
+    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: [] });
+  });
+
+  test("elect() checks its input: a bad prefix, id or value is a bug and throws", async () => {
+    const store = semanticBlobStore();
+    await expect(elect(store, election("A", { candidates: "meta/v1/candidates" }))).rejects.toThrow(
+      RangeError,
+    );
+    await expect(elect(store, election("A", { key: `${CANDIDATES}x` }))).rejects.toThrow(RangeError);
+    await expect(elect(store, election("a/b"))).rejects.toThrow(RangeError);
+    await expect(elect(store, election("x.refused"))).rejects.toThrow(RangeError);
+    await expect(elect(store, election("A", { value: election("B").value }))).rejects.toThrow(RangeError);
+    expect(store.calls.put).toBe(0);
   });
 
   test("the fallback refuses on a profile that fails elect, and writes nothing", async () => {
@@ -441,13 +515,13 @@ describe("publish: the elected publication", () => {
               if (o.outcome === "contested") {
                 expect(o.candidates.length).toBeGreaterThan(1);
                 // A terminal contested ("every visible candidate refuses") is never wrong: nobody won.
-                if ((o.undecided ?? []).length === 0) expect(won).toEqual([]);
+                if (o.undecided.length === 0) expect(won).toEqual([]);
               }
             }
             // A published value always names a claimant, and only one ever is.
             if (winner !== undefined) expect(ids).toContain(winner);
           }),
-          { numRuns: 300 },
+          { numRuns: RUNS },
         );
       });
     }
@@ -498,7 +572,46 @@ describe("publish: the elected publication", () => {
             if (r.ok && r.value.outcome === "lost") expect([...won]).toEqual([r.value.winner]);
           }
         }),
-        { numRuns: 300 },
+        { numRuns: RUNS },
+      );
+    });
+  }
+
+  for (const n of [2, 3]) {
+    test(`mixed routes: ${n} devices with different profiles for one store never both win (quality r1)`, async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.scheduler(),
+          fc.array(fc.boolean(), { minLength: n, maxLength: n }),
+          async (s, proven) => {
+            const inner = semanticBlobStore();
+            // A device that has not measured conditional create sees the same store without it.
+            const unmeasured: BlobStore = {
+              ...inner,
+              semantics: () => ({ ...inner.semantics(), conditionalCreate: "unknown" }),
+              capabilities: () => ({ createIfAbsent: false, replaceIfMatch: false }),
+            };
+            const ids = Array.from({ length: n }, (_, i) => `C${i}`);
+            const results = await s.waitFor(
+              Promise.all(
+                ids.map((id, i) => elect(scheduled(proven[i] ? inner : unmeasured, s), election(id))),
+              ),
+            );
+            const won = ids.filter((_, i) => {
+              const r = results[i];
+              return r?.ok === true && r.value.outcome === "won";
+            });
+            expect(won.length).toBeLessThanOrEqual(1);
+            const published = inner.data.get(PUBLISHED);
+            if (won.length === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe(won[0]);
+            for (const r of results) {
+              if (r.ok && r.value.outcome === "lost") {
+                expect(r.value.winner).toBe(election("x").winnerOf(published as Uint8Array) as string);
+              }
+            }
+          },
+        ),
+        { numRuns: RUNS },
       );
     });
   }

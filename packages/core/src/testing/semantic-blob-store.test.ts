@@ -79,6 +79,88 @@ describe("semantic probe: failure handling", () => {
     await expect(semanticViolations(flaky)).rejects.toThrow("store.unreachable");
   });
 
+  test("a failed probe write waits for the rest of its batch before cleaning up: nothing is left behind", async () => {
+    const inner = semanticBlobStore();
+    const slow = {
+      ...inner,
+      put: async (key: string, data: Uint8Array, opts?: { ifNotExists?: boolean }) => {
+        if (key.endsWith("page/00001")) {
+          return {
+            ok: false as const,
+            exitCode: 1 as const,
+            finding: {
+              code: "store.failed",
+              severity: "block" as const,
+              message: "injected",
+              allowable: false,
+            },
+          };
+        }
+        if (key.endsWith("page/00002")) await new Promise((resolve) => setTimeout(resolve, 30));
+        return inner.put(key, data, opts);
+      },
+    };
+    await expect(semanticViolations(slow, undefined, { listProbeKeys: 5 })).rejects.toThrow("injected");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect([...inner.data.keys()].filter((key) => key.startsWith("probe/"))).toEqual([]);
+  });
+
+  test("a cleanup delete that fails is reported, after every other key was still deleted", async () => {
+    const inner = semanticBlobStore();
+    let deletes = 0;
+    const flaky = {
+      ...inner,
+      delete: (key: string) => {
+        if (deletes++ === 0) inner.failNext("delete");
+        return inner.delete(key);
+      },
+    };
+    await expect(semanticViolations(flaky, undefined, { listProbeKeys: 5 })).rejects.toThrow(
+      "store.unreachable",
+    );
+    expect([...inner.data.keys()].filter((key) => key.startsWith("probe/"))).toHaveLength(1);
+  });
+
+  test("an observer read that fails during a slow write is never an unhandled rejection", async () => {
+    const inner = semanticBlobStore();
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", record);
+    try {
+      let failedOnce = false;
+      const slow = {
+        ...inner,
+        get: (key: string) => {
+          if (key.endsWith("/whole") && !failedOnce) {
+            failedOnce = true;
+            inner.failNext("get");
+          }
+          return inner.get(key);
+        },
+        put: async (key: string, data: Uint8Array, opts?: { ifNotExists?: boolean }) => {
+          if (key.endsWith("/whole")) await new Promise((resolve) => setTimeout(resolve, 50));
+          return inner.put(key, data, opts);
+        },
+      };
+      await expect(semanticViolations(slow, undefined, { listProbeKeys: 5 })).rejects.toThrow(
+        "store.unreachable",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  });
+
+  test("a write that never shows within the polling bound is inconclusive, not a violation", async () => {
+    const honest = semanticBlobStore({ delayedVisibility: true });
+    // No settle: the write never shows, so nothing can be said about whole publication.
+    await expect(
+      semanticViolations(honest, undefined, { listProbeKeys: 5, poll: { tries: 3, ms: 1 } }),
+    ).rejects.toThrow("inconclusive");
+    expect([...honest.data.keys()].filter((key) => key.startsWith("probe/"))).toEqual([]);
+  });
+
   test("probe cleanup removes every key it wrote, even where the listing is cut short", async () => {
     const lying = semanticBlobStore({ truncateListAt: 1000, profile: STRONG });
     expect(await semanticViolations(lying, lying)).toContain("listComplete");
