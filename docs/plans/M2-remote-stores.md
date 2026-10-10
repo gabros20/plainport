@@ -845,7 +845,9 @@ store authenticates its published repository with this device's password before 
   schedule makes both candidates visible before either lists, both end `contested` and nothing is published.
 - After a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win.
 - A kill at every bootstrap step, then `recover`, settles to "published by this attempt", "lost", "contested" or
-  "rolled back (nothing published)". These are the crash-matrix rows.
+  "rolled back (nothing published)". These are the crash-matrix rows. They include "killed after the candidacy on a
+  conditional-create store": another attempt is then undecided (D99) until the killed attempt's recovery re-runs with
+  its journaled id, which settles it.
 - A third device adopts the winner.
 - A format-1 local store is adopted without rewriting it.
 

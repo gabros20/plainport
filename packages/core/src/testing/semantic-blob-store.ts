@@ -197,7 +197,8 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
       if (opts.ifNotExists && data.has(key)) return Promise.resolve(exists(key));
       if (options.tornWrites) return tornPut(key, copy, opts);
       // Only a put that landed changes what readers are shown later (delayed visibility pins the old value). The
-      // memory store writes within the call, so whether it landed is known before anyone else can read.
+      // memory store writes within the call, so whether it landed is known before anyone else can read; and it stores
+      // a fresh copy of the bytes on every write, so a changed reference means a write landed, even of equal bytes.
       const held = data.get(key);
       const landed = (): void => {
         if (data.get(key) !== held) remember(key, held ?? null);

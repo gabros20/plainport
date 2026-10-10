@@ -217,7 +217,9 @@ export const semanticViolations = async (
         bound,
       );
       if (!final.shown && !raw) throw inconclusive(`the publication probe ${key}`, bound);
-      if (torn || final.seen === null || final.seen.length !== data.length) violations.push("publication");
+      // Not shown although read-after-write is claimed is that property's failure; torn or short bytes are publication's.
+      if (final.seen === null && !violations.includes("readAfterWrite")) violations.push("readAfterWrite");
+      if (torn || (final.seen !== null && final.seen.length !== data.length)) violations.push("publication");
     }
     if (semanticValue(claims.conditionalCreate) === true) {
       issued.add(`${base}cc`);

@@ -141,7 +141,8 @@ export type ElectionOutcome =
    * No winner is published and this attempt refuses: it will never publish (D99). `undecided` names visible
    * candidates without a refusal read back from the store; while any is left this is not final (re-run later: it ends
    * lost if one publishes). With none left, this attempt's own refusal included, every visible candidate refuses
-   * (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps.
+   * (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps. Final needs this device's profile to prove
+   * list-after-write and complete listings; without them `undecided` keeps this attempt's own id, and `fix` says why.
    */
   | { outcome: "contested"; candidates: string[]; undecided: string[]; fix: string };
 
@@ -208,8 +209,8 @@ const assertElection = (e: Election): void => {
  * proves one, a plain put otherwise. A device with a proven conditional create still sees and respects every other
  * device's candidacy, so two devices taking different final writes never both win.
  *
- * Why contested can be final: a candidate written after this attempt's listing lists after this candidacy was
- * acknowledged, so it sees it and refuses; so every attempt that could still be sole is visible here, and once each
+ * Why contested can be final, where this device's profile proves list-after-write and complete listings: a candidate
+ * written after this attempt's listing lists after this candidacy was acknowledged, so it sees it and refuses; so every attempt that could still be sole is visible here, and once each
  * has refused nobody can publish. An attempt that has refused, or whose `.publishing` was acknowledged, keeps that
  * decision when re-run (its recovery). A re-run of the same attempt (same id) is otherwise safe: the same keys, and a
  * published value naming it is a win.
@@ -222,6 +223,10 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   if (!allowed.ok) return allowed;
   const conditional = semanticValue(semantics.conditionalCreate) === true;
   const listsAfterWrite = semanticValue(semantics.listAfterWrite) === true;
+  // A final contested rests on listings: a later candidate lists after this one's candidacy and sees it. Without
+  // list-after-write and complete listings proven, a lagging lister may still be sole (its conditional create still
+  // bounds the winners to one), so a contested here is never final.
+  const canProveFinal = listsAfterWrite && semanticValue(semantics.listComplete) === true;
 
   const readPublished = async (): Promise<Result<Published>> => {
     const got = await store.get(e.key);
@@ -363,8 +368,10 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     const now = await listCandidates();
     if (!now.ok) return now;
     candidates = now.value.ids;
-    // Final only when every visible candidate, this attempt included, has a refusal read back from the store.
+    // Final only when every visible candidate, this attempt included, has a refusal read back from the store, and
+    // this device's profile proves the listings that argument rests on; otherwise this attempt stays undecided.
     undecided = candidates.filter((id) => !now.value.refused.has(id));
+    if (!canProveFinal && undecided.length === 0) undecided = [e.id];
     if (undecided.length === 0) break;
     await e.wait(WAIT_MS);
   }
@@ -374,8 +381,10 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     keyOf(id, "publishing"),
   ]);
   const fix =
-    undecided.length > 0
-      ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is. Re-running an attempt with the same id (its recovery does) decides it. If an attempt will never run again (its device is gone), stop plainport on every device that uses the store ${name} and wait until none is running, then withdraw it by writing its refusal on its behalf (${undecided.map((id) => `${keyOf(id, "refused")} holding {"v":1,"id":"${id}","decision":"refused"}`).join("; ")}) and re-run`
-      : `stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
+    !canProveFinal && undecided.length === 1 && undecided[0] === e.id
+      ? `every visible candidate refuses, but this device's profile of the store ${name} does not prove list-after-write and complete listings, so another attempt this listing could not see may still be sole and win; re-run later with the same id (it ends lost if one won), and leave every candidate in ${e.candidates} where it is`
+      : undecided.length > 0
+        ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is. Re-running an attempt with the same id (its recovery does) decides it. If an attempt will never run again (its device is gone), stop plainport on every device that uses the store ${name} and wait until none is running, then withdraw it by writing its refusal on its behalf (${undecided.map((id) => `${keyOf(id, "refused")} holding {"v":1,"id":"${id}","decision":"refused"}`).join("; ")}) and re-run`
+        : `stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
   return ok({ outcome: "contested", candidates, undecided, fix });
 };

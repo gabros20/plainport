@@ -204,7 +204,10 @@ describe("semantic fake: each weakness is caught", () => {
 
   test("delayed visibility contradicts a claimed read-after-write", async () => {
     const lying = semanticBlobStore({ delayedVisibility: true, profile: STRONG });
-    expect(await semanticViolations(lying, lying)).toContain("readAfterWrite");
+    const found = await semanticViolations(lying, lying);
+    expect(found).toContain("readAfterWrite");
+    // An unseen publication probe is read-after-write's failure, not publication's: its bytes were never torn.
+    expect(found).not.toContain("publication");
     const honest = semanticBlobStore({ delayedVisibility: true });
     expect(await semanticViolations(honest, honest)).toEqual([]);
     expect(canAppend(honest.semantics())).toEqual({ eligible: false, missing: ["readAfterWrite"] });
