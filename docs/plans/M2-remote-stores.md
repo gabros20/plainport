@@ -20,6 +20,7 @@ unverified (R2's and B2's measured semantics, the darwin-x64 hub) as pending.
 **Before Task 1 (owner).** Answer the decisions below; the orchestrator records the answers as ADR-0023 ("M2
 decisions") in the commit that approves this plan, and amends ADR-0022's D74 as Q1 says. Read the flagged decisions in
 ADR-0022, since M2 builds on them. The real-project gate with hydration on (D78) is still suggested, not required.
+The owner's answers (Q1–Q21, as recommended, 2026-10-10) are recorded in ADR-0023.
 
 ---
 
