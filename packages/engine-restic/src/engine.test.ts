@@ -611,6 +611,22 @@ describe("restic engine: exit codes map to catalogued findings", () => {
     expect(result.finding.message.length).toBeGreaterThan(0);
   });
 
+  test("restic 0.18.1's recorded interrupted backup (exit 1, not 0.19's 130) parses and is restic.failed", async () => {
+    const host = replayHost([fixture("version", "0.18.1"), fixture("interrupted", "0.18.1")]);
+    const engine = resticEngine({
+      host,
+      restic: "/r",
+      repository: REPO,
+      password: "p",
+      env: {},
+      expectedVersion: "0.18.1",
+    });
+    const result = failure(await engine.list({}));
+    expect(result.finding.code).toBe("restic.failed");
+    expect(result.finding.message).toContain("context canceled");
+    expect(host.remaining()).toBe(0);
+  });
+
   test("restic's own message is carried, from its exit_error line", async () => {
     const { engine } = setup([fixture("wrong-password")]);
     expect(failure(await engine.list({})).finding.message).toContain("wrong password or no key found");

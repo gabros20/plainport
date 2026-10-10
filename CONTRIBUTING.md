@@ -74,7 +74,8 @@ Suites are tagged by tier in `test/tiers.ts`: `describeT1` (real binaries), `des
 `describeT3` (the real R2 and B2 buckets and the Mac mini, M2 Task 28). `bun run test:t2` sets
 `PLAINPORT_TEST_TIER=2` and `test:t3` sets 3; each tier includes the ones below it. Below its tier a suite is
 skipped; at its tier, a T2 or T3 suite whose environment is missing fails and names the command to run. It never
-skips silently.
+skips silently. A T2 environment must also be live: the gate checks, with one `docker inspect`, that the containers
+`up` recorded are still there and healthy, so a stale `.testenv/` (after a prune or a reboot) fails the same way.
 
 `scripts/testenv` brings the T2 environment up and down; never build one by hand.
 
@@ -84,14 +85,17 @@ skips silently.
   from the host, directly and through Toxiproxy, and writes `.testenv/` (gitignored, mode 0700): `env.json` with the
   endpoints and the credentials generated for the run, the SFTP keys, a sandbox `known_hosts` and an ssh config.
   Suites read it with `loadTestEnv()` from `scripts/testenv.ts`. A second `up` changes nothing and clears every
-  fault. MinIO no longer publishes images, so the S3 store is SeaweedFS, as the M2 plan allows; `minio` still names it.
-- `down` removes the containers, their volumes and network, and `.testenv/`. Running it twice is fine.
+  fault. MinIO no longer publishes images, so the S3 store is SeaweedFS 4.48 (run decision D94); `minio` still names it.
+- `down` removes the containers, their volumes and network, and `.testenv/`. Running it twice is fine. It refuses,
+  before stopping anything, when `.testenv/` holds a file it did not write.
 - `status`, `env` (shell exports: `eval "$(scripts/testenv env)"`), and `restart <service>`, which restarts one
   container without recreating it, for durability tests.
 - `fault <s3|sftp> <profile|clear>`, or `applyProfile()` from a test, applies a named Toxiproxy profile: `cut`
   (reset both ways), `latency` (250 ms each way), `slow-close` (the close arrives 1.5 s late) and `lost-ack` (the
-  request reaches the store whole, then the client gets a reset instead of the response).
+  request reaches the store whole, then the client gets a reset instead of the response; meaningful on the S3
+  proxy only, since on SFTP the server speaks first and the reset lands in the SSH handshake, like `cut`).
 - `--dir`, `--project` and `--port-base` run a second environment beside the first; the T2 smoke test does that.
+  `PLAINPORT_TESTENV_DIR` and `PLAINPORT_TESTENV_PROJECT` set the default folder and project.
 
 Tests run under a sandbox `HOME`, where the docker CLI finds neither its context nor its compose plugin, so `up`
 records both in `env.json` and T2 tests pass them to their children (`dockerEnv()`). GitHub's macOS runners have no

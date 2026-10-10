@@ -1190,7 +1190,7 @@ plainport is judged by one property, never losing a project, so the test suite i
 | --- | --- | --- |
 | Unit | Planner rules, strip-set logic, fold rules, finding codes | Fixture trees with golden plans; fast-check property tests for the fold |
 | Engine contract | Restic output parsing and exit-code mapping | A real restic binary on a temp repository, plus recorded JSON-lines fixtures per supported restic version |
-| Store contract | `BlobStore` semantics, including create-if-absent | One suite run against `fs`, MinIO in Docker and an SFTP container |
+| Store contract | `BlobStore` semantics, including create-if-absent | One suite run against `fs`, an S3 store in Docker (SeaweedFS since run decision D94: MinIO no longer publishes images) and an SFTP container |
 | Crash matrix | Both sagas survive death at any phase | Kill the process at each journal step, run `recover`, check the invariants |
 | Two-device moves | A move survives either side dying; the lease ends on exactly one device | Two sandboxed plainport instances with separate home folders, talking through an `ssh` shim; containers for the cross-OS pair |
 | Detached jobs | The remote half of a move survives its SSH session ending, on macOS and on Linux with logind set to kill session processes | Drop the connection mid-restore, then reattach; one Linux container runs with KillUserProcesses=yes |
@@ -1200,7 +1200,7 @@ plainport is judged by one property, never losing a project, so the test suite i
 | Agent kit | Plans match what the agents report; applying twice changes nothing; only ledger items are ever removed | Apply twice and diff; seed hand-made conflicts; read back through each agent's own list commands |
 | Append-only access | A device key cannot delete or rewrite snapshots | `forget` and `prune` through the forced command must be refused |
 | Secrets envelope | Non-recipients never receive secret files or agent sessions; grants and revokes re-encrypt correctly | Onload as owner, worker and revoked device; assert which files exist |
-| Network faults | Upload and restore under latency, cuts and 5xx errors | Toxiproxy between restic and MinIO, and on the SSH link |
+| Network faults | Upload and restore under latency, cuts and 5xx errors | Toxiproxy between restic and the S3 store (SeaweedFS, D94), and on the SSH link |
 | File-system zoo | Symlink loops, sockets, unreadable files, case pairs, NFD names, a 4 GB file, a 200,000-file tree | Generated fixtures on case-sensitive and case-insensitive APFS disk images made with `hdiutil` |
 | Cross-OS round trip | macOS to Linux and back keeps git state, modes and `core.*` settings | macOS CI with a Linux container peer |
 | Hydration | npm, pnpm, Yarn Classic, Yarn Berry, Bun, uv | Tiny real projects, plus offline runs against a local Verdaccio registry |

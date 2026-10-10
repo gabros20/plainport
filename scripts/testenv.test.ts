@@ -1,6 +1,7 @@
 // T0: the parts of scripts/testenv.ts that need no Docker. The T2 smoke test (testenv.t2.test.ts) runs the real thing.
 import { describe, expect, test } from "bun:test";
-import { accessSync, constants, readFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   envLines,
@@ -36,6 +37,7 @@ const sample: TestEnv = {
   dir: "/w/.testenv",
   portBase: 39100,
   docker: { host: "unix:///var/run/docker.sock" },
+  containers: ["c1", "c2", "c3", "c4"],
   s3: {
     kind: "seaweedfs",
     endpoint: "http://127.0.0.1:39100",
@@ -210,6 +212,39 @@ describe("testenv: command line", () => {
     expect(parseCommand(["fault", "rest", "cut"])).toMatchObject({ ok: false });
     expect(parseCommand(["fault", "s3", "melt"])).toMatchObject({ ok: false });
     expect(parseCommand(["up", "--port-base", "80"])).toMatchObject({ ok: false });
+  });
+
+  test("the usage names PLAINPORT_TESTENV_PROJECT and PLAINPORT_TESTENV_DIR", () => {
+    const usage = parseCommand([]);
+    expect(usage.ok ? "" : usage.message).toContain("PLAINPORT_TESTENV_PROJECT");
+    expect(usage.ok ? "" : usage.message).toContain("PLAINPORT_TESTENV_DIR");
+  });
+
+  test("up refuses a .testenv/ whose credentials survive but whose ssh keys do not, before touching Docker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "plainport-testenv-partial-"));
+    try {
+      writeFileSync(
+        join(dir, "credentials.json"),
+        JSON.stringify({
+          project: "p",
+          portBase: 39300,
+          s3: { accessKeyId: "A", secretAccessKey: "S" },
+          rest: { password: "P" },
+        }),
+      );
+      // No docker on PATH: reaching Docker would fail differently.
+      const ran = Bun.spawnSync([process.execPath, join(import.meta.dir, "testenv.ts"), "up", "--dir", dir], {
+        env: { ...process.env, PATH: "/usr/bin:/bin" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(ran.exitCode).toBe(1);
+      expect(ran.stderr.toString()).toContain("ssh/id_ed25519");
+      expect(ran.stderr.toString()).toContain("scripts/testenv down");
+      expect(ran.stderr.toString()).not.toContain("    at ");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("the scripts/testenv wrapper is executable and runs testenv.ts", () => {

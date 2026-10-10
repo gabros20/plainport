@@ -12,8 +12,8 @@ below are answered:
 
 **Milestone gate.** Two sandboxed plainport instances racing on one store (the two-Mac race) end in `conflicted`,
 never in lost work. "Never lost" means what Q16 makes the owner sign: every verified snapshot stays in the store and
-in the catalog, and a folder is deleted only on the terms Q16 states. The gate runs on a local store (T1), on MinIO
-and an SFTP container (T2), and on Cloudflare R2 and Backblaze B2 (T3) when the owner's buckets and the Mac mini are
+in the catalog, and a folder is deleted only on the terms Q16 states. The gate runs on a local store (T1), on an S3
+store (SeaweedFS, D94) and an SFTP container (T2), and on Cloudflare R2 and Backblaze B2 (T3) when the owner's buckets and the Mac mini are
 available. Without T3 the gate passes as a stated **T2 result**: HANDOFF lists every backend claim that stays
 unverified (R2's and B2's measured semantics, the darwin-x64 hub) as pending.
 
@@ -407,7 +407,7 @@ the next phase until it's fixed (ADR-0021). Each boundary states which remote wo
 | 1 · Carry-overs, test environments, sensitive output | 1–5 | M1 behaviour plus the carry-overs; T2 containers in CI; no remote store yet |
 | 2 · Store groundwork | 6–9 | Specs, fakes and tests for semantics, formats, bootstrap and store identity; local stores only |
 | 3 · Catalog groundwork | 10–14 | Crypto spec, codec, resolution model, offline views, gate schedules, all on fakes; local stores only |
-| 4 · Secrets and the rclone blob store | 15–17 | Secret references; blob store contract and measured semantics on MinIO and SFTP; no remote offload yet |
+| 4 · Secrets and the rclone blob store | 15–17 | Secret references; blob store contract and measured semantics on SeaweedFS (D94) and SFTP; no remote offload yet |
 | 5 · Remote stores end to end | 18–21 | Bootstrap, offload, onload, sealing and the catalog over SFTP and S3 (single device) |
 | 6 · Leases and conflicts | 22–26 | Advisory leases, forks, retained trash, `resolve --keep`, `compare` |
 | 7 · Proof and release | 27–29 | Remote crash matrix, T3, the gate, `v0.2.0` |
@@ -1272,7 +1272,7 @@ The contract suite is green on rclone-local, and no profile claims more than the
 
 ---
 
-## Task 17 — Semantics on MinIO and SFTP, and the conditional-write retest  `T2`
+## Task 17 — Semantics on the S3 store (SeaweedFS) and SFTP, and the conditional-write retest  `T2`
 
 ### Objective
 Measure each backend's semantics profile on real servers, record it, and pass the store contract and the elected
@@ -1280,6 +1280,9 @@ publication there.
 
 ### Context
 ADR-0018 (the open `If-None-Match` check); Q8, Q9; Tasks 6 and 16; `docs/DESIGN.md` "Machines → SSH policy".
+D94: the T2 S3 store is SeaweedFS 4.48, not MinIO (MinIO no longer publishes images); `minio` still names it in
+`scripts/testenv`. Task 29's "conditional write switched off" store is re-planned here for SeaweedFS: find whether
+it can refuse `If-None-Match`, or how else to force the non-conditional path.
 
 ### Scope
 Owns:
@@ -1290,7 +1293,7 @@ Owns:
 - The measured rows of the DESIGN semantics table.
 
 Measurements:
-- **MinIO:**
+- **SeaweedFS (the S3 store, D94):**
   - read-after-write and list-after-write;
   - pagination beyond 1,000 keys;
   - durability across `scripts/testenv restart minio`;
@@ -1301,8 +1304,8 @@ Measurements:
   - durability: `acked-unsynced`, since rclone's SFTP backend sends no fsync. It becomes `durable` only if a tested
     adapter path actually invokes `fsync@openssh.com` and the server supports it; a server advertising the extension
     is not enough (R2-6).
-- Each result goes into the backend's profile and the sidecar (`measured`). MinIO and AWS-style S3 are `durable` by
-  documentation, and the report cites the source.
+- Each result goes into the backend's profile and the sidecar (`measured`). AWS-style S3 is `durable` by
+  documentation, and the report cites the source; SeaweedFS's durability is measured, not assumed (D94).
 
 ### Tests first
 - **Eligibility per operation** on the measured profiles:
@@ -1310,11 +1313,11 @@ Measurements:
   - a profile forced to `publication: in-place` refuses `append`;
   - one forced to `durability: unknown` refuses `release`, while its offload commits, keeps the trash and reports
     why.
-- The contract and semantic suites on MinIO and SFTP.
+- The contract and semantic suites on SeaweedFS and SFTP.
 - Task 6's election on both: two processes, 50 rounds.
 - `lost-ack` on a put: the retry finds the landed event.
 - `cut` during a list fails as `store.unreachable`, never as a short listing.
-- A MinIO restart after an acknowledged put keeps the event.
+- A SeaweedFS restart (`scripts/testenv restart minio`) after an acknowledged put keeps the event.
 
 ### Verification
 `scripts/testenv up && bun run test:t2 -t "blob-rclone|semantics|publish"`
@@ -1324,7 +1327,7 @@ Measurements:
 ADR-0018's open item.
 
 ### Stop condition
-Both backends have measured profiles, the contract is green on fs, rclone-local, MinIO and SFTP, and the election
+Both backends have measured profiles, the contract is green on fs, rclone-local, SeaweedFS and SFTP, and the election
 never admits two.
 
 ---
@@ -1353,7 +1356,7 @@ blob store.
 
 ### Tests first
 - Golden tests for locations, options and environment, with the canary.
-- T2 bootstrap: two processes with different passwords on one fresh MinIO prefix and one SFTP folder produce one
+- T2 bootstrap: two processes with different passwords on one fresh SeaweedFS (D94) prefix and one SFTP folder produce one
   repository, and the loser's restic is never pointed at the winner's.
 - A kill at each bootstrap step, then `recover`.
 - T2 single-device round trip: offload then onload of a fixture, byte-identical by Task 3's comparison. Until Task 24
@@ -1419,7 +1422,7 @@ and `stores.test`, and the regenerated contract files.
 - `remove` refuses while in use.
 - `test` on a delete-denying fake says `denied`, not "append-only".
 - `init` re-pointing an unreachable path refuses and writes nothing.
-- T2: `add` and `test` on MinIO and SFTP.
+- T2: `add` and `test` on SeaweedFS (D94) and SFTP.
 
 ### Verification
 `bun test packages/cli -t "store|init" && bun run contract && git diff --exit-code plainport.json schemas/ && bun run
@@ -1460,7 +1463,7 @@ Rules:
 - `catalogKey` gives the same key across two passwords on one repository, on restic 0.18.1 and 0.19.1 (matrix; D93), with
   the canary over every master-key component.
 - A `kid` mismatch fails closed.
-- T2 on MinIO: the bytes under `meta/v1/events/` hold no project ULID, path or root key.
+- T2 on SeaweedFS (D94): the bytes under `meta/v1/events/` hold no project ULID, path or root key.
 - An empty-mirror recover on a sealed remote store at every commit boundary (Task 11's rows on a real store).
 
 ### Verification
@@ -1813,7 +1816,8 @@ acknowledgement lost at the worst moments.
 ADR-0017; `CONTRIBUTING.md` "The crash matrix"; Task 4's fault profiles; Tasks 8, 23 and 24.
 
 ### Scope
-Owns `test/crash-matrix/`: a store dimension (local, MinIO, SFTP), a fault dimension (`cut`, `lost-ack`), and the
+Owns `test/crash-matrix/`: a store dimension (local, SeaweedFS as the S3 store per D94, SFTP), a fault dimension
+(`cut`, and `lost-ack` on the S3 store only: on SFTP a downstream reset fires in the SSH handshake, like `cut`), and the
 bootstrap rows.
 
 - Faults at:
@@ -1906,8 +1910,10 @@ Prove the gate under Q16's promise and Q17's lease definition on every available
 ### Scope
 Owns `scripts/gate-m2.ts` and its test, the gate report and the release commits.
 
-- **Store kinds.** Local (T1), MinIO and SFTP (T2, including MinIO with its conditional write switched off, so the
-  non-conditional path races too), and R2 and B2 (T3) when Task 28 passed.
+- **Store kinds.** Local (T1), SeaweedFS (D94) and SFTP (T2, including the S3 store with its conditional write
+  switched off, so the
+  non-conditional path races too; how to switch it off on SeaweedFS is re-planned in Task 17), and R2 and B2 (T3)
+  when Task 28 passed.
 - **Schedules S1 to S8**, each followed by Task 3's tree comparison and the per-device invariants 1 to 6.
 - **Eligibility (R2-6).** Profiles that fail a predicate (forced `publication: in-place`, `durability: unknown`, or
   `elect` failing) refuse exactly the operations Task 6's table says, and their offloads keep their folders.

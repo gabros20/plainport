@@ -10,7 +10,7 @@ import { describe, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
-import { testenvDir } from "../scripts/testenv.ts";
+import { environmentProblem, testenvDir } from "../scripts/testenv.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -28,17 +28,39 @@ export type Gate =
   | { run: false; reason: "tier" }
   | { run: false; reason: "missing"; message: string };
 
-/** Whether a T2 or T3 suite runs: skipped below its tier, failing when its environment is missing. */
+// One health probe per environment folder and test process: every describeT2 suite in a run shares it.
+const probed = new Map<string, string | undefined>();
+const probeOnce = (dir: string): string | undefined => {
+  if (!probed.has(dir)) probed.set(dir, environmentProblem(dir));
+  return probed.get(dir);
+};
+
+/**
+ * Whether a T2 or T3 suite runs: skipped below its tier, failing when its environment is missing. A T2 environment
+ * must also be live: `probe` (default: one `docker inspect` of the containers `up` recorded) names what is wrong with
+ * a stale .testenv/, such as containers removed by a prune or a reboot.
+ */
 export const environmentGate = (
   tier: 2 | 3,
   env: Env = process.env,
   exists: (path: string) => boolean = existsSync,
+  probe: (dir: string) => string | undefined = probeOnce,
 ): Gate => {
   if (!tierEnabled(tier, env)) return { run: false, reason: "tier" };
   const dir = testenvDir(env);
   if (tier === 2) {
     const marker = join(dir, "env.json");
-    if (exists(marker)) return { run: true };
+    if (exists(marker)) {
+      const problem = probe(dir);
+      if (problem === undefined) return { run: true };
+      return {
+        run: false,
+        reason: "missing",
+        message:
+          `the T2 environment in ${dir} is stale: ${problem}. ` +
+          "Run `scripts/testenv down`, then `scripts/testenv up`, then `bun run test:t2`.",
+      };
+    }
     return {
       run: false,
       reason: "missing",

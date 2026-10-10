@@ -16,8 +16,8 @@
 //   oven/bun image, with --init, on a copy of the checkout. LINUX_GAPS lists what it does not reproduce.
 //
 // Options: --dir <dir> (default .testenv/ in the checkout, or PLAINPORT_TESTENV_DIR), --project <name> (default
-// plainport-testenv), --port-base <port> (default 39100). After `up`, the other commands read the project and the
-// ports from <dir>/env.json. The credentials are throwaway values for containers bound to 127.0.0.1; they live in
+// PLAINPORT_TESTENV_PROJECT, else plainport-testenv), --port-base <port> (default 39100). After `up`, the other
+// commands read the project and the ports from <dir>/env.json. The credentials are throwaway values for containers bound to 127.0.0.1; they live in
 // .testenv/ (mode 0700) and in the children's environment, never in argv. Scripts may spawn directly and validate
 // their own dev-only files by hand (run decisions D8 and D10).
 
@@ -86,7 +86,8 @@ export type Toxic = {
  * - latency: 250 ms each way.
  * - slow-close: the close reaches the client 1.5 s after the server closed.
  * - lost-ack: the request goes through whole, untouched; the first byte of the response resets the client. The
- *   store did the work, and the client cannot know.
+ *   store did the work, and the client cannot know. Meaningful for the S3 proxy only: on SFTP the server speaks
+ *   first, so the reset fires during the SSH handshake and acts like cut.
  */
 export const PROFILES = {
   cut: [
@@ -141,6 +142,8 @@ export type TestEnv = {
    * its ~/.docker/cli-plugins, so T2 tests hand these to their children as DOCKER_HOST and PLAINPORT_TESTENV_COMPOSE.
    */
   docker: { host?: string; compose?: string };
+  /** The four containers `up` started, so the T2 gate can check they are still there and healthy. */
+  containers: string[];
   s3: {
     kind: "seaweedfs";
     endpoint: string;
@@ -308,7 +311,8 @@ export type Options = { dir?: string; project?: string; portBase?: number };
 
 const USAGE =
   "usage: scripts/testenv up | down | status | env | restart <service> | fault <s3|sftp> <profile|clear> | " +
-  "linux [-- <command>]  [--dir <dir>] [--project <name>] [--port-base <port>]";
+  "linux [-- <command>]  [--dir <dir>] [--project <name>] [--port-base <port>]\n" +
+  "environment: PLAINPORT_TESTENV_DIR (default --dir), PLAINPORT_TESTENV_PROJECT (default --project)";
 
 export const parseCommand = (
   argv: string[],
@@ -484,6 +488,37 @@ const composeBinary = (): string | undefined => {
   return lstatSync(path).isSymbolicLink() ? resolve(dirname(path), readlinkSync(path)) : path;
 };
 
+/**
+ * Why the environment in `dir` cannot serve T2 suites, or undefined when its containers are all running and healthy.
+ * One `docker inspect` of the containers `up` recorded: cheap enough for describeT2 to run once per process.
+ */
+export const environmentProblem = (dir: string): string | undefined => {
+  let env: TestEnv;
+  try {
+    env = loadTestEnv(dir);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  if (!Array.isArray(env.containers) || env.containers.length !== SERVICES.length) {
+    return `${join(dir, "env.json")} names no containers`;
+  }
+  let ran: Ran;
+  try {
+    ran = spawn(["docker", "inspect", "--format", "{{.State.Health.Status}}", ...env.containers], {
+      ...process.env,
+      ...dockerEnv(env),
+    });
+  } catch (error) {
+    return `docker could not run: ${(error as Error).message}`;
+  }
+  if (ran.exitCode !== 0) return "its containers are gone";
+  const states = ran.stdout.split("\n").filter((line) => line.trim());
+  if (states.length !== env.containers.length || states.some((state) => state.trim() !== "healthy")) {
+    return `its containers are not all healthy (${states.join(", ") || "no state"})`;
+  }
+  return undefined;
+};
+
 /** docker-related variables for T2 tests' children: see TestEnv.docker. */
 export const dockerEnv = (env: TestEnv): Record<string, string> => ({
   ...(env.docker.host === undefined ? {} : { DOCKER_HOST: env.docker.host }),
@@ -544,6 +579,16 @@ const prepare = async (dir: string, options: Options): Promise<Credentials> => {
           `Run \`scripts/testenv down --dir ${dir}\` first, or use another --dir.`,
       );
     }
+    const missing = ["id_ed25519", "id_ed25519.pub", "host_ed25519", "host_ed25519.pub"]
+      .map((name) => join("ssh", name))
+      .concat(["rest.htpasswd"])
+      .filter((name) => !existsSync(join(dir, name)));
+    if (missing.length > 0) {
+      refuse(
+        `${dir} is incomplete: ${missing.join(", ")} missing beside credentials.json. ` +
+          `Run \`scripts/testenv down --dir ${dir}\`, then up again.`,
+      );
+    }
     return existing;
   }
   mkdirSync(f.ssh, { recursive: true, mode: 0o700 });
@@ -581,6 +626,7 @@ const describe = (dir: string, credentials: Credentials, docker: TestEnv["docker
     dir,
     portBase: credentials.portBase,
     docker,
+    containers: [],
     s3: {
       kind: "seaweedfs",
       endpoint: `http://127.0.0.1:${ports.s3}`,
@@ -718,6 +764,13 @@ const up = async (dir: string, options: Options) => {
   }
   await populateProxies(env);
   await probe(env, SERVICES);
+  const ids = compose(credentials.project, dir, credentials, ["ps", "--quiet"]);
+  env.containers = ids.stdout.split("\n").filter((line) => line.trim());
+  if (ids.exitCode !== 0 || env.containers.length !== SERVICES.length) {
+    refuse(
+      `docker compose ps found ${env.containers.length} containers, not ${SERVICES.length}: ${ids.stderr.trim()}`,
+    );
+  }
   // Written last: describeT2 suites take its presence to mean the environment is up.
   writePrivate(files(dir).env, `${JSON.stringify(env, null, 2)}\n`);
   console.log(
@@ -729,20 +782,26 @@ const down = (dir: string, options: Options) => {
   const credentials = readCredentials(dir);
   const project =
     credentials?.project ?? options.project ?? process.env.PLAINPORT_TESTENV_PROJECT ?? DEFAULT_PROJECT;
-  const ran = compose(project, dir, credentials, ["down", "--volumes", "--remove-orphans", "--timeout", "5"]);
-  if (ran.exitCode !== 0) refuse(`docker compose down failed: ${ran.stderr.trim()}`);
+  const f = files(dir);
+  // Refuse before stopping anything: a refusal after `compose down` would leave an env.json that describes
+  // containers that are gone.
   if (existsSync(dir)) {
-    const f = files(dir);
     const strangers = [
       ...readdirSync(dir).filter((name) => !OWN_FILES.includes(name)),
       ...(existsSync(f.ssh) ? readdirSync(f.ssh).filter((name) => !OWN_SSH_FILES.includes(name)) : []),
     ];
     if (strangers.length > 0) {
       refuse(
-        `${dir} holds files testenv did not write (${strangers.join(", ")}); remove them, then run down again`,
+        `${dir} holds files testenv did not write (${strangers.join(", ")}); remove them, then run down again. ` +
+          "Nothing was stopped.",
       );
     }
-    // env.json first, so no suite takes a half-removed folder for an environment.
+    // env.json first, so no suite takes the environment for up while it goes down.
+    if (existsSync(f.env)) unlinkSync(f.env);
+  }
+  const ran = compose(project, dir, credentials, ["down", "--volumes", "--remove-orphans", "--timeout", "5"]);
+  if (ran.exitCode !== 0) refuse(`docker compose down failed: ${ran.stderr.trim()}`);
+  if (existsSync(dir)) {
     for (const name of OWN_FILES.filter((name) => name !== "ssh")) {
       if (existsSync(join(dir, name))) unlinkSync(join(dir, name));
     }
@@ -756,7 +815,11 @@ const down = (dir: string, options: Options) => {
 };
 
 const status = (dir: string, options: Options): number => {
-  const project = readCredentials(dir)?.project ?? options.project ?? DEFAULT_PROJECT;
+  const project =
+    readCredentials(dir)?.project ??
+    options.project ??
+    process.env.PLAINPORT_TESTENV_PROJECT ??
+    DEFAULT_PROJECT;
   const rows = ps(project, dir);
   let healthy = 0;
   for (const service of SERVICES) {

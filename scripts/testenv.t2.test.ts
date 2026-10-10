@@ -5,7 +5,7 @@
 // CLI would find no context.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,6 +90,7 @@ describeT2("testenv: the T2 environment", () => {
       expect(first).toMatchObject({ exitCode: 0 });
       env = loadTestEnv(dir);
       expect(env.project).toBe(project);
+      expect(env.containers).toHaveLength(4);
       expect(env.s3.endpoint).toBe("http://127.0.0.1:39300");
       expect(env.s3.accessKeyId).toMatch(/^[A-Z0-9]{20}$/);
       for (const file of ["env.json", "ssh/config", "ssh/known_hosts", "ssh/id_ed25519", "rest.htpasswd"]) {
@@ -293,6 +294,17 @@ describeT2("testenv: the T2 environment", () => {
         .split(/\s+/)
         .filter(Boolean);
       expect(volumes.length).toBeGreaterThan(0);
+
+      // A file testenv did not write makes down refuse before it stops anything, so no env.json is left
+      // describing containers that are gone.
+      writeFileSync(join(dir, ".DS_Store"), "");
+      const refused = testenv("down");
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain(".DS_Store");
+      expect(docker("ps", "-q", "--filter", label).split("\n").filter(Boolean)).toHaveLength(4);
+      expect(existsSync(join(dir, "env.json"))).toBe(true);
+      expect(testenv("status").exitCode).toBe(0);
+      unlinkSync(join(dir, ".DS_Store"));
 
       expect(testenv("down").exitCode).toBe(0);
       expect(testenv("down").exitCode).toBe(0);
