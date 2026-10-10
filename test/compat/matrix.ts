@@ -53,7 +53,11 @@ export const INVENTORY = [
 ] as const;
 
 /** Schemas under schemas/ that v0.2 added since v0.1.1, with the matrix row each belongs to. */
-export const NEW_SCHEMAS: Readonly<Record<string, string>> = { "trash-claim-boot": "claim.boot" };
+export const NEW_SCHEMAS: Readonly<Record<string, string>> = {
+  "trash-claim-boot": "claim.boot",
+  "election-record": "store.election",
+  "store-semantics": "store.election",
+};
 /** Schemas that exist at v0.1.1 and differ now, with their row. A changed file schema is a compatibility event. */
 export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {};
 

@@ -442,10 +442,43 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     );
   }, 300_000);
 
+  test("[store.election] v0.1.1 ignores and never deletes election records and repos/<attempt>/ folders beside an M1 store", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const [a, b] = [ulid(), ulid()];
+      const records = join(w.store, "meta/v1/candidates");
+      mkdirSync(records, { recursive: true });
+      const files: Record<string, unknown> = {
+        [`${a}.json`]: { v: 1, id: a, decision: "candidate" },
+        [`${a}.publishing`]: { v: 1, id: a, decision: "publishing" },
+        [`${b}.json`]: { v: 1, id: b, decision: "candidate" },
+        [`${b}.refused`]: { v: 1, id: b, decision: "refused" },
+      };
+      for (const [name, record] of Object.entries(files))
+        writeFileSync(join(records, name), `${JSON.stringify(record)}\n`);
+      mkdirSync(join(w.store, "repos", b), { recursive: true });
+      writeFileSync(join(w.store, "repos", b, "config"), "not a repository\n");
+      const before = treeDigest(join(w.store, "repos")) + treeDigest(records);
+      for (const args of [
+        ["ls", "--json"],
+        offloadArgs,
+        ["gc", "--now", "--yes", "--json"],
+        ["recover", "--json"],
+      ]) {
+        const ran = await w.old(args);
+        expect(ran.err, `old ${args[0]}`).not.toContain(SKIPPED);
+        await settleJournals(w.box.paths);
+      }
+      expect(treeDigest(join(w.store, "repos")) + treeDigest(records)).toBe(before);
+      expectOk(await w.old(onloadArgs), "old onload");
+      expect(sameAsReference(w)).toEqual([]);
+    });
+  }, 120_000);
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
   test.todo("[store.json.v2] Task 9: a store v0.2 creates is format 2 and v0.1.1 refuses it (the real shape)", () => {});
-  test.todo("[store.election] Task 8: v0.1.1 never reads or deletes repos/<attempt>/ or an election candidate, and a rollback leaves them", () => {});
+  test.todo("[store.election] Task 8: bootstrap's own repos/<attempt>/ layout and candidate prefix, with v0.1.1 ignoring them (stand-in layout tested now)", () => {});
   test.todo("[store.sidecar] Task 9: v0.1.1 ignores stores/<store id>.json and `scripts/install --rollback` still works with one present", () => {});
   test.todo("[store.upgrade-intent] Task 19: the upgrade-intent marker blocks a v0.2 offload and bootstrap, and v0.1.1 ignores it", () => {});
   test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade refuses (store.not-quiescent) while a paused v0.1.1 holds a lease", () => {});
