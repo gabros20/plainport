@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
   canAppend,
   canCommit,
@@ -9,6 +10,7 @@ import {
   requireEligible,
   type StoreSemantics,
   StoreSemanticsSchema,
+  storeSemanticsJsonSchemas,
   UNKNOWN_SEMANTICS,
 } from "./blob-store.ts";
 
@@ -33,6 +35,15 @@ describe("store semantics: the profile", () => {
     ).toBe(false);
     expect(StoreSemanticsSchema.safeParse({ ...strong, publication: { value: "none" } }).success).toBe(false);
     expect(StoreSemanticsSchema.safeParse({ ...strong, extra: "unknown" }).success).toBe(false);
+  });
+
+  test("the profile is published as JSON Schema, the zod schema's own export", () => {
+    expect(storeSemanticsJsonSchemas()).toEqual({
+      "store-semantics": z.toJSONSchema(StoreSemanticsSchema, {
+        target: "draft-2020-12",
+        io: "input",
+      }) as Record<string, unknown>,
+    });
   });
 
   test("capabilities() derives from the profile: create-if-absent only when conditional create is known true", () => {

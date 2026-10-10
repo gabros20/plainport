@@ -240,6 +240,13 @@ describe("publish: the elected publication", () => {
     }
   });
 
+  test("elect() requires exactly what canElect requires: a proven conditional create needs no visibility", async () => {
+    const strong = semanticBlobStore().semantics();
+    const profile: StoreSemantics = { ...strong, readAfterWrite: "unknown", listComplete: "unknown" };
+    const store = semanticBlobStore({ profile });
+    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
+  });
+
   test("an unknown conditional create alone routes to the fallback", async () => {
     const strong = semanticBlobStore(NO_CREATE).semantics();
     const profile: StoreSemantics = { ...strong, conditionalCreate: "unknown" };
@@ -302,6 +309,58 @@ describe("publish: the elected publication", () => {
     expect(await outcome(store, b)).toEqual({ outcome: "lost", winner: "A" });
   });
 
+  test("a sole candidate that pauses before publishing never makes another's contested terminal (astra r1)", async () => {
+    const store = semanticBlobStore(NO_CREATE);
+    let blocked: () => void = () => {};
+    const aBlocked = new Promise<void>((resolve) => {
+      blocked = resolve;
+    });
+    let release: () => void = () => {};
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A lists itself as the sole candidate, then pauses before its next write.
+    let listed = false;
+    const paused: BlobStore = {
+      ...store,
+      list: async (prefix) => {
+        const result = await store.list(prefix);
+        listed = true;
+        return result;
+      },
+      put: async (key, data, opts) => {
+        if (listed) {
+          blocked();
+          await resume;
+        }
+        return store.put(key, data, opts);
+      },
+    };
+    const a = elect(paused, election("A"));
+    await aBlocked;
+    // B sees A, exhausts its reads, and returns.
+    const b = await outcome(store, election("B"));
+    release();
+    expect(await a).toEqual({ ok: true, value: { outcome: "won" } });
+    // B must not have reported "no winner, every visible candidate refuses": A was entitled to publish.
+    expect(b).toMatchObject({ outcome: "contested", undecided: ["A"] });
+    expect(await outcome(store, election("B"))).toEqual({ outcome: "lost", winner: "A" });
+  });
+
+  test("a terminal contested names no undecided candidate, and its fix is the quiesced cleanup", async () => {
+    const store = semanticBlobStore(NO_CREATE);
+    await store.put(`${CANDIDATES}B.json`, bytes("{}"));
+    await store.put(`${CANDIDATES}B.refused`, bytes("{}"));
+    const o = await outcome(store, election("A"));
+    expect(o).toMatchObject({ outcome: "contested", candidates: ["A", "B"], undecided: [] });
+    if (o.outcome === "contested") expect(o.fix).toContain("every device");
+    // A refused for good: re-running the same attempt never publishes.
+    await store.delete(`${CANDIDATES}B.json`);
+    await store.delete(`${CANDIDATES}B.refused`);
+    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: [] });
+    expect(store.data.has(PUBLISHED)).toBe(false);
+  });
+
   /** A store whose every call runs when the fast-check scheduler says. */
   const scheduled = (inner: BlobStore, s: fc.Scheduler): BlobStore => ({
     ...inner,
@@ -336,7 +395,11 @@ describe("publish: the elected publication", () => {
             if (won.length === 1) expect(winner).toBe(won[0]);
             for (const o of outcomes) {
               if (o.outcome === "lost") expect(o.winner).toBe(winner as string);
-              if (o.outcome === "contested") expect(o.candidates.length).toBeGreaterThan(1);
+              if (o.outcome === "contested") {
+                expect(o.candidates.length).toBeGreaterThan(1);
+                // A terminal contested ("every visible candidate refuses") is never wrong: nobody won.
+                if ((o.undecided ?? []).length === 0) expect(won).toEqual([]);
+              }
             }
             // A published value always names a claimant, and only one ever is.
             if (winner !== undefined) expect(ids).toContain(winner);
@@ -345,5 +408,48 @@ describe("publish: the elected publication", () => {
         );
       });
     }
+  }
+
+  for (const [route, options] of [
+    ["conditional create", {}],
+    ["sole candidate", NO_CREATE],
+  ] as const) {
+    test(`${route}: a cancelled write that lands late never makes a second winner`, async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.scheduler(), fc.nat(6), async (s, skip) => {
+          const inner = semanticBlobStore({ ...options, lateLanding: true });
+          // Cancel the (skip+1)-th put: a candidate, a marker or a publication.
+          let puts = 0;
+          const cancelling: BlobStore = {
+            ...inner,
+            put: (key, data, opts) => {
+              if (puts++ === skip) inner.cancelNext();
+              return inner.put(key, data, opts);
+            },
+          };
+          const store = scheduled(cancelling, s);
+          const ids = ["C0", "C1"];
+          const settling = s.schedule(Promise.resolve()).then(() => inner.settle());
+          const first = await s.waitFor(Promise.all(ids.map((id) => elect(store, election(id)))));
+          await s.waitFor(settling);
+          inner.settle();
+          // Every attempt re-runs once everything has landed (its recovery).
+          const again = await Promise.all(ids.map((id) => elect(inner, election(id))));
+          const won = new Set<string>();
+          for (const results of [first, again]) {
+            results.forEach((r, i) => {
+              if (r.ok && r.value.outcome === "won") won.add(ids[i] as string);
+            });
+          }
+          expect(won.size).toBeLessThanOrEqual(1);
+          const published = inner.data.get(PUBLISHED);
+          if (won.size === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe([...won][0]);
+          for (const r of again) {
+            if (r.ok && r.value.outcome === "lost") expect([...won]).toEqual([r.value.winner]);
+          }
+        }),
+        { numRuns: 300 },
+      );
+    });
   }
 });

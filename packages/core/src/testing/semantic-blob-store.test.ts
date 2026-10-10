@@ -7,7 +7,7 @@ import {
   requireEligible,
   type StoreSemantics,
 } from "../ports/blob-store.ts";
-import { blobStoreContract, semanticViolations } from "./blob-store-contract.ts";
+import { ALL_ELIGIBLE, blobStoreContract, semanticViolations } from "./blob-store-contract.ts";
 import { semanticBlobStore } from "./semantic-blob-store.ts";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -26,10 +26,46 @@ const STRONG: StoreSemantics = {
 };
 
 // With no weakness switched on, the fake is the memory store, and keeps its contract.
-blobStoreContract("semantic fake without weaknesses", () => ({
-  store: semanticBlobStore(),
-  cleanup: () => {},
-}));
+blobStoreContract(
+  "semantic fake without weaknesses",
+  () => ({ store: semanticBlobStore(), cleanup: () => {} }),
+  { eligibility: ALL_ELIGIBLE },
+);
+
+// A store that acknowledges before it syncs (SFTP) keeps the contract too: Q21 admits it for release with the
+// post-grace proof, and the contract asserts exactly that instead of every predicate.
+blobStoreContract(
+  "semantic fake, acked-unsynced",
+  () => ({ store: semanticBlobStore({ durability: "acked-unsynced" }), cleanup: () => {} }),
+  { eligibility: { ...ALL_ELIGIBLE, release: "post-grace-proof" } },
+);
+
+describe("semantic probe: failure handling", () => {
+  test("a probe write that fails stops and joins the observer, and removes the probe's keys", async () => {
+    const inner = semanticBlobStore();
+    const failing = {
+      ...inner,
+      put: (key: string, data: Uint8Array, opts?: { ifNotExists?: boolean }) =>
+        key.endsWith("/whole")
+          ? Promise.resolve({
+              ok: false as const,
+              exitCode: 1 as const,
+              finding: {
+                code: "store.failed",
+                severity: "block" as const,
+                message: "injected",
+                allowable: false,
+              },
+            })
+          : inner.put(key, data, opts),
+    };
+    await expect(semanticViolations(failing, undefined, { listProbeKeys: 5 })).rejects.toThrow("injected");
+    const reads = inner.calls.get;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(inner.calls.get).toBe(reads);
+    expect([...inner.data.keys()].filter((key) => key.startsWith("probe/"))).toEqual([]);
+  });
+});
 
 describe("semantic fake: each weakness is caught", () => {
   test("delayed visibility: a get does not see a write until it settles", async () => {
@@ -126,6 +162,15 @@ describe("semantic fake: each weakness is caught", () => {
     await dropped.put("k", bytes("v"));
     dropped.settle();
     expect(await dropped.get("k")).toEqual({ ok: true, value: null });
+  });
+
+  test("a cancelled conditional create that lands late keeps its condition: it fails if the key now exists", async () => {
+    const store = semanticBlobStore({ lateLanding: true });
+    store.cancelNext();
+    await store.put("k", bytes("late"), { ifNotExists: true });
+    expect(await store.put("k", bytes("first"), { ifNotExists: true })).toMatchObject({ ok: true });
+    store.settle();
+    expect(text(((await store.get("k")) as { value: Uint8Array }).value)).toBe("first");
   });
 
   test("late landing contradicts a claimed never-lands-late", async () => {
