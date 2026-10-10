@@ -118,6 +118,17 @@ describe("scan: git facts", () => {
     expect(got?.unpushedTags).toEqual(["v2-light", "v2-note"]);
   });
 
+  test("a tag of an annotated tag is peeled to its commit and found (git 2.42 prints nest tag tag)", async () => {
+    const dir = fx.repo("web");
+    fx.origin(dir);
+    fx.write(join(dir, "c1.txt"), "1\n");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "ahead");
+    fx.git(dir, "tag", "-a", "-m", "inner", "inner");
+    fx.git(dir, "tag", "-a", "-m", "outer", "outer", "inner");
+    expect((await facts(dir))?.unpushedTags).toEqual(["inner", "outer"]);
+  });
+
   test("a repository with no remote has every tag unpushed, and none when it has no tags", async () => {
     const dir = fx.repo("web");
     expect((await facts(dir))?.unpushedTags).toEqual([]);

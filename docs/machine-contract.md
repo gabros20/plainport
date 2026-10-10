@@ -202,6 +202,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `device.none` | block | no | 6 | This device has no identity yet; fix points at plainport init |
 | `env.docker-mount` | block | yes | 6 | A running container bind-mounts the project folder or a folder inside it; offloading would pull files from under it |
 | `fs.case-collision` | block | no | 6 | The snapshot holds names that differ only by case (Foo.ts, foo.ts) and the landing volume ignores case, so one would overwrite the other; onload to a case-sensitive volume with --to |
+| `fs.case-unknown` | warn | no | 6 | onload --dry-run: the snapshot holds names that differ only by case, and a preview cannot tell without writing whether the landing volume ignores case (no folder above it has a letter in its name to look up); the onload itself probes the volume |
 | `fs.cross-volume` | block | no | 6 | The project folder is on another volume than the folder it would be moved aside into, so release could not rename it in one step |
 | `fs.dataless` | block | no | 6 | A file is an iCloud or Dropbox placeholder (dataless): reading it triggers a download or fails |
 | `fs.link-outside` | warn | yes | 6 | A symlink points outside the project; the link is stored, its target is not |
@@ -306,7 +307,10 @@ a `block` finding exits 6 (D38): its envelope is a failure whose `error.finding`
 `data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. The
 same holds for `onload --dry-run`, whose `data` is the preview (`kind: "onload"`): `restored` (`restore` or `reuse`, as in the real output)
 and why, the snapshot and the head it goes over, the landing folder, the space it needs, the findings and the
-hydrate plan. `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. A command that has no preview refuses
+hydrate plan, and `pending` (`op`, `step`, `action`: `resume` or `roll-back`) when an earlier onload stopped before
+its swap. The hydrate plan comes from the snapshot's file list, so it has no `untrusted` list: `untrustedKnown` is
+`false`, which is not the same as none. A live lock or a journal that holds the project back refuses with the run's
+own finding (`project.locked` exit 11, `journal.pending` exit 6). `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy

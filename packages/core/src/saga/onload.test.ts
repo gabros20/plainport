@@ -27,6 +27,7 @@ import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog 
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { type Journal, type OnloadJournal, readJournals } from "../journal/index.ts";
+import { acquireLock } from "../lock.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
@@ -35,6 +36,7 @@ import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { setUpStore } from "../store.ts";
+import { bytesOf } from "../testing/bytes.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { makeGitFixture } from "../testing/git-fixture.ts";
@@ -1982,26 +1984,6 @@ describe("onload: a first offload whose only event is unreadable (D88)", () => {
   });
 });
 
-/** Every entry below a folder with its mode and a hash of its content, link target or kind: byte-for-byte. */
-const bytesOf = (root: string): Record<string, string> => {
-  const out: Record<string, string> = {};
-  const walk = (relative: string) => {
-    for (const name of readdirSync(relative === "" ? root : join(root, relative)).sort()) {
-      const path = relative === "" ? name : `${relative}/${name}`;
-      const full = join(root, path);
-      const stat = lstatSync(full);
-      const mode = (stat.mode & 0o7777).toString(8);
-      if (stat.isSymbolicLink()) out[path] = `link ${mode} ${readlinkSync(full)}`;
-      else if (stat.isDirectory()) {
-        out[path] = `dir ${mode}`;
-        walk(path);
-      } else out[path] = `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
-    }
-  };
-  walk("");
-  return out;
-};
-
 const storeBytes = (): Record<string, string> =>
   Object.fromEntries(
     [...store.data.entries()].map(([key, bytes]) => [key, createHash("sha256").update(bytes).digest("hex")]),
@@ -2156,6 +2138,46 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
     expect(((await readJournals(testHost(), box.paths)).journals as OnloadJournal[])[0]?.op).toBe(
       stopped?.op,
     );
+  });
+
+  test("an onload stopped after its swap refuses as the run does: journal.pending, exit 6, recover first", async () => {
+    await offload();
+    const crash = testHost({ faults: { at: "onload.swapped" } });
+    await expect(onload({}, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    const run = await onload();
+    const got = await preview();
+    if (run.ok || got.ok) throw new Error("both must refuse");
+    expect([got.exitCode, got.finding.code, got.finding.fix]).toEqual([
+      run.exitCode,
+      run.finding.code,
+      run.finding.fix,
+    ]);
+    expect(got.exitCode).toBe(6);
+    expect(!got.ok && got.finding.fix).toContain("plainport recover");
+    // The folder it already moved into place does not make the preview say "move it aside" first.
+    expect(!got.ok && (got.data as { findings: { code: string }[] }).findings[0]?.code).toBe(
+      "journal.pending",
+    );
+  });
+
+  test("a live process holding the project's lock refuses as the run does: project.locked, exit 11", async () => {
+    await offload();
+    const id = await projectId();
+    const lock = await acquireLock(testHost(), join(box.paths.locksDir, `${id}.lock`), {
+      timeoutMs: 0,
+      held: () => {
+        throw new Error("not held yet");
+      },
+      now: () => new Date(),
+    });
+    expect(lock.ok).toBe(true);
+    try {
+      const got = await preview();
+      expect(!got.ok && [got.exitCode, got.finding.code]).toEqual([11, "project.locked"]);
+      expect(!got.ok && got.data).toMatchObject({ kind: "onload", restored: "restore" });
+    } finally {
+      if (lock.ok) await lock.value.release();
+    }
   });
 
   test("the preview's phases are paired, on a success and on a refusal", async () => {

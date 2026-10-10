@@ -43,8 +43,8 @@ export const formatBytes = (bytes: number): string => {
   return `${Number(value.toFixed(digits))} ${SI[unit]}`;
 };
 
-const LABEL = 10;
-const row = (label: string, text: string): string => `  ${label.padEnd(LABEL)}${text}`;
+export const LABEL = 10;
+export const row = (label: string, text: string): string => `  ${label.padEnd(LABEL)}${text}`;
 const SHOWN_LARGEST = 3;
 const SHOWN_IGNORED = 5;
 

@@ -21,7 +21,7 @@ import {
 import { z } from "zod";
 import { type CommandContext, defineCommand } from "../registry.ts";
 import { thisDevice } from "./local.ts";
-import { formatBytes } from "./offload.ts";
+import { formatBytes, row } from "./offload.ts";
 
 const HydrateReportSchema = z.looseObject({
   status: z.enum(["installed", "failed", "skipped", "reused", "none"]).meta({
@@ -172,11 +172,11 @@ const installs = (report: z.output<typeof HydrateReportSchema>): string =>
     )
     .join(", ");
 
-const row = (label: string, text: string): string => `  ${label.padEnd(10)}${text}`;
-
 /** The preview as a person reads it: the onload's target, where it lands, what it needs, the install, the findings. */
 const renderPreview = (preview: z.output<typeof OnloadPreviewSchema>): string => {
-  const lines = [`${preview.project} ← ${preview.store}, snapshot ${preview.snapshot} over ${preview.over}`];
+  const lines = [
+    `${preview.project} ← ${preview.store}, snapshot ${preview.snapshot}${preview.over === preview.snapshot ? "" : ` over ${preview.over}`}`,
+  ];
   lines.push(row("into", preview.dir));
   if (preview.pending !== undefined)
     lines.push(
@@ -225,8 +225,8 @@ const renderPreview = (preview: z.output<typeof OnloadPreviewSchema>): string =>
     }
   }
   for (const f of preview.findings) {
+    // A refusal's fix is printed with the failure itself (stderr), so it is not repeated here.
     lines.push(row(f.severity, `${f.code}  ${f.message}`));
-    if (f.severity === "block" && f.fix !== undefined) lines.push(`${" ".repeat(14)}fix: ${f.fix}`);
   }
   return lines.join("\n");
 };

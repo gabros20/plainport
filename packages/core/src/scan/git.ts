@@ -328,25 +328,33 @@ export const inProgress = async (host: HostPorts, gitDir: string): Promise<Resul
 };
 
 /**
- * The tags whose commit no remote-tracking branch holds (D69): the commits the tags reach that no remote does
- * (`rev-list --tags --not --remotes`), matched with each tag's commit, an annotated tag's peeled. Tags on anything but
- * a commit (a tree, a blob) hold no history and are left out.
+ * The tags whose commit no remote-tracking branch holds (D69). Each tag is peeled all the way (a tag of a tag
+ * included) to its commit by one `cat-file --batch-check`; tags on anything but a commit hold no history and are left
+ * out. With no remote-tracking branch at all every tag is unpushed, and git is not asked to walk the history; else
+ * `rev-list --tags --not --remotes` lists only the commits ahead of the remotes.
  */
-const unpushedTagsOf = async (host: HostPorts, dir: string, ctx: GitContext): Promise<Result<string[]>> => {
-  const refs = await git(host, dir, ctx, [
-    "for-each-ref",
-    "--format=%(refname:short)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)",
-    "refs/tags",
-  ]);
+const unpushedTagsOf = async (
+  host: HostPorts,
+  dir: string,
+  ctx: GitContext,
+  remoteBranches: boolean,
+): Promise<Result<string[]>> => {
+  const refs = await git(host, dir, ctx, ["for-each-ref", "--format=%(refname)", "refs/tags"]);
   if (!refs.ok) return refs;
+  const names = records(refs.value, NL);
+  if (names.length === 0) return ok([]);
+  const peeled = await git(host, dir, ctx, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], {
+    stdin: new TextEncoder().encode(`${names.map((n) => `${n}^{}`).join("\n")}\n`),
+  });
+  if (!peeled.ok) return peeled;
+  const answers = records(peeled.value, NL);
   const commitOf = new Map<string, string[]>();
-  for (const line of records(refs.value, NL)) {
-    const [name = "", type = "", object = "", peeledType = "", peeled = ""] = line.split("\0");
-    const commit = type === "commit" ? object : peeledType === "commit" ? peeled : undefined;
-    if (name === "" || commit === undefined) continue;
-    commitOf.set(commit, [...(commitOf.get(commit) ?? []), name]);
-  }
-  if (commitOf.size === 0) return ok([]);
+  names.forEach((name, i) => {
+    const [object = "", type = ""] = (answers[i] ?? "").split(" ");
+    if (type !== "commit") return;
+    commitOf.set(object, [...(commitOf.get(object) ?? []), name.slice("refs/tags/".length)]);
+  });
+  if (!remoteBranches) return ok([...commitOf.values()].flat().sort());
   const held = await git(host, dir, ctx, ["rev-list", "--tags", "--not", "--remotes", "--"]);
   if (!held.ok) return held;
   const tags: string[] = [];
@@ -468,7 +476,7 @@ export const gitFacts = async (
     if (!out.ok) return out;
     detachedHead = Number(text(out.value).trim());
   }
-  const tags = await unpushedTagsOf(host, dir, ctx);
+  const tags = await unpushedTagsOf(host, dir, ctx, remoteBranches);
   if (!tags.ok) return tags;
   const operations = await inProgress(host, gitDir);
   if (!operations.ok) return operations;

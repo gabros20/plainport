@@ -231,6 +231,7 @@ describe("findings", () => {
       "verify.mismatch": { severity: "block", allowable: false, exitCode: 7, summary: expect.any(String) },
       "strip.kept": { severity: "info", allowable: false, exitCode: 6, summary: expect.any(String) },
       "fs.case-collision": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "fs.case-unknown": { severity: "warn", allowable: false, exitCode: 6, summary: expect.any(String) },
       "fs.no-space": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "hydrate.failed": { severity: "block", allowable: false, exitCode: 10, summary: expect.any(String) },
       "lease.held": { severity: "warn", allowable: false, exitCode: 8, summary: expect.any(String) },

@@ -21,6 +21,7 @@ import { nodeLocalIo } from "@plainport/core";
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
 import { z } from "zod";
 import { describeT1 } from "../../../../test/tiers.ts";
+import { bytesOf } from "../../../core/src/testing/bytes.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
 import { testHost } from "../../../core/src/testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../../../core/src/testing/invariants.ts";
@@ -386,26 +387,6 @@ describe("onload: the command", () => {
   });
 });
 
-/** Every entry below a folder with its mode and a hash of its content or link target: byte-for-byte. */
-const bytesOf = (root: string): Record<string, string> => {
-  const out: Record<string, string> = {};
-  const walk = (relative: string) => {
-    for (const name of readdirSync(relative === "" ? root : join(root, relative)).sort()) {
-      const path = relative === "" ? name : `${relative}/${name}`;
-      const full = join(root, path);
-      const stat = lstatSync(full);
-      const mode = (stat.mode & 0o7777).toString(8);
-      if (stat.isSymbolicLink()) out[path] = `link ${mode} ${readlinkSync(full)}`;
-      else if (stat.isDirectory()) {
-        out[path] = `dir ${mode}`;
-        walk(path);
-      } else out[path] = `file ${mode} ${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
-    }
-  };
-  walk("");
-  return out;
-};
-
 describe("onload --dry-run (M2 task 2, D71)", () => {
   const planSchema = () => {
     const command = REGISTRY.find((c) => c.name === "onload");
@@ -485,7 +466,7 @@ describe("onload --dry-run (M2 task 2, D71)", () => {
     const snapshot = await offloaded();
     const run = await cli(["onload", "work:web", "--dry-run"]);
     expect(run.code).toBe(0);
-    expect(run.out).toContain(`work:web ← local, snapshot ${snapshot} over ${snapshot}`);
+    expect(run.out).toContain(`work:web ← local, snapshot ${snapshot}\n`);
     expect(run.out).toContain(`  into      ${dir()}`);
     expect(run.out).toMatch(/ {2}restore {3}from the store: /);
     expect(run.out).toMatch(/ {2}space {5}needs about .+ free/);
@@ -601,6 +582,44 @@ describeT1("onload with the real restic on a temp external-disk store", () => {
         stripped: ["node_modules"],
       }),
     ).toEqual([]);
+  }, 120_000);
+});
+
+describeT1("onload --dry-run with the real restic (M2 task 2, D71)", () => {
+  test("the preview leaves the sandbox and the store byte-identical, apart from restic's own cache", async () => {
+    const host = macosTestHost();
+    const env = {
+      HOME: box.home,
+      PATH: `${bin}:${PATH}`,
+      PLAINPORT_STORE_PASSWORD: "t1-pw",
+      FAKE_PM_LOG: join(box.home, "pm.log"),
+    };
+    const real = (): Ports => ({
+      ...ports(),
+      env,
+      system: host,
+      io: host,
+      stores: localStores(host, env),
+    });
+    const run = (argv: string[]) => capture(argv, REGISTRY, { ports: real() });
+    expect((await run(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"])).code).toBe(
+      0,
+    );
+    const off = await run(["offload", "work:web", "--store", "t1", "--yes", "--json"]);
+    expect(off.code).toBe(0);
+    const op = envelope(off.out).data.op as string;
+    for (let i = 0; i < 1200 && existsSync(join(box.home, "work/.plainport-trash", op)); i++)
+      await Bun.sleep(25);
+    // Warm this device's event mirror (D45) and restic's cache; the preview after it adds nothing to either.
+    expect((await run(["onload", "work:web", "--store", "t1", "--dry-run", "--json"])).code).toBe(0);
+    // restic's cache (the sandbox HOME's ~/.cache/plainport/restic) is the one thing a listing may touch.
+    const cache = (path: string) => path === ".cache" || path.startsWith(".cache/");
+    const before = bytesOf(box.home, cache);
+    const dry = await run(["onload", "work:web", "--store", "t1", "--dry-run", "--json"]);
+    expect(dry.code).toBe(0);
+    expect(envelope(dry.out).data).toMatchObject({ restored: "restore", snapshot: op, over: op });
+    expect(bytesOf(box.home, cache)).toEqual(before);
+    expect(existsSync(dir())).toBe(false);
   }, 120_000);
 });
 

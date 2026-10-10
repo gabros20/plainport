@@ -101,7 +101,13 @@ import {
   previewHydrate,
 } from "./hydrate.ts";
 import { openSaga, runSaga, type Saga, withFix, writeFailed } from "./journaled.ts";
-import { nestedProjects, type ProjectLock, registeredFolders, withProjectLock } from "./project-gate.ts";
+import {
+  gateFindings,
+  nestedProjects,
+  type ProjectLock,
+  registeredFolders,
+  withProjectLock,
+} from "./project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { checkSnapshot, kindAt, producedBy, restoreVerified, unreadable } from "./restore-tree.ts";
 
@@ -146,6 +152,10 @@ export const ONLOAD_BRANCHES = {
 } as const;
 
 /** The steps before the swap: a journal at one of them changed nothing outside its staging folder. */
+/** The interrupted operation an onload takes over instead of refusing (DESIGN step 3): its own, before the swap. */
+const RESUME_ONLOAD = (j: Journal, own: boolean): boolean =>
+  own && j.kind === "onload" && BEFORE_SWAP.has(j.step);
+
 const BEFORE_SWAP: ReadonlySet<string> = new Set([
   "onload.begin",
   "onload.restore.start",
@@ -400,7 +410,7 @@ const onloadFlow = async (
   return withProjectLock(gate, { id, address: ref.address }, (lock, resumed) => onloadLocked(lock, resumed), {
     related: nested,
     // An onload of this project that stopped before its swap is taken over, never refused (DESIGN step 3).
-    resume: (j, own) => own && j.kind === "onload" && BEFORE_SWAP.has(j.step),
+    resume: RESUME_ONLOAD,
   });
 
   /** What the onload restores: the project as the catalog folds it, the snapshot, the head it goes over, its copy here. */
@@ -501,65 +511,216 @@ const onloadFlow = async (
     }
   }
 
+  /**
+   * An earlier onload of this project, stopped before its swap, that this run takes over: the same snapshot to the
+   * same folder, and for a renamed-back folder, one that is still reusable (D51). Otherwise undefined: it is rolled
+   * back first. Reads only.
+   */
+  async function resumable(open: Journal | undefined, snapshot: string): Promise<OnloadJournal | undefined> {
+    if (open?.kind !== "onload") return undefined;
+    if (open.snapshot !== snapshot || open.project.dir !== landing) return undefined;
+    if (open.reuse !== undefined) {
+      const still = await reusable(snapshot, landing);
+      if (still?.op !== open.reuse.op) return undefined;
+    }
+    return open;
+  }
+
+  interface Preflighted {
+    rootFolder: string;
+    /** The renamed-back folder, when the onload reuses one. */
+    reuse: { op: string; folder: string } | undefined;
+    /** Whether the snapshot's listing was read (a restore), not the event's totals (a reuse). */
+    listed: boolean;
+    files: number;
+    bytes: number;
+    needed: number;
+    free: number;
+    rootMode?: number;
+    stripped?: number;
+    /** collect: what would refuse the onload, in the order the run meets them. */
+    blockers: Failure[];
+    /** collect: what the preview cannot settle without writing. */
+    warnings: Finding[];
+    /** The lease finding, when another device holds the project (a warning unless leases = "strict"). */
+    lease?: Finding;
+    /** collect: the snapshot's entries, for the preview's hydrate plan. */
+    listing?: ManifestBuilder;
+  }
+
+  /**
+   * The onload's preflight (DESIGN step 2), once, for the run and the preview: the lease, the landing place, the
+   * landing folder's surroundings, reuse, and the snapshot's listing with its space and case checks. The run
+   * (collect: false) returns the first refusal and writes its staging holder; the preview (collect: true) collects
+   * every refusal and writes nothing, so a check added here shows up in both.
+   */
+  async function preflightChecks(
+    t: Target,
+    how: { collect: false; resumed: OnloadJournal | undefined; ctx: RunContext } | { collect: true },
+  ): Promise<Result<Preflighted>> {
+    const { project, snapshot, over, made, stored } = t;
+    const collect = how.collect;
+    const blockers: Failure[] = [];
+    const warnings: Finding[] = [];
+    /** The refusal to return now (run), or undefined after noting it (preview). */
+    const refuse = (f: Failure): Failure | undefined => {
+      if (!collect) return f;
+      blockers.push(f);
+      return undefined;
+    };
+    const lease = leaseHeld(project);
+    if (lease !== undefined) {
+      if (config.onload.leases === "strict") {
+        const stopped = refuse(fail(lease, 8));
+        if (stopped !== undefined) return stopped;
+      } else if (!collect) report(lease);
+    }
+
+    const occupied = await occupiedBy(project, over);
+    if (occupied !== undefined) {
+      const stopped = refuse(occupied);
+      if (stopped !== undefined) return stopped;
+    }
+    const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
+    const placed = await landingChecks(rootFolder);
+    let nearest = rootFolder;
+    if (placed.ok) nearest = placed.value;
+    else {
+      const stopped = refuse(placed);
+      if (stopped !== undefined) return stopped;
+      try {
+        nearest = await nearestExisting(io, dirname(landing));
+      } catch (error) {
+        assertSystemError(error);
+      }
+    }
+    const holder = join(rootFolder, STAGING_DIR);
+
+    // The same head's folder, still in its offload's trash: renamed back rather than restored.
+    const reuse =
+      !how.collect && how.resumed !== undefined
+        ? how.resumed.reuse
+        : snapshot === over && req.to === undefined
+          ? await reusable(snapshot, landing)
+          : undefined;
+    const out: Preflighted = {
+      rootFolder,
+      reuse,
+      listed: false,
+      files: 0,
+      bytes: 0,
+      needed: 0,
+      free: 0,
+      blockers,
+      warnings,
+      ...(lease === undefined ? {} : { lease }),
+    };
+    if (reuse !== undefined) {
+      // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
+      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
+      out.files = produced?.stats.files ?? 0;
+      out.bytes = produced?.stats.bytes ?? 0;
+      if (collect) {
+        try {
+          out.free = await io.fs.freeBytes(nearest);
+        } catch (error) {
+          blockers.push(unreadable(nearest, error, "its free space is unknown"));
+        }
+      }
+      return ok(out);
+    }
+    if (!how.collect) {
+      try {
+        // A --to landing's holder is noted first, so gc finds a staging folder whose journal a lost write dropped.
+        if (req.to !== undefined) await noteStagingHolder(io, paths, holder);
+        await io.fs.mkdirp(holder);
+      } catch (error) {
+        return writeFailed(error, `making ${holder}`, false, holder);
+      }
+    }
+    const listing = new ManifestBuilder();
+    const listed = await checkSnapshot({
+      io,
+      engine: store.engine,
+      store: store.blob,
+      stored,
+      ...(made.event === undefined ? {} : { event: made.event }),
+      ctx: how.collect ? { op, ...(signal === undefined ? {} : { signal }), emit: () => {} } : how.ctx,
+      op,
+      nearest,
+      holder,
+      resuming: !how.collect && how.resumed !== undefined,
+      address: ref.address,
+      elsewhere: `plainport onload ${shellWord(ref.address)} --to <path>`,
+      ...(how.collect
+        ? {
+            preview: {
+              problems: blockers,
+              warnings,
+              onEntry: (entry) => {
+                if (entry.type === "file" || entry.type === "dir" || entry.type === "symlink")
+                  listing.add({
+                    path: entry.path,
+                    type: entry.type,
+                    size: entry.size ?? 0,
+                    mode: entry.mode,
+                    mtimeNs: 0n,
+                    ...(entry.linkTarget === undefined ? {} : { linkTarget: entry.linkTarget }),
+                  });
+              },
+            },
+          }
+        : {}),
+    });
+    if (!listed.ok) return !how.collect && signal?.aborted ? cancelled() : listed;
+    const t2 = listed.value;
+    return ok({
+      ...out,
+      listed: true,
+      files: t2.files,
+      bytes: t2.bytes,
+      needed: t2.needed,
+      free: t2.free,
+      ...(t2.rootMode === undefined ? {} : { rootMode: t2.rootMode }),
+      ...(t2.stripped === undefined ? {} : { stripped: t2.stripped }),
+      ...(collect ? { listing } : {}),
+    });
+  }
+
   async function previewBody(enter: (next: Phase) => void): Promise<Result<OnloadPreview>> {
     const target = await resolveTarget();
     if (!target.ok) return target;
     enter("preflight");
-    const { project, snapshot, over, made, stored } = target.value;
+    const { snapshot, over } = target.value;
     const findings: Finding[] = [];
     const blockers: Failure[] = [];
-    // An onload of this project that stopped before its swap: the run takes it over when it restores the same snapshot
-    // to the same folder, else rolls it back first (DESIGN step 3); the preview says which.
+    // The gate the run passes first, read-only: a live lock or a journal that holds the project back refuses with the
+    // run's own finding and exit code; an onload stopped before its swap is reported as resumed or rolled back.
+    const gated = await gateFindings(
+      { io, paths, clock, log: deps.log },
+      { id, address: ref.address },
+      { related: nested, resume: RESUME_ONLOAD },
+    );
     let pending: OnloadPreview["pending"];
-    try {
-      const stopped = (await readJournals(io, paths)).journals.find(
-        (j): j is OnloadJournal => j.kind === "onload" && j.project.id === id && BEFORE_SWAP.has(j.step),
-      );
-      if (stopped !== undefined)
-        pending = {
-          op: stopped.op,
-          step: stopped.step,
-          action: stopped.snapshot === snapshot && stopped.project.dir === landing ? "resume" : "roll-back",
-        };
-    } catch (error) {
-      assertSystemError(error);
-    }
-    const held = leaseHeld(project);
-    if (held !== undefined) {
-      findings.push(held);
-      if (config.onload.leases === "strict") blockers.push(fail(held, 8));
-    }
-    const occupied = await occupiedBy(project, over);
-    if (occupied !== undefined) blockers.push(occupied);
-    const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
-    const placed = await landingChecks(rootFolder);
-    if (!placed.ok) blockers.push(placed);
-    let nearest = rootFolder;
-    try {
-      nearest = placed.ok ? placed.value : await nearestExisting(io, dirname(landing));
-    } catch (error) {
-      assertSystemError(error);
+    if (!gated.ok) blockers.push(gated);
+    else if (gated.value?.kind === "onload") {
+      const resumed = await resumable(gated.value, snapshot);
+      pending = {
+        op: gated.value.op,
+        step: gated.value.step,
+        action: resumed === undefined ? "roll-back" : "resume",
+      };
     }
 
-    const reuse = snapshot === over && req.to === undefined ? await reusable(snapshot, landing) : undefined;
-    let files = 0;
-    let bytes = 0;
-    let needed = 0;
-    let stripped: number | undefined;
-    let hydratePlan: HydratePlan;
-    let free = 0;
-    try {
-      free = await io.fs.freeBytes(nearest);
-    } catch (error) {
-      blockers.push(unreadable(nearest, error, "its free space is unknown"));
-    }
+    const checked = await preflightChecks(target.value, { collect: true });
+    if (!checked.ok) return checked;
+    const c = checked.value;
+    blockers.push(...c.blockers);
+    if (c.lease !== undefined) findings.push(c.lease);
+    findings.push(...c.warnings);
+    const { reuse, files, bytes, needed, free, stripped } = c;
+
     const hydrating = req.hydrate !== false && config.onload.hydrate;
-    const skipped = (reason: string): HydratePlan => ({
-      status: "skipped",
-      reason,
-      steps: [],
-      untrustedKnown: false,
-    });
     const why = (): string => {
       if (req.to !== undefined)
         return "--to always restores from the store: a kept folder belongs to the project's own place";
@@ -568,10 +729,8 @@ const onloadFlow = async (
       return `no kept folder of snapshot ${snapshot} stands in the trash (offload.keepLocalFor was 0, or it changed, was deleted or is being deleted), so it is restored from the store`;
     };
     let reused: OnloadPreview["reused"];
+    let hydratePlan: HydratePlan;
     if (reuse !== undefined) {
-      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
-      files = produced?.stats.files ?? 0;
-      bytes = produced?.stats.bytes ?? 0;
       reused = {
         from: reuse.folder,
         offload: reuse.op,
@@ -584,57 +743,22 @@ const onloadFlow = async (
         steps: [],
         untrustedKnown: false,
       };
-    } else {
-      const problems: Failure[] = [];
-      const listing = new ManifestBuilder();
-      const listed = await checkSnapshot({
-        io,
-        engine: store.engine,
-        store: store.blob,
-        stored,
-        ...(made.event === undefined ? {} : { event: made.event }),
-        ctx: { op, ...(signal === undefined ? {} : { signal }), emit: () => {} },
-        op,
-        nearest,
-        holder: join(rootFolder, STAGING_DIR),
-        resuming: false,
-        address: ref.address,
-        elsewhere: `plainport onload ${shellWord(ref.address)} --to <path>`,
-        preview: {
-          problems,
-          onEntry: (entry) => {
-            if (entry.type === "file" || entry.type === "dir" || entry.type === "symlink")
-              listing.add({
-                path: entry.path,
-                type: entry.type,
-                size: entry.size ?? 0,
-                mode: entry.mode,
-                mtimeNs: 0n,
-                ...(entry.linkTarget === undefined ? {} : { linkTarget: entry.linkTarget }),
-              });
-          },
-        },
-      });
-      if (!listed.ok) return listed;
-      blockers.push(...problems);
-      files = listed.value.files;
-      bytes = listed.value.bytes;
-      needed = listed.value.needed;
-      free = listed.value.free;
-      stripped = listed.value.stripped;
-      if (!hydrating) {
-        hydratePlan = skipped(
+    } else if (!hydrating) {
+      hydratePlan = {
+        status: "skipped",
+        reason:
           req.hydrate === false
             ? `--no-hydrate: the files are restored as stored${stripped === 0 ? "; the offload stripped nothing, so the project is local" : "; plainport hydrate installs the dependencies later"}`
             : "onload.hydrate is false in the configuration",
-        );
-      } else {
-        hydratePlan = await previewHydrate(
-          { host, plugins: deps.plugins, env: deps.env },
-          listing.finish(),
-          landing,
-        );
-      }
+        steps: [],
+        untrustedKnown: false,
+      };
+    } else {
+      hydratePlan = await previewHydrate(
+        { host, plugins: deps.plugins, env: deps.env },
+        (c.listing as ManifestBuilder).finish(),
+        landing,
+      );
     }
     for (const f of blockers.map((b) => b.finding)) if (!findings.includes(f)) findings.push(f);
 
@@ -662,24 +786,14 @@ const onloadFlow = async (
   async function onloadLocked(lock: ProjectLock, open: Journal | undefined): Promise<Result<OnloadOutcome>> {
     const target = await resolveTarget();
     if (!target.ok) return target;
-    const { project, snapshot, over, made, stored, tagged } = target.value;
+    const { project, snapshot, over, stored, tagged } = target.value;
 
     // An earlier onload that stopped before its swap: taken over when it restores the same snapshot to the same
     // folder, else rolled back now (its staging folder and journal), since nothing else of it changed anything.
-    let resumed = open?.kind === "onload" ? open : undefined;
-    if (resumed !== undefined && (resumed.snapshot !== snapshot || resumed.project.dir !== landing)) {
-      const dropped = await dropStaging(resumed);
+    const resumed = await resumable(open, snapshot);
+    if (open?.kind === "onload" && resumed === undefined) {
+      const dropped = await dropStaging(open);
       if (!dropped.ok) return dropped;
-      resumed = undefined;
-    }
-    // A renamed-back folder taken over is checked again (D51): it may have changed since that onload stopped.
-    if (resumed?.reuse !== undefined) {
-      const still = await reusable(snapshot, landing);
-      if (still?.op !== resumed.reuse.op) {
-        const dropped = await dropStaging(resumed);
-        if (!dropped.ok) return dropped;
-        resumed = undefined;
-      }
     }
     if (resumed !== undefined) {
       op = resumed.op;
@@ -689,74 +803,21 @@ const onloadFlow = async (
     phase("resolve", "end");
 
     phase("preflight", "start");
-    const held = leaseHeld(project);
-    if (held !== undefined) {
-      if (config.onload.leases === "strict") return fail(held, 8);
-      report(held);
-    }
-
-    const occupied = await occupiedBy(project, over);
-    if (occupied !== undefined) return occupied;
-    const stubPath = ref.dir === undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
-    const rootFolder = req.to === undefined ? rootFolderOf(ref.path, landing) : dirname(landing);
-    const placed = await landingChecks(rootFolder);
-    if (!placed.ok) return placed;
-    const holder = join(rootFolder, STAGING_DIR);
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),
       emit: (e) => (e.type === "log" ? deps.log(e.level, e.message) : deps.emit(e)),
     };
-
-    // The same head's folder, still in its offload's trash: renamed back rather than restored.
-    const reuse =
-      resumed !== undefined
-        ? resumed.reuse
-        : snapshot === over && req.to === undefined
-          ? await reusable(snapshot, landing)
-          : undefined;
-    let files = 0;
-    let bytes = 0;
-    let rootMode: number | undefined;
-    let stripped: number | undefined;
-    if (reuse === undefined) {
-      try {
-        // A --to landing's holder is noted first, so gc finds a staging folder whose journal a lost write dropped.
-        if (req.to !== undefined) await noteStagingHolder(io, paths, holder);
-        await io.fs.mkdirp(holder);
-      } catch (error) {
-        return writeFailed(error, `making ${holder}`, false, holder);
-      }
-      const listed = await checkSnapshot({
-        io,
-        engine: store.engine,
-        store: store.blob,
-        stored,
-        ...(made.event === undefined ? {} : { event: made.event }),
-        ctx,
-        op,
-        nearest: placed.value,
-        holder,
-        resuming: resumed !== undefined,
-        address: ref.address,
-        elsewhere: `plainport onload ${shellWord(ref.address)} --to <path>`,
-      });
-      if (!listed.ok) return signal?.aborted ? cancelled() : listed;
-      files = listed.value.files;
-      bytes = listed.value.bytes;
-      rootMode = listed.value.rootMode ?? tagged?.rootMode;
-      stripped = listed.value.stripped;
-      if (tagged !== undefined && rootMode === undefined)
-        deps.log(
-          "warn",
-          `the mode of ${landing} is unknown: the event that records it cannot be read and snapshot ${snapshot} has no mode tag (an older plainport wrote it); the folder gets a new folder's mode`,
-        );
-    } else {
-      // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
-      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
-      files = produced?.stats.files ?? 0;
-      bytes = produced?.stats.bytes ?? 0;
-    }
+    const checked = await preflightChecks(target.value, { collect: false, resumed, ctx });
+    if (!checked.ok) return checked;
+    const { rootFolder, reuse, files, bytes, stripped } = checked.value;
+    const rootMode = checked.value.rootMode ?? tagged?.rootMode;
+    const stubPath = ref.dir === undefined ? undefined : `${ref.dir}${STUB_SUFFIX}`;
+    if (checked.value.listed && tagged !== undefined && rootMode === undefined)
+      deps.log(
+        "warn",
+        `the mode of ${landing} is unknown: the event that records it cannot be read and snapshot ${snapshot} has no mode tag (an older plainport wrote it); the folder gets a new folder's mode`,
+      );
     phase("preflight", "end");
     if (signal?.aborted) return cancelled();
 

@@ -472,8 +472,10 @@ export const previewHydrate = async (
 ): Promise<HydratePlan> => {
   const { host } = deps;
   const absent = Object.assign(new Error("not restored yet"), { code: "ENOENT" });
-  const fs: LocalFs = Object.create(host.fs, {
-    readText: { value: async () => Promise.reject(absent) },
+  // Every call on this file system answers "not there": the snapshot is not restored, so whatever stands at the
+  // landing path is not the project and a plugin must never read it.
+  const fs = new Proxy({} as LocalFs, {
+    get: (_, method) => (typeof method === "string" ? async () => Promise.reject(absent) : undefined),
   });
   const steps: HydrateStep[] = [];
   for (const plugin of deps.plugins) {
