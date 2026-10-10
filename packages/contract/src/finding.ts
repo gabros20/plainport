@@ -240,7 +240,7 @@ export const FINDINGS = Object.freeze({
     allowable: true,
     exitCode: 6,
     summary:
-      "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy",
+      "Commits, stashes or tags exist only in this copy of the repository (a tag counts when no remote has its commit), so the snapshot becomes their only copy",
   },
   "git.unpushed-required": {
     severity: "block",
@@ -639,6 +639,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 2,
     summary:
       'The arguments or options do not match the command\'s declared arguments; fix is plainport help <command>. Also restore without --snapshot when the project has no head (incomplete or conflicted): the message lists the candidate ids (D60); and offload.verify = "full" in config, which arrives in M5 and is refused rather than downgraded (D50)',
+  },
+  "fs.case-unknown": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "onload --dry-run: the snapshot holds names that differ only by case, and a preview cannot tell without writing whether the landing volume ignores case (no folder above it has a letter in its name to look up); the onload itself probes the volume",
   },
   "fs.case-collision": {
     severity: "block",

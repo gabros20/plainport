@@ -50,6 +50,11 @@ export interface GitFacts {
   };
   /** Local branches with no upstream on a remote: none set, gone, or another local branch. */
   localOnly: string[];
+  /**
+   * Tags (short names, sorted) whose commit no remote-tracking branch holds, so no remote has them (D69). A tag on a
+   * commit a remote branch holds is not listed: whether that remote also has the tag takes the network.
+   */
+  unpushedTags: string[];
   stashes: number;
   inProgress: InProgress[];
   /** The remotes configured, fetched or not. */
@@ -322,6 +327,41 @@ export const inProgress = async (host: HostPorts, gitDir: string): Promise<Resul
   return ok(found);
 };
 
+/**
+ * The tags whose commit no remote-tracking branch holds (D69). Each tag is peeled all the way (a tag of a tag
+ * included) to its commit by one `cat-file --batch-check`; tags on anything but a commit hold no history and are left
+ * out. With no remote-tracking branch at all every tag is unpushed, and git is not asked to walk the history; else
+ * `rev-list --tags --not --remotes` lists only the commits ahead of the remotes.
+ */
+const unpushedTagsOf = async (
+  host: HostPorts,
+  dir: string,
+  ctx: GitContext,
+  remoteBranches: boolean,
+): Promise<Result<string[]>> => {
+  const refs = await git(host, dir, ctx, ["for-each-ref", "--format=%(refname)", "refs/tags"]);
+  if (!refs.ok) return refs;
+  const names = records(refs.value, NL);
+  if (names.length === 0) return ok([]);
+  const peeled = await git(host, dir, ctx, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], {
+    stdin: new TextEncoder().encode(`${names.map((n) => `${n}^{}`).join("\n")}\n`),
+  });
+  if (!peeled.ok) return peeled;
+  const answers = records(peeled.value, NL);
+  const commitOf = new Map<string, string[]>();
+  names.forEach((name, i) => {
+    const [object = "", type = ""] = (answers[i] ?? "").split(" ");
+    if (type !== "commit") return;
+    commitOf.set(object, [...(commitOf.get(object) ?? []), name.slice("refs/tags/".length)]);
+  });
+  if (!remoteBranches) return ok([...commitOf.values()].flat().sort());
+  const held = await git(host, dir, ctx, ["rev-list", "--tags", "--not", "--remotes", "--"]);
+  if (!held.ok) return held;
+  const tags: string[] = [];
+  for (const commit of records(held.value, NL)) tags.push(...(commitOf.get(commit) ?? []));
+  return ok(tags.sort());
+};
+
 /** The facts for a folder with a .git; undefined when it has none. */
 export const gitFacts = async (
   host: HostPorts,
@@ -436,6 +476,8 @@ export const gitFacts = async (
     if (!out.ok) return out;
     detachedHead = Number(text(out.value).trim());
   }
+  const tags = await unpushedTagsOf(host, dir, ctx, remoteBranches);
+  if (!tags.ok) return tags;
   const operations = await inProgress(host, gitDir);
   if (!operations.ok) return operations;
 
@@ -448,6 +490,7 @@ export const gitFacts = async (
     changed,
     unpushed: { commits: total.value, branches, detachedHead },
     localOnly,
+    unpushedTags: tags.value,
     stashes,
     inProgress: operations.value,
     remotes,

@@ -94,6 +94,14 @@ export const PlanSchema = outputObject({
           "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
       }),
   }),
+  git: z.boolean().optional().meta({
+    description:
+      "Whether the project folder is a git repository of its own. False: no .git, so git lists nothing as gitignored and every file travels except the stripped dependency folders. Absent in a plan an older plainport made",
+  }),
+  nested: z.array(z.string().min(1)).optional().meta({
+    description:
+      "Repositories inside the project folder, relative and sorted: they travel as files, their own .git included. Absent when there are none (also the git.nested-repos finding)",
+  }),
   strip: z.array(StripEntrySchema),
   findings: z.array(FindingSchema),
   phases: z.array(PhaseSchema),

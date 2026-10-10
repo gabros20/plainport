@@ -301,6 +301,40 @@ describe("plan: the strip set", () => {
     expect(stripped(p)).toEqual([]);
     const nested = p.findings.find((f) => f.code === "git.nested-repos");
     expect(nested).toMatchObject({ severity: "info", paths: ["node_modules/tool", "vendor/lib"] });
+    // The same list, as data an agent reads without parsing a message (D69).
+    expect(p.nested).toEqual(["node_modules/tool", "vendor/lib"]);
+  });
+
+  test("a project with no nested repository has no nested field, and git is true for a repository (M2 task 2)", async () => {
+    put("src/a.ts");
+    const p = await plan([]);
+    expect(p.nested).toBeUndefined();
+    expect(p.git).toBe(true);
+  });
+
+  test("a folder that is no repository has git false (M2 task 2)", async () => {
+    const plain = join(fx.root, "plain");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "a.txt"), "a");
+    const result = await planOffload(host, quietChecks, [], {
+      dir: plain,
+      project: { address: "work:plain", root: "work", path: "plain" },
+      loader: new ConfigLoader(host, paths),
+      env: fx.env,
+      now: NOW,
+    });
+    expect(result.ok && result.value.git).toBe(false);
+  });
+
+  test("a tag on a commit no remote holds goes under git.unpushed, with the tag as a path (D69)", async () => {
+    put("a.ts");
+    fx.git(dir, "add", ".");
+    fx.git(dir, "commit", "-q", "-m", "ahead");
+    fx.git(dir, "tag", "v-local");
+    const p = await plan([]);
+    const unpushed = p.findings.find((f) => f.code === "git.unpushed");
+    expect(unpushed?.message).toContain("v-local");
+    expect(unpushed?.paths).toContain("refs/tags/v-local");
   });
 
   test("a candidate inside a nested repository is checked against that repository", async () => {

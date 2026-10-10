@@ -32,7 +32,7 @@ import {
 } from "@plainport/contract";
 import type { ConfigLoader } from "../config/load.ts";
 import { deleteGuard } from "../delete-guard.ts";
-import { systemErrorCode } from "../io.ts";
+import { type LocalFs, systemErrorCode } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { dehydrateSet } from "../plan/planner.ts";
 import type { HostChecks } from "../ports/checks.ts";
@@ -43,6 +43,7 @@ import { ensureRegistered, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { canonicalPath } from "../roots/canonical.ts";
 import { refreshIndex } from "../scan/git.ts";
+import type { Manifest } from "../scan/manifest.ts";
 import { scanTree } from "../scan/walk.ts";
 import { secretVariables } from "../store.ts";
 import { ulid } from "../ulid.ts";
@@ -423,6 +424,100 @@ export const hydrateProject = async (
   }
   phase("hydrate", "end");
   return { report: { status: steps.length === 0 ? "none" : "installed", steps, untrusted } };
+};
+
+export type HydratePlanStep = {
+  /** The install root, relative to the project; "" is the project folder. */
+  path: string;
+  /** The install as a person would type it, e.g. npm ci. */
+  command: string;
+  /** The package manager it runs (the first word of the command). */
+  packageManager: string;
+  /** Set when the manager the install will run is Corepack's shim; absent when that cannot be told before the restore. */
+  via?: "corepack";
+};
+
+/** What an onload would install (onload --dry-run, D71). */
+export type HydratePlan = {
+  /** install: these commands run. reused: the folder comes back with its dependencies. skipped: not asked for. none: nothing to install. */
+  status: "install" | "reused" | "skipped" | "none";
+  reason?: string;
+  steps: HydratePlanStep[];
+  /**
+   * With steps: the toolchain the install meets. `pinnedBy` lists the version files in the snapshot (.nvmrc,
+   * .node-version, .tool-versions, mise.toml); `manager` is the version manager on PATH that would activate the pinned
+   * version (mise, fnm or Volta). Their contents, and package.json's packageManager and engines, are read after the
+   * restore, so the versions themselves are not shown.
+   */
+  toolchain?: { pinnedBy: string[]; manager?: string };
+  /**
+   * Always false: what the project file asks to run that this version never runs (D54) is read from the restored
+   * .plainport.toml, so a preview cannot say; `untrusted` is deliberately absent, never an empty list.
+   */
+  untrustedKnown: false;
+};
+
+const VERSION_FILES = [".nvmrc", ".node-version", ".tool-versions", "mise.toml", ".mise.toml"];
+
+/**
+ * The install an onload would run for a snapshot not yet restored (D71), from its file list alone: the plugins
+ * see the snapshot's entries but every file reads as missing, so the package manager comes from the lockfiles and
+ * the commands are the frozen installs those choose. Nothing is run beyond looking for the version managers and
+ * Corepack on PATH, and nothing is written.
+ */
+export const previewHydrate = async (
+  deps: { host: HostPorts; plugins: readonly EcosystemPlugin[]; env: Env },
+  manifest: Manifest,
+  dir: string,
+): Promise<HydratePlan> => {
+  const { host } = deps;
+  const absent = Object.assign(new Error("not restored yet"), { code: "ENOENT" });
+  // Every call on this file system answers "not there": the snapshot is not restored, so whatever stands at the
+  // landing path is not the project and a plugin must never read it.
+  const fs = new Proxy({} as LocalFs, {
+    get: (_, method) => (typeof method === "string" ? async () => Promise.reject(absent) : undefined),
+  });
+  const steps: HydrateStep[] = [];
+  for (const plugin of deps.plugins) {
+    const detection = await plugin.detect({ dir, manifest, fs });
+    if (detection === null) continue;
+    steps.push(...(await plugin.hydrate({ dir, manifest, fs, detection })).steps);
+  }
+  if (steps.length === 0) {
+    return {
+      status: "none",
+      reason: "no ecosystem plugin finds dependencies to install",
+      steps: [],
+      untrustedKnown: false,
+    };
+  }
+  const pinnedBy = VERSION_FILES.filter((name) => manifest.get(name)?.type === "file");
+  let manager: string | undefined;
+  if (pinnedBy.length > 0)
+    for (const name of MANAGERS) {
+      if ((await onPath(host, deps.env, name)) !== undefined) {
+        manager = name;
+        break;
+      }
+    }
+  const env = installEnv(deps.env);
+  const planned: HydratePlanStep[] = [];
+  for (const step of steps) {
+    const name = step.argv[0] as string;
+    // A version manager around the install may swap the tool: Corepack is then known only after the restore.
+    const via =
+      manager === undefined &&
+      (await suppliedByCorepack(host, env, { wrap: (argv) => [...argv], findings: [] }, name, dir))
+        ? { via: "corepack" as const }
+        : {};
+    planned.push({ path: step.path, command: step.command, packageManager: name, ...via });
+  }
+  return {
+    status: "install",
+    steps: planned,
+    toolchain: { pinnedBy, ...(manager === undefined ? {} : { manager }) },
+    untrustedKnown: false,
+  };
 };
 
 /** Records whether the project's dependencies are installed (registry.json `unhydrated`). */

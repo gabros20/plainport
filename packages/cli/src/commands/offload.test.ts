@@ -85,6 +85,7 @@ describe("offload: dry run", () => {
       [
         "work:web → local",
         "  include   3 files · 1.57 KB",
+        "  git       not a git repository: every file travels except stripped dependency folders",
         "  strip     node_modules 612 KB · dist 2.4 KB",
         "  largest   src/main.ts 1.5 KB · package.json 48 B · package-lock.json 22 B",
         `  plan      ${id} (valid 1h) → plainport offload work:web --plan ${id}`,
@@ -171,6 +172,52 @@ describe("offload: dry run", () => {
     box.file("work/web/.env", "TOKEN=op://vault/item\n");
     const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
     expect(data.include.gitignored).toBeUndefined();
+  });
+
+  test("a folder that is not a git repository says so in the plan: git false, and a human line (M2 task 2)", async () => {
+    const json = await cli(["offload", "work:web", "--dry-run", "--json"]);
+    const data = envelope(json.out).data;
+    expect(PlanSchema.safeParse(data).success).toBe(true);
+    expect(data.git).toBe(false);
+    expect(data.nested).toBeUndefined();
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).toContain(
+      "  git       not a git repository: every file travels except stripped dependency folders\n",
+    );
+  });
+
+  test("a git repository says nothing of the kind, and nested repositories are listed as nested (M2 task 2)", async () => {
+    gitRepo();
+    Bun.spawnSync(["git", "init", "-q", join(box.home, "work/web/vendor/lib")], {
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: box.home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...QUIET_GIT_ENV,
+      },
+    });
+    const data = envelope((await cli(["offload", "work:web", "--dry-run", "--json"])).out).data;
+    expect(data.git).toBe(true);
+    expect(data.nested).toEqual(["vendor/lib"]);
+    const human = await cli(["offload", "work:web", "--dry-run"]);
+    expect(human.out).not.toContain("not a git repository");
+  });
+
+  test("a plan saved by M1, without git or nested, still parses and prints without the git line", () => {
+    const plan = PlanSchema.parse({
+      id: ulid(NOW.getTime()),
+      kind: "offload",
+      project: { address: "work:web", root: "work", path: "web", dir: "/w/web", store: "local" },
+      fingerprint: "sha256:x",
+      include: { files: 1, bytes: 1, largest: [] },
+      strip: [],
+      findings: [],
+      phases: [],
+      estimate: { uploadBytes: 1 },
+      expiresAt: NOW.toISOString(),
+    });
+    expect(plan.git).toBeUndefined();
+    expect(renderPlan(plan)).not.toContain("not a git repository");
   });
 
   test("a gitignored list git could not complete says so, in the human plan too (quality r1 minor 5)", () => {
