@@ -7,6 +7,7 @@ import { resolvePaths, runTrashDelete, TRASH_DELETE_WORD } from "@plainport/core
 import { nodePlugin } from "@plainport/eco-node";
 import { createMacosChecks, createMacosHost, guardFromEnv, type MacosHost } from "@plainport/host-macos";
 import { REGISTRY } from "./commands/index.ts";
+import { finishProcess } from "./exit.ts";
 import { gate } from "./gate.ts";
 import { housekeep } from "./housekeeping.ts";
 import { Cancellation, stopOnSignals } from "./interrupt.ts";
@@ -217,7 +218,9 @@ if (import.meta.main) {
       operation: cancellation,
       cancelled: report.cancelled,
     });
-    process.exitCode = await done;
+    const code = await done;
     release();
+    // A store probe the deadline gave up on would keep the process alive until its mount answers (D32).
+    await finishProcess(code);
   }
 }

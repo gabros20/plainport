@@ -74,6 +74,23 @@ describe("which claims are live (D64 revised)", () => {
   });
 });
 
+describe("a claim read that fails with a bug (AGENTS.md rule 7)", () => {
+  test("is thrown, never read as a claim that is gone (which another deleter would take over)", async () => {
+    claim();
+    const real = testHost();
+    const buggy: HostPorts = {
+      ...real,
+      fs: {
+        ...real.fs,
+        readText: async () => {
+          throw new TypeError("a bug");
+        },
+      },
+    };
+    await expect(trashClaim(buggy, trash, DEVICE)).rejects.toThrow("a bug");
+  });
+});
+
 describe("the boot session beside the claim (Q5 i)", () => {
   /** `<op>.claim.boot` for the claim on disk: its pid and startedAt, and the boot session it was written in. */
   const bootMark = (session: string, over: Record<string, unknown> = {}) => {

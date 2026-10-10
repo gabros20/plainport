@@ -6,8 +6,10 @@ export { type BootMark, fromThisBoot, readBootSession, SAME_BOOT_MS } from "./bo
 export * from "./catalog/index.ts";
 export * from "./config/index.ts";
 export {
+  abandonedCalls,
+  type Deadlined,
   type ProbeOptions,
-  probeWithin,
+  probeDeadline,
   realScheduler,
   type Scheduler,
   STORE_PROBE_DEADLINE_MS,

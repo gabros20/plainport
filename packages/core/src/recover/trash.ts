@@ -190,10 +190,13 @@ const finished = async (io: LocalIo, journal: OffloadJournal): Promise<boolean> 
   }
 };
 
-/** This device's id, which a trash claim names (D64); empty when it cannot be read, so no claim is this device's. */
-const thisDeviceId = async (io: LocalIo, paths: PlainportPaths): Promise<string> => {
+/**
+ * This device: its id, which a trash claim names (D64), empty when it cannot be read, so no claim is this device's;
+ * and its name, which binds its roots, absent then.
+ */
+const thisDevice = async (io: LocalIo, paths: PlainportPaths): Promise<{ id: string; name?: string }> => {
   const read = await readDevice(io, paths);
-  return read.ok && read.value !== undefined ? read.value.id : "";
+  return read.ok && read.value !== undefined ? { id: read.value.id, name: read.value.name } : { id: "" };
 };
 
 /** Why a trash is left now: a live detached delete of this device claims it (D64). */
@@ -256,7 +259,8 @@ export const collectTrash = async (
     staging: [],
     stagingKept: [],
   };
-  const self = await thisDeviceId(io, paths);
+  const me = await thisDevice(io, paths);
+  const self = me.id;
   let problem: Failure | undefined;
   for (const journal of read.journals.filter(released)) {
     const item = itemOf(journal);
@@ -337,7 +341,7 @@ export const collectTrash = async (
       problem ??= done;
     }
   }
-  await sweepOrphanClaims(deps, read.journals, self);
+  await sweepOrphanClaims(deps, read.journals, me);
   const swept = await sweepStaging(deps, clock);
   report.staging.push(...swept.removed);
   report.stagingKept.push(...swept.kept);
@@ -388,8 +392,8 @@ const claimFilesSound = async (io: LocalIo, trash: string): Promise<boolean> => 
 };
 
 /**
- * Orphan claims (D64, D67): in the trash holder of every root of this device, of every registered `--to` landing and
- * of every open offload journal, the claim files of a trash folder that is gone, once neither the claim nor a stray
+ * Orphan claims (D64, D67): in the trash holder of every root of `device`, of every registered `--to` landing and of
+ * every open offload journal (a holder named `.plainport-trash` only), the claim files of a trash folder that is gone, once neither the claim nor a stray
  * `.claim.tmp` is live (D64's test). A delete killed after its trash went leaves them, and so does an older version's
  * delete, which never removes a `.claim.boot`. Only those files go, never a folder, and only:
  * - in a holder that is a real folder, reached by no link of its own (realHolder), and lies in no registered project
@@ -401,14 +405,14 @@ const claimFilesSound = async (io: LocalIo, trash: string): Promise<boolean> => 
 const sweepOrphanClaims = async (
   deps: TrashDeps,
   journals: readonly Journal[],
-  self: string,
+  device: { id: string; name?: string },
 ): Promise<void> => {
   const { host, paths } = deps;
+  const self = device.id;
   const holders = new Set<string>();
-  const device = await readDevice(host, paths);
   const roots = await listRoots(host, paths, {
     env: deps.env,
-    ...(device.ok && device.value !== undefined ? { device: device.value.name } : {}),
+    ...(device.name === undefined ? {} : { device: device.name }),
   });
   if (roots.ok)
     for (const r of roots.value.roots) if (r.path !== undefined) holders.add(join(r.path, TRASH_DIR));
@@ -416,7 +420,12 @@ const sweepOrphanClaims = async (
   if (registry.ok)
     for (const e of Object.values(registry.value.projects))
       if (e.override !== undefined) holders.add(join(dirname(e.override), TRASH_DIR));
-  for (const j of journals) if (j.kind === "offload") holders.add(dirname(j.trash ?? offloadTrashOf(j)));
+  // A journal's trash path is plainport's own, but only a holder by that name is ever swept.
+  for (const j of journals)
+    if (j.kind === "offload") {
+      const holder = dirname(j.trash ?? offloadTrashOf(j));
+      if (basename(holder) === TRASH_DIR) holders.add(holder);
+    }
   for (const listed of holders) {
     const holder = await realHolder(host, listed);
     if (holder === undefined) continue;
@@ -433,6 +442,9 @@ const sweepOrphanClaims = async (
       continue;
     }
     const ops = new Set(names.flatMap((name) => CLAIM_NAME.exec(name)?.[1] ?? []));
+    // The holder goes only when this sweep emptied it: an rmdir of a holder it did not touch would only race an
+    // offload making it again (makeInHolder).
+    let unlinked = false;
     for (const op of ops) {
       const trash = join(holder, op);
       try {
@@ -448,13 +460,14 @@ const sweepOrphanClaims = async (
       for (const file of trashClaimFiles(trash)) {
         try {
           await host.fs.unlink(file);
+          unlinked = true;
           deps.log("info", `removed ${file}, the claim of a trash that is gone`);
         } catch (error) {
           assertSystemError(error);
         }
       }
     }
-    await removeEmptyHolder(host, holder, TRASH_DIR);
+    if (unlinked) await removeEmptyHolder(host, holder, TRASH_DIR);
   }
 };
 
@@ -652,7 +665,8 @@ export const housekeeping = async (
   }
   const journals = read.journals;
   const reused = renamedBack(journals);
-  const self = await thisDeviceId(io, paths);
+  const me = await thisDevice(io, paths);
+  const self = me.id;
   for (const journal of journals) {
     if (holdsProjectBack(journal)) {
       // One a live plainport on this host is still running (it holds the project's lock) is not interrupted.
@@ -777,6 +791,6 @@ export const housekeeping = async (
       );
   }
   // A write command's only (D61): a read command writes nothing.
-  if (options.deleteDue) await sweepOrphanClaims(deps, journals, self);
+  if (options.deleteDue) await sweepOrphanClaims(deps, journals, me);
   return done;
 };

@@ -13,7 +13,9 @@
 // The store's root must already exist: a disk that is not mounted is store.unreachable, and nothing is ever created
 // at its mount point (which would quietly fill the system disk). Folders below the root are made as needed. The root
 // is looked at before every call, within STORE_PROBE_DEADLINE_MS: a network mount that hangs is store.unreachable then
-// (D32), though the stat itself cannot be cancelled and waits on in the background (deadline.ts).
+// (D32), though the stat itself cannot be cancelled and waits on in the background (deadline.ts). One probe at a time
+// per store: calls made while one is out share it, and while one that timed out still hangs every call is
+// store.unreachable at once, so a dead mount holds one thread of Bun's pool, not one per call.
 
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
@@ -22,11 +24,12 @@ import {
   assertBlobPrefix,
   type BlobEntry,
   type BlobStore,
+  type Deadlined,
+  type FileKind,
   type LocalIo,
   type ProbeOptions,
   type PutOptions,
-  probeWithin,
-  STORE_PROBE_DEADLINE_MS,
+  probeDeadline,
   systemErrorCode,
   TEMP_SUFFIX,
   tempPathFor,
@@ -46,10 +49,9 @@ const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** probe: the deadline of the root's probe, STORE_PROBE_DEADLINE_MS on the real timers by default (tests fake it). */
+/** probe: the root probe's deadline, STORE_PROBE_DEADLINE_MS on the real timers by default (tests fake it). */
 export const fsBlobStore = (io: LocalIo, root: string, probe: ProbeOptions = {}): BlobStore => {
   const { fs } = io;
-  const seconds = (probe.deadlineMs ?? STORE_PROBE_DEADLINE_MS) / 1000;
   const pathOf = (key: string): string => join(root, ...key.split("/"));
 
   const unreachable = (detail: string): Failure =>
@@ -76,17 +78,37 @@ export const fsBlobStore = (io: LocalIo, root: string, probe: ProbeOptions = {})
       }),
     );
 
+  /** The root's probe now out, shared by every call made meanwhile; `hanging` once it timed out and has not settled. */
+  let probing: Promise<Deadlined<FileKind>> | undefined;
+  let hanging: { seconds: number } | undefined;
+  const probeRoot = (): Promise<Deadlined<FileKind>> => {
+    if (probing !== undefined) return probing;
+    const stat = fs.stat(root);
+    const settled = () => {
+      probing = undefined;
+      hanging = undefined;
+    };
+    stat.then(settled, settled);
+    const probed = probeDeadline(
+      stat.then((found) => found.kind),
+      probe,
+    ).then((outcome) => {
+      if (outcome.timedOut) hanging = { seconds: outcome.seconds };
+      return outcome;
+    });
+    probing = probed;
+    return probed;
+  };
+  const hung = (seconds: number) =>
+    unreachable(`did not answer within ${seconds} seconds (a network mount that hangs?)`);
+
   /** Undefined when the root is a folder; store.unreachable when it is missing or is not one. */
   const checkRoot = async (): Promise<Failure | undefined> => {
+    if (hanging !== undefined) return hung(hanging.seconds);
     try {
-      const kind = await probeWithin(
-        fs.stat(root).then((stat) => stat.kind),
-        probe,
-        () => undefined,
-      );
-      if (kind === undefined)
-        return unreachable(`did not answer within ${seconds} seconds (a network mount that hangs?)`);
-      if (kind === "dir") return undefined;
+      const probed = await probeRoot();
+      if (probed.timedOut) return hung(probed.seconds);
+      if (probed.value === "dir") return undefined;
       return unreachable("is not a folder");
     } catch (error) {
       const code = systemErrorCode(error);

@@ -53,7 +53,8 @@ import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
 
 export interface ViewDeps {
-  io: LocalIo;
+  /** The host's files and processes, and its boot session, which says whether a trash's claim is live (Q5 i). */
+  io: LocalIo & Pick<HostPorts, "bootSession">;
   paths: PlainportPaths;
   env: Env;
   /** This device: its root bindings, and whether a lease is its own. */

@@ -5,11 +5,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ok } from "@plainport/contract";
 import { STORE_IDENTITY_KEY } from "./catalog/identity.ts";
 import type { Store } from "./config/schema.ts";
 import type { Scheduler } from "./deadline.ts";
 import type { StoreOpener } from "./ports/store.ts";
-import { readRegistry } from "./registry.ts";
+import { readRegistry, updateRegistry } from "./registry.ts";
 import { checkStorePin, setUpStore } from "./store.ts";
 import { type FakeEngine, fakeEngine } from "./testing/fake-engine.ts";
 import { testHost } from "./testing/host.ts";
@@ -222,7 +223,43 @@ describe("setUpStore on a disk that fails I/O (rule 7)", () => {
     });
     expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
       "store.unreachable",
-      expect.stringContaining("did not answer within 10 seconds"),
+      expect.stringContaining(`resolving ${join(box.home, "ssd/store")} did not answer within 10 seconds`),
+    ]);
+    expect(await pinned()).toBeUndefined();
+  });
+
+  test("a registered project's folder on another hung mount: the message names the overlap check, not the store's path", async () => {
+    const updated = await updateRegistry(testHost(), box.paths, (registry) =>
+      ok({
+        ...registry,
+        projects: {
+          ...registry.projects,
+          [ulid()]: {
+            root: "work",
+            path: "web",
+            override: join(box.home, "nfs/web"),
+            registeredAt: "2026-10-04T12:00:00.000Z",
+          },
+        },
+      }),
+    );
+    expect(updated.ok).toBe(true);
+    // The probes before it answer, so this fake's timers fire after a short real wait rather than at once.
+    const soon: Scheduler = {
+      setTimer: (fire) => setTimeout(fire, 300),
+      clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    };
+    const result = await setUpStore(hungUnder(join(box.home, "nfs")), {
+      ...options,
+      probe: { scheduler: soon },
+      paths: box.paths,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining(
+        "checking store ssd against the registered projects' folders did not answer within 10 seconds",
+      ),
     ]);
     expect(await pinned()).toBeUndefined();
   });

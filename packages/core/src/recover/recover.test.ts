@@ -2294,7 +2294,9 @@ describe("D67: a released journal whose trash is already gone is finished", () =
 });
 
 describe("orphan claims: a claim whose trash is gone and whose claimer is not live (D64, D67)", () => {
-  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  /** A host in boot session "S", so these rows never depend on whether the runner can read its own. */
+  const inS = (): HostPorts => ({ ...testHost(), bootSession: async () => "S" });
+  const trashDeps = (): TrashDeps => ({ host: inS(), paths: box.paths, env: env(), log: () => {} });
   const holder = () => join(box.home, "work/.plainport-trash");
   /** `<op>.claim`, its `.claim.boot` and a stray `.claim.tmp`, with no trash folder and no journal. */
   const orphan = async (pid: number): Promise<string> => {
@@ -2302,7 +2304,7 @@ describe("orphan claims: a claim whose trash is gone and whose claimer is not li
     mkdirSync(holder(), { recursive: true });
     const startedAt = new Date().toISOString();
     const claim = { v: 1, device: device.id, pid, bootedAt: testHost().proc.bootedAtMs(), startedAt };
-    const session = await testHost().bootSession();
+    const session = "S";
     writeFileSync(`${trash}.claim`, JSON.stringify(claim));
     writeFileSync(`${trash}.claim.tmp`, JSON.stringify(claim));
     writeFileSync(`${trash}.claim.boot`, JSON.stringify({ v: 1, pid, startedAt, session }));
@@ -2372,6 +2374,39 @@ describe("orphan claims: a claim whose trash is gone and whose claimer is not li
     for (const trash of [torn, tornBoot, tornTmp, folder])
       expect([trash, left(trash)]).toEqual([trash, [".claim", ".claim.boot", ".claim.tmp"]]);
     for (const name of lookalikes) expect(existsSync(join(holder(), name))).toBe(true);
+  });
+
+  test("a lone .claim.boot with no trash (a deleter killed between its claim and its .claim.boot, or v0.1.1's) goes", async () => {
+    const trash = await orphan(99_999_999);
+    rmSync(`${trash}.claim`);
+    rmSync(`${trash}.claim.tmp`);
+    value(await collectTrash(trashDeps(), { early: false }));
+    expect(left(trash)).toEqual([]);
+  });
+
+  test("a .claim.boot beside a released trash with no claim (killed before its claim): gc deletes the trash and it", async () => {
+    config('[offload]\nkeepLocalFor = "1h"');
+    value(await offloadNow());
+    const [journal] = (await journals()) as OffloadJournal[];
+    const { keepUntil: _k, ...rest } = journal as OffloadJournal;
+    await rewrite(rest);
+    const trash = rest.trash as string;
+    writeFileSync(
+      `${trash}.claim.boot`,
+      JSON.stringify({ v: 1, pid: process.pid, startedAt: new Date().toISOString(), session: "S" }),
+    );
+    expect(value(await collectTrash(trashDeps(), { early: false })).deleted.map((d) => d.op)).toEqual([
+      rest.op,
+    ]);
+    expect([existsSync(trash), left(trash)]).toEqual([false, []]);
+    await expectInvariants();
+  });
+
+  test("a holder the sweep removed nothing from is left as it is, empty or not", async () => {
+    mkdirSync(holder(), { recursive: true });
+    value(await collectTrash(trashDeps(), { early: false }));
+    await housekeeping(trashDeps());
+    expect(existsSync(holder())).toBe(true);
   });
 
   test("a claim beside a trash that is still there is no orphan: gc leaves it to the journal's own settling", async () => {

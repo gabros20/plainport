@@ -66,12 +66,16 @@ export const trashClaimFiles = (trash: string): string[] => [
 ];
 
 /**
- * What reads a claim: the files, this process's view of pids and the boot time, and this host's boot session. An io
- * that is no host port (a read-only view's) has no session, so M1's rule decides there.
+ * What reads a claim: the files, this process's view of pids and the boot time, and this host's boot session (a host
+ * port's; one that cannot read a session returns undefined, and M1's rule decides).
  */
-export type ClaimIo = LocalIo & Partial<Pick<HostPorts, "bootSession">>;
+export type ClaimIo = LocalIo & Pick<HostPorts, "bootSession">;
 
-/** Parsed JSON of `path`, or undefined when it is not there or does not read. */
+/**
+ * Parsed JSON of `path`: not found when it is not there; found without a value when it does not parse or cannot be
+ * read (another system error). Anything else is a bug and is thrown (AGENTS.md rule 7): a bug never reads as a claim
+ * that is gone, which another deleter would take over.
+ */
 const readJson = async (io: LocalIo, path: string): Promise<{ found: boolean; value?: unknown }> => {
   try {
     return { found: true, value: JSON.parse(await io.fs.readText(path)) };
@@ -99,7 +103,7 @@ export const claimAt = async (
     boot.success && boot.data.pid === claim.pid && boot.data.startedAt === claim.startedAt
       ? boot.data.session
       : undefined;
-  const now = session === undefined ? undefined : await io.bootSession?.();
+  const now = session === undefined ? undefined : await io.bootSession();
   if (
     !fromThisBoot(io.proc, { bootedAt: claim.bootedAt, ...(session === undefined ? {} : { session }) }, now)
   )

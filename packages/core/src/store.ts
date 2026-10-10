@@ -20,7 +20,7 @@ import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
-import { type ProbeOptions, probeWithin, STORE_PROBE_DEADLINE_MS } from "./deadline.ts";
+import { type ProbeOptions, probeDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
@@ -146,19 +146,24 @@ const unreachableAt = (name: string, root: string, detail: string) =>
   );
 
 /**
- * store.unreachable for a probe of `path` that did not answer within its deadline (D32): a network mount that hangs.
- * The call itself cannot be cancelled and waits on in the background (deadline.ts).
+ * store.unreachable for a probe that did not answer within its deadline (D32): a network mount that hangs. `what` names
+ * the probe, so the message points at the mount that hangs. The call itself cannot be cancelled and waits on in the
+ * background (deadline.ts).
  */
-const hung = (name: string, root: string, path: string, probe: ProbeOptions) =>
-  unreachableAt(
-    name,
-    root,
-    `${path} did not answer within ${(probe.deadlineMs ?? STORE_PROBE_DEADLINE_MS) / 1000} seconds (a network mount that hangs?)`,
-  );
+const hung = (name: string, root: string, what: string, seconds: number) =>
+  unreachableAt(name, root, `${what} did not answer within ${seconds} seconds (a network mount that hangs?)`);
 
-/** A probe of the store's path (D32) under its deadline; store.unreachable when it does not answer in time. */
-const bounded = <T>(work: Promise<Result<T>>, name: string, root: string, probe: ProbeOptions) =>
-  probeWithin<Result<T>>(work, probe, () => hung(name, root, root, probe));
+/** A probe (D32) under its deadline; store.unreachable naming `what` when it does not answer in time. */
+const bounded = async <T>(
+  work: Promise<Result<T>>,
+  what: string,
+  name: string,
+  root: string,
+  probe: ProbeOptions,
+): Promise<Result<T>> => {
+  const probed = await probeDeadline(work, probe);
+  return probed.timedOut ? hung(name, root, what, probed.seconds) : probed.value;
+};
 
 /**
  * Whether `path` is a folder: undefined when nothing is there; store.unreachable when it cannot be looked at (a failing
@@ -172,13 +177,9 @@ const folderAt = async (
   probe: ProbeOptions,
 ): Promise<Result<boolean | undefined>> => {
   try {
-    const kind = await probeWithin(
-      io.fs.stat(path).then((stat) => stat.kind),
-      probe,
-      () => undefined,
-    );
-    if (kind === undefined) return hung(name, root, path, probe);
-    return ok(kind === "dir");
+    const probed = await probeDeadline(io.fs.stat(path), probe);
+    if (probed.timedOut) return hung(name, root, path, probed.seconds);
+    return ok(probed.value.kind === "dir");
   } catch (error) {
     const code = systemErrorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return ok(undefined);
@@ -261,6 +262,7 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   // is written has the deadline (D32): resolving it as much as looking at it.
   const reserved = await bounded(
     notReserved(io, root, paths.home, `store ${name}'s folder`),
+    `resolving ${root}`,
     name,
     root,
     probe,
@@ -278,7 +280,13 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
     }
     return ok(undefined);
   };
-  const apart = await bounded(overlaps(), name, root, probe);
+  const apart = await bounded(
+    overlaps(),
+    `checking store ${name} against the registered projects' folders`,
+    name,
+    root,
+    probe,
+  );
   if (!apart.ok) return apart;
   if (folder.value === undefined) {
     try {

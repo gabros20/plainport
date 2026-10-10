@@ -9,12 +9,46 @@ const booted = 1_800_000_000_000;
 const proc = { ...testHost().proc, bootedAtMs: () => booted };
 
 describe("this host's boot session (Q5 i)", () => {
-  test("reads as the same id every time, and the host port caches it", async () => {
+  test("this machine's reads as an id, the same every time", async () => {
     const host = testHost();
     const first = await readBootSession(host, process.platform);
     expect(first).toMatch(/^[0-9A-Fa-f-]{16,64}$/);
     expect(await readBootSession(host, process.platform)).toBe(first as string);
-    expect(await host.bootSession()).toBe(first as string);
+  });
+
+  test("macOS asks sysctl through the runner, Linux reads boot_id; either is trimmed and checked", async () => {
+    const runs: string[] = [];
+    const reads: string[] = [];
+    const host = {
+      ...testHost(),
+      run: async (spec: { command: string; args?: readonly string[] }) => {
+        runs.push([spec.command, ...(spec.args ?? [])].join(" "));
+        return {
+          ok: true as const,
+          value: {
+            exitCode: 0,
+            signal: null,
+            stdout: { text: "0A1B2C3D-0000-4000-8000-00000000000A\n", droppedBytes: 0 },
+            stderr: { text: "", droppedBytes: 0 },
+            leftoversStopped: false,
+            durationMs: 1,
+          },
+        };
+      },
+      fs: {
+        ...testHost().fs,
+        readText: async (path: string) => {
+          reads.push(path);
+          return "not a session\n";
+        },
+      },
+    };
+    expect(await readBootSession(host as never, "darwin")).toBe("0A1B2C3D-0000-4000-8000-00000000000A");
+    expect(await readBootSession(host as never, "linux")).toBeUndefined();
+    expect([runs, reads]).toEqual([
+      ["/usr/sbin/sysctl -n kern.bootsessionuuid"],
+      ["/proc/sys/kernel/random/boot_id"],
+    ]);
   });
 
   test("a platform without one, or a source that does not answer, has none", async () => {
