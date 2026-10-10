@@ -6,7 +6,8 @@ kilobytes of catalog events that every machine must read.
 
 **Decision.** restic is the only engine for project data, behind the `Engine` port. rclone carries catalog
 events to buckets and SFTP, behind the `BlobStore` port; `node:fs` serves local disks and peer RPC serves
-devices running plainport. plainport bundles pinned restic (0.17.1 or later, for the exit codes it maps) and
+devices running plainport. plainport bundles pinned restic (0.17.1 or later, for the exit codes it maps; raised to 0.18.0 or later by run
+decision D93 on 2026-10-10, for the JSON output of `check` and `restore`) and
 rclone binaries, so every device runs the tested versions. OpenDAL is the fallback if conditional writes ever
 become required.
 

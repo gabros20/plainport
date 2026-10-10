@@ -106,27 +106,41 @@ describe("restic engine: the version check", () => {
     expect(host.calls).toHaveLength(1);
   });
 
-  // restic 0.17 prints `version --json` without message_type (0.18 added it); DESIGN.md supports 0.17.1 or later.
-  test("restic 0.17.1's version line, recorded without message_type, passes the check", async () => {
-    const host = replayHost([fixture("version", "0.17.1"), fixture("snapshots")]);
+  // restic 0.17 printed `version --json` without message_type. plainport needs 0.18.0 or later (D93), but a line
+  // without it must still parse, so an old restic is named as the wrong version rather than as unreadable output.
+  const withoutType = (version: string) =>
+    edited(fixture("version"), {
+      stdout: `${JSON.stringify({ version, go_version: "go1.23.1", go_os: "darwin", go_arch: "arm64" })}\n`,
+    });
+
+  test("a version line without message_type, as restic 0.17 printed it, passes the check", async () => {
+    const host = replayHost([withoutType(PINNED_VERSION), fixture("snapshots")]);
     const engine = resticEngine({
       host,
       restic: "/r",
       repository: REPO,
       password: "p",
       env: {},
-      expectedVersion: "0.17.1",
     });
     expect(value(await engine.list({})).length).toBeGreaterThan(0);
   });
 
+  test("restic 0.17.1 is refused as restic.version-mismatch: plainport needs 0.18.0 or later (D93)", async () => {
+    const host = replayHost([withoutType("0.17.1")]);
+    const engine = resticEngine({ host, restic: "/r", repository: REPO, password: "p", env: {} });
+    const result = failure(await engine.list({}));
+    expect(result.finding.code).toBe("restic.version-mismatch");
+    expect(result.finding.message).toContain("0.17.1");
+    expect(host.calls).toHaveLength(1);
+  });
+
   test("the version line is still checked strictly: a missing or malformed version, or another message type, is refused", async () => {
-    const base = fixture("version", "0.17.1");
+    const base = fixture("version");
     for (const stdout of [
       '{"go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
       '{"version":17,"go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
-      '{"version":"0.17.1"}\n',
-      '{"message_type":"summary","version":"0.17.1","go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
+      `{"version":"${PINNED_VERSION}"}\n`,
+      `{"message_type":"summary","version":"${PINNED_VERSION}","go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n`,
     ]) {
       const host = replayHost([edited(base, { stdout })]);
       const engine = resticEngine({
@@ -135,7 +149,6 @@ describe("restic engine: the version check", () => {
         repository: REPO,
         password: "p",
         env: {},
-        expectedVersion: "0.17.1",
       });
       expect({ stdout, code: failure(await engine.list({})).finding.code }).toEqual({
         stdout,

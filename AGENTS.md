@@ -13,7 +13,7 @@ These instructions are stable rules for any coding agent working in this reposit
 
 - TypeScript on Bun, compiled to a single binary with `bun build --compile`. No native modules.
 - Zod schemas at every edge (events, stubs, plans, config, RPC), exported as JSON Schema.
-- External binaries are pinned and bundled: restic (0.17.1 or later) and rclone; age and age-plugin-se arrive with the secrets envelope. The system's OpenSSH and git are used as installed.
+- External binaries are pinned and bundled: restic (0.18.0 or later) and rclone; age and age-plugin-se arrive with the secrets envelope. The system's OpenSSH and git are used as installed.
 - Package layout follows the "Package layout" block in `DESIGN.md`. Create a package only when a milestone needs it.
 
 ## Rules that are not negotiable

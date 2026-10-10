@@ -584,7 +584,8 @@ Items:
   `PLAINPORT_TEST_TIER=2`; `test:t3` sets 3.
 - **CI.**
   - The `linux` job runs `scripts/testenv up` and `test:t2`.
-  - A `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18 and the pinned 0.19.1,
+  - A `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18 and the pinned 0.19.1
+    (amended by D93: 0.18.0 is the floor, so the latest 0.18 and the pin),
     with checksums in `tools.lock.json` and fixtures under `fixtures/restic/<version>/`.
   - macOS runners have no Docker.
 
@@ -1456,7 +1457,7 @@ Rules:
 - An M1 store cannot be sealed in place (Q10).
 
 ### Tests first
-- `catalogKey` gives the same key across two passwords on one repository, on restic 0.17.1 and 0.19.1 (matrix), with
+- `catalogKey` gives the same key across two passwords on one repository, on restic 0.18.1 and 0.19.1 (matrix; D93), with
   the canary over every master-key component.
 - A `kid` mismatch fails closed.
 - T2 on MinIO: the bytes under `meta/v1/events/` hold no project ULID, path or root key.

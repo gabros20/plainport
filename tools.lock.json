@@ -53,31 +53,8 @@
     }
   },
   "matrix": {
-    "comment": "Older restic versions CI's restic-matrix job runs @plainport/engine-restic's T1 suite against (ADR-0021): 0.17.1, the oldest plainport supports, and the latest 0.18. Never bundled. Fetch one with `bun scripts/fetch-tools.ts --restic <version>`; sums from the release's SHA256SUMS, as for the pins.",
+    "comment": "Older restic versions CI's restic-matrix job runs @plainport/engine-restic's T1 suite against (ADR-0021): the latest 0.18, the oldest minor plainport supports (run decision D93: 0.18.0 or later; 0.17 prints `check --json` as text and no files_deleted in restore summaries). Never bundled. Fetch one with `bun scripts/fetch-tools.ts --restic <version>`; sums from the release's SHA256SUMS, as for the pins.",
     "restic": [
-      {
-        "version": "0.17.1",
-        "checksums": "https://github.com/restic/restic/releases/download/v0.17.1/SHA256SUMS",
-        "format": "bz2",
-        "targets": {
-          "darwin-arm64": {
-            "url": "https://github.com/restic/restic/releases/download/v0.17.1/restic_0.17.1_darwin_arm64.bz2",
-            "sha256": "566fe53499d05440d4a9539a9294b760877654c62fdfec3f8c988069615e3e9a"
-          },
-          "darwin-x64": {
-            "url": "https://github.com/restic/restic/releases/download/v0.17.1/restic_0.17.1_darwin_amd64.bz2",
-            "sha256": "bbe5398b0a9bddb89a524821df31fc63a1ce8ff25ef41c99f7f5f090d8fcaa4b"
-          },
-          "linux-x64": {
-            "url": "https://github.com/restic/restic/releases/download/v0.17.1/restic_0.17.1_linux_amd64.bz2",
-            "sha256": "bdfaf16fe933136e3057e64e28624f2e0451dbd47e23badb2d37dbb60fdb6a70"
-          },
-          "linux-arm64": {
-            "url": "https://github.com/restic/restic/releases/download/v0.17.1/restic_0.17.1_linux_arm64.bz2",
-            "sha256": "aa9d86ac5f261f6a8295d5503bb27761ba7fe1fc1cf26fa52e7ab249b9a04716"
-          }
-        }
-      },
       {
         "version": "0.18.1",
         "checksums": "https://github.com/restic/restic/releases/download/v0.18.1/SHA256SUMS",

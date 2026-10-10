@@ -103,8 +103,8 @@ checkout without `node_modules`, `.tools` or its git history (the copy is a fres
 its known gaps first: Debian's git has no fsmonitor daemon, there are no Node.js package managers, and it runs arm64
 on Apple silicon. On 2026-10-10 those two gaps were its only failures (1,744 pass).
 
-**The restic matrix.** CI's `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18
-and the pin. `tools.lock.json`'s `matrix` section holds the older versions' checksums;
+**The restic matrix.** CI's `restic-matrix` job runs `engine-restic`'s T1 suite on the latest restic 0.18 and the
+pin: plainport supports restic 0.18.0 or later (run decision D93; 0.17 prints `check --json` as text). `tools.lock.json`'s `matrix` section holds the older versions' checksums;
 `bun scripts/fetch-tools.ts --restic <version>` fetches one (refusing a mismatch) into
 `.tools/matrix/restic-<version>/`, and `PLAINPORT_RESTIC_MATRIX=<version>` makes the suite use it.
 `bun scripts/record-restic-fixtures.ts --restic <version>` records its fixtures into `fixtures/restic/<version>/`.

@@ -95,13 +95,14 @@ jobs:
           ls -l dist/plainport-*
 
   restic-matrix:
-    # engine-restic's T1 suite on every restic plainport supports: 0.17.1, the latest 0.18 and the pin (ADR-0021).
+    # engine-restic's T1 suite on every restic plainport supports: the latest 0.18 and the pin (ADR-0021; 0.18.0 or
+    # later since run decision D93).
     # tools.lock.json's `matrix` section holds their checksums; fixtures/restic/<version>/ their recorded output.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        restic: ["0.17.1", "0.18.1", "0.19.1"]
+        restic: ["0.18.1", "0.19.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

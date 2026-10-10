@@ -129,9 +129,9 @@ describe("tiers: the restic under test (restic matrix)", () => {
   });
 
   test("PLAINPORT_RESTIC_MATRIX=<version> names the binary fetch-tools --restic installs, and its version", () => {
-    expect(resticUnderTest({ PLAINPORT_RESTIC_MATRIX: "0.17.1" })).toEqual({
-      version: "0.17.1",
-      path: join(checkout, ".tools", "matrix", "restic-0.17.1", String(hostTarget()), "restic"),
+    expect(resticUnderTest({ PLAINPORT_RESTIC_MATRIX: "0.18.1" })).toEqual({
+      version: "0.18.1",
+      path: join(checkout, ".tools", "matrix", "restic-0.18.1", String(hostTarget()), "restic"),
     });
   });
 

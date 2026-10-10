@@ -1311,7 +1311,7 @@ None right now: every question raised so far is settled under Decisions. New one
 - **Standalone first.** plainport ships on its own; a plainkeep pack can follow once it has proven itself.
 - **The Mac mini is the hub,** always on, with the main repository on its own disk.
 - **Runtime: Bun,** compiled to a single binary.
-- **Pinned restic and rclone binaries ship with plainport,** so every device runs the tested versions (restic 0.17.1 or later for the exit codes plainport maps).
+- **Pinned restic and rclone binaries ship with plainport,** so every device runs the tested versions (restic 0.18.0 or later: the exit codes plainport maps, and the JSON output of `check` and of `restore`'s summary; run decision D93, 2026-10-10).
 - **One restic repository per root,** each with its own key, so a device can be given one root without seeing the others.
 - **Every project lives under a root;** a folder outside every root must be filed with `--root` and `--as` before it can be offloaded.
 - **Deletion defaults:** the local copy is deleted as soon as the offload is verified (`keepLocalFor = 0`), and prune honours a forget only after seven days.

@@ -90,12 +90,12 @@ test("macOS runs no T2: GitHub's macOS runners have no Docker", () => {
 // biome-ignore lint/suspicious/noTemplateCurlyInString: a GitHub Actions expression, not a JS template.
 const MATRIX_RESTIC = "${{ matrix.restic }}";
 
-test("the restic matrix runs engine-restic's T1 suite on 0.17.1, the latest 0.18 and the pinned restic", () => {
+test("the restic matrix runs engine-restic's T1 suite on the latest 0.18 and the pinned restic (D93: 0.18.0 or later)", () => {
   const matrix = job("restic-matrix");
   expect(matrix["runs-on"]).toBe("ubuntu-24.04");
   const versions = matrix.strategy?.matrix?.restic as string[];
   expect(versions).toEqual([...lock.matrix.restic.map((entry) => entry.version), lock.tools.restic.version]);
-  expect(versions[0]).toBe("0.17.1");
+  expect(versions[0]).toStartWith("0.18.");
   expect(versions.some((version) => version.startsWith("0.18."))).toBe(true);
   // A matrix row that fails does not cancel the others: each version's result is its own.
   expect((matrix.strategy as { "fail-fast"?: boolean })["fail-fast"]).toBe(false);

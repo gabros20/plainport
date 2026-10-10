@@ -415,11 +415,11 @@ describe("tools: tools.lock.json", () => {
     expect(parsed.lock.tools.restic.format).toBe("bz2");
   });
 
-  test("restic is 0.17.1 or later (ADR-0006)", () => {
+  test("restic is 0.18.0 or later (ADR-0006, run decision D93)", () => {
     const parsed = parseLock(raw);
     if (!parsed.ok) throw new Error(parsed.message);
     const [major = 0, minor = 0, patch = 0] = parsed.lock.tools.restic.version.split(".").map(Number);
-    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThanOrEqual(17_001);
+    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThanOrEqual(18_000);
   });
 
   test("parseLock refuses a missing target, a bad sum or a plain-http url", () => {
@@ -444,11 +444,11 @@ describe("tools: tools.lock.json", () => {
     expect(parseLock(http)).toMatchObject({ ok: false });
   });
 
-  test("the matrix holds restic 0.17.1 and the latest 0.18, both older than the pin, for all four targets", () => {
+  test("the matrix holds the latest restic 0.18, older than the pin, for all four targets", () => {
     const parsed = parseLock(raw);
     if (!parsed.ok) throw new Error(parsed.message);
     const versions = parsed.lock.matrix.restic.map((entry) => entry.version);
-    expect(versions).toEqual(["0.17.1", "0.18.1"]);
+    expect(versions).toEqual(["0.18.1"]);
     for (const entry of parsed.lock.matrix.restic) {
       expect(entry.checksums).toBe(
         `https://github.com/restic/restic/releases/download/v${entry.version}/SHA256SUMS`,

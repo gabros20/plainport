@@ -119,8 +119,8 @@ const parseJson = <S extends z.ZodType>(schema: S, text: string, what: string): 
 };
 
 /**
- * The one line `restic version --json` prints. restic 0.17 leaves out message_type (0.18 added it), and DESIGN.md
- * supports 0.17.1 or later; every other field is still required.
+ * The one line `restic version --json` prints. message_type may be missing, as restic 0.17 printed it, so a too-old
+ * restic gets restic.version-mismatch rather than a parse error; every other field is still required.
  */
 export const VersionOutput = z.object({
   message_type: z.literal("version").optional(),
