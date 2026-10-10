@@ -97,28 +97,48 @@ export const headUncertain = (
   };
 };
 
+/** The restic tag that holds the project folder's own mode (Q5 ii), in octal: `plainport:mode=0755`. */
+export const rootModeTag = (mode: number): string =>
+  `plainport:mode=${(mode & 0o7777).toString(8).padStart(4, "0")}`;
+
+/** The folder mode a snapshot's tags record; undefined when none does (a snapshot from before the tag). */
+export const rootModeOfTags = (tags: readonly string[]): number | undefined => {
+  for (const tag of tags) {
+    const octal = /^plainport:mode=([0-7]{1,5})$/.exec(tag)?.[1];
+    if (octal === undefined) continue;
+    const mode = Number.parseInt(octal, 8);
+    if (mode <= 0o7777) return mode;
+  }
+  return undefined;
+};
+
 /**
  * The restic id of `snapshot`, a snapshot of project `id` whose event the catalog could not read (D86): the one
- * snapshot in the repository tagged with its op, leaving out any the catalog names as discarded. snapshot.not-found
- * when there is none, or more than one to choose from.
+ * snapshot in the repository tagged with its op, leaving out any the catalog names as discarded, with the folder mode
+ * its tag records (the event, which holds rootMode, being the unreadable one). snapshot.not-found when there is none,
+ * or more than one to choose from.
  */
 export const unfoldedSnapshot = async (
   engine: Engine,
   options: { id: string; snapshot: string; discarded: readonly string[]; address: string; ctx?: RunContext },
-): Promise<Result<string>> => {
+): Promise<Result<{ id: string; rootMode?: number }>> => {
   const listed = await engine.list(
     { tags: ["plainport", `plainport:project=${options.id}`, `plainport:op=${options.snapshot}`] },
     options.ctx,
   );
   if (!listed.ok) return listed;
-  const found = listed.value.filter((s) => !options.discarded.includes(s.id)).map((s) => s.id);
-  if (found.length === 1) return ok(found[0] as string);
+  const found = listed.value.filter((s) => !options.discarded.includes(s.id));
+  const [only] = found;
+  if (found.length === 1 && only !== undefined) {
+    const rootMode = rootModeOfTags(only.tags);
+    return ok({ id: only.id, ...(rootMode === undefined ? {} : { rootMode }) });
+  }
   return fail(
     finding("snapshot.not-found", {
       message:
         found.length === 0
           ? `the repository holds no snapshot tagged as ${options.snapshot} of ${options.address}, and the catalog cannot read the event that names it; nothing was restored`
-          : `the repository holds ${found.length} snapshots tagged as ${options.snapshot} of ${options.address} (${found.join(", ")}), and the event that says which one was kept cannot be read; nothing was restored`,
+          : `the repository holds ${found.length} snapshots tagged as ${options.snapshot} of ${options.address} (${found.map((s) => s.id).join(", ")}), and the event that says which one was kept cannot be read; nothing was restored`,
       fix: "upgrade plainport if a newer version wrote the unreadable event; until then restore an older snapshot side by side: plainport restore <project> --snapshot <id> --to <path>",
     }),
   );

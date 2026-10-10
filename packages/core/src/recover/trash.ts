@@ -38,7 +38,16 @@ import { writeFailed } from "../saga/journaled.ts";
 import { STAGING_DIR } from "../saga/onload.ts";
 import { holdsProjectBack, notAProject, operationRunning, withProjectLock } from "../saga/project-gate.ts";
 import { offloadTrashOf, rootFolderOf, TRASH_DIR } from "../saga/release.ts";
-import { noteRefusal, readRefusal, trashClaim, trashClaimFile, trashRefusedFile } from "../trash-claim.ts";
+import {
+  type ClaimIo,
+  claimAt,
+  noteRefusal,
+  readRefusal,
+  trashClaim,
+  trashClaimFile,
+  trashClaimFiles,
+  trashRefusedFile,
+} from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
 import { notedStagingHolders, readStagingRecords, removeStagingRecord } from "./staging.ts";
 
@@ -141,8 +150,9 @@ export const removeTrash = async (ctx: DeleteGuardContext, trash: string): Promi
     systemErrorCode(error);
     if (await stillThere(io, trash)) throw error;
   }
-  // The claim, a temporary one a delete killed while claiming left behind, and an earlier refusal's note.
-  for (const file of [trashClaimFile(trash), `${trashClaimFile(trash)}.tmp`, trashRefusedFile(trash)]) {
+  // The claim, its boot session, a temporary one a delete killed while claiming left behind, and an earlier
+  // refusal's note.
+  for (const file of [...trashClaimFiles(trash), trashRefusedFile(trash)]) {
     try {
       await io.fs.unlink(file);
     } catch (error) {
@@ -186,7 +196,7 @@ const thisDeviceId = async (io: LocalIo, paths: PlainportPaths): Promise<string>
 
 /** Why a trash is left now: a live detached delete of this device claims it (D64). */
 export const claimedReason = async (
-  io: LocalIo,
+  io: ClaimIo,
   trash: string,
   device: string,
 ): Promise<string | undefined> => {
@@ -285,7 +295,7 @@ export const collectTrash = async (
         }
         const trash = itemOf(now).trash;
         // One deleter at a time (D64): a live detached delete's trash is its own.
-        const deleting = await claimedReason(io, trash, self);
+        const deleting = await claimedReason(host, trash, self);
         if (deleting !== undefined) {
           report.kept.push({ ...itemOf(now), reason: deleting });
           return ok(undefined);
@@ -325,12 +335,75 @@ export const collectTrash = async (
       problem ??= done;
     }
   }
+  await sweepOrphanClaims(deps, read.journals, self);
   const swept = await sweepStaging(deps, clock);
   report.staging.push(...swept.removed);
   report.stagingKept.push(...swept.kept);
   problem ??= swept.problems[0];
   if (problem !== undefined) return failWith(problem.finding, report, problem.exitCode);
   return ok(report);
+};
+
+/** The files a claim leaves beside its trash: `<op>.claim`, `<op>.claim.boot`, `<op>.claim.tmp`. */
+const CLAIM_NAME = /^([0-9A-HJKMNP-TV-Z]{26})\.claim(?:\.boot|\.tmp)?$/;
+
+/**
+ * Orphan claims (D64, D67): in the trash holder of every root of this device, of every registered `--to` landing and
+ * of every open offload journal, the claim files of a trash folder that is gone, once neither the claim nor a stray
+ * `.claim.tmp` is live (D64's test). A delete killed after its trash went leaves them, and so does an older version's
+ * delete, which never removes a `.claim.boot`. Only those files go, never a folder, and only beside a trash that is
+ * no longer there: nothing they claimed is left to lose. What cannot be read or removed now is left for the next run.
+ */
+const sweepOrphanClaims = async (
+  deps: TrashDeps,
+  journals: readonly Journal[],
+  self: string,
+): Promise<void> => {
+  const { host, paths } = deps;
+  const holders = new Set<string>();
+  const device = await readDevice(host, paths);
+  const roots = await listRoots(host, paths, {
+    env: deps.env,
+    ...(device.ok && device.value !== undefined ? { device: device.value.name } : {}),
+  });
+  if (roots.ok)
+    for (const r of roots.value.roots) if (r.path !== undefined) holders.add(join(r.path, TRASH_DIR));
+  const registry = await readRegistry(host, paths);
+  if (registry.ok)
+    for (const e of Object.values(registry.value.projects))
+      if (e.override !== undefined) holders.add(join(dirname(e.override), TRASH_DIR));
+  for (const j of journals) if (j.kind === "offload") holders.add(dirname(j.trash ?? offloadTrashOf(j)));
+  for (const holder of holders) {
+    let names: string[];
+    try {
+      names = await host.fs.readdir(holder);
+    } catch (error) {
+      assertSystemError(error);
+      continue;
+    }
+    const ops = new Set(names.flatMap((name) => CLAIM_NAME.exec(name)?.[1] ?? []));
+    for (const op of ops) {
+      const trash = join(holder, op);
+      try {
+        if (await stillThere(host, trash)) continue;
+      } catch (error) {
+        assertSystemError(error);
+        continue;
+      }
+      const claimed = await claimAt(host, trashClaimFile(trash), trash, self);
+      const claiming = await claimAt(host, `${trashClaimFile(trash)}.tmp`, trash, self);
+      if (claimed.state === "live" || claiming.state === "live") continue;
+      for (const file of trashClaimFiles(trash)) {
+        try {
+          await host.fs.unlink(file);
+          deps.log("info", `removed ${file}, the claim of a trash that is gone`);
+        } catch (error) {
+          assertSystemError(error);
+        }
+      }
+    }
+    await removeEmptyHolder(host, holder, TRASH_DIR);
+  }
 };
 
 /**
@@ -553,7 +626,7 @@ export const housekeeping = async (
     // journal, under the lock; a read command leaves it. Neither says anything.
     if (
       (await finished(io, journal)) &&
-      (await claimedReason(io, itemOf(journal).trash, self)) === undefined
+      (await claimedReason(host, itemOf(journal).trash, self)) === undefined
     ) {
       if (options.deleteDue) {
         const closed = await withProjectLock(
@@ -564,7 +637,7 @@ export const housekeeping = async (
             if (!reread.ok) return reread;
             const now = reread.value;
             if (now === undefined || !released(now) || !(await finished(io, now))) return ok(undefined);
-            if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+            if ((await claimedReason(host, itemOf(now).trash, self)) !== undefined) return ok(undefined);
             const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
             if (!guarded.ok) return guarded;
             try {
@@ -585,7 +658,7 @@ export const housekeeping = async (
     // A due trash that housekeeping does not hand on now, and that no live delete claims (one that crashed before its
     // claim, or could not write it): only gc deletes it, so say so.
     if (!options.deleteDue || journal.keepUntil === undefined) {
-      if ((await claimedReason(io, itemOf(journal).trash, self)) === undefined)
+      if ((await claimedReason(host, itemOf(journal).trash, self)) === undefined)
         done.notices.push(
           `the trash ${itemOf(journal).trash} of ${journal.project.address}'s offload ${journal.op} is due and nothing is deleting it; plainport gc deletes it`,
         );
@@ -612,7 +685,7 @@ export const housekeeping = async (
         const away = await rootAway(io, now);
         if (away !== undefined) return away;
         // A live deleter's already (D64); a dead one's is taken over by the new detached delete's claim.
-        if ((await claimedReason(io, itemOf(now).trash, self)) !== undefined) return ok(undefined);
+        if ((await claimedReason(host, itemOf(now).trash, self)) !== undefined) return ok(undefined);
         // A registered working copy is never deleted as trash (D84).
         const guarded = await notAProject(io, paths, deps.env, itemOf(now).trash);
         if (!guarded.ok) return guarded;
@@ -651,5 +724,7 @@ export const housekeeping = async (
         `the trash of ${journal.project.address}'s offload ${journal.op} is past its deadline but was not deleted now (${started.finding.message}); plainport gc deletes it`,
       );
   }
+  // A write command's only (D61): a read command writes nothing.
+  if (options.deleteDue) await sweepOrphanClaims(deps, journals, self);
   return done;
 };

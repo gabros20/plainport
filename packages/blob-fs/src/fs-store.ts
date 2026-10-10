@@ -11,7 +11,9 @@
 // it (catalog/log.ts).
 //
 // The store's root must already exist: a disk that is not mounted is store.unreachable, and nothing is ever created
-// at its mount point (which would quietly fill the system disk). Folders below the root are made as needed.
+// at its mount point (which would quietly fill the system disk). Folders below the root are made as needed. The root
+// is looked at before every call, within STORE_PROBE_DEADLINE_MS: a network mount that hangs is store.unreachable then
+// (D32), though the stat itself cannot be cancelled and waits on in the background (deadline.ts).
 
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
@@ -22,9 +24,11 @@ import {
   type BlobStore,
   type LocalIo,
   type PutOptions,
+  STORE_PROBE_DEADLINE_MS,
   systemErrorCode,
   TEMP_SUFFIX,
   tempPathFor,
+  withinDeadline,
 } from "@plainport/core";
 
 /** `<name>.<pid>.<12 hex>.tmp`: what a write leaves behind if the process dies before its link or rename. */
@@ -41,8 +45,14 @@ const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-export const fsBlobStore = (io: LocalIo, root: string): BlobStore => {
+export interface FsBlobStoreOptions {
+  /** How long the root's probe may take; STORE_PROBE_DEADLINE_MS by default (tests shorten it). */
+  probeDeadlineMs?: number;
+}
+
+export const fsBlobStore = (io: LocalIo, root: string, options: FsBlobStoreOptions = {}): BlobStore => {
   const { fs } = io;
+  const deadline = options.probeDeadlineMs ?? STORE_PROBE_DEADLINE_MS;
   const pathOf = (key: string): string => join(root, ...key.split("/"));
 
   const unreachable = (detail: string): Failure =>
@@ -72,7 +82,10 @@ export const fsBlobStore = (io: LocalIo, root: string): BlobStore => {
   /** Undefined when the root is a folder; store.unreachable when it is missing or is not one. */
   const checkRoot = async (): Promise<Failure | undefined> => {
     try {
-      if ((await fs.stat(root)).kind === "dir") return undefined;
+      const probed = await withinDeadline(fs.stat(root), deadline);
+      if (probed.timedOut)
+        return unreachable(`did not answer within ${deadline / 1000} seconds (a network mount that hangs?)`);
+      if (probed.value.kind === "dir") return undefined;
       return unreachable("is not a folder");
     } catch (error) {
       const code = systemErrorCode(error);

@@ -709,6 +709,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           return stale("the folder changed between the plan and the snapshot");
         const excluded = new Set(stripped);
         for (const s of prepared.tree.skipped) if (!isExcluded(excluded, s.path)) excluded.add(s.path);
+        // The folder's own mode, as a tag too (Q5 ii); one that cannot be read is left out, as in the event.
+        let folderMode: number | undefined;
+        try {
+          folderMode = (await io.fs.lstat(folder)).mode;
+        } catch (error) {
+          assertSystemError(error);
+        }
         const taken = await takeSnapshot({
           saga,
           engine: store.engine,
@@ -718,6 +725,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           log: deps.log,
           excludes: [...excluded].sort(),
           ...(previous === undefined ? {} : { parent: previous }),
+          ...(folderMode === undefined ? {} : { rootMode: folderMode }),
           ctx,
           cancelled,
         });

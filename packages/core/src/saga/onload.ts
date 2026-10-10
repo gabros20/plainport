@@ -367,6 +367,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
     // Under doubt the fold's head is older than the snapshot restored (D86): that snapshot is the copy's next base.
     const over = doubt !== undefined ? snapshot : head.value;
     let made: { event?: string; stored: Record<string, string> } | undefined = project.snapshots[snapshot];
+    // Found by its tag, the folder's mode is the tag's too: the event that records it is the unreadable one (Q5 ii).
+    let tagged: { rootMode?: number } | undefined;
     if (made === undefined && doubt !== undefined) {
       const found = await unfoldedSnapshot(store.engine, {
         id,
@@ -375,7 +377,8 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
         address: ref.address,
       });
       if (!found.ok) return found;
-      made = { stored: { [store.name]: found.value } };
+      made = { stored: { [store.name]: found.value.id } };
+      tagged = found.value;
     }
     if (made === undefined) {
       return fail(
@@ -482,8 +485,13 @@ export const runOnload = async (deps: OnloadDeps, req: OnloadRequest): Promise<R
       if (!listed.ok) return signal?.aborted ? cancelled() : listed;
       files = listed.value.files;
       bytes = listed.value.bytes;
-      rootMode = listed.value.rootMode;
+      rootMode = listed.value.rootMode ?? tagged?.rootMode;
       stripped = listed.value.stripped;
+      if (tagged !== undefined && rootMode === undefined)
+        deps.log(
+          "warn",
+          `the mode of ${landing} is unknown: the event that records it cannot be read and snapshot ${snapshot} has no mode tag (an older plainport wrote it); the folder gets a new folder's mode`,
+        );
     } else {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
       const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);

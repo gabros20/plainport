@@ -1858,6 +1858,24 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     });
   }
 
+  test("--snapshot <S2> with S2's offloaded event unreadable gives the folder its mode from the snapshot's tag (Q5 ii)", async () => {
+    chmodSync(dir, 0o700);
+    const { second } = await hideNewest(malformed);
+    value(await onload({ snapshot: second.op, hydrate: false }));
+    expect((lstatSync(dir).mode & 0o7777).toString(8)).toBe("700");
+    const tagged = engine.repository.snapshots.find((s) => s.info.tags.includes(`plainport:op=${second.op}`));
+    expect(tagged?.info.tags).toContain("plainport:mode=0700");
+  });
+
+  test("--snapshot <S2> whose snapshot has no mode tag (an older writer) says the folder's mode is unknown", async () => {
+    chmodSync(dir, 0o700);
+    const { second } = await hideNewest(malformed);
+    for (const s of engine.repository.snapshots)
+      (s.info as { tags: string[] }).tags = s.info.tags.filter((t) => !t.startsWith("plainport:mode="));
+    value(await onload({ snapshot: second.op, hydrate: false }));
+    expect(logs.some((l) => l.includes(dir) && l.includes("mode") && l.includes("unknown"))).toBe(true);
+  });
+
   test("a skipped event that leaves the known snapshot named does not stop the default onload", async () => {
     await offload();
     value(await onload());

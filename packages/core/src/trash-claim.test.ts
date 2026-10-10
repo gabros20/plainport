@@ -5,10 +5,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import Ajv2020 from "ajv/dist/2020";
+import V011_TRASH_CLAIM from "../../../test/fixtures/v0.1.1/trash-claim.json";
+import type { HostPorts } from "./ports/host.ts";
 import { posixDeleteTrash } from "./spawner.ts";
 import { childGuardEnv, SELF, testHost } from "./testing/host.ts";
 import { makeSandbox, type Sandbox } from "./testing/sandbox.ts";
-import { trashClaim, trashClaimFile } from "./trash-claim.ts";
+import { TrashClaimSchema, trashClaim, trashClaimBootFile, trashClaimFile } from "./trash-claim.ts";
+import { runTrashDelete, trashDeletePayload } from "./trash-delete.ts";
 import { ulid } from "./ulid.ts";
 
 let box: Sandbox;
@@ -67,6 +71,119 @@ describe("which claims are live (D64 revised)", () => {
     }
     writeFileSync(trashClaimFile(trash), "{ torn");
     expect((await trashClaim(testHost(), trash, DEVICE)).state).toBe("gone");
+  });
+});
+
+describe("the boot session beside the claim (Q5 i)", () => {
+  /** `<op>.claim.boot` for the claim on disk: its pid and startedAt, and the boot session it was written in. */
+  const bootMark = (session: string, over: Record<string, unknown> = {}) => {
+    const written = JSON.parse(readFileSync(trashClaimFile(trash), "utf8"));
+    writeFileSync(
+      trashClaimBootFile(trash),
+      JSON.stringify({ v: 1, pid: written.pid, startedAt: written.startedAt, session, ...over }),
+    );
+  };
+  const inSession = (session: string | undefined): HostPorts => ({
+    ...testHost(),
+    bootSession: async () => session,
+  });
+  const dayAway = () => testHost().proc.bootedAtMs() - 86_400_000;
+
+  test("a stepped clock with the same boot session reads as live", async () => {
+    // The clock stepped a day after the claim was written: M1's boot-time rule alone would read an earlier boot.
+    claim({ bootedAt: dayAway() });
+    bootMark("S");
+    expect((await trashClaim(inSession("S"), trash, DEVICE)).state).toBe("live");
+  });
+
+  test("another boot session reads as gone, even when the boot times agree", async () => {
+    claim();
+    bootMark("S");
+    expect((await trashClaim(inSession("T"), trash, DEVICE)).state).toBe("gone");
+  });
+
+  test("without both sessions, M1's rule decides: no .claim.boot, one that does not read, one for another claim, none now", async () => {
+    claim({ bootedAt: dayAway() });
+    expect((await trashClaim(inSession("S"), trash, DEVICE)).state).toBe("gone");
+    writeFileSync(trashClaimBootFile(trash), "{ torn");
+    expect((await trashClaim(inSession("S"), trash, DEVICE)).state).toBe("gone");
+    bootMark("S", { startedAt: "2001-01-01T00:00:00.000Z" });
+    expect((await trashClaim(inSession("S"), trash, DEVICE)).state).toBe("gone");
+    bootMark("S", { pid: 99_999_999 });
+    expect((await trashClaim(inSession("S"), trash, DEVICE)).state).toBe("gone");
+    bootMark("S");
+    expect((await trashClaim(inSession(undefined), trash, DEVICE)).state).toBe("gone");
+    claim();
+    bootMark("S");
+    expect((await trashClaim(inSession(undefined), trash, DEVICE)).state).toBe("live");
+  });
+
+  test("the detached delete writes .claim.boot before its claim, keeps the claim in M1's shape, and removes both", async () => {
+    const real = testHost();
+    const order: string[] = [];
+    const texts = new Map<string, string>();
+    const host: HostPorts = {
+      ...real,
+      bootSession: async () => "S",
+      fs: {
+        ...real.fs,
+        writeTextDurable: async (path, text) => {
+          order.push(`write ${path}`);
+          texts.set(path, text);
+          return real.fs.writeTextDurable(path, text);
+        },
+        rename: async (from, to) => {
+          order.push(`rename ${from} ${to}`);
+          return real.fs.rename(from, to);
+        },
+      },
+    };
+    const payload = trashDeletePayload(trash, journal, DEVICE, box.paths, { HOME: box.home });
+    expect(await runTrashDelete(host, payload)).toBe(0);
+    const claimFile = trashClaimFile(trash);
+    expect(order.slice(0, 3)).toEqual([
+      `write ${trashClaimBootFile(trash)}`,
+      `write ${claimFile}.tmp`,
+      `rename ${claimFile}.tmp ${claimFile}`,
+    ]);
+    const written = JSON.parse(texts.get(`${claimFile}.tmp`) as string);
+    expect(Object.keys(written).sort()).toEqual(["bootedAt", "device", "pid", "startedAt", "v"]);
+    expect(JSON.parse(texts.get(trashClaimBootFile(trash)) as string)).toEqual({
+      v: 1,
+      pid: written.pid,
+      startedAt: written.startedAt,
+      session: "S",
+    });
+    expect([existsSync(trash), existsSync(claimFile), existsSync(trashClaimBootFile(trash))]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  test("the compatibility row: v0.1.1's claim reader parses a claim this version writes", async () => {
+    const real = testHost();
+    let text: string | undefined;
+    const host: HostPorts = {
+      ...real,
+      bootSession: async () => "S",
+      fs: {
+        ...real.fs,
+        writeTextDurable: async (path, written) => {
+          if (path === `${trashClaimFile(trash)}.tmp`) text = written;
+          return real.fs.writeTextDurable(path, written);
+        },
+      },
+    };
+    const payload = trashDeletePayload(trash, journal, DEVICE, box.paths, { HOME: box.home });
+    expect(await runTrashDelete(host, payload)).toBe(0);
+    const claimed = JSON.parse(text as string);
+    // v0.1.1's published schema (schemas/trash-claim.json at the tag) and its strict parser, which this one still is.
+    const v011 = new Ajv2020({ strict: false, allErrors: true, formats: { "date-time": true } }).compile(
+      V011_TRASH_CLAIM,
+    );
+    expect([v011(claimed), v011.errors ?? []]).toEqual([true, []]);
+    expect(TrashClaimSchema.safeParse(claimed).success).toBe(true);
   });
 });
 

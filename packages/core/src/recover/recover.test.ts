@@ -2293,6 +2293,55 @@ describe("D67: a released journal whose trash is already gone is finished", () =
   });
 });
 
+describe("orphan claims: a claim whose trash is gone and whose claimer is not live (D64, D67)", () => {
+  const trashDeps = (): TrashDeps => ({ host: testHost(), paths: box.paths, env: env(), log: () => {} });
+  const holder = () => join(box.home, "work/.plainport-trash");
+  /** `<op>.claim`, its `.claim.boot` and a stray `.claim.tmp`, with no trash folder and no journal. */
+  const orphan = async (pid: number): Promise<string> => {
+    const trash = join(holder(), ulid());
+    mkdirSync(holder(), { recursive: true });
+    const startedAt = new Date().toISOString();
+    const claim = { v: 1, device: device.id, pid, bootedAt: testHost().proc.bootedAtMs(), startedAt };
+    const session = await testHost().bootSession();
+    writeFileSync(`${trash}.claim`, JSON.stringify(claim));
+    writeFileSync(`${trash}.claim.tmp`, JSON.stringify(claim));
+    writeFileSync(`${trash}.claim.boot`, JSON.stringify({ v: 1, pid, startedAt, session }));
+    return trash;
+  };
+  const left = (trash: string) =>
+    [".claim", ".claim.boot", ".claim.tmp"].filter((suffix) => existsSync(`${trash}${suffix}`));
+
+  test("gc removes a claim with no trash and a dead pid, its .claim.boot and a stray .claim.tmp, then the empty holder", async () => {
+    const trash = await orphan(99_999_999);
+    value(await collectTrash(trashDeps(), { early: false }));
+    expect(left(trash)).toEqual([]);
+    expect(existsSync(holder())).toBe(false);
+  });
+
+  test("gc keeps a claim with no trash whose claimer is live", async () => {
+    const trash = await orphan(process.pid);
+    value(await collectTrash(trashDeps(), { early: false }));
+    expect(left(trash)).toEqual([".claim", ".claim.boot", ".claim.tmp"]);
+  });
+
+  test("housekeeping in a write command removes a dead orphan claim; a read command's leaves it", async () => {
+    const dead = await orphan(99_999_999);
+    const live = await orphan(process.pid);
+    await housekeeping(trashDeps(), { deleteDue: false });
+    expect(left(dead)).toEqual([".claim", ".claim.boot", ".claim.tmp"]);
+    await housekeeping(trashDeps());
+    expect([left(dead), left(live)]).toEqual([[], [".claim", ".claim.boot", ".claim.tmp"]]);
+  });
+
+  test("a claim beside a trash that is still there is no orphan: gc leaves it to the journal's own settling", async () => {
+    const trash = await orphan(99_999_999);
+    mkdirSync(trash);
+    value(await collectTrash(trashDeps(), { early: false }));
+    expect(left(trash)).toEqual([".claim", ".claim.boot", ".claim.tmp"]);
+    expect(existsSync(trash)).toBe(true);
+  });
+});
+
 describe("release fixes: expected I/O failures are values, never exceptions (I9, rule 7)", () => {
   const eio = (what: string) => Object.assign(new Error(`EIO: ${what}`), { code: "EIO" });
   const trashDeps = (over: Partial<TrashDeps> = {}): TrashDeps => ({

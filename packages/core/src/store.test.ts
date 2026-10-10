@@ -170,6 +170,27 @@ describe("setUpStore on a disk that fails I/O (rule 7)", () => {
       mint: () => ulid(),
     });
 
+  test("a pinned store folder whose stat never returns (a hung network mount, D32) is store.unreachable within the deadline", async () => {
+    const first = await setUpWith(testHost());
+    expect(first.ok ? "set up" : first.finding.message).toBe("set up");
+    const real = testHost();
+    const hung = { ...real, fs: { ...real.fs, stat: () => new Promise<never>(() => {}) } };
+    const started = performance.now();
+    const result = await checkStorePin(hung, {
+      paths: box.paths,
+      env: { PLAINPORT_STORE_PASSWORD: "pw" },
+      name: "ssd",
+      store: { kind: "local", path: "~/ssd/store" },
+      opener,
+      probeDeadlineMs: 50,
+    });
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("did not answer within"),
+    ]);
+  });
+
   test("a store folder that cannot be looked at is store.unreachable, never an exception", async () => {
     const result = await setUpWith(failing("stat", join(box.home, "ssd/store"), "EIO"));
     expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([

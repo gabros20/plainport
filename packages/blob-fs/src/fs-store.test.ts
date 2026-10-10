@@ -22,6 +22,7 @@ import {
   PathGuard,
   readEvents,
   resolvePaths,
+  STORE_PROBE_DEADLINE_MS,
   storeEventLog,
   ulid,
 } from "@plainport/core";
@@ -261,5 +262,35 @@ describe("blob-fs carries the catalog", () => {
       state: online.value.state,
       syncedAt: now.toISOString(),
     });
+  });
+});
+
+describe("a store folder on a network mount that hangs (D32)", () => {
+  /** A stat that never returns, as on a hung SMB or NFS mount. */
+  const hung: LocalIo = { ...io, fs: { ...io.fs, stat: () => new Promise(() => {}) } };
+
+  test("every call's root probe fails as store.unreachable within the deadline", async () => {
+    const dir = temp();
+    try {
+      const store = fsBlobStore(hung, dir, { probeDeadlineMs: 50 });
+      const started = performance.now();
+      const results = await Promise.all([
+        store.get("meta/x"),
+        store.list("meta/"),
+        store.put("meta/y", new Uint8Array()),
+      ]);
+      expect(performance.now() - started).toBeLessThan(2_000);
+      for (const result of results)
+        expect(result.ok ? "ok" : [result.finding.code, result.finding.message]).toEqual([
+          "store.unreachable",
+          expect.stringContaining("did not answer within"),
+        ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the deadline is 10 seconds by default", () => {
+    expect(STORE_PROBE_DEADLINE_MS).toBe(10_000);
   });
 });

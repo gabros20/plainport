@@ -260,6 +260,8 @@ describe("offload: the happy path", () => {
       "plainport:path=web",
       `plainport:op=${result.op}`,
       "plainport:kind=offload",
+      // The folder's own mode (Q5 ii), as its offloaded event's rootMode records it.
+      `plainport:mode=${(events.find((e) => e.type === "offloaded") as { rootMode: number }).rootMode.toString(8).padStart(4, "0")}`,
     ]);
     const snapshot = engine.repository.snapshots[0];
     expect(snapshot?.entries.map((e) => e.path).sort()).toEqual([

@@ -1,9 +1,10 @@
 // The detached trash delete's own process (D47, D64, D67, D87): `plainport __delete-trash <payload>`, started by
 // HostPorts.deleteTrashDetached and never waited for. It claims the trash as its own first (trash-claim.ts, so no other
-// deleter takes it while it runs), then runs the delete guard right before it deletes (delete-guard.ts: no mount, no
-// store, no registered project, a clean configuration), and only then removes the trash, its claim, the offload's
-// journal and the holder when that leaves it empty. A refusal removes only the claim: the trash and the journal stay,
-// and the next gc, housekeeping or recover runs the guard again and reports delete.guard-refused.
+// deleter takes it while it runs: its `.claim.boot`, then the claim), then runs the delete guard right before it
+// deletes (delete-guard.ts: no mount, no store, no registered project, a clean configuration), and only then removes
+// the trash, its claim and `.claim.boot`, the offload's journal and the holder when that leaves it empty. A refusal
+// removes only the claim files: the trash and the journal stay, and the next gc, housekeeping or recover runs the
+// guard again and reports delete.guard-refused.
 //
 // The internal word is dispatched by the CLI's entry point before the registry, so it is in no help, completion or
 // plainport.json: it is not a command a person or an agent runs.
@@ -16,7 +17,8 @@ import { removeEmptyHolder } from "./holder.ts";
 import { errorCode, type LocalIo } from "./io.ts";
 import { JournalSchema } from "./journal/index.ts";
 import type { Env, PlainportPaths } from "./paths.ts";
-import { noteRefusal, trashClaimFile, trashRefusedFile } from "./trash-claim.ts";
+import type { HostPorts } from "./ports/host.ts";
+import { noteRefusal, trashClaimBootFile, trashClaimFile, trashRefusedFile } from "./trash-claim.ts";
 
 /** The argv word the detached child runs under. */
 export const TRASH_DELETE_WORD = "__delete-trash";
@@ -86,7 +88,10 @@ const unlinkIfThere = async (io: LocalIo, path: string): Promise<boolean> => {
 };
 
 /** Runs the detached delete in this process and returns its exit code (TRASH_DELETE_EXIT); never throws for I/O. */
-export const runTrashDelete = async (io: LocalIo, payloadText: string | undefined): Promise<number> => {
+export const runTrashDelete = async (
+  io: LocalIo & Pick<HostPorts, "bootSession">,
+  payloadText: string | undefined,
+): Promise<number> => {
   let payload: TrashDeletePayload;
   try {
     const parsed = TrashDeletePayloadSchema.safeParse(JSON.parse(payloadText ?? ""));
@@ -98,14 +103,21 @@ export const runTrashDelete = async (io: LocalIo, payloadText: string | undefine
   const { trash, journal, device } = payload;
   const paths = payload.paths as unknown as PlainportPaths;
   const claim = trashClaimFile(trash);
-  // The claim first, written by this process with its own pid: until it is there nothing tells another deleter.
-  const text = `${JSON.stringify({
-    v: 1,
-    device,
-    pid: io.proc.pid,
-    bootedAt: io.proc.bootedAtMs(),
-    startedAt: new Date().toISOString(),
-  })}\n`;
+  const boot = trashClaimBootFile(trash);
+  const pid = io.proc.pid;
+  const startedAt = new Date().toISOString();
+  // The boot session first (Q5 i), naming the claim it belongs to, so the claim is never there without it. Without a
+  // session, or when it cannot be written, readers judge the claim by M1's boot-time rule: nothing more is lost.
+  const session = await io.bootSession();
+  if (session !== undefined) {
+    try {
+      await io.fs.writeTextDurable(boot, `${JSON.stringify({ v: 1, pid, startedAt, session })}\n`);
+    } catch {
+      await unlinkIfThere(io, boot);
+    }
+  }
+  // The claim, written by this process with its own pid: until it is there nothing tells another deleter.
+  const text = `${JSON.stringify({ v: 1, device, pid, bootedAt: io.proc.bootedAtMs(), startedAt })}\n`;
   try {
     await io.fs.writeTextDurable(`${claim}.tmp`, text);
     await io.fs.rename(`${claim}.tmp`, claim);
@@ -119,6 +131,7 @@ export const runTrashDelete = async (io: LocalIo, payloadText: string | undefine
     await noteRefusal(io, trash, guarded.finding);
     if (payload.keepUntil !== undefined) await restoreDeadline(io, journal, payload.keepUntil);
     await unlinkIfThere(io, claim);
+    await unlinkIfThere(io, boot);
     return TRASH_DELETE_EXIT.refused;
   }
   try {
@@ -128,6 +141,7 @@ export const runTrashDelete = async (io: LocalIo, payloadText: string | undefine
   }
   // Trash, then claim, then journal (D67): a crash between them never leaves a claim no journal leads to.
   if (!(await unlinkIfThere(io, claim))) return TRASH_DELETE_EXIT.failed;
+  await unlinkIfThere(io, boot);
   await unlinkIfThere(io, trashRefusedFile(trash));
   if (!(await unlinkIfThere(io, journal))) return TRASH_DELETE_EXIT.failed;
   await removeEmptyHolder(io, dirname(trash), ".plainport-trash");
