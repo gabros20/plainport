@@ -143,7 +143,16 @@ export class PathGuard {
     for (const [name, value] of Object.entries(spec.env)) {
       if (name === "PATH") continue;
       for (const piece of value.split(":")) {
-        if (piece.startsWith("/")) await this.check(`run ${label} with ${name}=`, piece, false);
+        if (!piece.startsWith("/")) continue;
+        try {
+          await this.check(`run ${label} with ${name}=`, piece, false);
+        } catch (error) {
+          // An env value may be a secret that only looks like a path (base64 can start with "/"): the refusal names
+          // the variable, never its value (AGENTS.md rule 9).
+          if (error instanceof PathRefused)
+            throw new PathRefused(`run ${label} with`, `the value of ${name}`, error.root);
+          throw error;
+        }
       }
     }
   }

@@ -63,13 +63,22 @@ export interface RunSpec {
   /**
    * The output may hold a secret (`security … -w`, `op read`, `restic cat masterkey`; AGENTS.md rule 9). stdout is
    * captured privately, bounded by capture.maxBytes (default outputLimitBytes), and returned only as `captured` in an
-   * ok outcome whose exit code is 0; stdout's tail stays empty. stderr's bounded tail is in the ok outcome only, for
-   * the caller to classify, never to quote. Nothing either stream says reaches log events, a finding's message, error
-   * data or a thrown error, on any path: a failure names the program, why it stopped and byte counts only. Every
-   * buffer the runner held, read chunks and a string stdin included, is overwritten when the run ends. Excludes onLine
-   * and wholeStdout, which would hand the lines to a callback. Parse `captured` with parseSensitiveJson.
+   * ok outcome whose exit code is 0. Neither stream's text is returned otherwise: both tails stay empty, and
+   * RunOutcome.sensitive holds the byte counts and, with classifyStderr, the code it chose. Nothing either stream says
+   * reaches log events, a finding's message, error data or a thrown error, on any path: a failure names the program,
+   * why it stopped, a plain error code and byte counts only. Every buffer the runner held, read chunks and a string
+   * stdin included, is overwritten when the run ends. Excludes onLine and wholeStdout, which would hand the lines to a
+   * callback. Parse `captured` with parseSensitiveJson.
    */
   sensitive?: boolean;
+  /**
+   * Sensitive runs only: how a caller learns what stderr said without seeing it (op's "not signed in" against "no
+   * such item"). Once an ok run ends, classify gets stderr's newest outputLimitBytes and returns one of `codes`, which
+   * becomes RunOutcome.sensitive.stderrCode; the bytes are then overwritten. Build it with stderrClasses, which types
+   * the codes as a closed union. A classify that throws, or returns a code not in `codes`, is a bug: the run throws an
+   * error that quotes neither.
+   */
+  classifyStderr?: StderrClasses;
   /** Every complete line as it arrives (parsers, progress). A throw is a bug: the group is stopped, then it
    * propagates. */
   onLine?: (line: OutputLine) => void;
@@ -80,6 +89,12 @@ export interface RunSpec {
     /** Default: both. */
     streams?: readonly OutputStream[];
   };
+}
+
+/** A sensitive run's stderr classifier: a closed set of codes and the function that picks one. */
+export interface StderrClasses<C extends string = string> {
+  codes: readonly C[];
+  classify(stderr: Uint8Array): C;
 }
 
 /**
@@ -101,6 +116,8 @@ export interface RunOutcome {
   /** All of stdout when RunSpec.capture was given; absent otherwise. With sensitive, present only when the exit code
    * is 0. */
   captured?: Uint8Array;
+  /** Sensitive runs only: how much each stream printed, and the code classifyStderr chose, if one was given. */
+  sensitive?: { stdoutBytes: number; stderrBytes: number; stderrCode?: string };
   /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). With capture,
    * this is a process.output-incomplete failure instead, since a stopped process may have been writing. */
   leftoversStopped: boolean;

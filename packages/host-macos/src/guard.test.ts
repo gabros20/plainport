@@ -97,6 +97,23 @@ describe("host guard: protected paths are refused", () => {
     expect(spawned).toEqual([]);
   });
 
+  test("an env value refused as a path is named by its variable, never by its value (it may be a secret)", async () => {
+    const secret = join(home, "canary_guard_0123456789abcdef0123456789abcdef");
+    const error = await host
+      .run({
+        command: "/bin/echo",
+        args: [],
+        cwd: outside,
+        env: { ...env, API_TOKEN: `/usr/share:${secret}` },
+      })
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: REFUSED });
+    const text = `${String(error)} ${(error as Error).stack} ${JSON.stringify(error)}`;
+    expect(text).toContain("API_TOKEN");
+    expect(text).not.toContain("canary_guard");
+    expect(spawned).toEqual([]);
+  });
+
   test("a child may get PATH entries, read-only paths and paths elsewhere", async () => {
     const result = await host.run({
       command: "/bin/echo",

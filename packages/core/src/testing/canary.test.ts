@@ -194,4 +194,41 @@ describe("canary: catches a deliberately leaky runner", () => {
     ).toContain("encrypt (base64)");
     expect(() => expectNoCanary([master], { output: ["clean"], findings: [{ code: "x" }] })).not.toThrow();
   });
+
+  test("a canary split across chunks, events, findings or argv is found in the stream's concatenation", () => {
+    const canary = makeCanary();
+    const pieces = canary.value.match(/.{1,5}/g) as string[];
+    expect(pieces.length).toBeGreaterThan(4);
+    const encoder = new TextEncoder();
+    expect(findCanaries([canary], { stdout: pieces.map((piece) => encoder.encode(piece)) }).join()).toContain(
+      "stdout (all of it)",
+    );
+    expect(findCanaries([canary], { stderr: pieces }).join()).toContain("stderr (all of it)");
+    const events = pieces.map((piece) => ({ type: "log", op: "x", level: "info", message: piece }));
+    expect(findCanaries([canary], { events }).join()).toContain("events (all of");
+    const findings = pieces.map((piece) => ({ code: "process.timeout", message: piece }));
+    expect(findCanaries([canary], { findings }).join()).toContain("findings (all of");
+    expect(findCanaries([canary], { argv: [["/bin/tool", ...pieces]] }).join()).toContain("argv (all of it)");
+    expect(findCanaries([canary], { returned: [{ stderr: { text: pieces.join("") } }] })).not.toEqual([]);
+    // Each piece alone is too short to count, so it is the concatenation that finds them.
+    expect(findCanaries([canary], { output: [pieces[0] as string] })).toEqual([]);
+  });
+
+  test("a file whose name holds a canary is reported without its name", () => {
+    const canary = makeCanary();
+    const dir = tempDir();
+    writeFileSync(join(dir, `${canary.value}.txt`), "clean");
+    const hits = findCanaries([canary], { dirs: [dir] });
+    expect(hits).not.toEqual([]);
+    expect(hits.join("\n")).toContain("name withheld");
+    expect(hits.join("\n")).not.toContain(canary.value.slice(0, 12));
+    let message = "";
+    try {
+      expectNoCanary([canary], { dirs: [dir] });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("canary found");
+    expect(findCanaries([canary], { errors: [message] })).toEqual([]);
+  });
 });

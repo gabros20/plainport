@@ -21,11 +21,18 @@ export interface Canary {
   forms: readonly CanaryForm[];
 }
 
-/** Where a test looks. Each is optional; a test passes what it collected. */
+/**
+ * Where a test looks. Each is optional; a test passes what it collected. Each item is searched on its own, and each
+ * list as a whole too (its items concatenated, and for objects the same field across items), so a value split across
+ * chunks, lines or events is found.
+ */
 export interface CanaryPlaces {
   /** Folders searched recursively, without following symlinks; a symlink's target text is searched too. */
   dirs?: readonly string[];
-  /** plainport's own stdout and stderr, as text or bytes. */
+  /** plainport's own stdout and stderr (recordOwnOutput collects them), as text or bytes, in the order written. */
+  stdout?: readonly (string | Uint8Array)[];
+  stderr?: readonly (string | Uint8Array)[];
+  /** Any other output, as text or bytes. */
   output?: readonly (string | Uint8Array)[];
   /** Event lines, as parsed objects or as the JSON text written. */
   events?: readonly unknown[];
@@ -34,6 +41,8 @@ export interface CanaryPlaces {
   argv?: readonly (readonly string[])[];
   /** Thrown errors: message, stack, cause and own fields. */
   errors?: readonly unknown[];
+  /** What a call returned for diagnostics (a run's outcome, its tails), less the one field allowed to hold it. */
+  returned?: readonly unknown[];
 }
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
@@ -101,6 +110,45 @@ export const recordArgv = (spawner: Spawner): { spawner: Spawner; argv: string[]
   };
 };
 
+/**
+ * Runs `run` while recording what this process itself writes to its stdout and stderr, console included, so a test
+ * can search plainport's own output (CanaryPlaces.stdout and .stderr). Nothing recorded reaches the terminal.
+ */
+export const recordOwnOutput = async <T>(
+  run: () => Promise<T>,
+): Promise<{ value: T; stdout: (string | Uint8Array)[]; stderr: (string | Uint8Array)[] }> => {
+  const stdout: (string | Uint8Array)[] = [];
+  const stderr: (string | Uint8Array)[] = [];
+  const saved = { out: process.stdout.write, err: process.stderr.write, console: { ...console } };
+  const into =
+    (sink: (string | Uint8Array)[]) =>
+    (chunk: string | Uint8Array): boolean => {
+      sink.push(chunk);
+      return true;
+    };
+  process.stdout.write = into(stdout) as typeof process.stdout.write;
+  process.stderr.write = into(stderr) as typeof process.stderr.write;
+  for (const [name, sink] of [
+    ["log", stdout],
+    ["info", stdout],
+    ["debug", stdout],
+    ["warn", stderr],
+    ["error", stderr],
+    ["trace", stderr],
+  ] as const) {
+    console[name] = (...args: unknown[]) => {
+      sink.push(args.map(String).join(" "));
+    };
+  }
+  try {
+    return { value: await run(), stdout, stderr };
+  } finally {
+    process.stdout.write = saved.out;
+    process.stderr.write = saved.err;
+    Object.assign(console, saved.console);
+  }
+};
+
 /** Bytes as latin1: every byte one character, so an ASCII form is found byte for byte in any file. */
 const latin1 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("latin1");
 
@@ -123,6 +171,42 @@ const texts = (value: unknown, seen = new Set<unknown>()): string[] => {
   return out;
 };
 
+/** Every text a value holds, each with the name of the field it sits in ("" at the top), in order. */
+const leaves = (value: unknown, key = "", seen = new Set<unknown>()): [string, string][] => {
+  if (value === null || value === undefined) return [];
+  if (typeof value === "string") return [[key, value]];
+  if (value instanceof Uint8Array) return [[key, latin1(value)]];
+  if (typeof value !== "object") return [[key, String(value)]];
+  if (seen.has(value)) return [];
+  seen.add(value);
+  const out: [string, string][] = [];
+  if (Array.isArray(value)) {
+    for (const item of value) out.push(...leaves(item, key, seen));
+    return out;
+  }
+  if (value instanceof Error) out.push([key, String(value)]);
+  for (const name of Object.getOwnPropertyNames(value)) {
+    out.push(...leaves((value as Record<string, unknown>)[name], name, seen));
+  }
+  return out;
+};
+
+/** A list as a whole: all its texts concatenated, and each field's texts across the items concatenated. */
+const wholes = (name: string, items: readonly unknown[]): [string, string[]][] => {
+  const all = leaves(items as unknown[]);
+  const byField = new Map<string, string[]>();
+  for (const [field, text] of all) byField.set(field, [...(byField.get(field) ?? []), text]);
+  return [
+    [`${name} (all of it)`, [all.map(([, text]) => text).join("")]],
+    ...[...byField]
+      .filter(([field]) => field !== "")
+      .map(([field, texts]): [string, string[]] => [
+        `${name} (all of its "${field}" fields)`,
+        [texts.join("")],
+      ]),
+  ];
+};
+
 /** Every file and symlink under dir, as [path relative to dir, its content]. */
 const files = (dir: string): [string, string][] => {
   const out: [string, string][] = [];
@@ -141,20 +225,34 @@ const files = (dir: string): [string, string][] => {
  * a failing test does not spread it into logs either.
  */
 export const findCanaries = (canaries: readonly Canary[], places: CanaryPlaces): string[] => {
+  const forms = canaries.flatMap((canary) => canary.forms);
   const haystacks: [string, string[]][] = [];
   for (const dir of places.dirs ?? []) {
-    for (const [path, content] of files(dir)) haystacks.push([`file ${path} under ${dir}`, [path, content]]);
+    for (const [path, content] of files(dir)) {
+      const place = `file ${path} under ${dir}`;
+      // A name that holds a canary is itself a hit: reported, but never repeated.
+      const named = forms.some((form) => place.includes(form.text));
+      haystacks.push([
+        named ? `a file under a folder searched (name withheld: it holds a canary)` : place,
+        [place, content],
+      ]);
+    }
   }
   const listed = (name: string, items: readonly unknown[] | undefined): void => {
-    (items ?? []).forEach((item, index) => {
+    if (items === undefined || items.length === 0) return;
+    items.forEach((item, index) => {
       haystacks.push([`${name}[${index}]`, texts(item)]);
     });
+    haystacks.push(...wholes(name, items));
   };
+  listed("stdout", places.stdout);
+  listed("stderr", places.stderr);
   listed("output", places.output);
   listed("events", places.events);
   listed("findings", places.findings);
   listed("argv", places.argv);
   listed("errors", places.errors);
+  listed("returned", places.returned);
   const hits: string[] = [];
   for (const [place, found] of haystacks) {
     for (const canary of canaries) {
