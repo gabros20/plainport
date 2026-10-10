@@ -257,11 +257,13 @@ export const LINUX_IMAGE =
 
 /** What the Linux recipe does not reproduce, compared with GitHub's ubuntu-24.04 runner. */
 export const LINUX_GAPS = [
-  "No git fsmonitor daemon: Linux git has no built-in fsmonitor, so the fsmonitor paths (D52) are not exercised.",
-  "No Node.js, npm, pnpm or Yarn: the real offline-install hydration tests skip (CI is not set), as they do outside CI.",
-  "Not a git checkout: the copy has no .git, so tests that read this repository's history (check:version) run in CI only.",
+  "Debian bookworm's git 2.39 has no fsmonitor daemon on Linux (Ubuntu 24.04's 2.43 has), so the fsmonitor check of" +
+    " packages/core/src/scan/git.test.ts fails here and not in CI.",
+  "No Node.js, npm, pnpm or Yarn: the real offline-install tests skip, as they do outside CI, and the npm eval" +
+    " (evals/agent-smoke/hydrate.test.ts) fails.",
+  "The copy is a fresh one-commit git repository: no history, no tags, no remote.",
   "linux/arm64 on Apple silicon, where CI is linux/amd64.",
-  "Debian (the oven/bun base) rather than Ubuntu 24.04, as an unprivileged user (bun) rather than the runner user.",
+  "Debian (the oven/bun base) rather than Ubuntu 24.04, as the unprivileged user bun rather than the runner user.",
 ];
 
 export const linuxCommand = (options: { checkout: string; run: string }): string[] => {
@@ -269,13 +271,16 @@ export const linuxCommand = (options: { checkout: string; run: string }): string
     "set -euo pipefail",
     "export DEBIAN_FRONTEND=noninteractive",
     "apt-get update -qq >/dev/null",
-    "apt-get install -y -qq --no-install-recommends git zsh bzip2 unzip ca-certificates openssh-client >/dev/null",
+    "apt-get install -y -qq --no-install-recommends git zsh bzip2 unzip procps ca-certificates openssh-client >/dev/null",
     // A copy, so the container's node_modules and .tools never land in the checkout.
     "mkdir /work",
     "tar -C /src --exclude=./node_modules --exclude='./packages/*/node_modules' --exclude=./.tools --exclude=./dist" +
       " --exclude=./.testenv --exclude=./.git -cf - . | tar -C /work -xf -",
     "chown -R bun:bun /work",
     "cd /work",
+    // Some tests (scripts/install) need the checkout to be a git repository.
+    "runuser -u bun -- sh -c 'git init -q && git add -A && git -c user.name=testenv -c user.email=testenv@invalid" +
+      " commit -q -m testenv'",
     "runuser -u bun -- bun install --frozen-lockfile",
     "runuser -u bun -- bun scripts/fetch-tools.ts",
     `runuser -u bun -- bash -c ${shellQuote(options.run)}`,

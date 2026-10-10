@@ -99,8 +99,9 @@ Docker: CI runs T2 in the `linux` job only.
 
 `scripts/testenv linux [-- <command>]` is the reproducible Linux test recipe: `bun run test:t1` (or the command)
 in the pinned `oven/bun` image of `.bun-version`, with `--init`, as the unprivileged `bun` user, on a copy of the
-checkout without `node_modules`, `.tools` or `.git`. It prints its known gaps first (no git fsmonitor, no Node.js
-package managers, no git history, arm64 on Apple silicon).
+checkout without `node_modules`, `.tools` or its git history (the copy is a fresh one-commit repository). It prints
+its known gaps first: Debian's git has no fsmonitor daemon, there are no Node.js package managers, and it runs arm64
+on Apple silicon. On 2026-10-10 those two gaps were its only failures (1,744 pass).
 
 **The restic matrix.** CI's `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18
 and the pin. `tools.lock.json`'s `matrix` section holds the older versions' checksums;
