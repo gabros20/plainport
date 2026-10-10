@@ -274,6 +274,51 @@ for (const name of ["realpath", "realpathSync"]) {
   wrap(fs[name] as Patchable, "native", (args) => guard(`${name}.native`, args[0], false));
 }
 
+// Temp folders this run makes under the temp directory: `plainport-*` ones still there after the last test are a leak.
+// Only this process's own folders are judged, so runs sharing a TMPDIR don't blame each other.
+const madeTemp = new Set<string>();
+for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
+  for (const variant of ["mkdtemp", "mkdtempSync"]) {
+    const original = target[variant];
+    if (typeof original !== "function") continue;
+    const remember = (made: unknown) => {
+      if (typeof made === "string" && basename(made).startsWith("plainport-") && dirname(made) === tmp)
+        madeTemp.add(made);
+      return made;
+    };
+    const wrapped = function (this: unknown, ...args: unknown[]) {
+      const last = args.at(-1);
+      if (typeof last === "function") {
+        args[args.length - 1] = (error: unknown, made: unknown) => {
+          remember(made);
+          (last as Fn)(error, made);
+        };
+        return (original as Fn).apply(this, args);
+      }
+      const made = (original as Fn).apply(this, args);
+      return made instanceof Promise ? made.then(remember) : remember(made);
+    };
+    Object.assign(wrapped, original);
+    target[variant] = wrapped;
+  }
+}
+
+/** The temp folders this run made and left behind. */
+export const leakedTempFolders = (): string[] =>
+  [...madeTemp].filter((dir) => (fs.existsSync as (path: string) => boolean)(dir));
+
+// After the last test: a leak fails the run (afterAll throws), and the folders are removed so they don't pile up.
+afterAll(() => {
+  const leaked = leakedTempFolders();
+  for (const dir of leaked) rmSync(dir, { recursive: true, force: true });
+  if (leaked.length > 0)
+    throw new Error(
+      `temp folder leak: this run left ${leaked.length} temp folder${leaked.length === 1 ? "" : "s"} in ${tmp} (${leaked
+        .map((dir) => basename(dir))
+        .join(", ")}); the test that made each must remove it`,
+    );
+});
+
 const bun = Bun as unknown as Patchable;
 
 // Bun.file is a read until one of its mutators is called.

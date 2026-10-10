@@ -144,7 +144,16 @@ export function scoreTranscript(input: unknown) {
   if (!transcript.fixtureIntact) issue("fixture.changed", "Restored fixture bytes or modes differ.");
   if (transcript.agentExitCode !== 0) issue("agent.failed", "Agent did not exit successfully.");
   return {
-    passed: reachedShelved && returnedLocal && contractIssues.length === 0,
+    // Two verdicts (M2 Task 3): `passed` is the four objective checks about the fixture; `clean` is that the
+    // agent met no contract issue on the way (a missing fix or hint, a confusing refusal, a bad exit, incomplete evidence).
+    // Evidence the harness could not collect (a call or an observation) also keeps `passed` false: the checks cannot be trusted.
+    passed:
+      reachedShelved &&
+      returnedLocal &&
+      restoredFromStore &&
+      transcript.fixtureIntact &&
+      !contractIssues.some((i) => i.code === "call.evidence-incomplete" || i.code === "observation.invalid"),
+    clean: contractIssues.length === 0,
     reachedShelved,
     returnedLocal,
     calls: transcript.calls.length,

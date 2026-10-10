@@ -3,7 +3,7 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, join as joinPath } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
@@ -261,11 +261,27 @@ export const FAKE_REGISTRY: Registry = [
 ];
 
 /**
+ * Removes a sandbox, also when a detached child of the command that ran in it (an offload's delete) is still
+ * writing into it: the removal is repeated until the folder stays gone.
+ */
+const removeSandbox = (dir: string): void => {
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 40; attempt++) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    Atomics.wait(wait, 0, 0, 25);
+    if (!existsSync(dir)) return;
+  }
+  throw new Error(`could not remove ${dir}`);
+};
+
+/**
  * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
  * project, an empty git repository, and a shelved one, work:clients/acme/api), store local, and the folders the
  * examples name (~/personal, ~/Developer/Work). cleanup() removes it.
  */
-export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
+export const exampleHome = async (
+  options: { failSetup?: boolean } = {},
+): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
   for (const dir of ["work/clients/acme/web", "personal", "Developer/Work"]) {
     mkdirSync(join(home, dir), { recursive: true });
@@ -273,7 +289,10 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   const git = Bun.spawnSync(["git", "init", "-q", join(home, "work/clients/acme/web")], {
     env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
-  if (git.exitCode !== 0) throw new Error(`git init failed: ${git.stderr.toString()}`);
+  if (git.exitCode !== 0 || options.failSetup === true) {
+    removeSandbox(home);
+    throw new Error(`git init failed: ${git.stderr.toString()}`);
+  }
   const ports = sandboxPorts(home);
   const setup = await capture(
     ["init", "--root", "work=~/work", "--store-path", "~/store", "--device", "mbp", "--yes"],
@@ -281,7 +300,7 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
     { ports },
   );
   if (setup.code !== 0) {
-    rmSync(home, { recursive: true, force: true });
+    removeSandbox(home);
     throw new Error(`example home setup failed: ${setup.err}`);
   }
   // A shelved project for onload's examples: offloaded once (an empty git repository with a README; no package
@@ -292,13 +311,16 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   const apiGit = Bun.spawnSync(["git", "init", "-q", api], {
     env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
-  if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
+  if (apiGit.exitCode !== 0) {
+    removeSandbox(home);
+    throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
+  }
   const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
   if (shelved.code !== 0) {
-    rmSync(home, { recursive: true, force: true });
+    removeSandbox(home);
     throw new Error(`example home setup failed: ${shelved.err}`);
   }
-  return { home, ports, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+  return { home, ports, cleanup: () => removeSandbox(home) };
 };
 
 export interface Captured {

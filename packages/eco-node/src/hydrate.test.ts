@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -235,6 +236,58 @@ describe("hydrate: the core meets the toolchain", () => {
     expect(
       events.filter((e) => e.type === "phase").map((e) => e.type === "phase" && `${e.phase} ${e.status}`),
     ).toEqual(["toolchain start", "toolchain end", "hydrate start", "hydrate end"]);
+  });
+});
+
+describe("hydrate: Corepack (M2 Task 3)", () => {
+  /**
+   * A `pnpm` that behaves like Corepack's shim: it is a symlink into a corepack package, it asks before downloading
+   * unless COREPACK_ENABLE_DOWNLOAD_PROMPT=0 (here: it hangs up with exit 7), and it writes the manager it used into
+   * package.json unless COREPACK_ENABLE_AUTO_PIN=0.
+   */
+  const corepackShim = () => {
+    const dist = join(root, "lib/node_modules/corepack/dist");
+    mkdirSync(dist, { recursive: true });
+    const target = join(dist, "pnpm.js");
+    writeFileSync(
+      target,
+      [
+        "#!/bin/sh",
+        'echo "$COREPACK_ENABLE_DOWNLOAD_PROMPT $COREPACK_ENABLE_AUTO_PIN" >> "$FAKE_LOG"',
+        'case "$1" in --version) echo 9.12.0; exit 0;; esac',
+        '[ "$COREPACK_ENABLE_DOWNLOAD_PROMPT" = "0" ] || { echo "Corepack is about to download pnpm. Proceed? [Y/n]" >&2; exit 7; }',
+        '[ "$COREPACK_ENABLE_AUTO_PIN" = "0" ] || sed \'s/"private": true,/"private": true, "packageManager": "pnpm@9.12.0",/\' package.json > package.json.new && mv package.json.new package.json',
+        "mkdir -p node_modules",
+      ].join("\n"),
+    );
+    chmodSync(target, 0o755);
+    symlinkSync(target, join(bin, "pnpm"));
+  };
+
+  test("installs never wait on a Corepack prompt or write into package.json, and the report names Corepack", async () => {
+    corepackShim();
+    const dir = project("pnpm");
+    const before = readFileSync(join(dir, "package.json"));
+    const log = join(root, "corepack.log");
+    const done = await hydrate(dir, {
+      ...offlineEnv(`${bin}:/usr/bin:/bin`),
+      FAKE_LOG: log,
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "1",
+      COREPACK_ENABLE_AUTO_PIN: "1",
+    });
+    expect(done.failure?.finding.message).toBeUndefined();
+    expect(readFileSync(join(dir, "package.json")).equals(before)).toBe(true);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["0 0"]);
+    expect(done.report.steps).toEqual([
+      { path: "", command: "pnpm install --frozen-lockfile", ok: true, via: "corepack" },
+    ]);
+  });
+
+  test("a package manager that is not Corepack's shim is not credited to Corepack", async () => {
+    fake("pnpm", "mkdir -p node_modules");
+    const dir = project("pnpm");
+    const done = await hydrate(dir, offlineEnv(`${bin}:/usr/bin:/bin`));
+    expect(done.report.steps).toEqual([{ path: "", command: "pnpm install --frozen-lockfile", ok: true }]);
   });
 });
 

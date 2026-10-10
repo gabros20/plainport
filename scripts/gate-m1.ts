@@ -3,10 +3,11 @@
 // a staged file, an uncommitted edit, an untracked file, a .env with a dummy value) and a regenerable node_modules
 // and .next to strip, then offloaded and onloaded (--no-hydrate: nothing is ever installed) by a binary built from
 // this checkout, against a temp store under a sandboxed HOME. The restored tree must match the one offloaded byte
-// for byte (content, type, mode, symlink target) minus the stripped paths, and git must report the same facts.
+// for byte (content, type, mode, symlink target, hard links, xattrs, flags) minus the stripped paths, and git must report the same facts.
 // The strip set is checked by the gate itself before it is trusted (stripProblems); the project must end
-// restored-unhydrated, and the offload must warn git.unpushed. Extended attributes, ACLs and file flags are not
-// compared.
+// restored-unhydrated, and the offload must warn git.unpushed. The comparison is scripts/tree-compare.ts, which also
+// checks hard-link groups, extended attributes and BSD flags (not ACLs). The report written by --out is the gate's raw
+// result; it is attached to the release notes.
 //
 // Flags: --projects <list> (comma-separated D11 names or <url>@<40-hex sha>; default all five D11 projects),
 // --out <file> (the report as JSON), --binary <path> (a built plainport; default: build one), --tools <dir> (restic
@@ -20,17 +21,15 @@
 // macOS only in M1: plainport has only the macOS host, so the gate refuses elsewhere (platformProblem) until host-linux
 // arrives with M3. Scripts may spawn directly and report failures as messages (run decisions D8 and D10).
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
-  readlinkSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -39,6 +38,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { hostTarget } from "../packages/core/src/tools.ts";
 import { buildCommand } from "./build.ts";
+import { compareTrees, hashTree, mtimeChanges, type Tree, type TreeEntry } from "./tree-compare.ts";
 
 const CHECKOUT = resolve(import.meta.dir, "..");
 
@@ -94,63 +94,7 @@ export const parseTimeLAll = (text: string): Timing[] => {
 
 export const parseTimeL = (text: string): Timing | undefined => parseTimeLAll(text)[0];
 
-export type TreeEntry = {
-  type: "file" | "dir" | "symlink" | "other";
-  mode: number;
-  hash?: string;
-  target?: string;
-  mtimeMs?: number;
-};
-export type Tree = Map<string, TreeEntry>;
-
-const stripped = (path: string, strip: readonly string[]): boolean =>
-  strip.some((s) => path === s || path.startsWith(`${s}/`));
-
-/** Every entry under `dir` (the folder itself as "."), its type, permission bits and content hash or link target. */
-export const hashTree = (dir: string, strip: readonly string[]): Tree => {
-  const tree: Tree = new Map();
-  const visit = (relative: string): void => {
-    const full = relative === "." ? dir : join(dir, relative);
-    const stat = lstatSync(full);
-    const mode = stat.mode & 0o7777;
-    if (stat.isSymbolicLink()) {
-      tree.set(relative, { type: "symlink", mode, target: readlinkSync(full) });
-    } else if (stat.isFile()) {
-      const hash = createHash("sha256").update(readFileSync(full)).digest("hex");
-      tree.set(relative, { type: "file", mode, hash, mtimeMs: stat.mtimeMs });
-    } else if (stat.isDirectory()) {
-      tree.set(relative, { type: "dir", mode });
-      for (const name of readdirSync(full).sort()) {
-        const child = relative === "." ? name : `${relative}/${name}`;
-        if (!stripped(child, strip)) visit(child);
-      }
-    } else {
-      tree.set(relative, { type: "other", mode });
-    }
-  };
-  visit(".");
-  return tree;
-};
-
-/** What differs between two trees, one line per path, sorted: missing, extra, or changed and how. */
-export const compareTrees = (before: Tree, after: Tree): string[] => {
-  const problems: string[] = [];
-  for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
-    const a = before.get(path);
-    const b = after.get(path);
-    if (b === undefined) problems.push(`missing ${path}`);
-    else if (a === undefined) problems.push(`extra ${path}`);
-    else {
-      const how: string[] = [];
-      if (a.type !== b.type) how.push(`type ${a.type} → ${b.type}`);
-      if (a.mode !== b.mode) how.push(`mode ${a.mode.toString(8)} → ${b.mode.toString(8)}`);
-      if (a.type === b.type && a.hash !== b.hash) how.push("content");
-      if (a.type === b.type && a.target !== b.target) how.push(`target ${a.target} → ${b.target}`);
-      if (how.length > 0) problems.push(`changed ${path}: ${how.join(", ")}`);
-    }
-  }
-  return problems;
-};
+export { compareTrees, hashTree, type Tree, type TreeEntry };
 
 /**
  * The strip set checked by the gate itself, not taken on plainport's word (AGENTS rule 2, DESIGN "Strip set"): nothing
@@ -183,10 +127,6 @@ export const stripProblems = (
       problems.push(`strip set lacks ${folder}, which the gate planted as regenerable`);
   return problems;
 };
-
-/** Files whose modification time differs (reported, not part of byte identity). */
-const mtimeChanges = (before: Tree, after: Tree): number =>
-  [...before].filter(([path, a]) => a.type === "file" && after.get(path)?.mtimeMs !== a.mtimeMs).length;
 
 export type GitFacts = {
   head: string;

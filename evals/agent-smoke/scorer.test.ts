@@ -48,7 +48,7 @@ test("scorer requires ordered observations for the fixture, byte integrity and a
     }).passed,
   ).toBe(false);
   expect(scoreTranscript({ ...transcript, fixtureIntact: false }).passed).toBe(false);
-  expect(scoreTranscript({ ...transcript, agentExitCode: 1 }).passed).toBe(false);
+  expect(scoreTranscript({ ...transcript, agentExitCode: 1 }).clean).toBe(false);
 });
 
 test("scorer rejects malformed recordings instead of silently counting them", () => {
@@ -193,4 +193,26 @@ test("scorer accepts onload after leading global flags", () => {
   expect(scoreTranscript(transcript).contractIssues).toEqual([]);
   call.argv = ["--json", "--", "onload", "work:fixture"];
   expect(scoreTranscript(transcript).passed).toBe(false);
+});
+
+test("scorer splits passed (the four objective checks) from clean (no contract issues)", () => {
+  const pass = scoreTranscript(recorded("pass"));
+  expect([pass.passed, pass.clean]).toEqual([true, true]);
+  // Shelved, back local, restored from the store and byte-identical, but the agent was confused on the way.
+  const confused = scoreTranscript({
+    ...(recorded("pass") as Record<string, unknown>),
+    agentIssues: ["lost"],
+  });
+  expect(confused.contractIssues.map((issue) => issue.code)).toEqual(["agent.confusing"]);
+  expect([confused.passed, confused.clean]).toEqual([true, false]);
+  // Evidence the harness could not collect leaves nothing to trust: neither verdict holds.
+  const blind = scoreTranscript(recorded("unregistered"));
+  expect([blind.passed, blind.clean]).toEqual([false, false]);
+  const failed = scoreTranscript(recorded("fail"));
+  expect([failed.passed, failed.clean]).toEqual([false, false]);
+  // Each objective check alone fails `passed`; an agent that exits badly after a good round trip only loses `clean`.
+  const transcript = recorded("pass") as Record<string, unknown>;
+  expect(scoreTranscript({ ...transcript, fixtureIntact: false }).passed).toBe(false);
+  const badExit = scoreTranscript({ ...transcript, agentExitCode: 1 });
+  expect([badExit.passed, badExit.clean]).toEqual([true, false]);
 });

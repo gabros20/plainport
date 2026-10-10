@@ -289,3 +289,23 @@ describe("home tripwire: cleanup", () => {
     });
   }
 });
+
+describe("home tripwire: temp folder leaks", () => {
+  for (const leak of [false, true]) {
+    test(`a run that ${leak ? "leaves" : "removes"} its plainport-* temp folder ${leak ? "fails" : "passes"}`, () => {
+      const tmp = mkdtempSync(join(sandbox, "child-tmp-"));
+      onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+      const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/temp-leak.fixture.ts"], {
+        cwd: repoRoot,
+        env: { ...process.env, TMPDIR: tmp, PLAINPORT_FIXTURE_LEAK: leak ? "1" : "0" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = run.stdout.toString() + run.stderr.toString();
+      expect(run.exitCode === 0).toBe(!leak);
+      if (leak) expect(output).toMatch(/left 1 temp folder.*plainport-leak-/s);
+      // The check removes what it found, so a leak never piles up.
+      expect(readdirSync(tmp)).toEqual([]);
+    });
+  }
+});

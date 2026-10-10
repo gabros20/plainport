@@ -18,7 +18,7 @@
 // and `plainport hydrate` (runHydrate) retries. `plainport dehydrate` (runDehydrate) is the way back: it removes the
 // installed dependencies a plugin claims and git does not track, nothing else.
 
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   type Failure,
   type Finding,
@@ -56,6 +56,8 @@ export type HydrateStepReport = {
   ok: boolean;
   /** The install's exit code when it ran and failed; null when a signal ended it. */
   exitCode?: number | null;
+  /** Set when Corepack supplied the package manager (its shim is what `command` ran). */
+  via?: "corepack";
 };
 
 export type HydrateReport = {
@@ -94,6 +96,12 @@ const INSTALL_IDLE_MS = 10 * 60_000;
 const INSTALL_TIMEOUT_MS = 60 * 60_000;
 const VERSION_TIMEOUT_MS = 30_000;
 
+/**
+ * Corepack must never wait on a prompt to download a package manager, nor write the manager it used into the
+ * project's package.json (M2 Task 3). Set after the user's own values, whatever they are.
+ */
+const COREPACK_POLICY = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", COREPACK_ENABLE_AUTO_PIN: "0" } as const;
+
 /** Variables only plainport and its engines read: a store password or a restic or rclone setting may be among them. */
 const PRIVATE_PREFIXES = ["PLAINPORT_", "RESTIC_", "RCLONE_"];
 
@@ -111,7 +119,7 @@ const installEnv = (env: Env, secrets: readonly string[] = []): Record<string, s
       !secrets.includes(name)
     )
       out[name] = value;
-  return out;
+  return { ...out, ...COREPACK_POLICY };
 };
 
 /** Where a program is on the env's PATH, if it is anywhere. */
@@ -121,6 +129,16 @@ const onPath = async (host: HostPorts, env: Env, name: string): Promise<string |
     if (await host.fs.executable(join(folder, name))) return join(folder, name);
   }
   return undefined;
+};
+
+/** Whether `name` on the env's PATH is Corepack's shim: a link that resolves into the corepack package. */
+const suppliedByCorepack = async (host: HostPorts, env: Env, name: string): Promise<boolean> => {
+  try {
+    const found = await onPath(host, env, name);
+    return found !== undefined && (await host.fs.realpath(found)).split(sep).includes("corepack");
+  } catch {
+    return false; // a PATH entry the host refuses or cannot read: not credited to Corepack
+  }
 };
 
 export interface Toolchain {
@@ -325,6 +343,9 @@ export const hydrateProject = async (
   for (const step of installs) {
     if (deps.signal?.aborted) return stopped(steps);
     const argv = toolchain.wrap(step.argv);
+    const via = (await suppliedByCorepack(host, env, step.argv[0] as string))
+      ? { via: "corepack" as const }
+      : {};
     const cwd = step.path === "" ? dir : join(dir, ...step.path.split("/"));
     const where = step.path === "" ? address : `${address} (${step.path})`;
     const ran = await host.run({
@@ -338,7 +359,7 @@ export const hydrateProject = async (
       log: { op, emit: (event) => deps.log(event.level, event.message) },
     });
     if (!ran.ok) {
-      steps.push({ path: step.path, command: step.command, ok: false });
+      steps.push({ path: step.path, command: step.command, ok: false, ...via });
       if (ran.finding.code === "process.cancelled" || deps.signal?.aborted) return stopped(steps);
       return failed(
         `${where} is restored, but ${step.command} could not run: ${ran.finding.message}`,
@@ -350,7 +371,7 @@ export const hydrateProject = async (
     }
     const { exitCode, signal: killed } = ran.value;
     if (exitCode !== 0) {
-      steps.push({ path: step.path, command: step.command, ok: false, exitCode });
+      steps.push({ path: step.path, command: step.command, ok: false, exitCode, ...via });
       return failed(
         `${where} is restored, but ${step.command} ${
           exitCode === null ? `was ended by ${killed}` : `failed with exit code ${exitCode}`
@@ -358,7 +379,7 @@ export const hydrateProject = async (
         steps,
       );
     }
-    steps.push({ path: step.path, command: step.command, ok: true });
+    steps.push({ path: step.path, command: step.command, ok: true, ...via });
   }
   // The index's stat data is stale after a restore: one refresh, so the first git status is not slow.
   if (manifest.get(".git") !== undefined) {

@@ -2727,6 +2727,11 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "via": {
+                      "description": "Corepack supplied the package manager; installs run with its download prompt and auto-pin off",
+                      "type": "string",
+                      "const": "corepack"
                     }
                   },
                   "required": [
@@ -2899,6 +2904,11 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "via": {
+                      "description": "Corepack supplied the package manager; installs run with its download prompt and auto-pin off",
+                      "type": "string",
+                      "const": "corepack"
                     }
                   },
                   "required": [
