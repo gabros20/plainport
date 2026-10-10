@@ -209,8 +209,15 @@ describe("the detached delete claims before it deletes (D64 revised)", () => {
     const started = await posixDeleteTrash(testHost(), trash, journal, DEVICE, launch());
     if (!started.ok) throw new Error(started.finding.message);
     // Its claim is there, or it already finished (claim and journal gone with the trash).
-    if (existsSync(trashClaimFile(trash))) {
-      const written = JSON.parse(readFileSync(trashClaimFile(trash), "utf8"));
+    // One read, no look first: the delete can remove the claim between an exists check and a read (ENOENT = finished).
+    let text: string | undefined;
+    try {
+      text = readFileSync(trashClaimFile(trash), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (text !== undefined) {
+      const written = JSON.parse(text);
       expect([written.device, written.pid]).toEqual([DEVICE, started.value.pid]);
     } else expect(existsSync(trash)).toBe(false);
     for (let i = 0; i < 400 && existsSync(journal); i++) await Bun.sleep(10);
