@@ -6,8 +6,13 @@ export class RingBuffer {
   private end = 0;
   private total = 0;
 
-  constructor(readonly capacity: number) {
+  /** observe, a test seam, is handed the backing buffer (runner.ts's bufferProbe). */
+  constructor(
+    readonly capacity: number,
+    observe?: (buffer: Uint8Array) => void,
+  ) {
     this.buffer = new Uint8Array(capacity);
+    observe?.(this.buffer);
   }
 
   push(chunk: Uint8Array): void {

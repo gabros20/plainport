@@ -8,7 +8,14 @@ import { join } from "node:path";
 import type { PlainportEvent } from "@plainport/contract";
 import { runProcess } from "../runner/runner.ts";
 import type { ChildProcess, RunSpec, Spawner } from "../runner/types.ts";
-import { expectNoCanary, findCanaries, makeCanary, makeMasterKeyCanary, recordArgv } from "./canary.ts";
+import {
+  expectNoCanary,
+  findCanaries,
+  makeCanary,
+  makeMasterKeyCanary,
+  recordArgv,
+  recordOwnOutput,
+} from "./canary.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -230,5 +237,93 @@ describe("canary: catches a deliberately leaky runner", () => {
     }
     expect(message).toContain("canary found");
     expect(findCanaries([canary], { errors: [message] })).toEqual([]);
+  });
+});
+
+describe("canary: pieces and other spellings", () => {
+  /** The random part of a plain canary: what makes it a secret, as opposed to its fixed `canary_<label>_` prefix. */
+  const randomOf = (canary: { value: string }): string =>
+    canary.value.slice(canary.value.lastIndexOf("_") + 1);
+
+  test("any 12-character piece of the random part is found, interior slices included", () => {
+    const canary = makeCanary();
+    const random = randomOf(canary);
+    const middle = canary.value.slice(13, 33);
+    const first15 = random.slice(0, 15);
+    const interior = random.slice(9, 21);
+    for (const piece of [middle, first15, interior]) {
+      expect(findCanaries([canary], { findings: [{ message: `x ${piece} y` }] })).not.toEqual([]);
+      expect(findCanaries([canary], { output: [`before${piece}after`] })).not.toEqual([]);
+    }
+    // Shorter than 12, or only the fixed prefix that every canary of the label shares, is not a piece.
+    expect(findCanaries([canary], { output: [random.slice(0, 11)] })).toEqual([]);
+    expect(findCanaries([canary], { output: ["canary_secret_"] })).toEqual([]);
+    // The report names the form, never the piece.
+    const hits = findCanaries([canary], { output: [interior] }).join("\n");
+    expect(hits).toContain("a piece");
+    expect(hits).not.toContain(interior);
+  });
+
+  test("the cuts the default runner makes are found: the 600-character tail of a message, the 2000-character log line", async () => {
+    const canary = makeCanary();
+    // lastOutput keeps the last 600 characters: a canary followed by 580 more keeps its last 20.
+    const tail = await runProcess(
+      printing(`${canary.value}${"x".repeat(580)}`, null),
+      spec({ idleTimeoutMs: 30, killGraceMs: 20 }),
+    );
+    expect(tail.ok).toBe(false);
+    const message = tail.ok ? "" : tail.finding.message;
+    expect(message).not.toContain(canary.value);
+    expect(message).toContain(canary.value.slice(-20));
+    expect(findCanaries([canary], { findings: tail.ok ? [] : [tail.finding] })).not.toEqual([]);
+    // A log line is cut at 2000 characters: "tool: " and 1964 more leave the canary's first 30.
+    const events: PlainportEvent[] = [];
+    await runProcess(
+      printing(`${"y".repeat(1964)}${canary.value}`, 0),
+      spec({ log: { op: "x", emit: (event) => events.push(event) } }),
+    );
+    const logged = JSON.stringify(events);
+    expect(logged).not.toContain(canary.value);
+    expect(logged).toContain(canary.value.slice(0, 30));
+    expect(findCanaries([canary], { events })).not.toEqual([]);
+  });
+
+  test("a master key component cut to its first 15 hex characters, or a middle slice of its base64, is found", () => {
+    const master = makeMasterKeyCanary();
+    const key = JSON.parse(master.value) as { encrypt: string; mac: { k: string } };
+    const hex = Buffer.from(key.encrypt, "base64").toString("hex");
+    expect(findCanaries([master], { output: [hex.slice(0, 15)] }).join()).toContain("encrypt (hex)");
+    expect(findCanaries([master], { findings: [{ message: key.mac.k.slice(5, 19) }] }).join()).toContain(
+      "mac.k (base64)",
+    );
+  });
+
+  test("base64 at every alignment and base64url find a value encoded inside a larger envelope", () => {
+    const canary = makeCanary();
+    for (const prefix of ["", "a", "ab", "abc"]) {
+      const envelope = Buffer.from(`${prefix}{"token":"${canary.value}"}`);
+      expect(findCanaries([canary], { output: [envelope.toString("base64")] })).not.toEqual([]);
+      expect(findCanaries([canary], { output: [envelope.toString("base64url")] })).not.toEqual([]);
+    }
+    expect(findCanaries([canary], { output: [Buffer.from(canary.value).toString("hex")] })).not.toEqual([]);
+    const master = makeMasterKeyCanary();
+    const key = JSON.parse(master.value) as { encrypt: string };
+    const raw = Buffer.from(key.encrypt, "base64");
+    for (const prefix of [[], [1], [1, 2]]) {
+      const shifted = Buffer.concat([Buffer.from(prefix), raw, Buffer.from([9, 9, 9])]);
+      expect(findCanaries([master], { output: [shifted.toString("base64")] }).join()).toContain("encrypt");
+      expect(findCanaries([master], { output: [shifted.toString("base64url")] }).join()).toContain("encrypt");
+    }
+  });
+
+  test("recordOwnOutput records a logged object as the console would print it, fields included", async () => {
+    const canary = makeCanary();
+    const own = await recordOwnOutput(async () => {
+      console.log({ outcome: { stderr: { text: canary.value } } });
+      console.error("%s failed", canary.value);
+    });
+    expect(findCanaries([canary], { stdout: own.stdout })).not.toEqual([]);
+    expect(findCanaries([canary], { stderr: own.stderr })).not.toEqual([]);
+    expect(own.stdout.join("")).not.toContain("[object Object]");
   });
 });

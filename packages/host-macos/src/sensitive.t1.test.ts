@@ -5,7 +5,7 @@
 // no process is left in any group the runner started. T1: real processes (ADR-0018).
 
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PlainportEvent } from "@plainport/contract";
@@ -51,7 +51,17 @@ beforeEach(() => {
   recorded.argv.length = 0;
 });
 
+/** Helpers a test started outside every process group (the held-open case's perl): killed after each test. */
+const helpers: number[] = [];
+
 afterEach(() => {
+  for (const pid of helpers.splice(0)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
   rmSync(dir, { recursive: true, force: true });
   const left: string[] = [];
   for (const pgid of groups.splice(0)) {
@@ -216,8 +226,11 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
     const canary = makeCanary();
     const { result } = await runCase(
       canary,
-      'printf "%s\\n" "$SECRET"; /usr/bin/perl -MPOSIX -e "POSIX::setsid(); sleep 3" & exit 0',
+      'printf "%s\\n" "$SECRET"; /usr/bin/perl -MPOSIX -e "POSIX::setsid(); sleep 30" & echo $! > helper.pid; exit 0',
     );
+    const pid = Number(readFileSync(join(dir, "helper.pid"), "utf8"));
+    expect(pid).toBeGreaterThan(1);
+    helpers.push(pid);
     expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
     expect(messageOf(result)).toContain(`${canary.value.length + 1} bytes on stdout`);
   });

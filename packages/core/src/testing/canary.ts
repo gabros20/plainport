@@ -5,6 +5,7 @@
 
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join, relative } from "node:path";
+import { formatWithOptions } from "node:util";
 import type { Spawner } from "../runner/types.ts";
 
 /** One spelling of a planted value to look for, named for the report (which never quotes the value). */
@@ -16,10 +17,17 @@ export interface CanaryForm {
 export interface Canary {
   /** What the test plants: printed by a fake child, put in an environment variable, written as a key. */
   value: string;
-  /** Every spelling that counts as a leak: the value, its halves (a partial print, a cut message) and, for a
-   * structured secret, each component in base64 and hex. Each is long enough not to match by chance. */
+  /** Every spelling that counts as a leak, whole: the value and its halves, its hex, and its base64 at each of the
+   * three alignments a larger envelope can give it, plain and base64url; for a structured secret, each component the
+   * same way. Each is long enough not to match by chance. */
   forms: readonly CanaryForm[];
+  /** Every PIECE-character slice of the forms (a cut message keeps any slice, interior ones included), named by its
+   * form, less the slices every canary of the kind shares (`canary_secret_`). Forms added later have no pieces. */
+  pieces: readonly CanaryForm[];
 }
+
+/** How long a slice of a planted value must be to count: 48 bits of hex, 72 of base64, never a chance match. */
+export const PIECE = 12;
 
 /**
  * Where a test looks. Each is optional; a test passes what it collected. Each item is searched on its own, and each
@@ -49,6 +57,17 @@ const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 const base64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
 const random = (size: number): Uint8Array => crypto.getRandomValues(new Uint8Array(size));
 
+const base64url = (text: string): string => text.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+
+/**
+ * The bytes' base64 when an envelope puts them at offset 1 or 2 of a 3-byte group: the encoding of the bytes behind
+ * `shift` zeros, less its first group (which holds the zeros) and its last (which depends on what follows).
+ */
+const shiftedBase64 = (bytes: Uint8Array, shift: number): string =>
+  Buffer.concat([new Uint8Array(shift), bytes])
+    .toString("base64")
+    .slice(4, -4);
+
 /** The whole text and its two halves, each half long enough to be unique. */
 const withHalves = (name: string, text: string): CanaryForm[] => {
   const middle = Math.ceil(text.length / 2);
@@ -59,26 +78,62 @@ const withHalves = (name: string, text: string): CanaryForm[] => {
   ];
 };
 
+/** The spellings of some bytes: hex and base64 whole and halved, base64 shifted, each base64 also as base64url. */
+const encodings = (name: string, bytes: Uint8Array): CanaryForm[] => {
+  const aligned = base64(bytes);
+  const shifted = [1, 2].map(
+    (shift): CanaryForm => ({
+      name: `${name} (base64, shifted ${shift})`,
+      text: shiftedBase64(bytes, shift),
+    }),
+  );
+  return [
+    ...withHalves(`${name} (hex)`, hex(bytes)),
+    ...withHalves(`${name} (base64)`, aligned),
+    ...shifted,
+    { name: `${name} (base64url)`, text: base64url(aligned) },
+    ...shifted.map((form) => ({
+      name: form.name.replace("base64", "base64url"),
+      text: base64url(form.text),
+    })),
+  ];
+};
+
+/** Every PIECE-character slice of the forms, less those of `shared` (the same kind of value with other random bytes). */
+const piecesOf = (forms: readonly CanaryForm[], shared: readonly CanaryForm[]): CanaryForm[] => {
+  const slices = (text: string): string[] =>
+    Array.from({ length: Math.max(0, text.length - PIECE + 1) }, (_, at) => text.slice(at, at + PIECE));
+  const common = new Set(shared.flatMap((form) => slices(form.text)));
+  const pieces = new Map<string, string>();
+  for (const form of forms) {
+    for (const slice of slices(form.text)) {
+      if (!common.has(slice) && !pieces.has(slice)) pieces.set(slice, `${form.name}, a piece`);
+    }
+  }
+  return [...pieces].map(([text, name]) => ({ name, text }));
+};
+
 /**
  * A unique value: one identifier token (`canary_<label>_<32 hex>`), so a parser that quotes the token it stopped at
- * (JSON.parse's "Unexpected identifier") quotes all of it. Its base64 is looked for too.
+ * (JSON.parse's "Unexpected identifier") quotes all of it. Its hex and base64 are looked for too.
  */
 export const makeCanary = (label = "secret"): Canary => {
   if (!/^[A-Za-z0-9]+$/.test(label))
     throw new Error(`makeCanary: the label must be letters and digits, got ${label}`);
+  const formsOf = (value: string): CanaryForm[] => [
+    ...withHalves(label, value),
+    ...encodings(label, new TextEncoder().encode(value)),
+  ];
   const value = `canary_${label}_${hex(random(16))}`;
-  return {
-    value,
-    forms: [
-      ...withHalves(label, value),
-      ...withHalves(`${label} (base64)`, base64(new TextEncoder().encode(value))),
-    ],
-  };
+  const forms = formsOf(value);
+  // A canary with other random bytes shares only what every canary of the label shares: those slices are no leak.
+  return { value, forms, pieces: piecesOf(forms, formsOf(`canary_${label}_${hex(random(16))}`)) };
 };
 
 /**
  * A restic master key as `restic cat masterkey` prints it: `{"mac":{"k":…,"r":…},"encrypt":…}`, base64 components of
- * 16, 16 and 32 random bytes. The value is that JSON; each component is looked for in base64 and hex, whole and halved.
+ * 16, 16 and 32 random bytes. The value is that JSON; each component is looked for in hex and base64 (every alignment,
+ * plain and url), whole, halved and in pieces.
  */
 export const makeMasterKeyCanary = (): Canary => {
   const parts = { "mac.k": random(16), "mac.r": random(16), encrypt: random(32) };
@@ -86,13 +141,8 @@ export const makeMasterKeyCanary = (): Canary => {
     mac: { k: base64(parts["mac.k"]), r: base64(parts["mac.r"]) },
     encrypt: base64(parts.encrypt),
   });
-  return {
-    value,
-    forms: Object.entries(parts).flatMap(([name, bytes]) => [
-      ...withHalves(`${name} (base64)`, base64(bytes)),
-      ...withHalves(`${name} (hex)`, hex(bytes)),
-    ]),
-  };
+  const forms = Object.entries(parts).flatMap(([name, bytes]) => encodings(name, bytes));
+  return { value, forms, pieces: piecesOf(forms, []) };
 };
 
 /** Wraps a spawner so every argv it is asked to start is recorded, for CanaryPlaces.argv. */
@@ -136,8 +186,9 @@ export const recordOwnOutput = async <T>(
     ["error", stderr],
     ["trace", stderr],
   ] as const) {
+    // As the console would print them: objects with their fields, at any depth.
     console[name] = (...args: unknown[]) => {
-      sink.push(args.map(String).join(" "));
+      sink.push(formatWithOptions({ depth: Number.POSITIVE_INFINITY }, ...args));
     };
   }
   try {
@@ -226,14 +277,26 @@ const files = (dir: string): [string, string][] => {
  */
 export const findCanaries = (canaries: readonly Canary[], places: CanaryPlaces): string[] => {
   const forms = canaries.flatMap((canary) => canary.forms);
+  const pieces = new Map<string, string>();
+  for (const canary of canaries) for (const piece of canary.pieces ?? []) pieces.set(piece.text, piece.name);
+  /** The names of the forms and pieces a text holds: whole forms by includes, pieces by one sliding pass. */
+  const held = (text: string): string[] => {
+    const names = new Set<string>();
+    for (const form of forms) if (text.includes(form.text)) names.add(form.name);
+    for (let at = 0; at + PIECE <= text.length; at++) {
+      const name = pieces.get(text.slice(at, at + PIECE));
+      if (name !== undefined) names.add(name);
+    }
+    return [...names];
+  };
   const haystacks: [string, string[]][] = [];
   for (const dir of places.dirs ?? []) {
     for (const [path, content] of files(dir)) {
       const place = `file ${path} under ${dir}`;
       // A name that holds a canary is itself a hit: reported, but never repeated.
-      const named = forms.some((form) => place.includes(form.text));
+      const named = held(place).length > 0;
       haystacks.push([
-        named ? `a file under a folder searched (name withheld: it holds a canary)` : place,
+        named ? "a file under a folder searched (name withheld: it holds a canary)" : place,
         [place, content],
       ]);
     }
@@ -253,15 +316,11 @@ export const findCanaries = (canaries: readonly Canary[], places: CanaryPlaces):
   listed("argv", places.argv);
   listed("errors", places.errors);
   listed("returned", places.returned);
-  const hits: string[] = [];
+  const hits = new Set<string>();
   for (const [place, found] of haystacks) {
-    for (const canary of canaries) {
-      for (const form of canary.forms) {
-        if (found.some((text) => text.includes(form.text))) hits.push(`${place}: ${form.name}`);
-      }
-    }
+    for (const text of found) for (const name of held(text)) hits.add(`${place}: ${name}`);
   }
-  return hits;
+  return [...hits];
 };
 
 /** Throws, naming each place and form, when any canary shows up in any place. */

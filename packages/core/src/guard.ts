@@ -131,7 +131,13 @@ export class PathGuard {
     if (real !== undefined) throw new PathRefused(op, path, real.path);
   }
 
-  /** Checks what a child would be handed: its cwd, absolute path arguments and env paths. */
+  /**
+   * Checks what a child would be handed: its cwd, absolute path arguments and env paths. An env value may be a secret
+   * that only looks like a path (base64 can start with "/"), so it is opaque: checked as spelled against the roots as
+   * spelled, never resolved on disk (no realpath, lstat or readlink sees it), and a refusal names the variable, never
+   * its value (AGENTS.md rule 9). A spelling that reaches a root only through a symlink is therefore not caught there;
+   * the cwd and arguments, where secrets never go, are still resolved.
+   */
   async checkRun(spec: RunSpec): Promise<void> {
     const label = basename(spec.command);
     await this.check(`run ${label} in`, spec.cwd, false);
@@ -144,15 +150,9 @@ export class PathGuard {
       if (name === "PATH") continue;
       for (const piece of value.split(":")) {
         if (!piece.startsWith("/")) continue;
-        try {
-          await this.check(`run ${label} with ${name}=`, piece, false);
-        } catch (error) {
-          // An env value may be a secret that only looks like a path (base64 can start with "/"): the refusal names
-          // the variable, never its value (AGENTS.md rule 9).
-          if (error instanceof PathRefused)
-            throw new PathRefused(`run ${label} with`, `the value of ${name}`, error.root);
-          throw error;
-        }
+        const refused = PathGuard.verdict(this.literal, fold(resolve(piece)), false);
+        if (refused !== undefined)
+          throw new PathRefused(`run ${label} with`, `the value of ${name}`, refused.path);
       }
     }
   }

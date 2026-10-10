@@ -67,7 +67,8 @@ export interface RunSpec {
    * RunOutcome.sensitive holds the byte counts and, with classifyStderr, the code it chose. Nothing either stream says
    * reaches log events, a finding's message, error data or a thrown error, on any path: a failure names the program,
    * why it stopped, a plain error code and byte counts only. Every buffer the runner held, read chunks and a string
-   * stdin included, is overwritten when the run ends. Excludes onLine and wholeStdout, which would hand the lines to a
+   * stdin included, is overwritten when the run ends; bytes still queued unread in a stream whose reader was cancelled
+   * (stdout held open past the drain) are dropped, not overwritten, as the runner never holds them. Excludes onLine and wholeStdout, which would hand the lines to a
    * callback. Parse `captured` with parseSensitiveJson.
    */
   sensitive?: boolean;

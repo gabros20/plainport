@@ -10,7 +10,9 @@
 // A sensitive run (output that may hold a secret, AGENTS.md rule 9) keeps its output out of every line, event, message
 // and error, and overwrites what it held when it ends; see RunSpec.sensitive.
 //
-// Known limits: a grandchild that calls setsid() leaves the group and is out of reach; a group whose last member
+// Known limits: a sensitive run overwrites only the bytes it read: when a pipe held open past the drain makes it cancel
+// its readers, whatever was still queued inside the stream (Bun's pipe buffer) is dropped unread, not overwritten,
+// and lives until it is collected. A grandchild that calls setsid() leaves the group and is out of reach; a group whose last member
 // exits between our liveness check and our KILL could, in theory, have its id reused by a new group in that
 // instant; and if plainport itself is SIGKILLed, its children keep running (macOS has no parent-death signal), which
 // the journal and `recover` exist for.
@@ -166,6 +168,13 @@ class LineSplitter {
   }
 }
 
+/**
+ * A test seam: when set, observe gets every buffer a run's capture and private collectors allocate (capture chunks, a
+ * sensitive stderr ring, the copy handed to classifyStderr), so a test can check they were overwritten once the run
+ * ended. Not exported from the package; never set outside tests.
+ */
+export const bufferProbe: { observe?: (bytes: Uint8Array) => void } = {};
+
 /** One stream's bounded tail and its lines. A callback that throws is reported once, then lines stop. */
 class Collector {
   private readonly ring: RingBuffer;
@@ -237,7 +246,7 @@ class PrivateCollector {
   private readonly ring: RingBuffer | undefined;
 
   constructor(keep: number | undefined) {
-    this.ring = keep === undefined ? undefined : new RingBuffer(keep);
+    this.ring = keep === undefined ? undefined : new RingBuffer(keep, bufferProbe.observe);
   }
 
   push(chunk: Uint8Array): void {
@@ -254,7 +263,9 @@ class PrivateCollector {
 
   /** A copy of the kept bytes, for the caller to overwrite once used. */
   kept(): Uint8Array {
-    return this.ring?.bytes() ?? new Uint8Array(0);
+    const bytes = this.ring?.bytes() ?? new Uint8Array(0);
+    bufferProbe.observe?.(bytes);
+    return bytes;
   }
 
   wipe(): void {
@@ -285,7 +296,9 @@ class Capture {
       return;
     }
     // A copy the capture owns: a Node Buffer's slice() would share the chunk's memory, which the pump overwrites.
-    this.chunks.push(new Uint8Array(chunk));
+    const copy = new Uint8Array(chunk);
+    bufferProbe.observe?.(copy);
+    this.chunks.push(copy);
     this.size += chunk.length;
   }
 
@@ -543,7 +556,8 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       "runProcess: a sensitive run takes no onLine or wholeStdout; its output reaches no callback",
     );
   const label = basename(spec.command);
-  if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, "");
+  if (spec.signal?.aborted)
+    return stoppedFailure("cancelled", label, settings, spec.sensitive ? byteCounts(0, 0) : "");
 
   const stdin = typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin;
   const wipers: (() => void)[] = [];

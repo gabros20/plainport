@@ -14,7 +14,7 @@ import {
   recordOwnOutput,
 } from "../testing/canary.ts";
 import { RingBuffer } from "./ring-buffer.ts";
-import { parseSensitiveJson, runProcess, stderrClasses } from "./runner.ts";
+import { bufferProbe, parseSensitiveJson, runProcess, stderrClasses } from "./runner.ts";
 import type { ChildProcess, GroupSignal, RunSpec, Spawner } from "./types.ts";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -522,6 +522,15 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
     expect(stdin.every((byte) => byte === 0)).toBe(true);
   });
 
+  test("already cancelled before it starts: process.cancelled with byte counts, nothing spawned", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const run = await runCase(() => {}, { signal: controller.signal });
+    expect(run.spawner.requests).toEqual([]);
+    expectFailure(run, "process.cancelled", 0);
+    expect(run.result?.ok === false && run.result.finding.message).toContain("0 bytes on stderr");
+  });
+
   test("onLine and wholeStdout are refused: nothing would keep a callback from seeing the output", async () => {
     const spawner = new FakeSpawner((child) => child.exit(0));
     await expect(runProcess(spawner, spec({ onLine: () => {} }))).rejects.toThrow(RangeError);
@@ -529,6 +538,92 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
       RangeError,
     );
     expect(spawner.requests).toEqual([]);
+  });
+});
+
+describe("runner: sensitive mode, the runner's own buffers", () => {
+  /** Runs `run` while recording every buffer the capture and the private collectors allocate. */
+  const observed = async (run: () => Promise<unknown>): Promise<Uint8Array[]> => {
+    const seen: Uint8Array[] = [];
+    bufferProbe.observe = (bytes) => seen.push(bytes);
+    try {
+      await run();
+    } finally {
+      bufferProbe.observe = undefined;
+    }
+    return seen;
+  };
+  const zeros = (bytes: Uint8Array): boolean => bytes.every((byte) => byte === 0);
+  const classes = stderrClasses(["a", "b"], () => "a");
+
+  test("are overwritten when the run ends: exit 0, exit 1, a timeout, a classifier that throws", async () => {
+    const canary = makeCanary();
+    const printing = (end: (child: FakeChild) => void) => (child: FakeChild) => {
+      child.write("stdout", `${canary.value}\n`);
+      child.write("stderr", `${canary.value}\n`);
+      end(child);
+    };
+    const cases: [string, () => Promise<unknown>][] = [
+      [
+        "exit 0",
+        () =>
+          runCase(
+            printing((child) => child.exit(0)),
+            { classifyStderr: classes },
+          ),
+      ],
+      [
+        "exit 1",
+        () =>
+          runCase(
+            printing((child) => child.exit(1)),
+            { classifyStderr: classes },
+          ),
+      ],
+      [
+        "timeout",
+        () =>
+          runCase(
+            printing(() => {}),
+            { classifyStderr: classes },
+          ),
+      ],
+      [
+        "classifier throws",
+        () =>
+          runCase(
+            printing((child) => child.exit(1)),
+            {
+              classifyStderr: {
+                codes: ["a"],
+                classify: () => {
+                  throw new Error("no");
+                },
+              },
+            },
+          ),
+      ],
+    ];
+    for (const [name, run] of cases) {
+      const seen = await observed(run);
+      // The capture's chunk and the stderr ring at least; a classifier's copy too where one ran.
+      expect({ name, buffers: seen.length >= 2 }).toEqual({ name, buffers: true });
+      expect({ name, wiped: seen.every(zeros) }).toEqual({ name, wiped: true });
+    }
+  });
+
+  test("the probe sees real data: a default-mode capture is not overwritten", async () => {
+    const seen = await observed(() =>
+      runCase(
+        (child) => {
+          child.write("stdout", "data\n");
+          child.exit(0);
+        },
+        { sensitive: false, capture: { maxBytes: 1024 } },
+      ),
+    );
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.some((bytes) => !zeros(bytes))).toBe(true);
   });
 });
 

@@ -114,6 +114,23 @@ describe("host guard: protected paths are refused", () => {
     expect(spawned).toEqual([]);
   });
 
+  test("an env value is checked as spelled only, never resolved on disk: it may be a secret, not a path", async () => {
+    // A spelling under the refused root is refused without touching the disk ...
+    const literal = await host
+      .run({ command: "/bin/echo", args: [], cwd: outside, env: { ...env, TOKEN: join(home, "x") } })
+      .catch((e: unknown) => e);
+    expect(literal).toMatchObject({ code: REFUSED });
+    // ... and a spelling that would reach it only through a symlink is not followed: the value stays opaque.
+    // (Arguments and the cwd are still resolved; secrets never go there, AGENTS.md rule 9.)
+    const result = await host.run({
+      command: "/bin/echo",
+      args: [],
+      cwd: outside,
+      env: { ...env, TOKEN: join(outside, "to-home", "secret") },
+    });
+    expect(result).toMatchObject({ ok: true, value: { exitCode: 0 } });
+  });
+
   test("a child may get PATH entries, read-only paths and paths elsewhere", async () => {
     const result = await host.run({
       command: "/bin/echo",
