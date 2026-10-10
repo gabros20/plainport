@@ -244,6 +244,7 @@ export async function runEvalWith(
     redact(JSON.stringify({ ...transcript, cleanedAgentPaths, score }, null, 2)),
   );
   console.log(JSON.stringify({ ...score, transcript: join(rawDir, `${stem}.json`) }, null, 2));
+  // The exit code follows the objective verdict; `clean` is reported beside it (M2 Task 3).
   return score.passed ? 0 : 1;
 }
 

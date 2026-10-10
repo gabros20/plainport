@@ -3,7 +3,7 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, join as joinPath } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
@@ -20,6 +20,7 @@ import {
 } from "../../core/src/testing/fake-engine.ts";
 import { QUIET_GIT_ENV } from "../../core/src/testing/git-fixture.ts";
 import { testHost } from "../../core/src/testing/host.ts";
+import { removeSettled } from "../../core/src/testing/sandbox.ts";
 import { help } from "./commands/help.ts";
 import { REGISTRY } from "./commands/index.ts";
 import { type IO, run } from "./main.ts";
@@ -265,8 +266,22 @@ export const FAKE_REGISTRY: Registry = [
  * project, an empty git repository, and a shelved one, work:clients/acme/api), store local, and the folders the
  * examples name (~/personal, ~/Developer/Work). cleanup() removes it.
  */
-export const exampleHome = async (): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
+export const exampleHome = async (
+  options: { afterCreate?: (home: string) => void } = {},
+): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
+  try {
+    options.afterCreate?.(home);
+    return await setUpExampleHome(home);
+  } catch (error) {
+    await removeSettled(home);
+    throw error;
+  }
+};
+
+const setUpExampleHome = async (
+  home: string,
+): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
   for (const dir of ["work/clients/acme/web", "personal", "Developer/Work"]) {
     mkdirSync(join(home, dir), { recursive: true });
   }
@@ -281,7 +296,6 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
     { ports },
   );
   if (setup.code !== 0) {
-    rmSync(home, { recursive: true, force: true });
     throw new Error(`example home setup failed: ${setup.err}`);
   }
   // A shelved project for onload's examples: offloaded once (an empty git repository with a README; no package
@@ -295,10 +309,9 @@ export const exampleHome = async (): Promise<{ home: string; ports: Ports; clean
   if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
   const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
   if (shelved.code !== 0) {
-    rmSync(home, { recursive: true, force: true });
     throw new Error(`example home setup failed: ${shelved.err}`);
   }
-  return { home, ports, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+  return { home, ports, cleanup: () => removeSettled(home) };
 };
 
 export interface Captured {

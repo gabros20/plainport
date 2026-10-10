@@ -30,6 +30,10 @@ const HydrateReportSchema = z.looseObject({
       command: z.string().meta({ description: "The frozen install, e.g. npm ci" }),
       ok: z.boolean(),
       exitCode: z.int().nullable().optional(),
+      via: z.literal("corepack").optional().meta({
+        description:
+          "Corepack supplied the package manager; installs run with its download prompt and auto-pin off",
+      }),
     }),
   ),
   untrusted: z.array(z.string()).meta({
@@ -80,7 +84,12 @@ const OnloadOutputSchema = z
   .meta({ description: "The project onloaded; with exit 10, restored but not hydrated (D14)" });
 
 const installs = (report: z.output<typeof HydrateReportSchema>): string =>
-  report.steps.map((s) => (s.path === "" ? s.command : `${s.command} in ${s.path}`)).join(", ");
+  report.steps
+    .map(
+      (s) =>
+        `${s.path === "" ? s.command : `${s.command} in ${s.path}`}${s.via === "corepack" ? " via Corepack" : ""}`,
+    )
+    .join(", ");
 
 const env = (ctx: CommandContext) => ctx.env;
 
