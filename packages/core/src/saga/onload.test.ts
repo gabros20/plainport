@@ -2180,6 +2180,58 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
     }
   });
 
+  /** The host with some file system calls replaced, everything else the real test host's. */
+  const withFs = (overrides: Record<string, unknown>): HostPorts => {
+    const real = testHost();
+    const fs = new Proxy(real.fs, {
+      get: (t, k, r) => (k in overrides ? overrides[k as string] : Reflect.get(t, k, r)),
+    });
+    return new Proxy(real, { get: (t, k, r) => (k === "fs" ? fs : Reflect.get(t, k, r)) });
+  };
+
+  test("a free-space read that throws is one more blocker: the ones already found survive", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    box.file("work/web/other.txt", "hello\n");
+    const failing = withFs({
+      freeBytes: async () => {
+        throw Object.assign(new Error("input/output error"), { code: "EIO" });
+      },
+    });
+    const got = await previewOnload(deps({}, failing), { project: await ref() });
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    const codes = (got.data as { findings: { code: string }[] }).findings.map((f) => f.code);
+    // The occupied folder comes first, as the run meets it; the unreadable volume is reported beside it.
+    expect(codes).toEqual(["path.occupied", "fs.unreadable"]);
+    expect(got.finding.code).toBe("path.occupied");
+    expect((got.data as { space: { free: number } }).space.free).toBe(0);
+  });
+
+  test("names differing only by case, on a volume no folder name can answer for, warn fs.case-unknown (never block)", async () => {
+    await offload();
+    value(await previewOnload(deps(), { project: await ref() }));
+    engine.hooks.listing = (entries) => [
+      ...entries,
+      { ...(entries.find((e) => e.path === "src/main.ts") as (typeof entries)[number]), path: "src/MAIN.ts" },
+    ];
+    // The landing folder's nearest existing ancestor is named only with digits and every folder above it reports
+    // another device, so there is nothing to look a swapped-case name up against.
+    const digits = join(box.home, "work/2024");
+    mkdirSync(digits, { recursive: true });
+    const nameless = withFs({
+      stat: async (path: string) => {
+        const stat = await testHost().fs.stat(path);
+        return { ...stat, dev: path === digits ? 1 : 2 };
+      },
+    });
+    const got = value(
+      await previewOnload(deps({}, nameless), { project: await ref(), to: join(digits, "7") }),
+    );
+    expect(got.findings.map((f) => `${f.severity} ${f.code}`)).toEqual(["warn fs.case-unknown"]);
+    expect(got.findings[0]?.paths).toEqual(["src/MAIN.ts", "src/main.ts"]);
+  });
+
   test("the preview's phases are paired, on a success and on a refusal", async () => {
     await offload();
     box.file("work/web/other.txt", "x");
