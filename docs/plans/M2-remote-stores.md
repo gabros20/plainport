@@ -1,179 +1,254 @@
 # M2 · Remote stores: orchestrate plan
 
-Status: **draft, waiting for the owner's approval.** Run on branch `m2-remote-stores` once the owner decisions below
-are answered:
+Status: **draft, revision 2, waiting for the owner's approval.** Revised from gpt-6-astra's architecture review of
+revision 1 (`.orchestrate/review-m2-plan-astra.md`: 2 Critical, 16 Important, 1 Minor, 11 missing tasks); the table at
+the end maps every finding to where this plan resolves it. Run on branch `m2-remote-stores` once the owner decisions
+below are answered:
 
 ```text
 /orchestrate docs/plans/M2-remote-stores.md strategy=staged review=dual
 ```
 
 **Milestone gate.** Two sandboxed plainport instances racing on one store (the two-Mac race) end in `conflicted`,
-never in lost work: on a local store (T1), on MinIO and on an SFTP container (T2), and on Cloudflare R2 (T3) when the
-owner's buckets and the Mac mini are available. If T3 cannot run, the gate passes at T2 and HANDOFF records T3 as
-pending.
+never in lost work. "Never lost" means what Q16 makes the owner sign: every verified snapshot stays in the store and
+in the catalog, and a folder is deleted only on the terms Q16 states. The gate runs on a local store (T1), on MinIO
+and an SFTP container (T2), and on Cloudflare R2 and Backblaze B2 (T3) when the owner's buckets and the Mac mini are
+available. Without T3 the gate passes as a stated **T2 result**: HANDOFF lists every backend claim that stays
+unverified (R2's and B2's measured semantics, the darwin-x64 hub) as pending.
 
 **Before Task 1 (owner).** Answer the decisions below; the orchestrator records the answers as ADR-0023 ("M2
-decisions") in the commit that approves this plan. Read the flagged decisions in ADR-0022, since M2 builds on them.
-The real-project gate with hydration on (D78) is still suggested, not required.
+decisions") in the commit that approves this plan, and amends ADR-0022's D74 as Q1 says. Read the flagged decisions in
+ADR-0022, since M2 builds on them. The real-project gate with hydration on (D78) is still suggested, not required.
 
 ---
 
 ## Owner decisions needed
 
 Each question is a place where `DESIGN.md` is silent or ambiguous, or where M2 changes a persisted format or the
-public contract. A task that reaches a question still open stops with `DESIGN_CONFLICT`.
+public contract. For each: the options, the planner's view, astra's view, and one final recommendation. **Blocks**
+names the first task that stops with `DESIGN_CONFLICT` while the question is open.
 
-**Q1. S3 store credentials and layout** (config is input, strict; Tasks 5 and 8). Today an `s3` store has `endpoint`,
-`bucket` and one `secret`, which DESIGN says holds "restic password + access keys", and no prefix inside the bucket.
-- (a) One reference whose value bundles the password and the key pair as JSON.
-- (b) Separate references: `secret` (restic password), `accessKeyId` and `secretAccessKey`, all required for `s3`,
-  plus optional `region` and `path` (a prefix inside the bucket, default none).
-- (c) Like (b), but the key pair comes from the AWS environment and profile chain.
+### A. Formats, compatibility and the contract
 
-*Recommendation: (b).* Each value is one Keychain item or one 1Password field (`op://vault/item/field`), and `path`
-lets several roots (one repository per root, D48) and T3's per-run prefixes share a bucket. Consequence: a config
-with these keys is refused by v0.1.x (its config schema is strict), so rolling back after adding an S3 store means
-removing that store's lines first.
+**Q1. Correct D74's wording.** *Blocks Task 7.* D74 says that after v0.1.0 a catalog change is "additive-optional or
+bumps `v`". M1's event schemas are strict objects, so an event with any field v0.1.x does not know fails to parse and
+is skipped (`catalog.event-skipped`); an unknown type is skipped too. Skipping fails closed only where D86 notices it
+(the stub's or registry's snapshot is named by no readable event); a fresh device can accept an older readable head.
+- (a) Reword D74: on `v: 1` an added field or type is invisible to v0.1.x readers, not compatible with them;
+  compatibility between versions is enforced by the store's format (Q2), never by additivity.
+- (b) Keep the wording and make v0.2 readers lenient about unknown fields (D16 keeps inputs plainport parses strict).
 
-**Q2. Create-only writes and the root claim on stores without a conditional write** (D50; Task 7). rclone's
-`If-None-Match` is unproven on 1.75.1, B2 rejects the header (ADR-0018), and rclone has no exclusive create on SFTP.
-Events need none (ULID names, D41); the root claim does.
-- (a) Require a conditional write: a store without one cannot serve a root.
-- (b) A direct, SigV4-signed HTTP `PUT` with `If-None-Match: *` for the claim only, where the backend accepts it
-  (MinIO, R2); refuse B2 and SFTP.
-- (c) A claim protocol that needs only list-after-write consistency: write `meta/v1/root-claims/<root>.json`, list
-  the claims, and go on only when yours is the only one or `meta/v1/root.json` already names your root; then write
-  `root.json`. When several claims show and `root.json` is absent, every claimant refuses (`store.root-contested`,
-  fail closed; the fix names the claim file to remove by hand).
+Planner: (a). Astra: the compatibility claim is overstated and mixed writers need an explicit exclusion policy, which
+(a) plus Q2 provides. **Recommendation: (a).**
 
-*Recommendation:* use the conditional write wherever Task 7 proves the rclone adapter sends it, and (c) everywhere
-else. (c) is provable with T0 interleaving tests and adds no HTTP stack. Its stuck case needs two roots' first
-offloads to one fresh store at the same instant.
+**Q2. Mixed versions and adopting M1 stores.** *Blocks Tasks 7, 8 and 19.* Nothing today stops a v0.1.x device from
+reading, or writing to, a store a v0.2 device writes M2-only content to.
+- (a) **Store format 2.** `meta/v1/store.json` at `v: 2` holds the store's identity, its repository location, its
+  catalog seal policy and its format. v0.1.x refuses a `store.json` it cannot parse, so format 2 excludes old readers
+  and writers by construction. Every store v0.2 creates is format 2. An M1 local store stays format 1, and v0.2
+  writes nothing to it that v0.1.1 cannot read (no `resolved` event, `stored` keyed by alias, no seal) until
+  `plainport store upgrade <name>` (`confirm`) replaces its `store.json` atomically. On a format-1 store, `resolve` and
+  sealing refuse with that command as the fix.
+- (b) Say in HANDOFF that every device must run v0.2.
+- (c) Bump every event M2 writes to `v: 2`.
 
-**Q3. Sealed catalog events** (ADR-0013 says "bucket and VPS stores"; Task 10). Three parts:
-- *The key.* (a) HKDF-SHA256 from the repository's master key, read with `restic cat masterkey` inside
-  `engine-restic`: no new secret, whoever can open the repository can read its catalog, and it survives M3's
-  per-device restic keys. (b) A random 32-byte key per store, held as one more secret reference with a 1Password
-  recovery copy. (c) HKDF from the repository password, which breaks once M3 gives each device its own restic key.
-- *Which stores.* (i) `s3` only; (ii) `s3` and `sftp`; (iii) per store, chosen at `store add` with a default by kind
-  and pinned on this device, so a store reached as `local` on one device and `sftp` on another (D68) stays one store.
-- *The format.* The same key, `meta/v1/events/<ulid>.json`, holding `{"v":1,"sealed":"xchacha20poly1305","nonce","ct"}`
-  with the key name as associated data. `store.json` and `root.json` stay plain: they hold only ULIDs.
+Planner: (a). Astra: "HANDOFF prose is not a compatibility gate"; establish an enforceable exclusion or a constrained
+upgrade procedure, refuse in-place sealing until a migration exists. (a) is both, and Task 7 proves it with the real
+v0.1.1 binary. **Recommendation: (a).**
 
-*Recommendation:* key (a), verified on the pinned restic first, with (b) as the fallback; stores (iii), sealed by
-default for `s3` and `sftp`, plain for `local`. A store pinned as sealed that serves a plaintext event has it left
-out of the fold (`catalog.unsealed-event`), never trusted. The mirror keeps opened events, so offline `ls` works.
-Replication (M3) re-seals, since each repository has its own master key.
+**Q3. The `resolved` event type.** *Blocks Tasks 12 and 25.* M2 writes one new event type.
+- (a) `resolved` at `v: 1`, written only to format-2 stores (Q2).
+- (b) `resolved` at `v: 2`.
 
-**Q4. Where this device keeps per-store facts** (the seal pin, measured capabilities, the last test; Tasks 9 and 10).
-`registry.json` is `{v: 1}` with a strict schema, so v0.1.1 refuses any field M2 adds and `scripts/install --rollback`
-would break.
-- (a) `registry.json` v2: v0.2 reads v1 and v2; a rollback cannot read it.
-- (b) A new file per store, `~/.local/state/plainport/stores/<store id>.json` (`{v: 1, sealed, capabilities,
-  testedAt}`), which v0.1 never reads.
+Planner: (a), with revision 1's rationale ("v0.1.x fails closed") withdrawn, since Q2 is what keeps v0.1.x away.
+Astra: a new type can keep `v: 1`; the rationale was wrong. **Recommendation: (a).**
 
-*Recommendation: (b).*
+**Q4. Where this device keeps per-store facts** (the seal pin, the measured semantics, the last test). *Blocks Task
+9.* `registry.json` is strict `{v: 1}`; v0.1.1 refuses any added field, which would break `scripts/install --rollback`.
+- (a) `registry.json` v2.
+- (b) A sidecar per store, `~/.local/state/plainport/stores/<store id>.json` (`{v: 1, …}`), which v0.1 never reads.
+  It is written atomically under a lock, and its measured facts are invalidated when the store's endpoint, access kind,
+  rclone or restic version changes.
 
-**Q5. New catalog event types at `v: 1`** (D74; Task 14). M2 writes one new type, `resolved`. A v0.1.x reader
-skips an unknown type (D17), and since it changes state, folds as uncertain (D86) and refuses head-dependent defaults:
-it fails closed and is never wrong. Every existing type is strict, so even an "additive optional" field makes a
-v0.1.x reader skip the whole event.
-- (a) New types at `v: 1`; no new fields on existing types in M2; HANDOFF states that every device reading a store
-  v0.2 wrote runs v0.2.
-- (b) Bump everything M2 writes to `v: 2`.
-- (c) Make readers ignore unknown fields from v0.2 on.
+Planner and astra: (b), with astra's atomicity and invalidation rules. **Recommendation: (b).**
 
-*Recommendation: (a).* Decide (c) before M3, when version skew across paired devices becomes real.
+**Q5. Small persisted formats** (revision 1's Q12). *Blocks Tasks 1 and 2.*
+- (i) **Boot session for trash claims.** Revision 1 added a field to `<op>.claim`. Astra: M1's strict claim parser
+  treats an unreadable claim as gone, so after a rollback v0.1.1 would ignore a live v0.2 deleter. Instead, the
+  boot session goes into a sibling file, `<op>.claim.boot`, which v0.1.1 never reads; the claim keeps M1's shape.
+- (ii) **The restic tag `plainport:mode=<octal>`**, so `onload --snapshot S` under an uncertain head can set the
+  folder's mode. Planner and astra agree.
+- (iii) **Fingerprint v3** for git maintenance locks. Astra: as specified it fails its own test (the lock changes its
+  parent folder's mtime and ctime), it leaves the lock in the snapshot, and `fp` is a published closed value
+  (`fp: 2` in the plan output schema, and in M1's journal schema), so v3 is a contract change and breaks rollback of
+  open journals. Options: defer to M5 with a full transient-artifact policy across scan, fingerprint, backup and
+  verification; or build it now with `fp: 2 | 3` and a `plainport_json` decision. Today such an offload retries
+  once and refuses: nothing is lost.
 
-**Q6. A fork found after the commit** (Task 13). Two devices can both pass the head check and both append, which is
-the race the gate runs. The fold then shows `conflicted` with both snapshots kept, so no work is lost either way.
-- (a) Release as today: both folders go to the trash, and `resolve` works from the store.
-- (b) Read the catalog again right before release's rename, where D52's fingerprint guard runs. When this
-  operation's snapshot is in a fork, keep the folder, write no stub and exit 8 with `catalog.head-moved` (data
-  kind `fork-after-commit`, additive). `recover` does the same check from `committed` on, and stays pending while
-  the store does not answer, where today it goes by the journal alone (D24).
+**Recommendation: (i) as a sibling file, (ii) yes, (iii) deferred to M5.**
 
-*Recommendation: (b).* DESIGN's step 7 promises that nothing local is deleted on a conflict, and the theirs ref
-(Task 15) needs the local copy. Cost: one catalog read before release, and recover needs the store after a commit.
+**Q6. Closed public values.** *Blocks Task 23.* A fork found after the commit needs to say so in offload's exit-8
+data, whose `kind` is the closed enum `"fork" | "diverged-after-commit"`.
+- (a) A new enum value `"fork-after-commit"`: a contract change.
+- (b) Keep `kind: "fork"` and add an optional `detail: "after-commit"`, which published outputs allow (D16).
 
-**Q7. What `resolve` does in M2** (Tasks 14 and 15). DESIGN says "keep one head, or both under two names".
-- (a) `--keep <snapshot>` only. It appends `resolved` naming the kept snapshot and the tips it settles. The others
-  stay in the repository and remain restorable with `restore --snapshot`. Keeping both means restoring the other
-  side by side (`restore --snapshot <id> --to <path>`) and filing it as a new project (`offload --root … --as …`).
-- (b) Also `--both --as <address>`, which forks a new project id from a snapshot. That needs a `forkedFrom` format,
-  the same one M3's `move --copy` needs.
+Planner: (b). Astra: preserve existing public values with optional detail where possible. **Recommendation: (b).**
 
-*Recommendation: (a)* now, and (b) with `move --copy` in M3. While this device holds a working copy, `--keep` must
-name that copy's snapshot: you bring their work in through the theirs ref, then keep yours.
+### B. Stores, secrets and the catalog
 
-**Q8. The store commands' risk classes, and what `store remove` does** (Task 9).
+**Q7. S3 store credentials and layout.** *Blocks Tasks 15 and 18.*
+- (a) One reference bundling the password and the key pair.
+- (b) Separate references: `secret` (restic password), `accessKeyId`, `secretAccessKey`, all required for `s3`, plus
+  optional `region` and `path` (a prefix inside the bucket).
+- (c) The key pair from the AWS environment and profile chain.
+
+Planner: (b). Astra: agree; validate that restic and rclone reach the same location, and state whether temporary
+session credentials are supported. **Recommendation: (b); temporary session credentials (`AWS_SESSION_TOKEN`) are not
+supported in M2.** A config using these keys is refused by v0.1.x, so a rollback means removing the store's lines.
+
+**Q8. Stores of unknown consistency.** *Blocks Task 6.* Astra: "S3-compatible", "has no conditional write" and
+"eventually consistent" are different properties, and the claim protocol and the catalog both rely on visibility,
+whole-write publication and complete listings.
+- (a) Every backend has a **semantics profile** (Task 6): read-after-write and list-after-write visibility, whole-write
+  publication method, listing completeness, conditional create, durability. A profile is measured (Task 17) or
+  documented by the provider (AWS S3, R2). A store whose profile is unknown or weak can be read, but bootstrap,
+  root claims and offload refuse (`store.semantics-unknown`). The owner may assert a profile per store in config
+  (`consistency = "strong"`), which `store test` reports as asserted, not measured.
+- (b) Allow any store, with a warning.
+
+Planner and astra: (a). **Recommendation: (a).**
+
+**Q9. Bootstrap and the root claim.** *Blocks Tasks 8 and 18.* Astra's Critical: two devices that both see no
+repository can both run `restic init` at one location; restic's absence check and its key and config writes are not
+one transaction, so two master keys can land in one repository. Revision 1's claim protocol (its Q2 c) does not
+cover this, and needs stronger consistency than it stated.
+- (a) One `repo/` per store, and an exclusive bootstrap lock that needs a conditional create; stores without one cannot
+  be set up by plainport.
+- (b) **Per-attempt repositories and an elected publication.** Each bootstrap attempt initialises restic at its own
+  location, `repos/<attempt ulid>/`, so two initialisers never write the same repository. The attempt that wins the
+  election publishes `store.json` v2 naming its repository. Elections use a conditional create where Task 17 proves
+  one, and otherwise the sole-candidate rule on a store whose profile is strong (Q8). A loser stops, leaves its
+  repository in place, never writes, and is listed by `store test` with the manual cleanup. Bootstrap is journaled
+  and recoverable. The root claim uses the same election. Removing a contested candidate by hand is safe only after
+  stopping plainport on every device, and the fix says so.
+- (c) Revision 1's claim protocol, with no bootstrap protocol.
+
+Planner: (b). Astra: Q2(c) disagreed as written; the fix is an exclusive, recoverable bootstrap protocol covering
+identity, repository initialisation, root claim and seal configuration. **Recommendation: (b).** M1 local stores keep
+`repo/`; a format-2 `store.json` can also name `repo/`.
+
+**Q10. Sealed catalog events.** *Blocks Tasks 10 and 20.*
+- *Key:* (a) HKDF-SHA256 from the repository's master key (`restic cat masterkey`); (b) a random per-store key held as
+  one more secret reference; (c) HKDF from the repository password, which breaks with M3's per-device keys.
+- *Policy:* authoritative per store, in `store.json` v2 and fixed at bootstrap, and pinned by each device at first
+  contact, so a store that later flips the policy is refused.
+- *Migration:* sealing an existing plaintext store in place is refused in M2. An M1 store stays plain; a store is
+  sealed only when it is created.
+
+Planner: (a). Astra: agree in principle; specify the exact derivation, the envelope, a version independent of the
+event's, and rotation before freezing; never fall back silently to (b) for an existing store. **Recommendation: key
+(a) under Task 10's versioned spec, policy and migration as stated, sealed by default for new `s3` and `sftp` stores.
+If the spec finds (a) unworkable, the task stops and the owner decides (b); there is no silent fallback.**
+
+**Q11. Snapshot locations by store id, not alias.** *Blocks Task 9.* `stored` maps a store's name to its restic
+snapshot id, and onload looks up `stored[<this device's name>]`, so two devices calling one store `archive` and `nas`
+cannot read each other's snapshots.
+- (a) On format-2 stores, `stored` is keyed by store id. On format-1 stores it keeps M1's alias. Reading a legacy
+  event, a single non-ULID key means the store the event was read from (true of every M1 event, since M1 never
+  copies snapshots), and anything else is resolved through this device's registry or left unknown.
+- (b) Defer to M3's replication.
+
+Planner and astra: (a); astra says it must not wait for M3. **Recommendation: (a).**
+
+**Q12. A project's home store before replication.** *Blocks Task 21.*
+- (a) An offload to store S refuses unless S's catalog holds this copy's base (or it is a first offload)
+  (`store.history-elsewhere`, naming the store whose catalog or mirror holds the base, or "unknown"). Stores are
+  compared by id, and an offline home store still refuses by its mirror.
+- (b) Allow a new history on another store.
+
+Planner and astra: (a), by stable id and recorded provenance. **Recommendation: (a).**
+
+**Q13. Store commands.** *Blocks Task 19.*
 - `store list`: `read`.
-- `store test`: `safe_write`. It writes, reads and deletes one probe key under `meta/v1/probes/`, and reports a
-  refused delete as "append-only" rather than as a failure; `--read-only` only reads.
-- `store add`: `safe_write`. It writes only plainport's own setup files (`store.json`, an empty restic repository, the
-  root claim) to a store you named; no project data. The alternative is `confirm`, since it sends bytes off the
-  machine.
-- `store remove`: `confirm`, and local only. It forgets the name in `managed.toml` and on this device, deletes
-  nothing on the store, and refuses (`store.in-use`) while a root pins the store or this device has projects shelved
-  there.
+- `store test`: `safe_write`. It writes, reads and deletes one probe key and reports `delete: denied | allowed |
+  unreachable`. A denied delete is never reported as "append-only", which would need repository-wide proof (M3).
+- `store add`: `safe_write`. It runs bootstrap or adopts an existing store, and sends only setup files.
+- `store upgrade` (Q2): `confirm`.
+- `store remove`: `confirm` and local only; it refuses `store.in-use`.
 
-*Recommendation:* as listed, with `store add` as `safe_write`.
+Planner and astra agree, with astra's wording for `store test`. **Recommendation: as listed.**
 
-**Q9. A project and its store before replication** (M3; Task 11). A project's events live on the store it was
-offloaded to. Another store's catalog has no base for it, so an offload there would start a second history, and an
-onload there sees an incomplete head.
-- (a) Refuse an offload to a store other than the one that holds the project's head (`store.history-elsewhere`,
-  exit 6; the fix names that store).
-- (b) Allow it as a new first offload: a fork across stores.
+**Q14. Secret providers.** *Blocks Task 15.* `keychain:<service>/<account>` (read with `security
+find-generic-password -w`, written only by `store add --secret-stdin` through `security -i` on stdin) and `op:` (`op
+read`). `se:` and `bw:` stay refused. Astra: agree, after the runner's sensitive mode, with bounded waits for prompts and
+safe quoting of `security -i`'s command line. **Recommendation: both, after Task 5, with a 30-second deadline on any
+provider call.** A Keychain GUI prompt that is not answered in time is `store.secret-missing`.
 
-*Recommendation: (a).*
+**Q15. `init --store-path` re-pointing an unreachable pinned name.** *Blocks Task 19.* Planner and astra: refuse it.
+Re-pointing an unplugged disk stays possible through `config.toml`, checked at use (D68). **Recommendation: refuse.**
 
-**Q10. Secret providers in M2** (Task 5). The outline names Keychain only.
-- `keychain:<service>/<account>`, read through `/usr/bin/security find-generic-password -w` and written only by
-  `store add --secret-stdin`, through `security -i` with the command on stdin, never in argv.
-- `op:` (`op://vault/item/field`), read through `op read` with the CLI's own sign-in.
-- `se:` and `bw:` stay refused until M3 and M5.
+### C. Races, leases and conflicts
 
-*Recommendation:* build both `keychain:` and `op:` now. T3's bucket keys and the owner's recovery passwords already
-live in 1Password.
+**Q16. What M2 promises in a race.** *Blocks Tasks 14, 23, 24 and 29.* Astra: no finite sequence of reads closes the
+gap between a device's last read and its rename. A appends, re-reads and sees only itself, then B appends; A releases
+and B keeps its folder. Revision 1's "both folders kept" cannot be guaranteed.
+- (a) **Snapshots only.** Every verified snapshot is kept in the store and the catalog. A device keeps its folder when
+  its own operation sees the fork before its rename (at the commit or at the re-read); otherwise its work lives only
+  in its snapshot.
+- (b) **(a) plus a conflict grace.** On a remote store, release still renames into the trash and writes the stub, but
+  the trash is held for a grace period (default 15 minutes, `offload.conflictGrace`). Every delete entrance (the
+  detached delete, housekeeping, `gc`, `recover`'s delete-trash) reads the catalog fresh before deleting. A fork that
+  names the operation's snapshot keeps the trash as `conflict-retained`; an unreachable store keeps it and tries
+  later. The promise: **a released folder is deleted only after a catalog read, taken at least the grace period after
+  its commit, showed no fork naming its snapshot.** The residual: a fork appended after that read. A retained trash
+  comes back through M1's reuse path: once `resolve` keeps its snapshot, `onload` renames it back.
+- (c) Exclusive coordination with fencing. This needs a conditional write on every store, so not in M2.
 
-**Q11. `init --store-path` re-pointing an unreachable pinned name** (HANDOFF known limit; Task 9).
-- (a) Keep it. D45 still refuses the wrong disk at use.
-- (b) Refuse to re-point a pinned name to a path that does not answer with the pinned id. Re-pointing an unplugged
-  disk's name stays possible by editing `config.toml`, which D68 checks at use.
+Planner: (b). Astra: keep the extra check, but have the owner agree to a narrower guarantee or design coordination,
+and specify behaviour after the rename, after the stub and during delayed deletion. (b) does all three.
+**Recommendation: (b), with the promise and the residual written into DESIGN and HANDOFF as the owner signs them.**
 
-*Recommendation: (b)*, so D85's "before anything is written" holds.
+**Q17. What a lease is.** *Blocks Tasks 14 and 22.* Astra: two devices can onload at the same moment under `strict`,
+each seeing no holder; the fold then picks one lease, but both commands succeeded.
+- (a) **Advisory.** A lease is the fold's single selected holder. `warn` allows a second working copy; `strict` refuses
+  an onload when a holder is observed at its fresh read, but does not exclude a simultaneous one. Invariant 5 becomes
+  "the fold names at most one holder, and a device that observed a holder under `strict` never onloads". The race
+  that slips through ends, at offload, in a fork, never in a lost update.
+- (b) Exclusive acquisition with fencing: a conditional write on every store.
 
-**Q12. Three small persisted-format additions** (Tasks 1 and 2):
-- (i) The trash claim (`<op>.claim`, local) gains an optional `bootSession`, read from the host (macOS
-  `kern.bootsessionuuid`, Linux `/proc/sys/kernel/random/boot_id`). This fixes N13's 120-second window, and old
-  claims keep the old rule.
-- (ii) Offload adds the restic tag `plainport:mode=<octal>` (D26 encoding), so `onload --snapshot S` under an
-  uncertain head can set the folder's mode when the event holding `rootMode` is the unreadable one.
-- (iii) Fingerprint v3 leaves out git's transient lock and pid files inside `.git` (`*.lock`, `gc.pid`), so
-  background `git maintenance` stops failing offloads; the files they guard stay in. A journal holding a v2
-  fingerprint is still compared as v2.
+Planner and astra: (a) for M2, stated plainly. **Recommendation: (a).**
 
-*Recommendation:* all three. The alternative to (ii) is a warning that the mode is unknown; the alternative to (iii)
-is stopping `git maintenance`, which means editing the user's launchd or systemd schedule.
+**Q18. `resolve`, the theirs refs, and their risk classes.** *Blocks Tasks 12, 25 and 26.*
+- `resolve <project> --keep <snapshot>` (`confirm`) appends `resolved {keep, over, supersedes?}` under Task 12's causal
+  model: concurrent incompatible resolutions stay conflicted until one supersedes both, and work made from a rejected
+  tip after a resolution conflicts again, never vanishes.
+- While this device holds a working copy, `--keep` must name that copy's recorded snapshot (Task 23 records it).
+- Read-only inspection is `status` (each head's device, time, size and base).
+- The theirs refs come from a separate `plainport compare <project>` (`safe_write`: it writes only refs under
+  `refs/plainport/theirs/`).
+- `resolve --both` waits for M3's fork format.
 
-**Q13. The T3 race across two Macs: how the mini gets the test-bucket keys** (Task 17).
-- (a) `op` signed in on the mini.
-- (b) The laptop resolves the `op://` references and passes the values over SSH on stdin into the child's
-  environment: never in argv, never on disk. The keys are scoped to the test bucket and rotated after the run.
-- (c) No cross-device bucket race: T3 races two sandboxes on the laptop against R2 and runs only single-device
-  checks on the mini.
+Planner: revision 1 put the refs inside `resolve`. Astra: agree with `--keep` only, given complete causality and
+retained-copy bookkeeping; ref creation needs its own risk declaration and a read-only path. **Recommendation: as
+listed.**
 
-*Recommendation: (b)* if the owner accepts handing test-scoped keys to the mini; otherwise (c).
+**Q19. The T3 race across two Macs: the mini's test keys.** *Blocks Task 28.* (a) `op` signed in on the mini; (b) the
+laptop resolves the references and passes the values over SSH on stdin into the child's environment; (c) race two
+sandboxes on the laptop only. Astra: (b) when explicitly accepted, with test-scoped keys, a fixed stdin protocol, a
+restricted child environment and a documented rotation step. **Recommendation: (b) with astra's conditions;
+otherwise (c).**
 
-**Q14. Confirm what M2 leaves out:**
-- Breaking a stale lease (`lease-broken`): a `strict` user sets `leases = "warn"` for that onload.
-- Device names in the lease view: it shows the device id until M3's pairing gives names.
-- `resolve --both` (Q7).
-- B2's native `b2:` backend: M2 reaches B2 through its S3 API, and the native backend arrives with replication.
-- The REST server: in the compose file for M3's append-only work, but not a store kind.
+**Q20. Confirm what M2 leaves out.** *Blocks nothing.*
+- Breaking a stale lease (`lease-broken`). `warn` lets a second working copy exist; it never breaks or moves the lease.
+- Device names in the lease view (ids until M3's pairing).
+- `resolve --both`.
+- B2's native `b2:` backend (M2 reaches B2 through its S3 API).
+- The REST server as a store kind.
+- Fingerprint v3 (Q5 iii).
+- Proof that a device key cannot delete snapshots: invariant 6 in M2 means plainport issues no delete or overwrite of
+  snapshots or events, and key-level proof arrives with M3's append-only keys.
 
-*Recommendation:* confirm all five.
+Planner and astra agree. **Recommendation: confirm.**
 
 ---
 
@@ -181,33 +256,37 @@ is stopping `git maintenance`, which means editing the user's launchd or systemd
 
 - Read `AGENTS.md`, ADR-0023 (the answers above) and the ADRs and `docs/DESIGN.md` sections the task names before
   writing anything.
-- Test-first (ADR-0017): write the failing tests that state the acceptance, run them, see them fail, then
-  implement. Report the red run and the green run.
-- **Never lose work.** The local folder is touched only in release, after a verified commit. Every new saga step or
-  after-effect seam is exported, so the crash matrix gains its rows by itself, and gets a rule in
-  `OFFLOAD_RECOVERY` or `ONLOAD_RECOVERY`. A step without a rule stays pending, and so must a test that reaches it.
+- Test-first (ADR-0017): write the failing tests that state the acceptance, run them, see them fail, then implement.
+  Report the red run and the green run. A spec task's tests are executable: fakes, property tests and expected-outcome
+  tables, not prose.
+- **Never lose work.** The local folder is touched only in release, after a verified commit, and deleted only on Q16's
+  terms. Every new saga step or after-effect seam is exported, so the crash matrix gains its rows by itself, and gets a
+  rule in `OFFLOAD_RECOVERY`, `ONLOAD_RECOVERY` or the bootstrap table. A step without a rule stays pending.
 - **One guarded deleter (D87).** Every recursive local delete goes through it. On a store, plainport deletes only its
-  own probe keys (`store test`): never an event, a claim, `store.json` or restic data.
-- **One process runner** for rclone, restic, ssh, `security`, `op` and git. Calls to secret providers capture stdout
-  without streaming it as `log` events.
-- **Errors are values.** Every new finding goes into the contract's catalogue with its severity, exit code and fix,
-  and into `docs/machine-contract.md`. `bun run contract` is run and its output committed.
-- **Secrets stay references.** A secret value lives only in memory and in a child's environment: never in argv (`ps`
-  shows it), a file, a log, a journal, config, a fixture or an error message. rclone remotes are defined through
-  environment variables, with `RCLONE_CONFIG` pointed at a file that does not exist, so the user's `rclone.conf` is
-  never read. Each task that handles a secret runs the canary helper from Task 5 over everything the test wrote and
-  printed.
-- **Sandboxes only.** Tests never touch the real home, the login Keychain (they use throwaway keychains) or real
-  buckets, except Task 17, which works under per-run prefixes with scoped keys. OpenSSH reads `~/.ssh` from the
-  passwd home, not `$HOME`, so the home tripwire does not cover it: tests reach ssh only through the shim from Task 7,
-  with `-F` pointing at a sandbox config.
-- **Tiers are explicit.** Each suite is tagged T0, T1 (`describeT1`) or T2 (`describeT2`, Task 4). A T2 suite that
-  finds no test environment fails when `PLAINPORT_TEST_TIER` is 2 or more, naming `scripts/testenv up`; it never
-  skips silently.
-- **Formats and contract.** Catalog events follow D74 and Q5. A local persisted file stays readable by the previous
-  reader where the owner has not decided otherwise (Q4, Q12), so `scripts/install --rollback` to v0.1.1 keeps
-  working. Contract changes are additive: `plainport_json` stays 1, and M2 adds no `ProjectState` value (D17); new
+  own probe keys and its own publication temporaries: never an event, a claim, a candidate, `store.json`, a repository
+  or restic data. A recorder in the test harness fails any test whose rclone or restic calls include another delete,
+  `forget` or `prune`.
+- **One process runner,** and from Task 5 its sensitive mode for every call whose output may hold a secret
+  (`security`, `op`, `restic cat masterkey`).
+- **Errors are values.** Every new finding goes into the contract's catalogue and `docs/machine-contract.md` with its
+  severity, exit code and fix.
+- **Secrets stay references.** A secret value lives only in memory and in a child's environment: never in argv, a
+  file, a log, a journal, config, a fixture, a finding or an error message. rclone remotes come only from environment
+  variables, with `RCLONE_CONFIG` pointing at a file that does not exist. Every task that touches a secret or the
+  master key runs Task 5's canary helper over files, output, events, findings and argv.
+- **Sandboxes only.** Tests never touch the real home, the login Keychain or real buckets, except Task 28 (per-run
+  prefixes, scoped keys). OpenSSH reads `~/.ssh` from the passwd home, not `$HOME`, so tests reach ssh only through
+  Task 17's shim with `-F` pointing at a sandbox config.
+- **Tiers are explicit.** Each suite is tagged T0, T1 (`describeT1`), T2 (`describeT2`) or T3 (`describeT3`). A T2
+  or T3 suite that finds no environment fails, naming the command to run; it never skips silently.
+- **Formats and contract follow Task 7's compatibility matrix.** A task that adds or changes a persisted format, a
+  closed public value or a schema adds its row to the matrix and the matrix's test, including a run of the real
+  v0.1.1 binary where the format can reach it. `plainport_json` stays 1; M2 adds no `ProjectState` value (D17); new
   conditions are fine, since that set is open.
+- **Shared files.** `DESIGN.md` is section-owned: each task names the sections it edits, and two tasks marked
+  `parallel-safe` never edit the same one. Only a task that changes the command registry runs `bun run contract`, and
+  no two parallel tasks do. Only a task that adds a workspace package touches `bun.lock`, and no two parallel tasks
+  do.
 - Commit by path (`git add <your files>`), one or more small commits per task, message `m2(task N): …`.
 - If the design is wrong or silent on something that matters, stop with `DESIGN_CONFLICT`; don't patch around it.
   `DESIGN.md` changes in the same commit as the behaviour, and so does ADR-0023 for a changed decision.
@@ -218,112 +297,126 @@ is stopping `git maintenance`, which means editing the user's launchd or systemd
 
 | Task | Tiers | Needs |
 | --- | --- | --- |
-| 1–3, 12–15 | T0, T1 | the laptop |
-| 4 | T2 | Docker or OrbStack |
-| 5 | T0, T1 | macOS for the Keychain suite |
-| 6 | T0, T1 | pinned rclone |
-| 7–11, 16 | T0, T1, T2 | Docker or OrbStack (`scripts/testenv up`) |
-| 17 | T3 | the owner's R2 and B2 `op://` references, `op` signed in, `ssh mini` over Tailscale |
-| 18 | T1, T2 (T3 when Task 17 passed) | as above |
+| 1–3, 5–14, 22–26 | T0, T1 | the laptop (Task 7 also builds v0.1.1 from its tag) |
+| 4, 17–21, 27 | T0, T1, T2 | Docker or OrbStack (`scripts/testenv up`) |
+| 15 | T0, T1 | macOS for the Keychain suite |
+| 16 | T0, T1 | pinned rclone |
+| 28 | T3 | the owner's R2 and B2 `op://` references, `op` signed in, `ssh mini` over Tailscale |
+| 29 | T1, T2 (T3 when Task 28 passed) | as above |
 
-Everything up to and including the gate is provable at T0 to T2. Only Task 17 needs real buckets or the mini.
+**Dependency graph.**
 
-**Dependency graph.** 1 → 2 · {2, 3, 4} → {5, 6} · {4, 6} → 7 · {5, 7} → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 →
-16 → 17 → 18. Tasks 1, 3 and 4 are `parallel-safe` with each other, and so are tasks 5 and 6.
+- 1 → 2.
+- 3, 4 and 5 run beside 1 and 2.
+- {2, 3, 4, 5} → {6, 7} → 8 → 9 → {10, 12, 13}.
+- 10 → 11, and {11, 12, 13} → 14.
+- {5, 14} → 15 → 16 → 17 → 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25 → 26 → 27 → 28 → 29.
+
+`parallel-safe` groups: {1, 3, 4, 5}; {6, 7}; {10, 12, 13}. Tasks 15 and 16 are not parallel-safe: both add a workspace
+package and so touch `bun.lock`.
 
 **Branches.** All work happens locally on `m2-remote-stores`, managed by the orchestrator; no pull requests. At each
-phase boundary (after tasks 4, 7, 9, 11, 15 and 18) the orchestrator merges into `main`, pushes, and checks CI on
-`main` with `gh run watch`; from Task 4 on, that includes the Linux job running the T2 containers. A red CI stops the
-next phase until it's fixed (ADR-0021).
+phase boundary (after tasks 5, 9, 14, 17, 21, 26 and 29) the orchestrator merges into `main`, pushes, and checks CI
+on `main` with `gh run watch`; from Task 4 on, that includes the Linux job running the T2 containers. A red CI stops
+the next phase until it's fixed (ADR-0021). Each boundary states which remote workflows work:
 
-| Phase | Tasks | Ends with |
+| Phase | Tasks | What works at the merge |
 | --- | --- | --- |
-| 1 · Carry-overs and test environments | 1–4 | M1's open minors closed; `scripts/testenv`; T2 in Linux CI |
-| 2 · Secrets and the rclone blob store | 5–7 | Keychain and 1Password references; store contract green on fs, rclone, MinIO and SFTP |
-| 3 · Remote stores end to end | 8–9 | Offload and onload over SFTP and S3; `store add \| list \| test \| remove` |
-| 4 · Catalog over stores | 10–11 | Sealed events; mirror, offline `ls` and the home-store rule on remote stores |
-| 5 · Leases and conflicts | 12–15 | Two-device leases; forks at and after the commit; `resolve` and the theirs ref |
-| 6 · Proof and release | 16–18 | Remote crash matrix; T3; the two-Mac race; `v0.2.0` |
+| 1 · Carry-overs, test environments, sensitive output | 1–5 | M1 behaviour plus the carry-overs; T2 containers in CI; no remote store yet |
+| 2 · Store groundwork | 6–9 | Specs, fakes and tests for semantics, formats, bootstrap and store identity; local stores only |
+| 3 · Catalog groundwork | 10–14 | Crypto spec, codec, resolution model, offline views, gate schedules, all on fakes; local stores only |
+| 4 · Secrets and the rclone blob store | 15–17 | Secret references; blob store contract and measured semantics on MinIO and SFTP; no remote offload yet |
+| 5 · Remote stores end to end | 18–21 | Bootstrap, offload, onload, sealing and the catalog over SFTP and S3 (single device) |
+| 6 · Leases and conflicts | 22–26 | Advisory leases, forks, retained trash, `resolve --keep`, `compare` |
+| 7 · Proof and release | 27–29 | Remote crash matrix, T3, the gate, `v0.2.0` |
 
 ---
 
-## Task 1 — Core safety carry-overs  `parallel-safe with Tasks 3 and 4`
+## Task 1 — Core safety carry-overs  `parallel-safe with Tasks 3, 4 and 5`
 
 ### Objective
-Close the core-safety minors M1's reviews left open, before remote stores build on the same code.
+Close the core-safety minors M1's reviews left open, in a way a rollback to v0.1.1 survives.
 
 ### Context
-`docs/HANDOFF.md` "Carried into M2 → Core safety" and "Known limits"; D32, D63, D64, D67, D86, D87; Q12 (i) and (ii);
-`docs/DESIGN.md` "Offload process" (the detached delete and its claim) and "Catalog and data model" (restic tags).
+`docs/HANDOFF.md` "Carried into M2 → Core safety" and "Known limits"; D32, D63, D64, D67, D86, D88; Q5 (i) and
+(ii); `docs/DESIGN.md` "Offload process" (the detached delete and its claim) and "Catalog and data model" (restic
+tags).
 
 ### Scope
-Owns `packages/core/src/{trash-claim.ts,trash-delete.ts,lock.ts}`, `packages/core/src/recover/trash.ts`, the claim
-and boot parts of `packages/core/src/ports/host.ts` and `packages/host-macos/src/host.ts`, the tag and `rootMode`
-parts of `packages/core/src/saga/{snapshot.ts,onload.ts}` and `packages/engine-restic/src/engine.ts`, and
-`packages/cli/src/housekeeping.ts`.
+Owns:
+- `packages/core/src/{trash-claim.ts,trash-delete.ts,lock.ts}`. `trash-delete.ts` is the detached claim writer.
+- `packages/core/src/recover/trash.ts` and `packages/cli/src/housekeeping.ts`.
+- The boot-session parts of `packages/core/src/ports/host.ts` and `packages/host-macos/src/host.ts`.
+- The tag and `rootMode` parts of `packages/core/src/saga/{snapshot.ts,onload.ts}` and
+  `packages/engine-restic/src/engine.ts`.
+- DESIGN sections: "Offload process" (the claim sentence) and "Catalog and data model" (the tag list).
 
-- **Orphan claims.** `gc` and housekeeping remove an `<op>.claim` (and a stray `.claim.tmp`) whose trash folder is
-  gone and whose claimer is not live by D64's test. This is a single-file delete, and the claim is never removed
-  while its trash exists.
-- **Boot session (Q12 i).** `HostPorts` gains `bootSession()`. A new claim records it, and liveness compares it when
-  both sides have one; an old claim keeps the 120-second boot-time rule. The lock's "taken since this boot" test (D63)
-  uses the same helper.
-- **`rootMode` under an uncertain head (Q12 ii).** Offload adds the `plainport:mode=<octal>` tag. `onload --snapshot S`
-  through the tag lookup (D86, D88) sets the folder's mode from it, and without the tag it leaves a new folder's mode
-  and says so in the output.
-- **Host calls on network mounts (D32).** Store probes (reachability and reading `store.json`) race a deadline
-  (default 10 s) and return `store.unreachable` when it passes. The hung call is abandoned, since Bun cannot cancel
-  it; the limit is documented.
+Items:
+- **Orphan claims.** `gc` and housekeeping remove an `<op>.claim`, its `.claim.boot` and a stray `.claim.tmp` once
+  the trash folder is gone and the claimer is not live by D64's test.
+- **The boot session (Q5 i).** `HostPorts.bootSession()` reads macOS `kern.bootsessionuuid` or Linux
+  `/proc/sys/kernel/random/boot_id`. The detached delete writes `<op>.claim.boot` before the claim, and the claim keeps
+  M1's shape. Liveness uses the boot session when both files exist, and M1's rule otherwise. The lock's "since this
+  boot" test (D63) shares the helper.
+- **`rootMode` under an uncertain head (Q5 ii).** Offload adds `plainport:mode=<octal>`. `onload --snapshot S` through
+  the tag lookup (D86, D88) applies it, or says the mode is unknown.
+- **Host calls on network mounts (D32).** Store probes race a 10-second deadline and return `store.unreachable`.
+  Bun cannot cancel the hung call, which is documented.
 
 ### Tests first
-A claim with no trash and a dead pid is removed, while one with a live pid is kept. A claim from this boot with a
-stepped clock (boot time 200 s off, same `bootSession`) reads as live. An old claim with no `bootSession` behaves as in
-M1. `onload --snapshot S` with the offloaded event unreadable restores mode `0700` from the tag. A store probe
-against a fake `stat` that never returns fails within the deadline.
+- A claim with no trash and a dead pid is removed; a live one is kept.
+- A stepped clock with the same boot session reads as live.
+- The compatibility row: a v0.1.1 claim reader parses a claim written by this task.
+- `onload --snapshot S` with the offloaded event unreadable restores mode `0700` from the tag.
+- A probe against a `stat` that never returns fails within the deadline.
 
 ### Verification
-`bun test packages/core -t "claim|lock|gc|onload"` and `bun run test:t1 -t "claim|onload"`, then the crash matrix
-(`bun test test/crash-matrix`), unchanged and green.
+`bun test packages/core -t "claim|lock|gc|onload" && bun run test:t1 -t "claim|onload" && bun test test/crash-matrix`
 
 ### Report
 `.orchestrate/reports/task-1.md`
 
 ### Stop condition
-All four items have tests that fail without the change; the crash matrix is green in both variants.
+Every item has a test that fails without it; the crash matrix is green in both variants.
 
 ---
 
 ## Task 2 — `onload --dry-run` and the planning carry-overs
 
 ### Objective
-Agents can preview an onload (D71), and the offload plan says what M1 left unsaid: nested repositories, tags on no
-remote, non-git projects, and git maintenance no longer fails offloads.
+Agents can preview an onload (D71), and the offload plan lists nested repositories, tags on no remote and non-git
+projects.
 
 ### Context
-D36, D38, D69, D71; Q12 (iii); `docs/HANDOFF.md` "Carried into M2 → UX"; `docs/DESIGN.md` "Onload process" and
-"Offload process" steps 3 and 5; `docs/machine-contract.md` §6 (the `--dry-run` contract).
+D18, D36, D38, D69, D71; `docs/HANDOFF.md` "Carried into M2 → UX"; `docs/DESIGN.md` "Onload process" and "Offload
+process" steps 3 and 5; `docs/machine-contract.md` §6. The git-maintenance fingerprint item is deferred (Q5 iii).
 
 ### Scope
-Owns the planning part of `packages/core/src/saga/onload.ts` (after Task 1), `packages/core/src/plan/`,
-`packages/core/src/scan/`, the `onload` command's options and output schema, and its renderer.
+Owns:
+- The planning part of `packages/core/src/saga/onload.ts` (after Task 1).
+- `packages/core/src/plan/` and `packages/core/src/scan/`.
+- The `onload` command's options, output schema and renderer, and the regenerated contract files.
+- DESIGN sections: "Onload process" (the dry run) and "Offload process" step 5.
 
-- **`onload --dry-run`** is `read` (D18) and changes nothing: it saves no plan, since onload has no `--plan`. It
-  reports `restored: "reuse" | "store"` and why, the snapshot and the head it is written over, the landing folder,
-  the space needed, findings (occupied path, case collisions, the lease, `catalog.*`), and the hydrate plan (package
-  manager, frozen command, toolchain, Corepack). A `block` finding exits 6 with the preview as data, as offload's dry
-  run does (D38).
-- **D69 items.** Tags that no remote holds are reported under `git.unpushed` (message and `paths`; no new code).
-  Nested repositories are listed in the plan (`nested`, additive).
-- **Non-git projects.** The human plan adds "not a git repository: every file travels except stripped dependency
+Items:
+- **`onload --dry-run`** is `read` and saves no plan. It reports:
+  - `restored: "reuse" | "store"` and why;
+  - the snapshot and the head it is written over;
+  - the landing folder and the space needed;
+  - findings;
+  - the hydrate plan (package manager, frozen command, toolchain, Corepack).
+
+  A `block` finding exits 6 with the preview as data (D38).
+- **D69.** Tags held by no remote go under `git.unpushed` (message and `paths`). Nested repositories appear in the plan
+  as `nested`, an additive field.
+- **Non-git projects** get a human line: "not a git repository: every file travels except stripped dependency
   folders".
-- **Fingerprint v3 (Q12 iii)** for new plans and journals. Recover and plan approval compare a v2 fingerprint as v2.
 
 ### Tests first
-`onload --dry-run --json` validates against the schema and writes nothing (a tree snapshot of the sandbox before and
-after, store included). It reports reuse for a kept trash, blocks on an occupied path with exit 6 and data, and warns
-`lease.held`. A local-only tag shows under `git.unpushed`; a nested repository appears in the plan. Creating
-`.git/objects/maintenance.lock` during the upload no longer fails the offload, while an edit to a tracked file still
-does. A v2 journal recovers as before.
+`onload --dry-run --json` validates and writes nothing: the sandbox and the store are byte-identical before and after.
+It reports reuse for a kept trash, blocks on an occupied path with exit 6 and data, and warns `lease.held`. A local-only
+tag and a nested repository both show in the plan. A compatibility-matrix row is added for the new optional output
+fields.
 
 ### Verification
 `bun test packages/core -t "onload|plan|scan" && bun test packages/cli -t onload && bun run contract && git diff
@@ -337,32 +430,31 @@ does. A v2 journal recovers as before.
 
 ---
 
-## Task 3 — Small carry-overs: hydration environment, gate tooling and test hygiene  `parallel-safe with Tasks 1 and 4`
+## Task 3 — Small carry-overs: hydration environment, gate tooling and test hygiene  `parallel-safe with Tasks 1, 4 and 5`
 
 ### Objective
 Close the remaining small minors, so the M2 gate starts from better tools.
 
 ### Context
-`docs/HANDOFF.md` "Carried into M2 → Core safety" (Corepack), "Gate and eval" and "Tests and flake watch"; D54, D79.
+`docs/HANDOFF.md` "Carried into M2" (Corepack, "Gate and eval", "Tests and flake watch"); D54, D79.
 
 ### Scope
 Owns the install environment in `packages/core/src/saga/hydrate.ts` and `packages/eco-node/src/hydrate.ts`,
 `packages/cli/src/testing.ts`, `evals/agent-smoke/scorer.ts`, `scripts/gate-m1.ts` and a new `scripts/tree-compare.ts`.
 
-- **Corepack.** Installs run with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`, so they never wait on a prompt, and
-  `COREPACK_ENABLE_AUTO_PIN=0`, so Corepack never writes `packageManager` into the user's `package.json`. The hydrate
-  report says when Corepack provided the package manager.
-- **Tree comparison.** It moves out of `gate-m1.ts` into `scripts/tree-compare.ts`, and compares hard-link groups,
-  extended attributes and BSD file flags on top of M1's type, mode, content hash and link target. `gate-m1.ts` uses
-  it, and so does the M2 gate. A gate's raw `--out` JSON is attached to the release notes.
-- **Eval scoring.** It splits into `passed` (the four objective checks) and `clean` (no contract issues).
-- **The temp-folder leak.** `packages/cli/src/testing.ts` removes its `plainport-example-*` folders. A suite-level
+- **Corepack.** Installs run with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` and `COREPACK_ENABLE_AUTO_PIN=0`, so Corepack
+  never waits on a prompt and never writes into the user's `package.json`. The hydrate report names Corepack when it
+  supplied the manager.
+- **Tree comparison.** `scripts/tree-compare.ts` compares type, mode, content hash, link target, hard-link groups,
+  extended attributes and BSD flags. Both gates use it, and a gate's raw `--out` JSON is attached to the release notes.
+- **Eval scoring** splits into `passed` (the objective checks) and `clean` (no contract issues).
+- **The temp-folder leak.** `packages/cli/src/testing.ts` removes its `plainport-example-*` folders, and a suite-level
   check fails when a run leaves new `plainport-*` folders in `$TMPDIR`.
 
 ### Tests first
-`package.json` is byte-identical after a Corepack-managed install fixture. Tree comparison finds a broken hard link,
-a dropped xattr and a dropped `uchg` flag. The scorer gives `passed` but not `clean` on a recorded transcript with one
-confusing message. The leak check fails before the fix.
+`package.json` is byte-identical after a Corepack-managed install fixture. Tree comparison catches a broken hard link,
+a dropped xattr and a dropped `uchg` flag. The scorer gives `passed` but not `clean` on a recorded transcript. The leak
+check fails before the fix.
 
 ### Verification
 `bun test packages/eco-node packages/cli evals/agent-smoke scripts`
@@ -371,687 +463,1266 @@ confusing message. The leak check fails before the fix.
 `.orchestrate/reports/task-3.md`, with the scorer split recorded as a decision.
 
 ### Stop condition
-All four items are green, and `bun scripts/gate-m1.ts` still passes on one demo project with the new comparison.
+All four items are green, and `bun scripts/gate-m1.ts` passes on one demo project with the new comparison.
 
 ---
 
-## Task 4 — Test environments as code  `parallel-safe with Tasks 1 and 3` · `T2`
+## Task 4 — Test environments as code  `parallel-safe with Tasks 1, 3 and 5` · `T2`
 
 ### Objective
-One command brings up the T2 store containers on the laptop and in Linux CI, and CI runs the store suites and a
-restic version matrix.
+One command brings up the T2 store containers on the laptop and in Linux CI, with the fault controls the later tasks
+need, and CI runs the store suites and a restic version matrix.
 
 ### Context
-ADR-0018 (T2, "Environments as code", "Store capabilities are measured"), ADR-0021 (test tiers as commands, Linux CI
-job, version matrix); `docs/HANDOFF.md` "Tests and flake watch" (the Linux recipe); `CONTRIBUTING.md`.
+ADR-0018 (T2, "Environments as code"), ADR-0021 (tiers as commands, Linux CI, version matrix); `docs/HANDOFF.md`
+"Tests and flake watch"; `CONTRIBUTING.md`.
 
 ### Scope
-Owns `compose.yaml`, `scripts/testenv.ts` (and its `scripts/testenv` wrapper), `test/tiers.ts`, the `test:t2`
-script in `package.json`, `.github/workflows/ci.yml`, `scripts/ci-workflow.test.ts`, the matrix section of
-`tools.lock.json`, `scripts/fetch-tools.ts`, `.gitignore`, and the testing section of `CONTRIBUTING.md`.
+Owns:
+- `compose.yaml`, `scripts/testenv.ts` and its wrapper, `test/tiers.ts`, the `test:t2` and `test:t3` scripts.
+- `.github/workflows/ci.yml` and `scripts/ci-workflow.test.ts`.
+- The matrix section of `tools.lock.json` and `scripts/fetch-tools.ts`.
+- `.gitignore` and the testing section of `CONTRIBUTING.md`.
 
-- **`compose.yaml`.** Every image is pinned by digest, and every port binds to `127.0.0.1` only:
-  - MinIO (SeaweedFS if the image is unavailable, per ADR-0018);
-  - `atmoz/sftp`, with a key-only user;
-  - `restic/rest-server --append-only`, for M3, with a smoke test only;
-  - Toxiproxy, with a proxy in front of MinIO and one in front of SFTP.
-- **`scripts/testenv up | down | status | env | linux`.**
-  - `up` is idempotent and waits for health checks. It writes `.testenv/` (gitignored): endpoints, credentials
-    generated for this run, the SFTP host key and client key, and a sandbox `known_hosts` and ssh config.
-  - `down` removes the containers and volumes, and `env` prints the variables tests read.
-  - `linux` is the reproducible Linux test recipe: a pinned `oven/bun` container with `--init`, the repository
-    mounted, and the known gaps (no git fsmonitor daemon) set out.
-  - It works with Docker Desktop, OrbStack and the Ubuntu runner. Agents never build an environment by hand.
-- **T2 tier.** `describeT2` and `bun run test:t2` (`PLAINPORT_TEST_TIER=2`), with T2 suites failing rather than
-  skipping when `.testenv/` is missing.
+Items:
+- **`compose.yaml`.** Every image is pinned by digest, and every port binds to `127.0.0.1`:
+  - MinIO (SeaweedFS if the image is unavailable);
+  - `atmoz/sftp` with a key-only user;
+  - `restic/rest-server --append-only`, smoke only, for M3;
+  - Toxiproxy, in front of MinIO and SFTP.
+- **`scripts/testenv up | down | status | env | restart <service> | linux`.**
+  - `up` is idempotent and health-checked, and writes `.testenv/` (gitignored): endpoints, credentials generated for
+    the run, SFTP keys, a sandbox `known_hosts` and ssh config.
+  - `restart` restarts one container for durability tests.
+  - `linux` is the reproducible Linux test recipe: pinned `oven/bun`, `--init`, the known gaps set out.
+- **Fault controls.** Named Toxiproxy profiles: `cut` (reset both ways), `latency`, `slow-close`, and `lost-ack`
+  (forward the request whole, then reset before the response). Task 14's schedules and Task 27's matrix use them by
+  name.
+- **Tiers.** `describeT2` and `describeT3`, failing without their environment. `test:t2` sets
+  `PLAINPORT_TEST_TIER=2`; `test:t3` sets 3.
 - **CI.**
   - The `linux` job runs `scripts/testenv up` and `test:t2`.
-  - A new `restic-matrix` job runs `engine-restic`'s T1 suite against restic 0.17.1 (ADR-0006's floor), the latest
-    0.18 and the pinned 0.19.1. The matrix versions go into `tools.lock.json` with checksums from the official files,
-    `fetch-tools.ts --restic <version>` fetches them, and recorded fixtures exist for each under
-    `fixtures/restic/<version>/`.
-  - macOS runners have no Docker, so T2 stays on Linux.
-- T3 references arrive in Task 17; this task only reserves the `.testenv/t3.env` name in `.gitignore`.
+  - A `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18 and the pinned 0.19.1,
+    with checksums in `tools.lock.json` and fixtures under `fixtures/restic/<version>/`.
+  - macOS runners have no Docker.
 
 ### Tests first
-`tiers.test.ts`: `describeT2` runs at tier 2 and fails without `.testenv/`. `ci-workflow.test.ts` pins the T2 step
-and the matrix versions. A `fetch-tools` checksum mismatch for a matrix version refuses. A T2 smoke test runs `up`,
-reaches MinIO, SFTP (through the sandbox ssh config) and Toxiproxy, then `down` leaves no container or volume behind.
+`tiers.test.ts` covers the T2 and T3 gating. `ci-workflow.test.ts` pins the T2 step and the matrix. A checksum mismatch
+for a matrix version refuses. A T2 smoke test runs `up`, reaches every service, shows each Toxiproxy profile acting
+(the `lost-ack` request reaches MinIO while the client sees a reset), and leaves nothing behind after `down`.
 
 ### Verification
 `scripts/testenv up && bun run test:t2 -t testenv && scripts/testenv down`, `bun test scripts test/tiers.test.ts`,
-`actionlint` if available, and one `scripts/testenv linux` run of `bun run test:t1` with its result in the report.
+`actionlint` if available, and one `scripts/testenv linux` run of `bun run test:t1`.
 
 ### Report
-`.orchestrate/reports/task-4.md`, including the flake-watch rows from HANDOFF that the Linux recipe reproduced or
-cleared.
+`.orchestrate/reports/task-4.md`, including the flake-watch rows the Linux recipe reproduced or cleared.
 
 ### Stop condition
-`up` and `down` are idempotent, and the CI workflow is valid. The orchestrator confirms the Linux T2 job and the
-restic matrix green on `main` at the phase boundary.
+`up` and `down` are idempotent, the profiles are proven, and the workflow is valid. The orchestrator confirms the Linux
+T2 job and the matrix green on `main` at the phase boundary.
 
 ---
 
-## Task 5 — Secret providers: env, file, Keychain and 1Password  `parallel-safe with Task 6`
+## Task 5 — Sensitive process output and the canary  `parallel-safe with Tasks 1, 3 and 4`
 
 ### Objective
-Store secrets resolve through a `SecretProvider` port with `env:`, `file:`, `keychain:` and `op:` providers, and no
-value ever leaves memory or a child's environment.
+A process whose output may hold a secret can never leak it, whether it succeeds or fails. The leak test every later
+task uses exists before any secret provider or master-key read.
 
 ### Context
-ADR-0013; `docs/DESIGN.md` "Security and encryption" (Key custody, Keychain prompts), "Configuration", "Plugin
-interfaces → SecretProvider"; D79; Q1, Q10.
+Astra's Critical 2: `lastOutput` in `packages/core/src/runner/runner.ts` puts stdout's last lines into timeout and
+cancellation findings when stderr is empty. AGENTS rule 6 and rule 9; D79.
 
 ### Scope
-Owns `packages/core/src/ports/secrets.ts`, a new `packages/secrets/`, the secret parts of `packages/core/src/store.ts`
-(`resolveSecret` moves behind the port; `secretVariables` covers the new references), the `s3` store fields in
-`packages/core/src/config/schema.ts` (Q1), and a canary helper in `packages/core/src/testing/`.
+Owns the sensitive mode of `packages/core/src/runner/` (`runner.ts`, `types.ts`, `ring-buffer.ts`) and its
+host-macos spawner wiring, and a new `packages/core/src/testing/canary.ts`.
 
-- **`keychain:<service>/<account>`.**
-  - Reading runs `/usr/bin/security find-generic-password -s <service> -a <account> -w` through the runner, with
-    stdout captured, never streamed. "Not found" gives `store.secret-missing`, whose fix is the interactive
-    `security add-generic-password -s … -a … -w` (the value is typed, never passed).
-  - `set` runs `security -i` with the command on stdin, never in argv.
-  - Tests reach a throwaway keychain through a test hook that release builds compile out (D67).
-- **`op:`.** `op read <ref>` through the runner, stdout captured. A missing CLI or no sign-in gives
-  `store.secret-missing` with the exact fix.
-- **`se:` and `bw:`** are refused, naming the milestone that brings them.
-- **The install environment (D79)** also drops `AWS_*`, `RCLONE_*` and `OP_*` session variables, and the variables
-  that the new references name.
-- **The canary helper** plants a unique secret value. It then fails if that value appears in any file under the
-  sandbox, in captured stdout or stderr, in an event line, or in the argv of any process the runner started.
+- **The sensitive mode** (`sensitive: true` on a run):
+  - stdout is captured privately, bounded, and returned only in the ok value;
+  - nothing from stdout or stderr reaches `log` events, `onOutput` callbacks, diagnostic tails, finding messages,
+    error data or thrown errors, on every path: success, non-zero exit, idle and overall timeout, cancellation,
+    malformed output, spawn failure and output overflow;
+  - a failure names the command's label, the exit or stop reason, and byte counts only;
+  - the private buffer is overwritten when the run ends.
+- **The canary helper** plants unique values, including split and partial forms and each component of a structured
+  secret (the master key's `encrypt`, `mac.k` and `mac.r` in base64 and hex). It fails a test if any of them appears in:
+  files under the sandbox; captured stdout and stderr; event lines; findings; the argv of any process the runner
+  started; or a thrown error.
 
 ### Tests first
-- **Each provider:** found, missing, empty, and garbled reference. The value never reaches a `log` event, a
-  journal, a file or argv.
-- **Keychain (T1, macOS):** a temp keychain created under the sandbox HOME is read and written; `security
-  list-keychains -d user` and the default keychain are byte-identical before and after.
-- **`op`:** a fake `op` on the sandbox PATH.
-- **Schema:** `s3` requires `accessKeyId` and `secretAccessKey`; `keychain:plainport` without an account is refused.
+A fake child prints a canary, then:
+- exits 0;
+- exits 1;
+- hangs (idle timeout);
+- prints slowly (overall timeout);
+- is cancelled;
+- prints half the canary and hangs;
+- prints malformed JSON;
+- floods past the buffer.
+
+On every path the canary is absent everywhere the helper looks, and present in the ok value only on success. The
+helper's own test shows it catches a deliberately leaky runner.
 
 ### Verification
-`bun test packages/secrets packages/core -t "secret|store" && bun run test:t1 -t keychain && bun run contract`
+`bun test packages/core -t "runner|canary" && bun run test:t1 -t runner`
 
 ### Report
 `.orchestrate/reports/task-5.md`
 
 ### Stop condition
-Every provider is green, the canary helper is exported and used, and `DESIGN.md` "Configuration" names the reference
-forms M2 reads.
+Every failure path is covered for both modes, and the existing runner tests are unchanged and green.
 
 ---
 
-## Task 6 — The rclone blob store  `parallel-safe with Task 5`
+## Task 6 — Remote consistency and publication spec  `parallel-safe with Task 7`
 
 ### Objective
-`blob-rclone` implements the `BlobStore` port over the pinned rclone, proven by a store contract suite that every
-adapter runs.
+A precise, testable statement of what plainport needs from a store, and fakes that break each requirement, before
+any adapter exists.
 
 ### Context
-ADR-0006, ADR-0018 ("measured, never assumed"); `docs/DESIGN.md` "Storage: engine and metadata", "Plugin interfaces
-→ BlobStore"; D40, D41, D42; `packages/core/src/testing/blob-store-contract.ts`.
+Astra's Important 4 and 5 and missing task 2; ADR-0006, ADR-0018; D24, D41, D42, D45; Q8, Q9.
 
 ### Scope
-Owns a new `packages/blob-rclone/`, `packages/core/src/testing/blob-store-contract.ts` (made capability-aware and run
-against any factory), `packages/core/src/testing/memory-blob-store.ts` (capability knobs), and an optional batch read
-on the port (`getMany`). The batch read is internal, not public contract.
+Owns:
+- A new DESIGN section, "Remote stores: consistency and publication".
+- `StoreSemantics` in `packages/core/src/ports/blob-store.ts`.
+- `packages/core/src/testing/{semantic-blob-store.ts,blob-store-contract.ts}`.
+- A new `packages/core/src/catalog/publish.ts`.
 
-- **Calls** run through the runner:
-  - `get` is `rclone cat`; `put` is `rclone rcat` from stdin; `list` is `rclone lsjson -R --files-only`, which
-    gives sizes; `stat` is `lsjson --stat`; `delete` is `deletefile`.
-  - `getMany` is one `rclone copy --files-from-raw` into a temp folder under plainport's cache, cleaned through the
-    guarded deleter.
-- **Remotes** come only from environment variables (`RCLONE_CONFIG_<NAME>_*`), with `RCLONE_CONFIG` pointed at a file
-  that does not exist and `--cache-dir` under plainport's cache.
-- **Bounded network calls.** `--contimeout`, `--timeout`, `--retries 1` and `--low-level-retries`, plus the runner's
-  idle and overall deadlines.
-- **Exit codes.** On `get` and `stat`, 3 and 4 mean `null`. Exit 5 and connection failures give `store.unreachable`
-  (9). Anything else gives `store.failed`, with stderr redacted.
-- **Capabilities.** `createIfAbsent` and `replaceIfMatch` are false until Task 7 measures them.
-- **Whole writes.** Check whether rclone's partial-upload rename makes a `put` whole on the local and SFTP backends
-  of 1.75.1, and record the answer: a reader must never see a torn event.
+Items:
+- **`StoreSemantics`**, one property each:
+  - read-after-write visibility;
+  - list-after-write visibility;
+  - listing completeness (pagination);
+  - whole-write publication (`atomic-put`, `temp-then-rename`, or none);
+  - conditional create (proven or not);
+  - durability after acknowledgement;
+  - cancellation (whether a cancelled put can still land).
+
+  Each property is `strong | weak | unknown`, with a source (`measured`, `documented`, `asserted`). `capabilities()`
+  stays for compatibility and derives from it.
+- **The semantic fake** wraps the memory store with switches for each weakness: delayed visibility, a listing that
+  omits recent keys, a torn in-place write, lost acknowledgements (the write lands, the call fails), and late landing
+  after cancellation.
+- **Publication rules.**
+  - An event is published whole: `atomic-put` stores put directly; `temp-then-rename` stores upload to
+    `meta/v1/tmp/<op>-<nonce>` and rename. A torn key is never visible under `meta/v1/events/`.
+  - The unique-writer assumption is stated: an event key is a fresh ULID from its writer.
+  - A retry first reads the key and compares opened content, through Task 11's codec.
+  - Temporaries are swept only by their own operation's recovery.
+- **The elected publication primitive** (`publish.ts`), the one rule bootstrap and the root claim use:
+  - a conditional create when proven;
+  - otherwise, on a strong store, write a candidate, list, and proceed only as the sole candidate or when the
+    published key already names you; publish; read back;
+  - contested candidates refuse;
+  - removing a candidate by hand needs every plainport process quiesced first, and the finding's fix says so.
+- **Refusals.** Destructive workflows refuse an `unknown` or `weak` profile (`store.semantics-unknown`, Q8).
 
 ### Tests first
-- Exit-code mapping on recorded rclone stderr fixtures.
-- The canary: no secret in argv or in rclone's error output.
-- A `rclone.conf` with a poisoned remote, planted in the sandbox, is never used.
-- The contract suite fails against a stub adapter, then passes against fs, memory and rclone's `local` backend on a
-  temp folder (T1).
-- One `getMany` of 200 keys starts one process.
+- The contract suite gains semantic cases, and the memory and fs stores pass the strong profile.
+- Each fake weakness is caught by at least one test.
+- Every interleaving of two and three claimants (fast-check over schedules) admits at most one on a strong profile,
+  and the same schedules on a weak profile show why it refuses.
+- A lost acknowledgement followed by a retry gives one event, not two.
 
 ### Verification
-`bun test packages/blob-rclone packages/core -t blob && bun run test:t1 -t blob-rclone`
+`bun test packages/core -t "publish|semantic|blob"`
 
 ### Report
-`.orchestrate/reports/task-6.md`, with the partial-upload finding.
+`.orchestrate/reports/task-6.md`
 
 ### Stop condition
-The contract suite is green on fs, memory and rclone-local, and it is the one suite every later adapter runs.
+The DESIGN section, the profile type, the fake and the primitive are merged, with every requirement tied to a test.
 
 ---
 
-## Task 7 — The store contract on MinIO and SFTP, conditional writes and the root claim  `T2`
+## Task 7 — The format and compatibility matrix  `parallel-safe with Task 6`
 
 ### Objective
-The rclone blob store passes the contract on MinIO and an SFTP container. rclone's `If-None-Match` is measured, not
-assumed, and the root claim holds on stores without a conditional write.
+Every persisted format and every closed public value M2 touches has a row saying what each released reader does with
+it, and executable tests that run the real v0.1.1 binary.
 
 ### Context
-ADR-0018 (the open `If-None-Match` check), D41, D42, D48, D50, D51; Q2; `docs/DESIGN.md` "Machines → SSH policy";
-`packages/core/src/catalog/root-claim.ts`.
+Astra's Important 10 and 13 and missing task 4; D16, D17, D73, D74; Q1, Q2, Q3, Q5, Q6, Q11.
 
 ### Scope
-Owns the T2 tests of `packages/blob-rclone/`, the non-conditional paths of `packages/core/src/catalog/root-claim.ts`
-and of `appendEvent` in `packages/core/src/catalog/log.ts`, a new `test/support/ssh-shim.ts`, and a test-only SigV4
-probe in `test/support/s3-probe.ts`.
+Owns:
+- A new DESIGN section, "Formats and compatibility".
+- A new `test/compat/`, with a builder that compiles v0.1.1 from its tag in a temporary `git worktree` (removed after)
+  and caches the binary under `.tools/compat/`.
+- `docs/machine-contract.md` §7.
+- The D74 amendment in ADR-0022 (Q1).
 
-- **SFTP through the system OpenSSH.** rclone's `--sftp-ssh` runs the same `ssh` restic uses, with `BatchMode=yes`
-  and `StrictHostKeyChecking=yes`, so the user's `~/.ssh/config` applies to both layers. In tests the shim adds
-  `-F <sandbox config>`.
-- **`If-None-Match` on 1.75.1.**
-  - Measure it through the adapter against MinIO, using the direct probe as the reference.
-  - Record the result in ADR-0018's open item, in `DESIGN.md` and in each backend's `capabilities()`.
-  - Use the conditional write where the adapter sends it.
-- **The root claim (Q2)** uses that conditional write where it exists, and Q2's claim protocol everywhere else.
-- **Event appends on stores without a conditional write** put, then read back and compare. A different event under
-  the same id is `store.key-exists`, and nothing is written over.
-- **Toxiproxy** cuts the link during `put` and `list`. The result is `store.unreachable`, and a later `list` shows
-  the whole event or nothing.
+The matrix lists every persisted format: catalog events by type, `store.json` (v1, and v2 per Q2), `root.json`, the
+election candidates, the per-store sidecar, `registry.json`, `managed.toml` and `config.toml` keys, journals, plans,
+claims and `.claim.boot`, stubs, restic tags, and the mirror. It also lists every closed public value: exit codes,
+`ProjectState`, offload's `kind`, the plan's `fp`, phases.
+
+Each row gives:
+- what v0.1.1 does when it reads the format: parses it, skips it with a finding, or refuses;
+- what a rollback to v0.1.1 leaves working;
+- whether a v0.1.1 writer can reach the format, and what stops it;
+- how an M1 store is adopted.
 
 ### Tests first
-- **Claim interleavings (T0, memory store):** every interleaving of two claimants' write, list and settle lets at
-  most one proceed, and a contested claim refuses both.
-- **Contract (T2):** the suite on MinIO and SFTP, red against the T1-only adapter, then green.
-- **Claim race (T2):** two processes claiming one fresh MinIO prefix and one SFTP folder.
-- **Toxiproxy cuts (T2):** as above.
+- **Adoption (T1).** v0.2 opens an M1 local store, onloads and offloads on it, and v0.1.1 still reads everything v0.2
+  wrote there (format 1 stays readable).
+- **Exclusion.** v0.1.1 refuses a format-2 `store.json` before writing anything.
+- **Rollback.** v0.1.1 recovers a journal v0.2 left open on a format-1 store.
+- **Claims.** v0.1.1 parses a claim written beside a `.claim.boot`.
+- **Contract.** Every published schema in `schemas/` at v0.1.1 still validates v0.2's output for the same command (the
+  contract snapshot diff is additive).
+
+Rows for later tasks start as `test.todo` entries the owning task must turn on. A guard test fails the gate while any
+todo remains.
 
 ### Verification
-`scripts/testenv up && bun run test:t2 -t "blob-rclone|root-claim" && bun test packages/core -t "root-claim|log"`
+`bun run test:t1 -t compat && bun test test/compat`
 
 ### Report
-`.orchestrate/reports/task-7.md`, with the measured capability table: backend, `createIfAbsent`, and how it was
-measured.
+`.orchestrate/reports/task-7.md`, with the matrix.
 
 ### Stop condition
-The contract is green on fs, rclone-local, MinIO and SFTP; the `If-None-Match` result is recorded; the claim race
-never lets two roots on one store.
+The matrix covers every format in the inventory, the existing rows pass against the real v0.1.1, and D74 is amended.
 
 ---
 
-## Task 8 — Remote engine targets and the store opener  `T2`
+## Task 8 — The bootstrap protocol and its recovery
 
 ### Objective
-Offload and onload run against SFTP and S3 stores. One store definition gives restic's repository and the catalog
-at the same place.
+Setting up a store is exclusive and recoverable. No two initialisers ever write one restic repository, and identity,
+repository location, root and seal policy are published once.
 
 ### Context
-ADR-0006, ADR-0010; `docs/DESIGN.md` "Storage → Store kinds" and "Layout on every store", "Machines → SSH policy";
-D27, D45, D68, D85; Q1.
+Astra's Critical 1; ADR-0008, ADR-0010; D45, D48, D50, D51, D85; Q2, Q9, Q10; Tasks 6 and 7.
 
 ### Scope
-Owns `packages/engine-restic/src/engine.ts` (repository locations and options), `packages/cli/src/stores.ts` (the
-opener for `local`, `sftp` and `s3`; `peer` stays `store.unsupported` until M3), the remote parts of
-`packages/core/src/store.ts` (setup over a `BlobStore`), and `packages/core/src/catalog/identity.ts` (`store.json`
-on stores without a conditional write).
+Owns:
+- A new `packages/core/src/saga/bootstrap.ts` (journal steps, after-effect seams and `BOOTSTRAP_RECOVERY`).
+- The `store.json` v2 schema in `packages/core/src/catalog/identity.ts`.
+- The root claim's move onto the elected publication in `packages/core/src/catalog/root-claim.ts`.
+- A fake engine `init` that can be paused and delayed.
+- DESIGN sections: "Storage → Layout on every store" and a new "Bootstrap".
 
-- **Repository locations:**
-  - `sftp:<host>:<path>/repo`, with `-o sftp.args=` carrying `BatchMode=yes` and the shim in tests;
-  - `s3:<endpoint>/<bucket>/<path>/repo`, with `-o s3.region=` when it is set.
-  - Credentials go only in the child's environment (`RESTIC_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`),
-    and restic's messages are redacted of values and of URLs with credentials.
-- **Failures.** restic's network failures map to `store.unreachable` (9), a missing repository to
-  `store.not-set-up`, and a lock to `--retry-lock`, then exit 11.
-- **Setup** writes `store.json` (create-only where possible, otherwise write and read back) and then the restic
-  repository (`restic init` when `restic cat config` finds none). Two devices racing to set up one fresh store can
-  record different ids; the loser then gets `store.identity-changed` (fail closed), which the report states as a
-  known limit.
+The protocol (Q9 b):
+1. Journal `bootstrap.begin` with an attempt id.
+2. `restic init` at `repos/<attempt>/`.
+3. Write the candidate.
+4. Hold the election through Task 6's primitive.
+5. Publish `store.json` v2 `{v: 2, id, repo, catalog: {seal}, format: 2}`.
+6. Read it back.
+7. Record the id on this device.
+
+A loser stops before writing anything after its candidate and reports `store.bootstrap-lost`, naming the winner. Its
+repository is left for `store test` to list. The root claim is the same election under `meta/v1/root-claims/`.
+Adopting an existing store authenticates its published repository with this device's password before recording it.
 
 ### Tests first
-- **Golden tests** for each kind's repository location, options and environment, with the canary over argv.
-- **T2 round trips:** offload, then onload, of a fixture project on MinIO and on SFTP, byte-identical by the Task 3
-  comparison.
-- **A Toxiproxy cut mid-upload** fails the offload before the commit, with the folder untouched (invariant 1).
-- **Unreachable and wrong-password** stores map to 9 and to `store.secret-missing` or `store.failed`.
+- Two simultaneous initialisers, with different passwords, delayed config writes and lost acknowledgements (Task 6's
+  fake), produce exactly one published repository, and the loser's commands never touch it.
+- A kill at every bootstrap step, then `recover`, settles to "published by this attempt", "lost" or "rolled back
+  (nothing published)". These are the crash-matrix rows.
+- A third device adopts the winner.
+- A format-1 local store is adopted without rewriting it.
 
 ### Verification
-`bun test packages/engine-restic packages/cli -t stores && scripts/testenv up && bun run test:t2 -t "remote round
-trip"`
+`bun test packages/core -t "bootstrap|root-claim|identity" && bun test test/crash-matrix`
 
 ### Report
-`.orchestrate/reports/task-8.md`, with offload and onload times for the fixture on each kind.
+`.orchestrate/reports/task-8.md`
 
 ### Stop condition
-Both remote kinds round-trip byte-identically, and invariants 1 to 3 hold after the cut.
+The protocol is green on fakes for every schedule and crash row, and its compatibility rows (Task 7) are on.
 
 ---
 
-## Task 9 — `store add | list | test | remove`, and `init`  `T2`
+## Task 9 — Stable store identity
 
 ### Objective
-Stores can be set up, listed, tested and forgotten from the CLI, and `init` gets M2's setup work.
+Snapshot locations, home-store decisions and per-store facts use store ids, never a device's alias for a store.
 
 ### Context
-`docs/DESIGN.md` "CLI design" (`store …`, `init`), "Core API" (`stores.list`, `stores.test`), "Roots → Setting roots
-up"; D22, D68, D70, D85; Q4, Q8, Q10, Q11.
+Astra's Important 9 and missing task 3; D45, D68, D85; Q4, Q11, Q12; `packages/core/src/saga/onload.ts`
+(`stored[store.name]`).
 
 ### Scope
-Owns `packages/cli/src/commands/store.ts`, the store part of `packages/cli/src/commands/init.ts`, the
-`stores.list` and `stores.test` parts of core, the per-store state file `~/.local/state/plainport/stores/<id>.json`
-(Q4), and the regenerated `plainport.json`, `schemas/` and completions.
+Owns:
+- `stored` lookups everywhere they occur: onload, restore, recover, views.
+- The `stored` writer in offload, keyed by id on format-2 stores and by alias on format-1.
+- The per-store sidecar (Q4) in a new `packages/core/src/stores-state.ts`.
+- DESIGN sections: "Catalog and data model" (the `stored` paragraph) and "Local state per machine".
 
-- **`store add <name> --kind sftp|s3 …`.** It takes flags for each field (`--host`, `--path`, `--endpoint`,
-  `--bucket`, `--region`, and the secret references). With `--secret-stdin` it saves the password into the Keychain
-  (Q10). It writes `managed.toml` under its lock and sets the store up: identity, restic repository, and the root
-  claim with `--root`. It records the id, and re-running it finishes a setup that stopped half way.
-- **`store list`** reads only: kind, location, id, the root served and the last test. `--probe` also checks
-  reachability.
-- **`store test`** checks reachability, credentials, identity, that the restic repository opens, and the probe
-  write, read and delete. It measures `createIfAbsent` and latency, and records the result in the per-store file. A
-  refused delete reports `append-only`.
-- **`store remove`** behaves as Q8 says.
-- **`init`** shows folder sizes (D70), and re-pointing a pinned name is tightened as Q11 says.
-- New findings, such as `store.in-use` and `store.root-contested`, are added to the catalogue with fixes.
+Rules:
+- A ULID key is a store id.
+- A single non-ULID key in an event read from store S means S.
+- Any other alias resolves through this device's registry, or stays unknown (`snapshot.not-found`).
+- The sidecar holds the seal pin, the semantics profile with its source, the last test, and the facts it was
+  measured against (endpoint, access kind, tool versions), and invalidates on any change.
 
 ### Tests first
-- Each command's risk gate and its `--json` schema.
-- `store add` is idempotent and leaves no secret in `managed.toml` (the canary).
-- `store remove` refuses while a root pins the store.
-- `store test` on a memory store that refuses deletes reports `append-only`.
-- `init --store-path` to an unreachable path for a pinned name refuses and writes nothing.
-- T2: `store add` and `store test` against MinIO and SFTP.
+- Two homes call one store `archive` and `nas`, and each reads the other's snapshots (format 2).
+- One store under two names on one device.
+- `local` and `sftp` access to the same store (D68) give one id.
+- A legacy M1 event read from S resolves to S.
+- A changed root default while the old store is offline still finds the snapshot by id.
+- Sidecar invalidation, and an atomic write under a lock.
 
 ### Verification
-`bun test packages/cli -t "store|init" && bun run contract && git diff --exit-code plainport.json schemas/ &&
-bun run test:t2 -t "store add"`
+`bun test packages/core -t "stored|store identity|stores-state" && bun run test:t1 -t compat`
 
 ### Report
 `.orchestrate/reports/task-9.md`
 
 ### Stop condition
-The commands are registered with their risk classes, `docs/machine-contract.md` agrees, and the T2 tests are green.
+No code path looks up `stored` by name, and the compatibility rows are on.
 
 ---
 
-## Task 10 — Sealed catalog events  `T2`
+## Task 10 — The versioned crypto spec  `parallel-safe with Tasks 12 and 13`
 
 ### Objective
-On a sealed store, catalog events are XChaCha20-Poly1305 ciphertext that only a device able to open the repository
-can read or forge.
+The catalog seal is fully specified and versioned on its own, with test vectors, before any store is sealed.
 
 ### Context
-ADR-0009, ADR-0013; `docs/DESIGN.md` "Security and encryption" (Catalog row), "Stack" (`@noble/ciphers`); D45, D74,
-D86; Q3, Q4.
+Astra's Important 12 and missing task 6; ADR-0013; `docs/DESIGN.md` "Security and encryption", "Stack"
+(`@noble/ciphers`); Q10.
 
 ### Scope
-Owns `packages/core/src/catalog/seal.ts`, the seal path of `appendEvent` and of the mirror sync in
-`packages/core/src/catalog/log.ts`, an Engine port method `catalogKey(ctx)` (`engine-restic` derives the key and never
-returns the master key), `store add --seal | --no-seal`, the `sealed` column of `store list`, and the seal pin in the
-per-store file.
+Owns:
+- A new `packages/core/src/catalog/seal.ts` (pure: no I/O) and its vectors under `fixtures/seal/`.
+- `@noble/ciphers` in `bun.lock`.
+- A new DESIGN subsection, "Security and encryption → Catalog seal v1".
 
-- **The format, key and default** are those of Q3. The associated data is the event's key name, and each event gets
-  a random 24-byte nonce.
-- **The seal pin** is set at `store add` and checked on every read. On a store pinned as sealed, a plaintext event
-  is left out (`catalog.unsealed-event`, a warn that makes the fold uncertain by D86), and a failed open is
-  `catalog.seal-failed`. A store not pinned as sealed that serves sealed events refuses, as `store.identity-changed`
-  does.
-- **The mirror** holds opened events in files with mode `0600`.
+The spec, which the task may change only through `DESIGN_CONFLICT`:
+- **Input keying material:** the 64 bytes `encrypt (32) ‖ mac.k (16) ‖ mac.r (16)`, base64-decoded from `restic cat
+  masterkey`'s JSON. The order is fixed, and anything else is refused.
+- **Derivation:** HKDF-SHA256 with salt = the UTF-8 store id, info = `plainport catalog seal v1`, and 32 bytes of
+  output.
+- **Key id:** the first 8 bytes of HMAC-SHA256(key, `plainport kid v1`), in hex.
+- **The envelope**, one JSON line: `{"pp_seal":1,"alg":"xchacha20poly1305","kdf":"hkdf-sha256-restic-master-v1",
+  "kid","nonce","ct"}`, with base64url fields.
+- **Associated data:** `pp_seal\0v1\0<store id>\0<event key>`.
+- **Nonce:** 24 random bytes.
+- **Versioning.** `pp_seal` versions the envelope and KDF apart from the event's `v`. An unknown `pp_seal` or `kdf` is
+  `catalog.seal-failed`.
+- **Rotation.**
+  - A password change leaves the master key, and so the catalog key, unchanged.
+  - Removing a password does not revoke a master key someone already read: stated as a limit.
+  - Replacing a compromised master key means a new repository and re-sealed events, which is M3 and M5 work. M2
+    only fails closed on a `kid` mismatch.
+- **No fallback.** A random-key fallback is never chosen silently (Q10).
 
 ### Tests first
-- Seal and open round trip.
-- One flipped bit, a swapped key name and a wrong key each fail and are left out.
-- A plaintext event injected into a sealed store is not folded.
-- Invariant 4 holds over a sealed memory store (fast-check, 1,000 cases).
-- The engine's `catalogKey` never prints the master key (the canary).
-- T2 on MinIO: the bytes stored under `meta/v1/events/` contain no project ULID, path or root key.
+- Test vectors: fixed master key, store id, event key and nonce give fixed bytes.
+- One flipped bit in the ciphertext, the nonce, the AAD or the kid fails, as do a swapped event key, a swapped store id
+  and an unknown version.
+- Fast-check round trips (1,000 cases).
 
 ### Verification
-`bun test packages/core -t seal && bun test packages/engine-restic -t catalogKey && bun run test:t2 -t sealed`
+`bun test packages/core -t seal`
 
 ### Report
-`.orchestrate/reports/task-10.md`, with whether `restic cat masterkey` worked on 0.17.1 and 0.19.1, or why key (b)
-was used.
+`.orchestrate/reports/task-10.md`
 
 ### Stop condition
-`s3` and `sftp` stores seal by default, `local` stays plain, and `DESIGN.md` documents the format.
+The spec is in DESIGN, the vectors are committed, and the module is pure and green.
 
 ---
 
-## Task 11 — The catalog over remote stores  `T2`
+## Task 11 — The unified catalog codec
 
 ### Objective
-The catalog read path works over remote stores: a fast mirror sync, offline `ls`, doubt about skipped newer events,
-and one home store per project.
+One codec reads and writes every catalog event on every path: live, recovery, mirror and tests. A sealed store can
+never be misread as an absent or uncommitted event.
 
 ### Context
-`docs/DESIGN.md` "Catalog and data model" (the one read path), "Project lifecycle" (what `ls` and `status` show);
-D41, D45, D66, D86; `docs/HANDOFF.md` "Known limits" (a doubtful catalog); Q9.
+Astra's Important 11 and missing task 7; `packages/core/src/catalog/log.ts` (`appendEvent`, `readEvents`,
+`eventForOp`), `packages/core/src/recover/recover.ts` (its direct `OffloadedEventSchema` parse); D24, D41, D42, D45,
+D62; Task 10.
 
 ### Scope
-Owns `packages/core/src/catalog/{log.ts,head.ts}`, `packages/blob-fs/src/mirror.ts`,
-`packages/core/src/status/projects.ts`, and the `ls` and `status` commands.
+Owns a new `packages/core/src/catalog/codec.ts`, every event read and write in `log.ts`, `head.ts` and
+`recover/recover.ts`, the mirror's bookkeeping in `packages/blob-fs/src/mirror.ts`, and the test helpers that build
+event files.
 
-- **The sync** is one listing and one batch read of the missing events, with a deadline. A write path always reads
-  fresh, and a stale read refuses (existing; proven here on remote kinds).
-- **Offline.** With the store cut, `ls` and `status` read the mirror marked `stale` with its last sync, or
-  `never-synced`.
-- **D86, strengthened.** A skipped state-changing event whose ULID time is newer than the head's event makes the
-  head uncertain, even without the stub's or the registry's evidence. A second device hits this by construction.
-- **The home store (Q9).** An offload or onload whose project's head lives on another set-up store refuses
-  (`store.history-elsewhere`).
-- **Several stores.** `ls` merges every set-up store's catalog by project id. A project found in two catalogs gets
-  the open condition `several-stores`, preferring the store the registry names.
+- `encode(event, policy)` gives transport bytes. `decode(bytes, key, policy)` gives an event or a typed skip reason:
+  torn, not JSON, schema, wrong id, unknown type, `unsealed-event`, `seal-failed`.
+- **Idempotent appends** compare opened events, so a sealed retry with a new nonce counts as the same event.
+- **The mirror** stores opened bytes, plus a record of each transport file's name and size, which M1's cache digest
+  uses. Transport bytes and opened bytes are never confused.
+- **Recovery** reads through the codec, so recover works with an empty mirror on a sealed store.
+- **Every skip reason feeds D86** (Task 21 adds the rule for when doubt applies).
 
 ### Tests first
-- A skipped newer event makes onload refuse with `catalog.head-uncertain` on a fresh device.
-- `store.history-elsewhere` on an offload with `--store` naming the other store.
-- T2: `ls` with Toxiproxy down shows `stale` and the last sync time.
-- Syncing 1,000 events from MinIO starts two rclone processes (count assertion), and the time is recorded.
+- A grep-style test fails if any module outside the codec parses `meta/v1/events/` bytes.
+- At every offload and onload commit boundary, recover with an empty mirror on a sealed fake store settles exactly as
+  on a plain one (crash rows, both store kinds).
+- A sealed append whose acknowledgement is lost, then retried, gives one event.
+- The digest changes when a transport file changes size.
 
 ### Verification
-`bun test packages/core -t catalog && bun test packages/cli -t "ls|status" && bun run test:t2 -t "catalog remote"`
+`bun test packages/core -t "codec|catalog|recover" && bun test test/crash-matrix`
 
 ### Report
-`.orchestrate/reports/task-11.md`, with sync times for 100 and 1,000 events.
+`.orchestrate/reports/task-11.md`
 
 ### Stop condition
-All of the above is green, and `DESIGN.md` "Catalog and data model" states the newer-event rule and the home-store
-rule.
+All event I/O goes through the codec, and the crash matrix is green with sealed and plain fakes.
 
 ---
 
-## Task 12 — Leases across devices
+## Task 12 — The causal resolution model  `parallel-safe with Tasks 10 and 13`
 
 ### Objective
-Two devices see each other's leases: `status` and `ls` say who holds a project, and onload and offload warn, or block
-under `strict`.
+The fold settles conflicts by a stated causal rule with expected outcomes for every hard history, before any command
+writes a `resolved` event.
 
 ### Context
-`docs/DESIGN.md` "Catalog and data model → Fold rules" (Lease), "Onload process" step 2, "Edge cases → Concurrency";
-D40, D43, D54; invariant 5; Q14.
+Astra's Important 7 and missing task 8; ADR-0009; D41, D43; Q3, Q18.
 
 ### Scope
-Owns the lease view in `packages/core/src/status/projects.ts`, the lease finding in offload's plan
-(`packages/core/src/saga/offload.ts`), the lease tests of `onload.ts`, `packages/core/src/testing/invariants.ts` (made
-to work over several homes), and a new `test/support/two-devices.ts`. That helper runs two sandboxed instances, with
-two HOMEs and two device ids, on one store, and Tasks 13 to 18 use it.
+Owns `resolved` in `packages/core/src/catalog/events.ts` (`{v: 1, type: "resolved", project, root, path, keep, over:
+[ulid], supersedes?: [ulid]}`, written only to format-2 stores, Q2), its rule in `fold.ts`, and the DESIGN fold rules.
 
-- **The view.** It shows the holder (this device, or `device <short id>`), since when, and the open condition
-  `leased-elsewhere`, with `next` saying what to do.
-- **Offload.** When another device holds the lease further along the chain, the plan carries `lease.held` (warn,
-  allowable). Under `strict` it blocks with exit 8.
-- **Onload.** The lease check reads the store fresh; a stale read refuses.
+Rules:
+- A resolution is valid only if `keep` and every `over` are snapshots of the same project that the catalog holds, and
+  `keep ∉ over`. An invalid one is skipped with a finding and makes the fold uncertain.
+- A fork is settled when one non-superseded valid resolution names all its tips in `over ∪ {keep}`.
+- Two non-superseded resolutions that settle overlapping tips with different `keep` leave the project `conflicted`
+  (a resolution conflict). A resolution naming both in `supersedes` settles it.
+- Resolutions that agree on `keep` combine.
+- A snapshot made from a rejected tip after a resolution is a new fork against the kept line: work never vanishes.
+- A fork nested inside a settled one needs its own resolution.
 
 ### Tests first
-- B onloads while A holds the lease: a warning under `warn`, exit 8 under `strict`.
-- B's `status` names A's device.
-- An offload from the copy that does not hold the lease warns.
-- Invariant 5 holds across both homes after every two-device test, and the helper's own test shows a deliberately
-  double lease is caught.
+An expected-outcome table, one row per history, each with the exact `status`, `head`, `heads` and `conflicts`:
+- a plain fork resolved;
+- competing resolutions (keep X and keep Y);
+- partial overlap;
+- stale then superseding;
+- a descendant of a rejected tip;
+- a nested fork;
+- an invalid reference;
+- a resolution naming another project's snapshot.
+
+Then fast-check permutation invariance (1,000 cases) over histories built from those rows.
 
 ### Verification
-`bun test packages/core -t lease && bun run test:t1 -t "two devices"`
+`bun test packages/core -t "fold|resolved"`
 
 ### Report
 `.orchestrate/reports/task-12.md`
 
 ### Stop condition
-The two-device helper is exported, and lease warnings, `strict` and the view are green on a local store (T1).
+Every table row passes, and the DESIGN fold rules state the model.
 
 ---
 
-## Task 13 — The head check at commit, and forks after the commit
+## Task 13 — Credential-independent offline views  `parallel-safe with Tasks 10 and 12`
 
 ### Objective
-A race between two devices always ends with both snapshots kept and nothing deleted. A fork found at the commit or
-right after it keeps the folder.
+`ls` and `status` work from a store's mirror without resolving any secret, opening the engine or deriving the seal
+key, and say exactly why the store itself could not be read.
 
 ### Context
-`docs/DESIGN.md` "Offload process" step 7 and "Journal steps", "Conflict at step 7"; D24, D41, D51, D52, D61; Q6;
-`test/crash-matrix/`.
+Astra's Important 17 and missing task 9; D45, D66; `packages/core/src/status/projects.ts`,
+`packages/cli/src/commands/resolve.ts` (`viewDeps`).
 
 ### Scope
-Owns `packages/core/src/saga/{offload.ts,release.ts}` and `packages/core/src/recover/recover.ts`. The crash-matrix
-rows come by enumeration.
+Owns the store-opening path of `packages/core/src/status/projects.ts` and `viewDeps`, and the conditions it adds.
+DESIGN section: "Project lifecycle → What `ls` and `status` show".
 
-- **The head check at commit** reads the store fresh, never the mirror (existing; proven across two homes).
-- **Q6 (b).** Release reads the catalog again right before the rename. Any new step, journal field or after-effect
-  seam is exported, with its recover rule. `DESIGN.md` "Journal steps" and `docs/machine-contract.md` (the
-  `fork-after-commit` data kind) are updated.
-- **A deterministic race** comes from `PLAINPORT_TEST_PAUSE_AT=offload.verified` on both instances: both pass the
-  head check, then both commit.
+- Views open the mirror by the pinned store id first, then try the store.
+- A store failure becomes a condition beside the mirror's data:
+  - `stale` or `never-synced` (as in M1);
+  - `secret-unavailable` (a missing, signed-out or denied provider, or a missing password);
+  - `store-unreachable`;
+  - `seal-key-unavailable`.
+- Provider calls are bounded by Q14's deadline.
+- Write commands still refuse uncertain or unavailable stores.
 
 ### Tests first
-- **Sequential:** the second offload gets `catalog.head-moved` (fork, exit 8), its folder kept.
-- **Concurrent:** both commit, both find the fork after the commit, both folders are kept with no stub, the project
-  is `conflicted`, and each snapshot restores byte-identical to its folder.
-- **Crash rows:** killed between the re-read and the rename; the store unreachable at the re-read, which leaves the
-  journal pending and the folder kept; and `recover` with the store back.
+With fakes, separately:
+- network loss;
+- a missing `op`;
+- a signed-out `op`;
+- a denied Keychain read;
+- a missing password;
+- a key derivation failure;
+- a never-synced store.
+
+Each shows the mirror's projects with the right condition and no secret prompt beyond the deadline. A write command in
+each case refuses.
 
 ### Verification
-`bun test packages/core -t "offload|recover" && bun test test/crash-matrix && bun run test:t1 -t "race|crash"`
+`bun test packages/core -t "views|status" && bun test packages/cli -t "ls|status"`
 
 ### Report
-`.orchestrate/reports/task-13.md`, with the new row count.
+`.orchestrate/reports/task-13.md`
 
 ### Stop condition
-Both race orders are green, every new step has crash rows in both variants, and invariants 1 to 5 hold after each.
+No view path resolves a secret before reading the mirror.
 
 ---
 
-## Task 14 — The `resolved` event and `plainport resolve`
+## Task 14 — Adversarial gate schedules and independent invariants
 
 ### Objective
-`plainport resolve` settles a conflicted project by keeping one head. The fold reads its event, and the other
-snapshots stay restorable.
+The race schedules and the per-device invariants the gate needs exist as executable tests before the features they
+judge. What M1 can already run runs now; the rest are named and must be turned on by their owning tasks.
 
 ### Context
-ADR-0009; `docs/DESIGN.md` "Catalog and data model" (event list, fold rules), "CLI design" (`resolve`), "Offload
-process → Conflict at step 7"; D17, D41, D44, D60, D74; Q5, Q7.
+Astra's Important 15 and 18 and missing task 10; ADR-0017; `docs/DESIGN.md` "Testing and fault injection"
+(invariants); Q16, Q17; `packages/core/src/testing/invariants.ts`.
 
 ### Scope
-Owns `resolved` in `packages/core/src/catalog/events.ts`, its rule in `fold.ts`, a new
-`packages/core/src/saga/resolve.ts`, and the command in a new `packages/cli/src/commands/resolve-conflict.ts`. The
-existing `commands/resolve.ts` is the project-argument resolver and stays as it is.
+Owns:
+- `test/support/two-devices.ts`: two or three sandboxed homes and device ids on one store.
+- `test/support/schedules.ts`.
+- The per-device rewrite of `packages/core/src/testing/invariants.ts`.
+- New pause seams in the sagas, as exports, compiled out of release builds (D67).
+- DESIGN's invariants list (with Q16 and Q17 applied).
 
-- **The event** (`v: 1`, Q5): `{type: "resolved", project, root, path, keep, over: [the tips it settles]}`.
-- **The fold.** A fork whose tips all lie in `over ∪ {keep}` is settled, and the head is `keep` or what is made from
-  it. A later fork conflicts again. An `over` or `keep` the catalog does not hold makes the head incomplete (D41).
-- **The command.**
-  - `resolve <project>` without `--keep` lists the heads (device, time, size, base) and the exact commands, and
-    exits 0.
-  - With `--keep` it is `confirm`. It takes the project lock and appends the event, and a re-run is a no-op.
-  - When this device holds a working copy, `--keep` must name that copy's snapshot (Q7); otherwise it refuses, and
-    the fix names `restore --snapshot` and how to keep the copy's work.
-  - On a project that is not conflicted it exits 0 and says there is nothing to resolve.
+Pause seams: `offload.head-checked` (after a passing head check), `offload.committed`, `offload.release.reread`,
+`onload.lease-checked`, and `trash.delete.checked`.
+
+Schedules, each with the outcome every device must observe, written by device:
+- **S1 sequential:** B checks after A commits, so B forks before its commit.
+- **S2 both checked:** both pass the head check, then both append.
+- **S3 asymmetric:** A appends and releases before B appends (Q16's residual).
+- **S4 strict onloads:** two simultaneous strict onloads (Q17).
+- **S5 lost acknowledgement** at the event append.
+- **S6 delayed visibility** of the other's event (fake store).
+- **S7 resolution races:** competing resolutions, and a resolution while the other device's journal is pending.
+- **S8 D87 aliases:** a remote store reachable through a local mount or alias placed under a stripped folder.
+
+Invariants, independent of the implementation:
+1. A deleted folder's snapshot is verified, committed and in the store.
+2. **Per device:** a stub exists iff this device's own last completed operation shelved the project. It no longer
+   reads the global catalog status, which a later fork changes.
+3. No leftovers from finished operations.
+4. Fold permutation.
+5. **Per Q17:** the fold names at most one holder, and no device that observed a holder under `strict` onloaded.
+6. **M2 scope:** a recorder shows no forget, prune or delete of snapshots or events.
 
 ### Tests first
-- Fold properties (fast-check, 1,000 cases): any permutation with `resolved` events gives the same state; resolving
-  then forking again conflicts.
-- The command's gate and schema.
-- Across two homes: a fork, then `resolve --keep` on A, then B's onload gets the kept snapshot, and `restore
-  --snapshot <dropped>` still works.
+- The invariants' own tests: each catches a seeded violation.
+- S1 runs green on a local store now.
+- The other schedules are registered as `test.todo` with the task that turns each on (S2, S3 and S5: Task 23; S4:
+  Task 22; S6: Task 21; S7: Task 25; S8: Task 24).
+- A guard test lists the todos and fails at the gate if any remains.
 
 ### Verification
-`bun test packages/core -t "fold|resolve" && bun test packages/cli -t resolve && bun run contract && git diff
---exit-code plainport.json schemas/`
+`bun test test/support packages/core -t invariants && bun run test:t1 -t schedules`
 
 ### Report
 `.orchestrate/reports/task-14.md`
 
 ### Stop condition
-The event, the fold rule and the command are green, and `DESIGN.md` and `docs/machine-contract.md` agree.
+The harness, seams, invariants and schedule list are merged; S1 is green; every other schedule names its owner.
 
 ---
 
-## Task 15 — `refs/plainport/theirs/<snapshot>` through a temporary index
+## Task 15 — Secret providers: env, file, Keychain and 1Password
 
 ### Objective
-While a conflict stands, the other copy shows up in this repository as a commit you can diff and cherry-pick from,
-without touching your index, branches, working tree or secrets.
+Store secrets resolve through a `SecretProvider` port over the sensitive runner, and no value ever leaves memory or a
+child's environment.
 
 ### Context
-`docs/DESIGN.md` "Offload process → Conflict at step 7", "Prior art → herdr's Teleport" (temporary index); D33, D34,
-D58, D60, D87; Q7.
+ADR-0013; `docs/DESIGN.md` "Security and encryption", "Configuration", "Plugin interfaces → SecretProvider"; D79; Q7,
+Q14; Task 5.
 
 ### Scope
-Owns a new `packages/core/src/saga/theirs.ts` and the `--theirs` part of the resolve command. `resolve` writes the
-refs by default when this device holds the working copy.
+Owns:
+- `packages/core/src/ports/secrets.ts` and a new `packages/secrets/` (in `bun.lock`).
+- The secret parts of `packages/core/src/store.ts`.
+- The `s3` fields of `packages/core/src/config/schema.ts` (Q7).
+- DESIGN section: "Configuration" (the reference forms).
 
-- **Building the commit.**
-  - Restore the other head into a staging folder beside the project. Restore is unjournaled, as D60 has it, and
-    cleanup goes through the guarded deleter.
-  - Fetch its branches read-only into `refs/plainport/theirs/<snapshot>/heads/*`, so its unpushed commits arrive.
-  - Then, with `GIT_INDEX_FILE` set to a temp file and `--work-tree` set to the staging folder: `add -A` (which
-    honours the tree's ignore rules and this repository's `info/exclude`), `write-tree`, then `commit-tree` with
-    their `HEAD` as the parent, and `update-ref refs/plainport/theirs/<snapshot>`.
-- **Ignored files** that differ, such as `.env`, are listed in the output, never committed.
-- **Isolation.** Git runs with hooks off (`core.hooksPath=/dev/null`), signing off, and D34's config isolation.
+Items:
+- **`keychain:`** runs `/usr/bin/security find-generic-password -s -a -w` in sensitive mode with Q14's deadline.
+  `set` goes through `security -i`, with the command on stdin and each argument quoted by a tested encoder.
+  "Not found" gives `store.secret-missing`, whose fix is the interactive `security add-generic-password … -w`.
+- **`op:`** runs `op read` in sensitive mode.
+- **`se:` and `bw:`** are refused, naming their milestone.
+- **The install environment (D79)** also drops `AWS_*`, `RCLONE_*` and `OP_*` variables.
+- **Tests use a throwaway keychain** through a test hook that release builds compile out.
 
 ### Tests first
-- A canary value in the other copy's `.env` never appears in `git cat-file --batch-all-objects`.
-- The user's index bytes, `HEAD`, branches, stash, config and `git status --porcelain=v2` are identical before and
-  after.
-- `git diff HEAD refs/plainport/theirs/<id>` shows the other side's edit.
-- The other side's unpushed commit is reachable.
-- A crash mid-build leaves only a staging folder, which `gc` removes.
+- Each provider: found, missing, empty, garbled reference, timeout and cancellation, with the canary on every path.
+- The `security -i` encoder: values with spaces, quotes, backslashes and newlines round trip, and a value that would
+  inject a second command is refused.
+- T1 on macOS: the user's search list and default keychain are byte-identical before and after.
+- A fake `op` covers signed-out and hanging.
+- Schema: `s3` requires the new references; `AWS_SESSION_TOKEN` is never read.
 
 ### Verification
-`bun test packages/core -t theirs && bun run test:t1 -t theirs`
+`bun test packages/secrets packages/core -t "secret|store" && bun run test:t1 -t keychain && bun run contract`
 
 ### Report
 `.orchestrate/reports/task-15.md`
 
 ### Stop condition
-All the tests are green, and `help resolve` explains the ref and how to use it.
+Every provider is green with the canary, and the compatibility row for the new config keys is on.
 
 ---
 
-## Task 16 — The crash matrix over remote stores, and network faults  `T2`
+## Task 16 — The rclone blob store
 
 ### Objective
-Both sagas, including M2's new steps, survive death at every journal step against remote stores and with the store
-cut at the worst moments.
+`blob-rclone` implements the `BlobStore` port and Task 6's publication rules over the pinned rclone, with no
+publication semantics it cannot supply.
 
 ### Context
-ADR-0017; `docs/DESIGN.md` "Testing and fault injection"; `CONTRIBUTING.md` "The crash matrix"; Tasks 13 to 15.
+Astra's Important 5; ADR-0006; `docs/DESIGN.md` "Plugin interfaces → BlobStore"; Task 6; rclone 1.75.1's `rcat`
+writes in place on SFTP (`O_TRUNC`).
 
 ### Scope
-Owns `test/crash-matrix/` (a store dimension and a fault dimension) and `test/support/invariants.ts` usage across
-homes.
+Owns a new `packages/blob-rclone/` (in `bun.lock`) and an optional batch read on the port (`getMany`, internal).
 
-- The subprocess variant runs every row against MinIO and SFTP (T2), as well as the local store (T1).
-- **The fault dimension** uses Toxiproxy to cut the store at `commit.start`, during the event append, at release's
-  re-read (Q6), and during onload's restore. `recover` runs once with the store still down, when the operation is
-  pending and nothing is deleted, and once with it back.
-- `PLAINPORT_CRASH_MATRIX_DAMAGE=1` still fails every row, on every store kind.
+- **Calls**, all through the runner: `get` is `cat`; `list` is `lsjson -R --files-only`; `stat` is `lsjson --stat`;
+  `delete` is `deletefile`, for probe keys and own temporaries only.
+- **Publication.**
+  - On S3 a `put` is `rcat` straight to the key (atomic-put: an object appears only when complete).
+  - On SFTP a `put` is `rcat` to `meta/v1/tmp/<op>-<nonce>`, then `moveto` the final key. Task 17 measures whether
+    that rename is atomic and whether it refuses an existing target.
+  - Where no whole publication is proven, the profile says `none`, and Task 6's refusals apply.
+- **`getMany`** is one `copy --files-from-raw` into a temp folder, cleaned through the guarded deleter.
+- **Remotes** come from environment variables only, with `RCLONE_CONFIG` pointing at a missing file and a cache dir
+  under plainport's cache. Network calls are bounded (`--contimeout`, `--timeout`, `--retries 1`) on top of the
+  runner's deadlines.
+- **Exit codes.** On `get` and `stat`, 3 and 4 mean `null`. Exit 5 and connection failures are `store.unreachable`.
+  Anything else is `store.failed`, with stderr redacted.
+- **`semantics()`** reports `unknown` for every measured property until Task 17.
 
 ### Tests first
-The matrix is the test; new rows come from the sagas' exports.
+- Exit-code mapping on recorded stderr fixtures.
+- The canary over argv and error output.
+- A poisoned `rclone.conf` in the sandbox is never used.
+- The contract suite against rclone's `local` backend (T1).
+- An observer listing `meta/v1/events/` during a slow SFTP-style upload (the local backend with the temp-then-rename
+  path) never sees the key before it is whole.
+- A kill before and after the rename leaves either nothing under `events/` or the whole event, plus at most one
+  temporary that recovery sweeps.
+
+### Verification
+`bun test packages/blob-rclone packages/core -t blob && bun run test:t1 -t blob-rclone`
+
+### Report
+`.orchestrate/reports/task-16.md`
+
+### Stop condition
+The contract suite is green on rclone-local, and no profile claims more than the adapter does.
+
+---
+
+## Task 17 — Semantics on MinIO and SFTP, and the conditional-write retest  `T2`
+
+### Objective
+Measure each backend's semantics profile on real servers, record it, and pass the store contract and the elected
+publication there.
+
+### Context
+ADR-0018 (the open `If-None-Match` check); Q8, Q9; Tasks 6 and 16; `docs/DESIGN.md` "Machines → SSH policy".
+
+### Scope
+Owns:
+- The T2 tests of `packages/blob-rclone/`.
+- A new `test/support/ssh-shim.ts`: OpenSSH with `-F <sandbox config>`, `BatchMode=yes` and
+  `StrictHostKeyChecking=yes`.
+- A test-only SigV4 probe in `test/support/s3-probe.ts`.
+- The measured rows of the DESIGN semantics table.
+
+Measurements:
+- **MinIO:**
+  - read-after-write and list-after-write;
+  - pagination beyond 1,000 keys;
+  - durability across `scripts/testenv restart minio`;
+  - `If-None-Match` through the adapter, with the direct probe as the reference.
+- **SFTP through the system OpenSSH** (`--sftp-ssh`):
+  - whether `moveto` is atomic and whether it refuses an existing target;
+  - visibility;
+  - the durability boundary, stated plainly: rename after upload, with no fsync guarantee unless the server offers
+    `fsync@openssh.com`.
+- Each result goes into the backend's profile and the sidecar (`measured`).
+
+### Tests first
+- The contract and semantic suites on MinIO and SFTP.
+- Task 6's election on both: two processes, 50 rounds.
+- `lost-ack` on a put: the retry finds the landed event.
+- `cut` during a list fails as `store.unreachable`, never as a short listing.
+- A MinIO restart after an acknowledged put keeps the event.
+
+### Verification
+`scripts/testenv up && bun run test:t2 -t "blob-rclone|semantics|publish"`
+
+### Report
+`.orchestrate/reports/task-17.md`, with the measured profile table and the `If-None-Match` result recorded in
+ADR-0018's open item.
+
+### Stop condition
+Both backends have measured profiles, the contract is green on fs, rclone-local, MinIO and SFTP, and the election
+never admits two.
+
+---
+
+## Task 18 — Remote engine targets and bootstrap on real stores  `T2`
+
+### Objective
+restic reaches SFTP and S3 stores at the bootstrapped repository location, and bootstrap holds against real
+simultaneous initialisers.
+
+### Context
+ADR-0006, ADR-0010; `docs/DESIGN.md` "Storage → Store kinds"; D27, D45, D68, D85; Q7, Q9; Tasks 8 and 17.
+
+### Scope
+Owns `packages/engine-restic/src/engine.ts` (repository locations and options) and `packages/cli/src/stores.ts` (the
+opener for `local`, `sftp` and `s3`; `peer` stays `store.unsupported`). It wires Task 8's saga to the real engine and
+blob store.
+
+- **Repository locations:** `sftp:<host>:<path>/<repo>` through the shim's ssh in tests, and
+  `s3:<endpoint>/<bucket>/<path>/<repo>` with `s3.region` when set. `<repo>` comes from `store.json` v2.
+- **The two layers agree.** A test proves restic and rclone address the same prefix (Q7): a marker written through one
+  is found through the other.
+- **Credentials** go only in the child's environment, and messages are redacted.
+- **Failures.** Network failures are `store.unreachable`, a missing repository is `store.not-set-up`, and a lock is
+  `--retry-lock`, then 11.
+
+### Tests first
+- Golden tests for locations, options and environment, with the canary.
+- T2 bootstrap: two processes with different passwords on one fresh MinIO prefix and one SFTP folder produce one
+  repository, and the loser's restic is never pointed at the winner's.
+- A kill at each bootstrap step, then `recover`.
+- T2 single-device round trip: offload then onload of a fixture, byte-identical by Task 3's comparison.
+- A `cut` mid-upload fails before the commit, with invariants 1 to 3 holding.
+
+### Verification
+`bun test packages/engine-restic packages/cli -t stores && scripts/testenv up && bun run test:t2 -t "bootstrap|remote
+round trip"`
+
+### Report
+`.orchestrate/reports/task-18.md`, with times per kind.
+
+### Stop condition
+Both remote kinds bootstrap safely and round-trip byte-identically.
+
+---
+
+## Task 19 — `store add | list | test | upgrade | remove`, and `init`  `T2`
+
+### Objective
+Stores can be set up, adopted, upgraded, listed, tested and forgotten from the CLI, and `init` gets M2's setup work.
+
+### Context
+`docs/DESIGN.md` "CLI design" (`store …`, `init`), "Core API" (`stores.list`, `stores.test`); D22, D68, D70, D85;
+Q2, Q4, Q8, Q13, Q14, Q15.
+
+### Scope
+Owns `packages/cli/src/commands/store.ts`, the store part of `packages/cli/src/commands/init.ts`, core's `stores.list`
+and `stores.test`, and the regenerated contract files.
+
+- **`store add`** runs bootstrap, or adopts an existing store after authenticating it. It writes `managed.toml` under
+  its lock. `--secret-stdin` saves to the Keychain.
+- **`store list`** reads only; `--probe` also checks reachability.
+- **`store test`** measures the profile and writes it to the sidecar, reports `delete: denied | allowed |
+  unreachable`, and lists losing bootstrap repositories and contested candidates with the manual steps (quiesce first).
+- **`store upgrade`** (Q2) moves a format-1 store to format 2 after checking that no journal on this device is open
+  against it. It refuses on a store whose `store.json` is not this device's pinned id.
+- **`store remove`** behaves as Q13 says.
+- **`init`** shows folder sizes (D70) and refuses re-pointing per Q15.
+- New findings: `store.in-use`, `store.bootstrap-lost`, `store.root-contested`, `store.semantics-unknown`.
+
+### Tests first
+- The risk gate and schema of every command.
+- `store add` is idempotent and leaves no secret in `managed.toml`.
+- `store upgrade`, then v0.1.1, refuses the store (compatibility row on).
+- `remove` refuses while in use.
+- `test` on a delete-denying fake says `denied`, not "append-only".
+- `init` re-pointing an unreachable path refuses and writes nothing.
+- T2: `add` and `test` on MinIO and SFTP.
+
+### Verification
+`bun test packages/cli -t "store|init" && bun run contract && git diff --exit-code plainport.json schemas/ && bun run
+test:t2 -t "store add"`
+
+### Report
+`.orchestrate/reports/task-19.md`
+
+### Stop condition
+The commands are registered with their risk classes, `docs/machine-contract.md` agrees, and the tests are green.
+
+---
+
+## Task 20 — Sealing on stores  `T2`
+
+### Objective
+New `s3` and `sftp` stores seal their catalog per Task 10's spec, under a policy fixed at bootstrap and pinned by each
+device.
+
+### Context
+ADR-0013; Q10; Tasks 5, 8, 10, 11 and 19.
+
+### Scope
+Owns:
+- An Engine port method `catalogKey(ctx)`: `engine-restic` runs `restic cat masterkey` in sensitive mode and returns
+  only the derived key.
+- The seal policy in bootstrap (`store add --seal | --no-seal`, defaulting by kind).
+- The device pin in the sidecar.
+- The codec wiring that hands the key to `encode` and `decode`.
+- `store list`'s sealed column.
+
+Rules:
+- A store pinned sealed refuses plaintext events (`catalog.unsealed-event`, which feeds D86).
+- A store pinned plain refuses a seal flip (`store.identity-changed`).
+- An M1 store cannot be sealed in place (Q10).
+
+### Tests first
+- `catalogKey` gives the same key across two passwords on one repository, on restic 0.17.1 and 0.19.1 (matrix), with
+  the canary over every master-key component.
+- A `kid` mismatch fails closed.
+- T2 on MinIO: the bytes under `meta/v1/events/` hold no project ULID, path or root key.
+- An empty-mirror recover on a sealed remote store at every commit boundary (Task 11's rows on a real store).
+
+### Verification
+`bun test packages/core packages/engine-restic -t "seal|catalogKey" && bun run test:t2 -t sealed`
+
+### Report
+`.orchestrate/reports/task-20.md`
+
+### Stop condition
+Sealed by default for new remote stores, the pins enforced, and the compatibility rows on.
+
+---
+
+## Task 21 — The catalog over remote stores  `T2`
+
+### Objective
+The catalog read path works over remote stores: a fast mirror sync, conservative doubt about unreadable events, and
+the home-store rule.
+
+### Context
+Astra's Important 6; D41, D45, D86; Q12; Tasks 11 and 13.
+
+### Scope
+Owns the sync in `packages/core/src/catalog/log.ts`, the doubt rule in `head.ts`, the home-store check in the offload
+and onload preflights, and the multi-store merge in `status/projects.ts`.
+
+- **The sync:** one listing, one batch read, a deadline. A write path always reads fresh.
+- **Doubt without the clock.**
+  - An event skipped for any codec reason (`event-skipped`, `unsealed-event`, `seal-failed`) whose project cannot be
+    authenticated makes every head-dependent decision on that store uncertain (`catalog.head-uncertain`), whatever
+    its ULID's time.
+  - One whose project is known taints that project only.
+  - It clears when the event reads.
+- **The home store (Q12):** `store.history-elsewhere` unless the target catalog holds this copy's base, by store id,
+  using the mirror when the home store is offline.
+- **Several stores.** `ls` merges catalogs by project id, and a project in two catalogs gets the condition
+  `several-stores`.
+- This task turns on schedule S6 (delayed visibility).
+
+### Tests first
+- Negative clock skew, equal timestamps, and a damaged event that sorts before the readable head: each refuses.
+- An unreadable sealed event of unknown project taints the store; a known project's taints only that project.
+- `history-elsewhere`, with the home store offline.
+- T2: a 1,000-event sync starts two rclone processes, and the time is recorded.
+- S6 green.
+
+### Verification
+`bun test packages/core -t catalog && bun test packages/cli -t "ls|status" && bun run test:t2 -t "catalog remote"`
+
+### Report
+`.orchestrate/reports/task-21.md`
+
+### Stop condition
+The doubt and home-store rules are in DESIGN, and S6 is on.
+
+---
+
+## Task 22 — Advisory leases across devices
+
+### Objective
+Two devices see each other's leases. `strict` refuses an observed holder, and the docs say plainly that a lease is
+advisory (Q17).
+
+### Context
+`docs/DESIGN.md` "Fold rules → Lease", "Onload process" step 2; D40, D43, D54; Q17; Task 14.
+
+### Scope
+Owns the lease view in `status/projects.ts`, the lease finding in offload's plan, the onload lease tests, and DESIGN's
+lease paragraph (advisory wording).
+
+- **The view** shows the holder (this device or `device <short id>`), since when, and the condition
+  `leased-elsewhere`.
+- **Offload** warns `lease.held` when another device holds the lease further along the chain; `strict` blocks it with
+  exit 8.
+- **Onload** reads fresh, and `strict` refuses an observed holder.
+- This task turns on schedule S4: two simultaneous strict onloads may both succeed. The test asserts each device's own
+  observation and invariant 5 as Q17 defines it, and that their later offloads fork rather than lose anything.
+
+### Tests first
+- `warn` and `strict` across two homes.
+- B's `status` names A's device.
+- An offload from the non-holding copy warns.
+- S4 green.
+
+### Verification
+`bun test packages/core -t lease && bun run test:t1 -t "two devices|schedules"`
+
+### Report
+`.orchestrate/reports/task-22.md`
+
+### Stop condition
+The lease view and checks are green, and the DESIGN wording is advisory.
+
+---
+
+## Task 23 — Forks: local transitions and the check after the commit
+
+### Objective
+Every fork path leaves a durable, well-defined local state: which snapshot the kept copy is, a closed journal, and the
+base used after resolution. A fork seen right after the commit keeps the folder.
+
+### Context
+Astra's Important 3 and 8; `docs/DESIGN.md` "Offload process" step 7, "Journal steps"; D24, D51, D52, D59, D61; Q6,
+Q16, Q18; Task 14.
+
+### Scope
+Owns the fork paths of `packages/core/src/saga/{offload.ts,release.ts}`, their rules in `recover/recover.ts`, the
+offload command's exit-8 data (`detail`, Q6), and DESIGN's "Journal steps" and "Conflict at step 7".
+
+- **The fork before the commit** (M1's `diverged`) and the **fork after the commit** (release's re-read sees its own
+  snapshot in a fork) both:
+  - keep the folder and write no stub;
+  - set the registry entry's `base` to the operation's own snapshot (the kept copy's content as verified), which is
+    the existing field, so no format change;
+  - close the journal as `forked`, so D59 does not block `resolve`.
+- **Recover** from `committed` on re-reads the store first:
+  - a fork naming its snapshot settles as `forked`;
+  - no fork means it finishes release;
+  - an unreachable store means pending.
+  - A snapshot another device's resolution rejected also settles as `forked`: the copy is never released, and its next
+    offload reconflicts under Task 12's rule.
+- **Exit 8** carries `kind: "fork"` with `detail: "after-commit"` where it applies.
+- This task turns on schedules S2, S3 and S5. In S3, A's folder goes to the trash and B's stays; Task 24 adds the grace.
+
+### Tests first
+- The full sequence on both devices: fork → recover → `compare` (stubbed until Task 26) → `resolve --keep` (stubbed
+  until Task 25) → edit → offload → onload on the other.
+- A remote resolution while a local journal is pending, then recover.
+- Crash rows for the re-read: killed between re-read and rename, store unreachable at the re-read.
+- S2, S3 and S5 green, with their outcomes per device.
+
+### Verification
+`bun test packages/core -t "offload|recover|fork" && bun test test/crash-matrix && bun run test:t1 -t "schedules|crash"`
+
+### Report
+`.orchestrate/reports/task-23.md`, with the new row count.
+
+### Stop condition
+Every fork path's local state is specified in DESIGN and tested, and invariants 1 to 6 hold after each schedule.
+
+---
+
+## Task 24 — Conflict retention: deleting the trash only after a checked read
+
+### Objective
+Q16's promise holds: a released folder is deleted only after a catalog read, taken at least the grace period after its
+commit, showed no fork naming its snapshot. That holds through every delete entrance.
+
+### Context
+Q16; D59, D64, D67, D87; `packages/core/src/{trash-delete.ts,recover/trash.ts}`, `packages/cli/src/housekeeping.ts`,
+`gc`; Task 23.
+
+### Scope
+Owns one checked-delete function that the detached delete, housekeeping, `gc` and `recover`'s delete-trash all call.
+It also owns `offload.conflictGrace` (config, default `15m` for remote stores and `0` for local ones), the
+`conflict-retained` trash state in views, and DESIGN's release and trash paragraphs.
+
+- **Release on a remote store** sets the trash's `keepUntil` to at least the commit plus the grace.
+- **The checked delete** reads the catalog fresh after the deadline:
+  - a fork naming the snapshot gives `conflict-retained`, never deleted while that holds;
+  - an unreachable store keeps the trash and retries later;
+  - a resolution keeping the snapshot makes it reusable by `onload` (M1's reuse path);
+  - a resolution rejecting it makes it deletable, since its snapshot is in the store.
+- **The stub** written at release stays. `onload` after resolve renames the trash back when it is the kept head.
+- This task turns on schedule S8 (D87 with remote aliases). S3 is extended: B's append within the grace keeps A's
+  trash.
+
+### Tests first
+- Every entrance refuses to delete a forked trash.
+- The deadline is honoured under a stepped clock.
+- An unreachable store at delete time keeps the trash.
+- Reuse after `resolve --keep` of the retained snapshot.
+- Deletion after a rejection.
+- Crash rows at `trash.delete.checked`.
+- S3 extended and S8, green.
+
+### Verification
+`bun test packages/core -t "trash|gc|recover" && bun test test/crash-matrix && bun run test:t1 -t schedules`
+
+### Report
+`.orchestrate/reports/task-24.md`
+
+### Stop condition
+No delete entrance bypasses the check, and DESIGN and HANDOFF state the promise and its residual.
+
+---
+
+## Task 25 — `plainport resolve --keep`
+
+### Objective
+`resolve` settles a conflict by appending a valid `resolved` event under Task 12's model.
+
+### Context
+`docs/DESIGN.md` "CLI design" (`resolve`); D44, D60; Q2, Q3, Q18; Tasks 12 and 23.
+
+### Scope
+Owns a new `packages/core/src/saga/resolve.ts` and the command in a new
+`packages/cli/src/commands/resolve-conflict.ts`. The existing `commands/resolve.ts` is the project-argument resolver.
+It also owns `status`'s per-head detail for a conflicted project, and the regenerated contract files.
+
+- **`resolve <project> --keep <snapshot>`** (`confirm`):
+  - it requires a format-2 store;
+  - it reads fresh, takes the project lock, and refuses while a journal is open (fix: `recover`);
+  - `over` is the tips it observed, and `supersedes` every resolution its fresh read shows as competing;
+  - with a working copy here, `--keep` must be the registry's `base` for it (Task 23);
+  - a re-run is a no-op;
+  - it exits 0 with "nothing to resolve" when not conflicted.
+- **Read-only inspection** is `status`.
+- This task turns on schedule S7.
+
+### Tests first
+- The gate and schema.
+- Across two homes: fork, then `resolve --keep` on A, then B's onload gets the kept snapshot.
+- `restore --snapshot <rejected>` still works.
+- Competing resolutions on A and B stay conflicted until a superseding one.
+- `--keep` naming another device's snapshot while a copy is here refuses, and the fix is exact.
+- S7 green.
+
+### Verification
+`bun test packages/core -t resolve && bun test packages/cli -t resolve && bun run contract && git diff --exit-code
+plainport.json schemas/`
+
+### Report
+`.orchestrate/reports/task-25.md`
+
+### Stop condition
+The command and its rules are green, and `docs/machine-contract.md` agrees.
+
+---
+
+## Task 26 — `plainport compare`: the theirs refs through a temporary index
+
+### Objective
+While a conflict stands, each other head shows up in this repository as refs you can diff and cherry-pick from. They
+are built without running repository filters, and without touching your index, branches, working tree or secrets.
+
+### Context
+Astra's Important 16; `docs/DESIGN.md` "Conflict at step 7", "Prior art → Teleport"; D33, D34, D58, D60, D87; Q18.
+
+### Scope
+Owns a new `packages/core/src/saga/compare.ts`, the `compare` command (`safe_write`), and the regenerated contract
+files.
+
+For each other head:
+1. Restore it into a staging folder beside the project. This is unjournaled, as D60 has it, and cleanup goes through
+   the guarded deleter.
+2. Import the objects of its `.git` read-only: its branches into `refs/plainport/theirs/<snapshot>/heads/*`, and its
+   `HEAD`, detached or not, into `…/HEAD`.
+3. Seed a temporary index from its own `.git/index`, so its staged state and tracked-but-now-ignored files stay
+   tracked. Commit that as `…/index`.
+4. Update the temporary index from the staged working tree. Blobs are hashed with `git hash-object --no-filters -w`
+   and entered with `update-index --index-info`, so no clean or smudge filter or attribute driver ever runs. Untracked
+   files are added only when not ignored, using `ls-files --others --exclude-standard` against the staging tree.
+5. Commit the result as `refs/plainport/theirs/<snapshot>`, with its `HEAD` as the parent.
+
+Other rules:
+- Submodules stay as gitlinks and are listed.
+- Ignored files that differ are listed, never committed.
+- A non-git project refuses with a path list instead.
+- Git runs with hooks off, signing off, `core.attributesFile=/dev/null` and D34's isolation.
+
+### Tests first
+- A canary in the other copy's `.env`, a repository-defined clean filter that would inject that `.env` into a tracked
+  blob (its marker file is never created), and a tracked file now matched by `.gitignore`: none of them leaks, and the
+  tracked file is not recorded as deleted.
+- A detached unpushed `HEAD` is reachable, and the staged-only change shows in `…/index`.
+- The user's index bytes, `HEAD`, branches, stash, config and `git status --porcelain=v2` are identical before and
+  after.
+- A crash mid-build leaves only staging, which `gc` removes.
+
+### Verification
+`bun test packages/core -t compare && bun run test:t1 -t compare && bun run contract`
+
+### Report
+`.orchestrate/reports/task-26.md`
+
+### Stop condition
+All tests are green, and `help compare` explains the refs.
+
+---
+
+## Task 27 — The crash matrix over remote stores, and network faults  `T2`
+
+### Objective
+Both sagas and bootstrap survive death at every journal step against remote stores, and with the store cut or the
+acknowledgement lost at the worst moments.
+
+### Context
+ADR-0017; `CONTRIBUTING.md` "The crash matrix"; Task 4's fault profiles; Tasks 8, 23 and 24.
+
+### Scope
+Owns `test/crash-matrix/`: a store dimension (local, MinIO, SFTP), a fault dimension (`cut`, `lost-ack`), and the
+bootstrap rows.
+
+- Faults at:
+  - `commit.start`;
+  - during the event append (`lost-ack`: the event lands and the client sees failure);
+  - at release's re-read;
+  - at the checked delete;
+  - during onload's restore;
+  - at every bootstrap step.
+- `recover` runs once with the store still down (pending, nothing deleted) and once with it back.
+- `PLAINPORT_CRASH_MATRIX_DAMAGE=1` still fails every row on every store kind.
+
+### Tests first
+The matrix is the test; new rows come from the exports.
 
 ### Verification
 `bun test test/crash-matrix && bun run test:t1 -t crash && scripts/testenv up && bun run test:t2 -t crash`
 
 ### Report
-`.orchestrate/reports/task-16.md`, with row counts per variant, store kind and fault.
+`.orchestrate/reports/task-27.md`, with row counts per variant, store kind and fault.
 
 ### Stop condition
 Every row is green in every variant, and the damage mode bites on every store kind.
 
 ---
 
-## Task 17 — T3: real buckets and the Mac mini  `T3`
+## Task 28 — T3: real buckets and the Mac mini  `T3`
 
 ### Objective
 Prove M2 against real bucket semantics and the Intel hub, or record exactly why it could not run.
 
 ### Context
-ADR-0018 (T3), ADR-0013; `docs/ROADMAP.md` "Open items"; Q13; the owner's inputs below.
+ADR-0018 (T3), ADR-0013; Q8, Q19; Tasks 17 and 14.
 
 ### Scope
-Owns `scripts/testenv.ts t3`, the `test:t3` script (`PLAINPORT_TEST_TIER=3`, `describeT3`), `test/t3/`, and the T3 rows
-of the gate report.
+Owns `scripts/testenv.ts t3`, `test/t3/` and the T3 rows of the gate report.
 
-- **References.** `.testenv/t3.env` (gitignored) holds only `op://` references. Values are read with `op read` into
-  child environments at run time.
-- **Prefixes.** Every run works under `plainport-t3/<run ulid>/` in each bucket. Cleanup deletes only that prefix,
-  with the scoped key, and the buckets' lifecycle rule is the backstop.
+- **References.** `.testenv/t3.env` (gitignored) holds only `op://` references. Values are read with `op read` in
+  sensitive mode into child environments.
+- **Prefixes.** Every run works under `plainport-t3/<run ulid>/`. Cleanup deletes only that prefix, and the lifecycle
+  rule is the backstop.
 - **Buckets:**
-  - the store contract on R2 and on B2 (S3 API);
-  - rclone's `If-None-Match` on R2 (a real conditional write) and on B2 (expected to be rejected), with the
-    capability table updated;
-  - offload and onload round trips with times;
+  - measured profiles for R2 and B2 (S3 API), with documented sources cited;
+  - the contract and semantic suites;
+  - `If-None-Match` on R2 (expected proven) and B2 (expected rejected);
+  - Task 6's election on B2's non-conditional path;
+  - bootstrap with two initialisers;
+  - round trips with times;
   - sealed events.
 - **The mini.**
-  - `ssh mini` with `BatchMode=yes`, and `orb version` (ADR-0018's open check).
-  - The darwin-x64 build, copied to `~/plainport-t3/<run>/` and not installed: `plainport --version`, and a fixture
-    round trip against a temp local store there.
-  - The two-Mac race (laptop and mini on R2, Q13), or Q13's (c).
-  - Cleanup removes only the run folder the harness made, after checking its marker file.
+  - `ssh mini` (`BatchMode=yes`) and `orb version`.
+  - The darwin-x64 build in `~/plainport-t3/<run>/` (not installed): `--version` and a fixture round trip.
+  - Schedules S2 and S3 between laptop and mini on R2 and on B2 (Q19), or Q19's (c).
+  - Cleanup removes only the run folder, after checking its marker.
 
 ### Tests first
-The harness is tested at T0 with fakes. It refuses to start without every reference, and it refuses a prefix outside
-`plainport-t3/`. Cleanup touches only the run's prefix.
+The harness at T0 with fakes: it refuses without every reference, refuses a prefix outside `plainport-t3/`, and its
+cleanup touches only the run's prefix.
 
 ### Verification
-`scripts/testenv t3 check` (inputs present, `op` signed in, `ssh mini` reachable), then `bun run test:t3`.
+`scripts/testenv t3 check`, then `bun run test:t3`.
 
 ### Report
-`.orchestrate/reports/task-17.md`, with each check: passed, failed (filed and fixed before Task 18) or pending (the
+`.orchestrate/reports/task-28.md`, with each check passed, failed (filed and fixed before Task 29) or pending (the
 missing input named).
 
 ### Stop condition
-Every T3 check passes; or the inputs are missing, and the task ends `pending` with the exact list. That is not a
-failure: the gate goes on at T2.
+Every T3 check passes; or the inputs are missing and the task ends `pending` with the exact list. Then Task 29 runs as
+a T2 result.
 
 **What the owner provides for T3.**
-- 1Password items, referenced as `op://`, for:
-  - an R2 bucket (location hint `weur`) with an access key id and secret scoped to it, and its S3 endpoint;
-  - a B2 bucket in EU Central with an application key id and key scoped to it, and its S3 endpoint;
+- 1Password items for:
+  - an R2 bucket (`weur`) with a scoped key pair and its S3 endpoint;
+  - a B2 EU Central bucket with a scoped application key and its S3 endpoint;
   - a restic test password.
-- A lifecycle rule on both buckets expiring `plainport-t3/` after seven days.
+- A seven-day lifecycle rule on `plainport-t3/` in both buckets.
 - `op` signed in on the laptop.
-- The Mac mini online in Tailscale, with `ssh mini` working non-interactively, and an answer to Q13.
+- The mini online in Tailscale, with `ssh mini` working non-interactively, and an answer to Q19.
 
 ---
 
-## Task 18 — Gate: the two-Mac race, and release v0.2.0
+## Task 29 — Gate: the two-Mac race, and release v0.2.0
 
 ### Objective
-Prove the gate: two sandboxed instances racing on one store end in `conflicted`, never in lost work. Then release
-v0.2.0.
+Prove the gate under Q16's promise and Q17's lease definition on every available store kind, then release v0.2.0.
 
 ### Context
-`docs/ROADMAP.md` M2 gate; ADR-0017, ADR-0019, ADR-0020; `CONTRIBUTING.md` "Releases".
+`docs/ROADMAP.md` M2 gate; ADR-0017, ADR-0019, ADR-0020; `CONTRIBUTING.md` "Releases"; Task 14's schedules.
 
 ### Scope
-Owns `scripts/gate-m2.ts` and its test, the gate report, and the release commits.
+Owns `scripts/gate-m2.ts` and its test, the gate report and the release commits.
 
-- **Store kinds.** The local store (T1), MinIO and SFTP (T2), and R2 (T3) when Task 17 passed.
-- **Scenarios**, each followed by the Task 3 tree comparison and invariants 1 to 6 across both homes:
-  1. The concurrent race (barrier at `offload.verified`): `conflicted`, both snapshots restorable byte-identical to
-     their folders at verification, both folders kept, no stub.
-  2. The sequential race: the second offload forks with exit 8, and its folder is kept.
-  3. Leases under `warn` and under `strict`.
-  4. `resolve` with the theirs ref, then `resolve --keep`, an offload, and onload on the other device: `local` and
-     byte-identical.
-  5. A kill at `commit.start` on one side during the race, then `recover`: still no lost work.
-- **Times.** One M1 demo project's offload and onload times on each store kind.
-- **The full suite** at T0, T1 and T2, plus contract freshness and gitleaks.
+- **Store kinds.** Local (T1), MinIO and SFTP (T2, including MinIO with its conditional write switched off, so the
+  non-conditional path races too), and R2 and B2 (T3) when Task 28 passed.
+- **Schedules S1 to S8**, each followed by Task 3's tree comparison and the per-device invariants 1 to 6.
+- **End-to-end flow:** `compare`, `resolve --keep`, an offload, then onload on the other device, which ends `local`
+  and byte-identical.
+- **Times.** One M1 demo project's times on each kind.
+- **The full suite** at T0, T1 and T2, plus contract freshness, gitleaks, and the guard showing no schedule or
+  compatibility todo remains.
 
 ### Tests first
-Not applicable: this task runs the gate. The script itself is tested on a fixture with fakes.
+Not applicable: this task runs the gate. The script is tested on a fixture with fakes.
 
 ### Verification
-`bun scripts/gate-m2.ts --tiers 1,2[,3]`, `bun test`, `bun run test:t1`, `scripts/testenv up && bun run test:t2`, and
-`bun run contract --check`.
+`bun scripts/gate-m2.ts --tiers 1,2[,3]`, `bun test`, `bun run test:t1`, `scripts/testenv up && bun run test:t2`,
+`bun run contract --check`, and `bun run test:t1 -t compat`.
 
 ### Report
-`.orchestrate/reports/task-18.md`, plus an M2 summary for `docs/HANDOFF.md`: results per store kind, T3 status,
-times, and known limits, including Q5's "v0.2 stores need v0.2 on every device".
+`.orchestrate/reports/task-29.md`, plus an M2 summary for `docs/HANDOFF.md`:
+- results per store kind and schedule;
+- Q16's promise and residual, word for word;
+- the advisory lease;
+- the compatibility matrix's user-facing rows (`store upgrade`, rollback);
+- T3 status, with every unverified backend claim listed when it is a T2 result;
+- times.
 
 ### Stop condition
-Every scenario passes on every available store kind, and the full suite is green. Then the orchestrator:
+Every schedule passes on every available kind and the full suite is green. Then the orchestrator:
 1. merges into `main` and confirms CI is green, including the T2 job and the restic matrix;
-2. cuts release `v0.2.0` (ADR-0020) and sets `0.3.0-dev`;
+2. cuts `v0.2.0` (ADR-0020) and sets `0.3.0-dev`;
 3. marks ADR-0023 accepted;
 4. updates `docs/HANDOFF.md`, `docs/ROADMAP.md` and `CHANGELOG.md`.
+
+---
+
+## Where astra's findings are resolved
+
+| Finding | Resolved in |
+| --- | --- |
+| 1 Critical · concurrent repository initialisation | Q9 (b); Tasks 6, 8, 18, 27 |
+| 2 Critical · secret output on runner failure paths | Task 5 (before Tasks 15 and 20); Q14 |
+| 3 · the release race | Q16 (owner signs the promise); Tasks 14, 23, 24 |
+| 4 · the claim needs stated consistency | Q8; Tasks 6, 17, 28 |
+| 5 · `rcat` publication on SFTP | Task 6 (rules), Task 16 (temp-then-rename), Task 17 (measured) |
+| 6 · ULID-time doubt | Task 21 (doubt without the clock) |
+| 7 · competing resolutions | Q18; Task 12 (model), Task 25 |
+| 8 · local state after a fork | Task 23 (transitions, base, journal), Task 25 |
+| 9 · store aliases | Q11; Task 9 |
+| 10 · M1 adoption, mixed versions | Q1, Q2; Tasks 7, 8, 19 |
+| 11 · sealed recovery paths | Task 11 (one codec), Task 20 |
+| 12 · crypto unspecified | Q10; Task 10 |
+| 13 · non-additive changes | Q5, Q6; Task 7 (matrix with the real v0.1.1) |
+| 14 · fingerprint v3 incomplete | Q5 (iii) deferred to M5 |
+| 15 · lease ownership | Q17; Tasks 14, 22 |
+| 16 · temporary-index recipe | Q18 (`compare` is `safe_write`); Task 26 |
+| 17 · offline views need credentials | Task 13 |
+| 18 · gate does not prove its claims | Task 14 (schedules, per-device invariants), Task 4 (`lost-ack`, restart), Task 17 (pagination, durability), Tasks 27–29; Q20 (invariant 6 scope) |
+| 19 · graph and ownership | Dependency graph, shared-file rules, Tasks 5, 15, 16 ordering; old Task 10 split into Tasks 10, 11, 20 |
+| Missing tasks 1–11 | 1 → Task 8 · 2 → Task 6 · 3 → Task 9 · 4 → Task 7 · 5 → Task 5 · 6 → Task 10 · 7 → Task 11 · 8 → Tasks 12, 23 · 9 → Task 13 · 10 → Task 14 · 11 → this revision's graph |
