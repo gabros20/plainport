@@ -433,7 +433,7 @@ describe("onload --dry-run (M2 task 2, D71)", () => {
       snapshot,
       over: snapshot,
       dir: dir(),
-      restored: "store",
+      restored: "restore",
       findings: [],
       hydrate: { status: "install", steps: [{ path: "", command: "npm ci", packageManager: "npm" }] },
     });
@@ -476,7 +476,7 @@ describe("onload --dry-run (M2 task 2, D71)", () => {
     expect(env).toMatchObject({
       ok: false,
       error: { code: 6, finding: { code: "path.occupied" } },
-      data: { kind: "onload", restored: "store", findings: [{ severity: "block", code: "path.occupied" }] },
+      data: { kind: "onload", restored: "restore", findings: [{ severity: "block", code: "path.occupied" }] },
     });
     expect(planSchema().safeParse(env.data).success).toBe(true);
   });

@@ -82,7 +82,8 @@ const ignoresCase = async (io: LocalIo, folder: string, op: string): Promise<Res
 
 /**
  * ignoresCase without writing (a preview, D71): the nearest existing folder looked up with its own name's letters
- * swapped in case. A name with no letter in it cannot tell, and is taken to ignore case (the cautious answer).
+ * swapped in case. A name with no letter in it cannot tell, and is taken to ignore case (the cautious answer). Limit:
+ * it looks for a sibling of that folder, so a volume mounted at a case-folded sibling name can answer wrongly.
  */
 const ignoresCaseReadOnly = async (io: LocalIo, folder: string): Promise<Result<boolean>> => {
   const name = basename(folder);

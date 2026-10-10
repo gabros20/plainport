@@ -304,7 +304,7 @@ A `--dry-run` run is always a `read`, so it needs no `--yes`:
 `plainport offload web --dry-run` runs freely. Under `--json`, its envelope's `data` is the plan. A plan that holds
 a `block` finding exits 6 (D38): its envelope is a failure whose `error.finding` is the first blocker and whose
 `data` is still the whole plan (D14), and human output prints the plan on stdout, then the refusal on stderr. The
-same holds for `onload --dry-run`, whose `data` is the preview (`kind: "onload"`): `restored` (`reuse` or `store`)
+same holds for `onload --dry-run`, whose `data` is the preview (`kind: "onload"`): `restored` (`restore` or `reuse`, as in the real output)
 and why, the snapshot and the head it goes over, the landing folder, the space it needs, the findings and the
 hydrate plan. `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.

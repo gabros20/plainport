@@ -246,8 +246,8 @@ export type OnloadPreview = {
   over: string;
   /** Where the project would land. */
   dir: string;
-  /** reuse: the same head's kept folder renamed back from the trash. store: restored from the store. */
-  restored: "reuse" | "store";
+  /** reuse: the same head's kept folder renamed back from the trash. restore: restored from the store. */
+  restored: "restore" | "reuse";
   /** Why it is one or the other. */
   why: string;
   reused?: { from: string; offload: string; reason: string };
@@ -256,6 +256,11 @@ export type OnloadPreview = {
   bytes: number;
   /** The space a restore needs on the landing volume (0 for a reuse) and what is free there. */
   space: { needed: number; free: number };
+  /**
+   * An earlier onload of this project stopped before its swap and left a journal: the run would resume it (same
+   * snapshot and folder, restoring into the same staging folder) or roll it back first, then restore.
+   */
+  pending?: { op: string; step: string; action: "resume" | "roll-back" };
   /** Everything preflight would report: a block among them refuses the onload. */
   findings: Finding[];
   hydrate: HydratePlan;
@@ -482,11 +487,43 @@ const onloadFlow = async (
    * (an unknown snapshot, a store that does not answer) is returned as it is.
    */
   async function previewLocked(): Promise<Result<OnloadPreview>> {
+    // Phases are paired on every way out: the preview resolves, then runs the preflight checks.
+    let open: Phase | undefined = "resolve";
+    const enter = (next: Phase) => {
+      if (open !== undefined) phase(open, "end");
+      open = next;
+      phase(next, "start");
+    };
+    try {
+      return await previewBody(enter);
+    } finally {
+      if (open !== undefined) phase(open, "end");
+    }
+  }
+
+  async function previewBody(enter: (next: Phase) => void): Promise<Result<OnloadPreview>> {
     const target = await resolveTarget();
     if (!target.ok) return target;
+    enter("preflight");
     const { project, snapshot, over, made, stored } = target.value;
     const findings: Finding[] = [];
     const blockers: Failure[] = [];
+    // An onload of this project that stopped before its swap: the run takes it over when it restores the same snapshot
+    // to the same folder, else rolls it back first (DESIGN step 3); the preview says which.
+    let pending: OnloadPreview["pending"];
+    try {
+      const stopped = (await readJournals(io, paths)).journals.find(
+        (j): j is OnloadJournal => j.kind === "onload" && j.project.id === id && BEFORE_SWAP.has(j.step),
+      );
+      if (stopped !== undefined)
+        pending = {
+          op: stopped.op,
+          step: stopped.step,
+          action: stopped.snapshot === snapshot && stopped.project.dir === landing ? "resume" : "roll-back",
+        };
+    } catch (error) {
+      assertSystemError(error);
+    }
     const held = leaseHeld(project);
     if (held !== undefined) {
       findings.push(held);
@@ -521,7 +558,7 @@ const onloadFlow = async (
       status: "skipped",
       reason,
       steps: [],
-      untrusted: [],
+      untrustedKnown: false,
     });
     const why = (): string => {
       if (req.to !== undefined)
@@ -545,7 +582,7 @@ const onloadFlow = async (
         reason:
           "the folder comes back with the dependencies it had when it was offloaded, so nothing is installed",
         steps: [],
-        untrusted: [],
+        untrustedKnown: false,
       };
     } else {
       const problems: Failure[] = [];
@@ -608,12 +645,13 @@ const onloadFlow = async (
       snapshot,
       over,
       dir: landing,
-      restored: reuse === undefined ? "store" : "reuse",
+      restored: reuse === undefined ? "restore" : "reuse",
       why: reused === undefined ? why() : `renamed back from the trash, not restored: ${reused.reason}`,
       ...(reused === undefined ? {} : { reused }),
       files,
       bytes,
       space: { needed, free },
+      ...(pending === undefined ? {} : { pending }),
       findings,
       hydrate: hydratePlan,
     };

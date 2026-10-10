@@ -2033,14 +2033,16 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
       snapshot: off.op,
       over: off.op,
       dir,
-      restored: "store",
+      restored: "restore",
       findings: [],
       hydrate: {
         status: "install",
         steps: [{ path: "", command: "npm ci", packageManager: "npm" }],
-        untrusted: [],
+        untrustedKnown: false,
       },
     });
+    // Unknown, not none: the project file is read after the restore.
+    expect("untrusted" in got.hydrate).toBe(false);
     expect(got.why).toContain("store");
     expect(got.files).toBeGreaterThan(0);
     expect(got.bytes).toBeGreaterThan(0);
@@ -2077,7 +2079,7 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
     box.dir("elsewhere");
     value(await previewOnload(deps(), { project: await ref() }));
     const to = value(await preview({ to: join(box.home, "elsewhere/web") }));
-    expect(to).toMatchObject({ restored: "store", dir: join(box.home, "elsewhere/web") });
+    expect(to).toMatchObject({ restored: "restore", dir: join(box.home, "elsewhere/web") });
     expect(to.why).toContain("--to");
   });
 
@@ -2099,7 +2101,7 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
     expect([got.exitCode, got.finding.code]).toEqual([6, "path.occupied"]);
     expect(got.data).toMatchObject({
       kind: "onload",
-      restored: "store",
+      restored: "restore",
       dir,
       findings: [{ severity: "block", code: "path.occupied" }],
     });
@@ -2131,9 +2133,56 @@ describe("onload --dry-run: the preview (M2 task 2, D71)", () => {
     const strict = await preview();
     expect(!strict.ok && [strict.exitCode, strict.finding.code]).toEqual([8, "lease.held"]);
     expect(!strict.ok && strict.data).toMatchObject({
-      restored: "store",
+      restored: "restore",
       findings: [{ code: "lease.held" }],
     });
+  });
+
+  test("an onload stopped before its swap is reported: resumed for the same snapshot and folder, rolled back otherwise", async () => {
+    await offload();
+    const crash = testHost({ faults: { at: "onload.restored" } });
+    await expect(onload({}, {}, crash)).rejects.toBeInstanceOf(InjectedFault);
+    const [stopped] = (await readJournals(testHost(), box.paths)).journals as OnloadJournal[];
+    const same = value(await preview());
+    expect(same.pending).toEqual({ op: stopped?.op as string, step: "onload.restored", action: "resume" });
+    box.dir("elsewhere");
+    const other = value(await preview({ to: join(box.home, "elsewhere/web") }));
+    expect(other.pending).toEqual({
+      op: stopped?.op as string,
+      step: "onload.restored",
+      action: "roll-back",
+    });
+    // Nothing was resumed or rolled back by looking: the journal and staging folder are still there.
+    expect(((await readJournals(testHost(), box.paths)).journals as OnloadJournal[])[0]?.op).toBe(
+      stopped?.op,
+    );
+  });
+
+  test("the preview's phases are paired, on a success and on a refusal", async () => {
+    await offload();
+    box.file("work/web/other.txt", "x");
+    events = [];
+    const refused = await previewOnload(deps(), { project: await ref() });
+    expect(refused.ok).toBe(false);
+    rmSync(join(dir, "other.txt"));
+    rmSync(dir, { recursive: true });
+    const done = await previewOnload(deps(), {
+      project: await ref(),
+      snapshot: "01M40X7EC1DTXN87AJ4SH74DK6",
+    });
+    expect(done.ok).toBe(false);
+    const open: string[] = [];
+    for (const e of events) {
+      if (e.type !== "phase") continue;
+      if (e.status === "start") open.push(e.phase);
+      else expect(open.pop()).toBe(e.phase);
+    }
+    expect(open).toEqual([]);
+    events = [];
+    value(await previewOnload(deps(), { project: await ref() }));
+    expect(
+      events.filter((e) => e.type === "phase").map((e) => e.type === "phase" && `${e.phase} ${e.status}`),
+    ).toEqual(["resolve start", "resolve end", "preflight start", "preflight end"]);
   });
 
   test("a snapshot the catalog does not hold fails plainly, with no preview", async () => {

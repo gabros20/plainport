@@ -2831,10 +2831,10 @@
           "restored": {
             "type": "string",
             "enum": [
-              "reuse",
-              "store"
+              "restore",
+              "reuse"
             ],
-            "description": "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. store: restored from the store"
+            "description": "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. restore: restored from the store"
           },
           "why": {
             "type": "string",
@@ -3008,17 +3008,41 @@
                 ],
                 "additionalProperties": {}
               },
-              "untrusted": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
+              "untrustedKnown": {
+                "type": "boolean",
+                "const": false,
+                "description": "Always false: what the project's .plainport.toml asks to run (and this version never runs, D54) is read after the restore, so the preview has no untrusted list; absent is not the same as none"
               }
             },
             "required": [
               "status",
               "steps",
-              "untrusted"
+              "untrustedKnown"
+            ],
+            "additionalProperties": {}
+          },
+          "pending": {
+            "description": "An earlier onload of this project stopped before its swap and left a journal: the run resumes it (same snapshot and folder) or rolls it back first",
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "step": {
+                "type": "string"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "resume",
+                  "roll-back"
+                ]
+              }
+            },
+            "required": [
+              "op",
+              "step",
+              "action"
             ],
             "additionalProperties": {}
           }

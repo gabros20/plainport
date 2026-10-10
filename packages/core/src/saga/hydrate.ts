@@ -450,8 +450,11 @@ export type HydratePlan = {
    * restore, so the versions themselves are not shown.
    */
   toolchain?: { pinnedBy: string[]; manager?: string };
-  /** What the project file asks to run that this version never runs (D54); the file is read after the restore. */
-  untrusted: string[];
+  /**
+   * Always false: what the project file asks to run that this version never runs (D54) is read from the restored
+   * .plainport.toml, so a preview cannot say; `untrusted` is deliberately absent, never an empty list.
+   */
+  untrustedKnown: false;
 };
 
 const VERSION_FILES = [".nvmrc", ".node-version", ".tool-versions", "mise.toml", ".mise.toml"];
@@ -483,7 +486,7 @@ export const previewHydrate = async (
       status: "none",
       reason: "no ecosystem plugin finds dependencies to install",
       steps: [],
-      untrusted: [],
+      untrustedKnown: false,
     };
   }
   const pinnedBy = VERSION_FILES.filter((name) => manifest.get(name)?.type === "file");
@@ -511,7 +514,7 @@ export const previewHydrate = async (
     status: "install",
     steps: planned,
     toolchain: { pinnedBy, ...(manager === undefined ? {} : { manager }) },
-    untrusted: [],
+    untrustedKnown: false,
   };
 };
 

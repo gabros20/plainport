@@ -95,9 +95,9 @@ const OnloadPreviewSchema = z
     snapshot: z.string().meta({ description: "The snapshot that would be restored" }),
     over: z.string().meta({ description: "The head it would be written over; the copy's next base (D43)" }),
     dir: z.string().meta({ description: "Where the project would land" }),
-    restored: z.enum(["reuse", "store"]).meta({
+    restored: z.enum(["restore", "reuse"]).meta({
       description:
-        "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. store: restored from the store",
+        "reuse: the folder offload released is still kept (offload.keepLocalFor) and unchanged, so it is renamed back from the trash and nothing is restored or installed. restore: restored from the store",
     }),
     why: z.string().meta({ description: "Why it is one or the other" }),
     reused: z
@@ -145,8 +145,22 @@ const OnloadPreviewSchema = z
           }),
         })
         .optional(),
-      untrusted: z.array(z.string()),
+      untrustedKnown: z.literal(false).meta({
+        description:
+          "Always false: what the project's .plainport.toml asks to run (and this version never runs, D54) is read after the restore, so the preview has no untrusted list; absent is not the same as none",
+      }),
     }),
+    pending: z
+      .looseObject({
+        op: z.string(),
+        step: z.string(),
+        action: z.enum(["resume", "roll-back"]),
+      })
+      .optional()
+      .meta({
+        description:
+          "An earlier onload of this project stopped before its swap and left a journal: the run resumes it (same snapshot and folder) or rolls it back first",
+      }),
   })
   .meta({ description: "What an onload would do (--dry-run): nothing was written (D71)" });
 
@@ -164,6 +178,13 @@ const row = (label: string, text: string): string => `  ${label.padEnd(10)}${tex
 const renderPreview = (preview: z.output<typeof OnloadPreviewSchema>): string => {
   const lines = [`${preview.project} ← ${preview.store}, snapshot ${preview.snapshot} over ${preview.over}`];
   lines.push(row("into", preview.dir));
+  if (preview.pending !== undefined)
+    lines.push(
+      row(
+        "pending",
+        `an onload stopped at ${preview.pending.step} (${preview.pending.op}); this one ${preview.pending.action === "resume" ? "resumes it" : "rolls it back first"}`,
+      ),
+    );
   if (preview.reused !== undefined) {
     lines.push(row("reuse", `renamed back from ${preview.reused.from}; ${preview.reused.reason}`));
     lines.push(
