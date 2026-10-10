@@ -323,6 +323,38 @@ describe("publish: the elected publication", () => {
     expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: [] });
   });
 
+  test("without list-after-write a contested is never final: a lagging lister may still win by conditional create (quality r2)", async () => {
+    const inner = semanticBlobStore();
+    // Devices that have proven conditional create but not list-after-write, each with a listing that lags.
+    const lagging = (hide: (key: string) => boolean): BlobStore => ({
+      ...inner,
+      semantics: () => ({ ...inner.semantics(), listAfterWrite: "unknown" }),
+      list: async (prefix) => {
+        const listed = await inner.list(prefix);
+        return listed.ok ? ok(listed.value.filter((entry) => !hide(entry.key))) : listed;
+      },
+    });
+    await inner.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
+    await inner.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}'));
+    // A sees B refused, but its own files do not show in its listing yet.
+    const a = await outcome(
+      lagging((key) => key.startsWith(`${CANDIDATES}A.`)),
+      election("A"),
+    );
+    // C's listing misses A's and B's files: it is sole, and wins through its conditional create.
+    const c = await outcome(
+      lagging((key) => key.startsWith(`${CANDIDATES}A.`) || key.startsWith(`${CANDIDATES}B.`)),
+      election("C"),
+    );
+    expect(c).toEqual({ outcome: "won" });
+    // A's contested must not have been final: nobody could prove that no lagging lister was sole.
+    expect(a).toMatchObject({ outcome: "contested" });
+    if (a.outcome === "contested") {
+      expect(a.undecided).not.toEqual([]);
+      expect(a.fix).toContain("list-after-write");
+    }
+  });
+
   test("a refusal written on behalf of an attempt whose device is gone settles the election (the withdraw rule)", async () => {
     const store = semanticBlobStore(NO_CREATE);
     await store.put(`${CANDIDATES}GONE.json`, bytes('{"v":1,"id":"GONE","decision":"candidate"}'));
@@ -602,6 +634,12 @@ describe("publish: the elected publication", () => {
               return r?.ok === true && r.value.outcome === "won";
             });
             expect(won.length).toBeLessThanOrEqual(1);
+            // A final contested is never wrong, whatever mix of profiles took part.
+            if (
+              results.some((r) => r.ok && r.value.outcome === "contested" && r.value.undecided.length === 0)
+            ) {
+              expect(won).toEqual([]);
+            }
             const published = inner.data.get(PUBLISHED);
             if (won.length === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe(won[0]);
             for (const r of results) {
