@@ -10,6 +10,7 @@ import { runProcess } from "../runner/runner.ts";
 import type { ChildProcess, RunSpec, Spawner } from "../runner/types.ts";
 import {
   expectNoCanary,
+  expectRunLeaksNothing,
   findCanaries,
   makeCanary,
   makeMasterKeyCanary,
@@ -325,5 +326,60 @@ describe("canary: pieces and other spellings", () => {
     expect(findCanaries([canary], { stdout: own.stdout })).not.toEqual([]);
     expect(findCanaries([canary], { stderr: own.stderr })).not.toEqual([]);
     expect(own.stdout.join("")).not.toContain("[object Object]");
+  });
+});
+
+describe("canary: expectRunLeaksNothing, the shared leak gate", () => {
+  test("fails a default-mode run whose timeout quotes the secret, passes the same run in sensitive mode", async () => {
+    const canary = makeCanary();
+    const leaky = expectRunLeaksNothing([canary], (log) =>
+      runProcess(printing(canary.value, null), spec({ idleTimeoutMs: 30, killGraceMs: 20, log })),
+    );
+    await expect(leaky).rejects.toThrow(/canary found/);
+    const quiet = await expectRunLeaksNothing([canary], (log) =>
+      runProcess(
+        printing(canary.value, null),
+        spec({ idleTimeoutMs: 30, killGraceMs: 20, sensitive: true, log }),
+      ),
+    );
+    expect(quiet.result).toMatchObject({ ok: false, finding: { code: "process.idle-timeout" } });
+  });
+
+  test("scans the returned outcome, own output and recorded argv; checks events and throws", async () => {
+    const canary = makeCanary();
+    // A default-mode success returns stdout in its tail: the returned outcome is a place.
+    await expect(
+      expectRunLeaksNothing([canary], () => runProcess(printing(canary.value, 0), spec())),
+    ).rejects.toThrow(/returned\[0\]/);
+    await expect(
+      expectRunLeaksNothing([canary], async (log) => {
+        console.log({ leaked: canary.value });
+        return runProcess(printing("x", 0), spec({ sensitive: true, log }));
+      }),
+    ).rejects.toThrow(/stdout/);
+    const recorded = recordArgv(printing("x", 0));
+    await expect(
+      expectRunLeaksNothing(
+        [canary],
+        () => runProcess(recorded.spawner, spec({ sensitive: true, args: [canary.value] })),
+        { argv: recorded.argv },
+      ),
+    ).rejects.toThrow(/argv/);
+    await expect(
+      expectRunLeaksNothing([canary], (log) => runProcess(printing("x", 0), spec({ log }))),
+    ).rejects.toThrow(/logged 1 events/);
+    await expect(
+      expectRunLeaksNothing([canary], async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow(/threw 1 errors, expected none/);
+    const thrown = await expectRunLeaksNothing(
+      [canary],
+      async () => {
+        throw new Error("boom");
+      },
+      { throws: true },
+    );
+    expect(String(thrown.errors[0])).toContain("boom");
   });
 });

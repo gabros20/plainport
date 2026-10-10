@@ -1,5 +1,6 @@
 export { RingBuffer } from "./ring-buffer.ts";
 export {
+  bytesInclude,
   capturedOutput,
   parseSensitiveJson,
   RUN_DEFAULTS,
@@ -19,4 +20,5 @@ export type {
   Spawner,
   SpawnRequest,
   StderrClasses,
+  TypedStderrClasses,
 } from "./types.ts";

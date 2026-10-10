@@ -19,6 +19,7 @@
 
 import { basename } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
+import type { ZodType } from "zod";
 import { errorCode } from "../io.ts";
 import { RingBuffer } from "./ring-buffer.ts";
 import type {
@@ -29,6 +30,7 @@ import type {
   RunSpec,
   Spawner,
   StderrClasses,
+  TypedStderrClasses,
 } from "./types.ts";
 
 /** Defaults for the per-call settings in RunSpec; each is overridable per call. Reasons are in the report and
@@ -244,12 +246,15 @@ class Collector {
 class PrivateCollector {
   bytes = 0;
   private readonly ring: RingBuffer | undefined;
+  /** Once wiped it takes nothing more: a read that resumes after the run ended keeps no copy. */
+  private sealed = false;
 
   constructor(keep: number | undefined) {
     this.ring = keep === undefined ? undefined : new RingBuffer(keep, bufferProbe.observe);
   }
 
   push(chunk: Uint8Array): void {
+    if (this.sealed) return;
     this.bytes += chunk.length;
     this.ring?.push(chunk);
   }
@@ -269,6 +274,7 @@ class PrivateCollector {
   }
 
   wipe(): void {
+    this.sealed = true;
     this.ring?.wipe();
   }
 }
@@ -281,6 +287,8 @@ class Capture {
   private chunks: Uint8Array[] = [];
   private size = 0;
   overflowed = false;
+  /** Set by seal(): a read that resumes after the run ended keeps no copy. */
+  private sealed = false;
 
   constructor(
     private readonly maxBytes: number,
@@ -288,7 +296,7 @@ class Capture {
   ) {}
 
   push(chunk: Uint8Array): void {
-    if (this.overflowed) return;
+    if (this.overflowed || this.sealed) return;
     if (this.size + chunk.length > this.maxBytes) {
       this.overflowed = true;
       this.wipe();
@@ -307,6 +315,12 @@ class Capture {
     for (const chunk of this.chunks) chunk.fill(0);
     this.chunks = [];
     this.size = 0;
+  }
+
+  /** wipe(), for good: the run has ended (a sensitive run's wipers). */
+  seal(): void {
+    this.sealed = true;
+    this.wipe();
   }
 
   bytes(): Uint8Array {
@@ -354,13 +368,20 @@ export const capturedOutput = (
 };
 
 /**
- * A sensitive run's captured stdout parsed as JSON, or undefined when it is not UTF-8 JSON. Never JSON.parse it bare:
- * its errors quote the input ("Unexpected identifier …"), which would carry a secret into a message. The caller names
- * its own finding for undefined.
+ * A sensitive run's captured stdout parsed as JSON, and checked against `schema` when given; undefined when it is not
+ * UTF-8 JSON or does not match. Never JSON.parse it bare, nor report a schema's issues: JSON.parse's errors quote the
+ * input ("Unexpected identifier …") and a schema's issues can too, which would carry a secret into a message. The
+ * caller names its own finding for undefined.
  */
-export const parseSensitiveJson = (bytes: Uint8Array): { value: unknown } | undefined => {
+export const parseSensitiveJson = <T = unknown>(
+  bytes: Uint8Array,
+  schema?: ZodType<T>,
+): { value: T } | undefined => {
   try {
-    return { value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (schema === undefined) return { value: value as T };
+    const parsed = schema.safeParse(value);
+    return parsed.success ? { value: parsed.data } : undefined;
   } catch {
     return undefined;
   }
@@ -425,11 +446,25 @@ const plainCode = (error: unknown): string => {
   return code !== undefined && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "unknown";
 };
 
-/** A sensitive caller's stderr classifier, typed so its codes are a closed union. */
+/**
+ * A sensitive caller's stderr classifier, typed so its codes are a closed union, with codeOf to read the chosen code
+ * back from an outcome as that union (undefined when none was chosen or it is not one of the codes).
+ */
 export const stderrClasses = <const C extends string>(
   codes: readonly C[],
   classify: (stderr: Uint8Array) => C,
-): StderrClasses<C> => ({ codes, classify });
+): TypedStderrClasses<C> => ({
+  codes,
+  classify,
+  codeOf: (outcome) => {
+    const code = outcome.privateOutput?.stderrCode;
+    return codes.find((declared) => declared === code);
+  },
+});
+
+/** Whether the bytes hold `needle`'s UTF-8 bytes: for a classifier, which never decodes stderr into a string. */
+export const bytesInclude = (bytes: Uint8Array, needle: string): boolean =>
+  Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(new TextEncoder().encode(needle));
 
 /** classifyStderr's code for the kept stderr, which is overwritten after; a misbehaving classifier is a bug. */
 const classified = (label: string, classes: StderrClasses, stderr: Uint8Array): string => {
@@ -464,8 +499,12 @@ const spawnFailed = (spec: RunSpec, error: unknown): Failure => {
   );
 };
 
-/** counts is a sensitive run's byteCounts, "" otherwise. */
-const incompleteFailure = (label: string, incomplete: Incomplete, counts: string): Failure => {
+/** How much a sensitive run's streams printed; undefined for a run that is not sensitive. */
+type Quiet = { stdout: number; stderr: number } | undefined;
+
+/** quiet: a sensitive run, whose message gives byte counts and a plain code only. */
+const incompleteFailure = (label: string, incomplete: Incomplete, quiet: Quiet): Failure => {
+  const counts = quiet === undefined ? "" : byteCounts(quiet.stdout, quiet.stderr);
   switch (incomplete.why) {
     case "held-open":
       return fail(
@@ -484,7 +523,7 @@ const incompleteFailure = (label: string, incomplete: Incomplete, counts: string
     case "read-error":
       return fail(
         finding("process.output-incomplete", {
-          message: `${label}'s ${incomplete.stream} could not be read to the end: ${counts === "" ? describeError(incomplete.error) : `${plainCode(incomplete.error)}${counts}`}`,
+          message: `${label}'s ${incomplete.stream} could not be read to the end: ${quiet === undefined ? describeError(incomplete.error) : `${plainCode(incomplete.error)}${counts}`}`,
           fix: "run the command again; if it repeats, check the disk and the terminal plainport runs in",
         }),
       );
@@ -495,11 +534,12 @@ const stoppedFailure = (
   stop: Exclude<Stop, "error" | "incomplete">,
   label: string,
   settings: Settings & { captureMaxBytes?: number },
-  /** lastOutput's tail, or a sensitive run's byteCounts. */
-  said: string,
-  /** A sensitive run's byteCounts, "" otherwise: for the stops that do not quote output. */
-  counts = "",
+  /** What the output may contribute: a default run's tails (lastOutput), a sensitive run's byte counts. */
+  output: { tails: [OutputTail, OutputTail] } | { quiet: NonNullable<Quiet> },
 ): Failure => {
+  // The counts also go on the stops that never quote output, for a sensitive run.
+  const counts = "quiet" in output ? byteCounts(output.quiet.stdout, output.quiet.stderr) : "";
+  const said = "quiet" in output ? counts : lastOutput(...output.tails);
   switch (stop) {
     case "idle":
       return fail(
@@ -556,8 +596,15 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       "runProcess: a sensitive run takes no onLine or wholeStdout; its output reaches no callback",
     );
   const label = basename(spec.command);
-  if (spec.signal?.aborted)
-    return stoppedFailure("cancelled", label, settings, spec.sensitive ? byteCounts(0, 0) : "");
+  if (spec.signal?.aborted) {
+    const empty: OutputTail = { text: "", droppedBytes: 0 };
+    return stoppedFailure(
+      "cancelled",
+      label,
+      settings,
+      spec.sensitive ? { quiet: { stdout: 0, stderr: 0 } } : { tails: [empty, empty] },
+    );
+  }
 
   const stdin = typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin;
   const wipers: (() => void)[] = [];
@@ -668,7 +715,7 @@ const runChild = async (
   if (quiet !== undefined)
     wipers.push(
       () => quiet.stderr.wipe(),
-      () => capture?.wipe(),
+      () => capture?.seal(),
     );
   const stdoutSink = {
     push: (chunk: Uint8Array): void => {
@@ -775,15 +822,28 @@ const runChild = async (
       else if (leftoversStopped) incomplete = { why: "leftovers" };
       if (incomplete !== undefined) reason = "incomplete";
     }
+    // A classifier reads stderr as a whole: a stderr cut by a failed read would be classified wrong (a cut "not signed
+    // in" read as "other"), so the run fails instead.
+    if (reason === undefined && spec.classifyStderr !== undefined && "stderr" in readErrors) {
+      incomplete = { why: "read-error", stream: "stderr", error: readErrors.stderr };
+      reason = "incomplete";
+    }
     finished = true;
   } finally {
     clearTimeout(idleTimer);
     clearTimeout(overallTimer);
     spec.signal?.removeEventListener("abort", onAbort);
     if (!finished) {
-      // Only when something above threw: never leave the group running, nor a reader on a pipe someone holds.
-      if (!groupStopped) await stopGroup();
-      for (const reader of readers) reader.cancel().catch(() => {});
+      // Only when something above threw: never leave the group running, nor a reader on a pipe someone holds. The
+      // readers are cancelled and the pumps given their drain even if stopping throws again, so no read resumes after
+      // a sensitive run's wipers (which also seal the buffers against one that does).
+      try {
+        if (!groupStopped) await stopGroup();
+      } finally {
+        readersCancelled = true;
+        for (const reader of readers) reader.cancel().catch(() => {});
+        await within(pumps, DRAIN_MS);
+      }
     }
   }
 
@@ -791,11 +851,16 @@ const runChild = async (
   if (stopError !== undefined || reason === "error") {
     throw stopError ?? new Error("runProcess: stopped for a callback error that was not recorded");
   }
-  const counts = quiet === undefined ? "" : byteCounts(quiet.stdout.bytes, quiet.stderr.bytes);
-  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete, counts);
+  const counted: Quiet =
+    quiet === undefined ? undefined : { stdout: quiet.stdout.bytes, stderr: quiet.stderr.bytes };
+  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete, counted);
   if (reason !== undefined) {
-    const said = quiet === undefined ? lastOutput(stdout.tail(), stderr.tail()) : counts;
-    return stoppedFailure(reason, label, settings, said, counts);
+    return stoppedFailure(
+      reason,
+      label,
+      settings,
+      counted === undefined ? { tails: [stdout.tail(), stderr.tail()] } : { quiet: counted },
+    );
   }
   // A sensitive run hands over stdout only when the child succeeded: other output is not the secret it was for.
   const withheld = sensitive && (exit?.code !== 0 || (exit?.signal ?? null) !== null);
@@ -816,7 +881,7 @@ const runChild = async (
     ...(quiet === undefined
       ? {}
       : {
-          sensitive: {
+          privateOutput: {
             stdoutBytes: quiet.stdout.bytes,
             stderrBytes: quiet.stderr.bytes,
             ...(stderrCode === undefined ? {} : { stderrCode }),

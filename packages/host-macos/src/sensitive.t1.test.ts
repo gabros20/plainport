@@ -8,16 +8,14 @@ import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PlainportEvent } from "@plainport/contract";
-import { parseSensitiveJson, type RunSpec, type Spawner, stderrClasses } from "@plainport/core";
+import { bytesInclude, parseSensitiveJson, type RunSpec, type Spawner, stderrClasses } from "@plainport/core";
 import { describeT1 } from "../../../test/tiers.ts";
 import {
   type Canary,
-  expectNoCanary,
+  expectRunLeaksNothing,
   makeCanary,
   makeMasterKeyCanary,
   recordArgv,
-  recordOwnOutput,
 } from "../../core/src/testing/canary.ts";
 import { createMacosHost, PATH_REFUSED, posixSpawner } from "./index.ts";
 
@@ -77,50 +75,33 @@ afterEach(() => {
   if (left.length > 0) throw new Error(`processes left behind: ${left.join("; ")}`);
 });
 
-/** A shell child with the canary in $SECRET; it writes its scratch files in the sandbox, which is searched too. */
+/**
+ * A shell child with the canary in $SECRET, through expectRunLeaksNothing: its scratch files in the sandbox and the
+ * guard's protected root are searched too. The idle deadline is 10 s, as in the host runner suite (a cold start on a
+ * loaded host can be quiet for a while); only the idle cases lower it.
+ */
 const runCase = async (
   canary: Canary,
   script: string,
   overrides: Partial<RunSpec> = {},
   expectThrown = false,
-) => {
-  const events: PlainportEvent[] = [];
-  const errors: unknown[] = [];
-  const own = await recordOwnOutput(() =>
-    host
-      .run({
+) =>
+  expectRunLeaksNothing(
+    [canary],
+    (log) =>
+      host.run({
         command: "/bin/sh",
         args: ["-c", script],
         cwd: dir,
         env: { PATH: "/usr/bin:/bin", SECRET: canary.value },
         sensitive: true,
-        idleTimeoutMs: 300,
+        idleTimeoutMs: 10_000,
         killGraceMs: 300,
-        log: { op: "secret", emit: (event) => events.push(event) },
+        log,
         ...overrides,
-      })
-      .catch((error: unknown) => {
-        errors.push(error);
-        return undefined;
       }),
+    { dirs: [dir, protectedRoot], argv: recorded.argv, throws: expectThrown },
   );
-  const result = own.value;
-  const findings = result === undefined || result.ok ? [] : [result.finding];
-  const returned = result?.ok ? [{ ...result.value, captured: undefined }] : [];
-  expectNoCanary([canary], {
-    dirs: [dir, protectedRoot],
-    events,
-    findings,
-    argv: recorded.argv,
-    errors,
-    returned,
-    stdout: own.stdout,
-    stderr: own.stderr,
-  });
-  expect(events).toEqual([]);
-  expect(errors).toHaveLength(expectThrown ? 1 : 0);
-  return { result, errors };
-};
 
 const messageOf = (result: Awaited<ReturnType<typeof runCase>>["result"]): string =>
   result?.ok === false ? result.finding.message : "";
@@ -137,20 +118,22 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
 
   test("exits 1: an ok outcome with exit code 1, no stdout, and stderr only as the code a classifier chose", async () => {
     const canary = makeCanary();
+    const classes = stderrClasses(["not-found", "other"], (stderr) =>
+      bytesInclude(stderr, "not found") ? "not-found" : "other",
+    );
     const { result } = await runCase(
       canary,
       'printf "%s\\n" "$SECRET"; printf "%s: item not found\\n" "$SECRET" >&2; exit 1',
       {
-        classifyStderr: stderrClasses(["not-found", "other"], (stderr) =>
-          new TextDecoder().decode(stderr).includes("not found") ? "not-found" : "other",
-        ),
+        classifyStderr: classes,
       },
     );
     expect(result).toMatchObject({
       ok: true,
-      value: { exitCode: 1, stderr: { text: "" }, sensitive: { stderrCode: "not-found" } },
+      value: { exitCode: 1, stderr: { text: "" }, privateOutput: { stderrCode: "not-found" } },
     });
     if (!result?.ok) return;
+    expect(classes.codeOf(result.value)).toBe("not-found");
     expect(result.value.captured).toBeUndefined();
   });
 
@@ -159,6 +142,7 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
     const { result } = await runCase(
       canary,
       'printf "%s\\n" "$SECRET"; printf "%s\\n" "$SECRET" >&2; exec sleep 30',
+      { idleTimeoutMs: 300 },
     );
     expect(result).toMatchObject({ ok: false, finding: { code: "process.idle-timeout" } });
     const bytes = canary.value.length + 1;
@@ -189,7 +173,9 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
   test("prints half the canary and hangs: process.idle-timeout without either half", async () => {
     const canary = makeCanary();
     const half = Math.ceil(canary.value.length / 2);
-    const { result } = await runCase(canary, `printf "%s" "$SECRET" | head -c ${half}; exec sleep 30`);
+    const { result } = await runCase(canary, `printf "%s" "$SECRET" | head -c ${half}; exec sleep 30`, {
+      idleTimeoutMs: 300,
+    });
     expect(result).toMatchObject({ ok: false, finding: { code: "process.idle-timeout" } });
     expect(messageOf(result)).toContain(`${half} bytes on stdout`);
   });
@@ -226,12 +212,16 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
     const canary = makeCanary();
     const { result } = await runCase(
       canary,
-      'printf "%s\\n" "$SECRET"; /usr/bin/perl -MPOSIX -e "POSIX::setsid(); sleep 30" & echo $! > helper.pid; exit 0',
+      // perl leaves the group (setsid) and only then writes its pid, which sh waits for before it exits: when the
+      // leader goes, nothing is left in its group, and stdout is held only from outside it.
+      'printf "%s\\n" "$SECRET"; /usr/bin/perl -MPOSIX -e \'POSIX::setsid(); open(my $f, ">", "helper.tmp") or die; print $f $$; close $f; rename("helper.tmp", "helper.pid"); sleep 30\' & while [ ! -e helper.pid ]; do sleep 0.01; done; exit 0',
     );
     const pid = Number(readFileSync(join(dir, "helper.pid"), "utf8"));
     expect(pid).toBeGreaterThan(1);
     helpers.push(pid);
     expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
+    // The held-open path, not the leftovers one: the helper had left the group.
+    expect(messageOf(result)).toContain("a process outside its group kept its stdout open");
     expect(messageOf(result)).toContain(`${canary.value.length + 1} bytes on stdout`);
   });
 

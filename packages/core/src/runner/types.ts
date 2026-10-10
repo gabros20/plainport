@@ -64,7 +64,7 @@ export interface RunSpec {
    * The output may hold a secret (`security … -w`, `op read`, `restic cat masterkey`; AGENTS.md rule 9). stdout is
    * captured privately, bounded by capture.maxBytes (default outputLimitBytes), and returned only as `captured` in an
    * ok outcome whose exit code is 0. Neither stream's text is returned otherwise: both tails stay empty, and
-   * RunOutcome.sensitive holds the byte counts and, with classifyStderr, the code it chose. Nothing either stream says
+   * RunOutcome.privateOutput holds the byte counts and, with classifyStderr, the code it chose. Nothing either stream says
    * reaches log events, a finding's message, error data or a thrown error, on any path: a failure names the program,
    * why it stopped, a plain error code and byte counts only. Every buffer the runner held, read chunks and a string
    * stdin included, is overwritten when the run ends; bytes still queued unread in a stream whose reader was cancelled
@@ -75,7 +75,8 @@ export interface RunSpec {
   /**
    * Sensitive runs only: how a caller learns what stderr said without seeing it (op's "not signed in" against "no
    * such item"). Once an ok run ends, classify gets stderr's newest outputLimitBytes and returns one of `codes`, which
-   * becomes RunOutcome.sensitive.stderrCode; the bytes are then overwritten. Build it with stderrClasses, which types
+   * becomes RunOutcome.privateOutput.stderrCode; the bytes are then overwritten. A stderr that could not be read to
+   * its end is never classified: the run fails as process.output-incomplete. Build it with stderrClasses, which types
    * the codes as a closed union. A classify that throws, or returns a code not in `codes`, is a bug: the run throws an
    * error that quotes neither.
    */
@@ -98,6 +99,11 @@ export interface StderrClasses<C extends string = string> {
   classify(stderr: Uint8Array): C;
 }
 
+/** What stderrClasses builds: the classifier, and codeOf to read its code back from an outcome as the union. */
+export interface TypedStderrClasses<C extends string> extends StderrClasses<C> {
+  codeOf(outcome: RunOutcome): C | undefined;
+}
+
 /**
  * The newest bytes of one stream, decoded as UTF-8, and how many older bytes were dropped to keep it bounded. It is
  * for messages and logs: when droppedBytes > 0 the start is missing, so never parse it as data (use capture).
@@ -117,8 +123,9 @@ export interface RunOutcome {
   /** All of stdout when RunSpec.capture was given; absent otherwise. With sensitive, present only when the exit code
    * is 0. */
   captured?: Uint8Array;
-  /** Sensitive runs only: how much each stream printed, and the code classifyStderr chose, if one was given. */
-  sensitive?: { stdoutBytes: number; stderrBytes: number; stderrCode?: string };
+  /** Sensitive runs only: how much each stream printed, and the code classifyStderr chose, if one was given (read
+   * it with stderrClasses' codeOf, typed as the caller's union). */
+  privateOutput?: { stdoutBytes: number; stderrBytes: number; stderrCode?: string };
   /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). With capture,
    * this is a process.output-incomplete failure instead, since a stopped process may have been writing. */
   leftoversStopped: boolean;

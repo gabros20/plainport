@@ -6,7 +6,8 @@
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { formatWithOptions } from "node:util";
-import type { Spawner } from "../runner/types.ts";
+import type { Result } from "@plainport/contract";
+import type { LogEvent, RunOutcome, RunSpec, Spawner } from "../runner/types.ts";
 
 /** One spelling of a planted value to look for, named for the report (which never quotes the value). */
 export interface CanaryForm {
@@ -327,4 +328,71 @@ export const findCanaries = (canaries: readonly Canary[], places: CanaryPlaces):
 export const expectNoCanary = (canaries: readonly Canary[], places: CanaryPlaces): void => {
   const hits = findCanaries(canaries, places);
   if (hits.length > 0) throw new Error(`canary found:\n${hits.map((hit) => `  ${hit}`).join("\n")}`);
+};
+
+/** Everything one run left where a secret must not be, as CanaryPlaces, with the run's result, errors and events. */
+export interface CollectedRun {
+  result: Result<RunOutcome> | undefined;
+  errors: unknown[];
+  events: LogEvent[];
+  places: CanaryPlaces;
+}
+
+/**
+ * Runs `run`, handing it a log sink, and collects every place its secret could reach: the events logged, the finding
+ * of a failure, a thrown error, this process's own stdout and stderr (recordOwnOutput), the returned outcome less
+ * `captured` (the one field allowed to hold stdout), and the dirs and recorded argv the caller adds.
+ */
+export const collectRun = async (
+  run: (log: NonNullable<RunSpec["log"]>) => Promise<Result<RunOutcome>>,
+  extra: { dirs?: readonly string[]; argv?: readonly (readonly string[])[] } = {},
+): Promise<CollectedRun> => {
+  const events: LogEvent[] = [];
+  const errors: unknown[] = [];
+  const own = await recordOwnOutput(() =>
+    run({ op: "canary", emit: (event) => events.push(event) }).catch((error: unknown) => {
+      errors.push(error);
+      return undefined;
+    }),
+  );
+  const result = own.value;
+  return {
+    result,
+    errors,
+    events,
+    places: {
+      dirs: extra.dirs,
+      argv: extra.argv,
+      events,
+      errors,
+      findings: result === undefined || result.ok ? [] : [result.finding],
+      returned: result?.ok ? [{ ...result.value, captured: undefined }] : [],
+      stdout: own.stdout,
+      stderr: own.stderr,
+    },
+  };
+};
+
+/**
+ * The leak gate for a sensitive run (Tasks 5, 15, 19, 28): collectRun, then fail if any canary shows up in any place,
+ * if anything was logged (unless `events`), or if the run threw when it should not have, or did not when `throws`.
+ */
+export const expectRunLeaksNothing = async (
+  canaries: readonly Canary[],
+  run: (log: NonNullable<RunSpec["log"]>) => Promise<Result<RunOutcome>>,
+  extra: {
+    dirs?: readonly string[];
+    argv?: readonly (readonly string[])[];
+    events?: boolean;
+    throws?: boolean;
+  } = {},
+): Promise<CollectedRun> => {
+  const collected = await collectRun(run, extra);
+  expectNoCanary(canaries, collected.places);
+  if (!extra.events && collected.events.length > 0)
+    throw new Error(`the run logged ${collected.events.length} events; a sensitive run logs none`);
+  const thrown = collected.errors.length;
+  if (thrown !== (extra.throws ? 1 : 0))
+    throw new Error(`the run threw ${thrown} errors, ${extra.throws ? "expected one" : "expected none"}`);
+  return collected;
 };

@@ -4,17 +4,17 @@
 // against real process groups is in packages/host-macos (sensitive.t1.test.ts).
 
 import { describe, expect, test } from "bun:test";
-import type { PlainportEvent } from "@plainport/contract";
+import { z } from "zod";
 import {
   type Canary,
+  collectRun,
   expectNoCanary,
   makeCanary,
   makeMasterKeyCanary,
   recordArgv,
-  recordOwnOutput,
 } from "../testing/canary.ts";
 import { RingBuffer } from "./ring-buffer.ts";
-import { bufferProbe, parseSensitiveJson, runProcess, stderrClasses } from "./runner.ts";
+import { bufferProbe, bytesInclude, parseSensitiveJson, runProcess, stderrClasses } from "./runner.ts";
 import type { ChildProcess, GroupSignal, RunSpec, Spawner } from "./types.ts";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -58,7 +58,11 @@ class FakeChild implements ChildProcess {
     if (this.closed) return;
     const bytes = as === "buffer" ? Buffer.from(text) : encode(text);
     this.written.push(bytes);
-    (stream === "stdout" ? this.out : this.err).enqueue(bytes);
+    try {
+      (stream === "stdout" ? this.out : this.err).enqueue(bytes);
+    } catch {
+      // The runner cancelled its reader: the pipe is gone, as a real write would find it (EPIPE).
+    }
   }
 
   exit(code: number | null, signal: string | null = null): void {
@@ -72,12 +76,22 @@ class FakeChild implements ChildProcess {
     if (this.closed || this.heldOpen) return;
     this.closed = true;
     if (!this.broken) this.out.close();
-    this.err.close();
+    if (!this.brokenErr) this.err.close();
   }
 
   breakStdout(error: Error): void {
     this.broken = true;
     this.out.error(error);
+  }
+
+  private brokenErr = false;
+  breakStream(stream: "stdout" | "stderr", error: Error): void {
+    if (stream === "stdout") {
+      this.breakStdout(error);
+      return;
+    }
+    this.brokenErr = true;
+    this.err.error(error);
   }
 }
 
@@ -116,50 +130,20 @@ const spec = (overrides: Partial<RunSpec> = {}): RunSpec => ({
   ...overrides,
 });
 
-/** Runs one scripted child in sensitive mode and collects everywhere the canary must not be. */
+/** Runs one scripted child in sensitive mode and collects everywhere the canary must not be (collectRun). */
 const runCase = async (script: (child: FakeChild) => void, overrides: Partial<RunSpec> = {}) => {
   const spawner = new FakeSpawner(script);
   const recorded = recordArgv(spawner);
-  const events: PlainportEvent[] = [];
-  const errors: unknown[] = [];
-  const own = await recordOwnOutput(() =>
-    runProcess(recorded.spawner, {
-      ...spec(overrides),
-      log: { op: "secret", emit: (event) => events.push(event) },
-    }).catch((error: unknown) => {
-      errors.push(error);
-      return undefined;
-    }),
-  );
-  const result = own.value;
-  const findings = result === undefined || result.ok ? [] : [result.finding];
-  // The outcome as returned, but for captured stdout: the one place the secret may be, on exit 0.
-  const returned = result?.ok ? [{ ...result.value, captured: undefined }] : [];
-  return {
-    result,
-    spawner,
+  const run = await collectRun((log) => runProcess(recorded.spawner, { ...spec(overrides), log }), {
     argv: recorded.argv,
-    events,
-    errors,
-    findings,
-    returned,
-    stdout: own.stdout,
-    stderr: own.stderr,
-  };
+  });
+  return { ...run, spawner, findings: run.places.findings ?? [], returned: run.places.returned ?? [] };
 };
 
 type Case = Awaited<ReturnType<typeof runCase>>;
 
 const expectClean = (canary: Canary, run: Case): void => {
-  expectNoCanary([canary], {
-    events: run.events,
-    findings: run.findings,
-    argv: run.argv,
-    errors: run.errors,
-    returned: run.returned,
-    stdout: run.stdout,
-    stderr: run.stderr,
-  });
+  expectNoCanary([canary], run.places);
   expect(run.events).toEqual([]);
   expect(run.errors).toEqual([]);
 };
@@ -168,7 +152,7 @@ const expectClean = (canary: Canary, run: Case): void => {
 const expectFailure = (run: Case, code: string, stdoutBytes: number): string => {
   expect(run.result).toMatchObject({ ok: false, finding: { code } });
   const message = run.result?.ok === false ? run.result.finding.message : "";
-  expect(message).toStartWith("security ");
+  expect(message).toMatch(/^security\b/);
   expect(message).toContain(`${stdoutBytes} bytes on stdout`);
   expect(message).not.toContain("last output");
   return message;
@@ -196,7 +180,7 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
     expect(run.result.value.stdout).toEqual({ text: "", droppedBytes: 0 });
     expect(run.result.value.stderr).toEqual({ text: "", droppedBytes: 0 });
     const bytes = canary.value.length + 1;
-    expect(run.result.value.sensitive).toEqual({ stdoutBytes: bytes, stderrBytes: bytes });
+    expect(run.result.value.privateOutput).toEqual({ stdoutBytes: bytes, stderrBytes: bytes });
     expectWiped(run.spawner.spawned[0]);
   });
 
@@ -226,18 +210,19 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
     });
     if (!run.result?.ok) return;
     expect(run.result.value.captured).toBeUndefined();
-    expect(run.result.value.sensitive?.stderrCode).toBeUndefined();
+    expect(run.result.value.privateOutput?.stderrCode).toBeUndefined();
     expectWiped(run.spawner.spawned[0]);
   });
 
   test("classifyStderr: the outcome holds only the declared code it chose, never stderr", async () => {
     const canary = makeCanary();
-    let seen = "";
+    let seen = 0;
+    // Matched as bytes: stderr is never decoded into a string, which nothing could overwrite.
     const classifyStderr = stderrClasses(["not-found", "signed-out", "other"], (stderr) => {
-      seen = decode(stderr);
-      return seen.includes("not currently signed in")
+      seen = stderr.length;
+      return bytesInclude(stderr, "not currently signed in")
         ? "signed-out"
-        : seen.includes("not found")
+        : bytesInclude(stderr, "not found")
           ? "not-found"
           : "other";
     });
@@ -250,12 +235,56 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
       { classifyStderr },
     );
     expectClean(canary, run);
-    expect(seen).toContain("signed in");
+    expect(seen).toBeGreaterThan(0);
     expect(run.result).toMatchObject({
       ok: true,
-      value: { exitCode: 1, stderr: { text: "" }, sensitive: { stderrCode: "signed-out" } },
+      value: { exitCode: 1, stderr: { text: "" }, privateOutput: { stderrCode: "signed-out" } },
     });
+    // The typed reader: the code as the caller's closed union, checked against the declared codes.
+    const code: "not-found" | "signed-out" | "other" | undefined = run.result?.ok
+      ? classifyStderr.codeOf(run.result.value)
+      : undefined;
+    expect(code).toBe("signed-out");
+    // A code it did not declare reads as undefined.
+    if (run.result?.ok) {
+      const forged = {
+        ...run.result.value,
+        privateOutput: { stdoutBytes: 0, stderrBytes: 0, stderrCode: "x" },
+      };
+      expect(classifyStderr.codeOf(forged)).toBeUndefined();
+    }
     expectWiped(run.spawner.spawned[0]);
+  });
+
+  test("bytesInclude matches bytes without decoding them, at any offset, and only whole", () => {
+    const bytes = encode("[ERROR] you are not currently signed in\n");
+    expect(bytesInclude(bytes, "not currently signed in")).toBe(true);
+    expect(bytesInclude(bytes.subarray(8), "you are")).toBe(true);
+    expect(bytesInclude(bytes, "signed out")).toBe(false);
+    expect(bytesInclude(bytes.subarray(0, 20), "not currently signed in")).toBe(false);
+    expect(bytesInclude(new Uint8Array(0), "x")).toBe(false);
+  });
+
+  test("a stderr that fails mid-read with a classifier set: process.output-incomplete, never a classified cut", async () => {
+    const canary = makeCanary();
+    let classified = false;
+    const run = await runCase(
+      (child) => {
+        child.write("stderr", `${canary.value}: not currently sig`);
+        child.breakStream("stderr", Object.assign(new Error("read failed"), { code: "EIO" }));
+        child.exit(1);
+      },
+      {
+        classifyStderr: stderrClasses(["signed-out", "other"], () => {
+          classified = true;
+          return "other";
+        }),
+      },
+    );
+    expectNoCanary([canary], run.places);
+    expect(classified).toBe(false);
+    const message = expectFailure(run, "process.output-incomplete", 0);
+    expect(message).toContain("stderr could not be read to the end: EIO");
   });
 
   test("classifyStderr returning an undeclared code, or throwing, is a bug thrown without stderr", async () => {
@@ -277,12 +306,7 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
     });
     for (const run of [undeclared, throwing]) {
       expect(run.errors).toHaveLength(1);
-      expectNoCanary([canary], {
-        errors: run.errors,
-        events: run.events,
-        stdout: run.stdout,
-        stderr: run.stderr,
-      });
+      expectNoCanary([canary], run.places);
       expect(String(run.errors[0])).toContain("classifyStderr");
     }
   });
@@ -375,6 +399,19 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
     expect(parsed).toBeUndefined();
     expect(errors).toEqual([]);
     expect(parseSensitiveJson(encode(canary.value))).toEqual({ value: JSON.parse(canary.value) });
+    // With a schema: the value typed, and a mismatch refused the same way, never quoting the input.
+    const MasterKey = z.object({ mac: z.object({ k: z.string(), r: z.string() }), encrypt: z.string() });
+    const typed = parseSensitiveJson(encode(canary.value), MasterKey);
+    expect(typed?.value.mac.k).toBe((JSON.parse(canary.value) as { mac: { k: string } }).mac.k);
+    const strict = z.object({ encrypt: z.number() });
+    let mismatch: unknown = "not run";
+    try {
+      mismatch = parseSensitiveJson(encode(canary.value), strict);
+    } catch (error) {
+      errors.push(error);
+    }
+    expect(mismatch).toBeUndefined();
+    expect(errors).toEqual([]);
     // Bytes that are not UTF-8 are refused the same way.
     expect(parseSensitiveJson(new Uint8Array([0x22, 0xff, 0x22]))).toBeUndefined();
   });
@@ -452,20 +489,13 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
       child.breakStdout(Object.assign(new Error("failed"), { code: canary.value }));
       child.exit(0);
     });
-    expectNoCanary([canary], {
-      events: read.events,
-      findings: read.findings,
-      errors: read.errors,
-      returned: read.returned,
-      stdout: read.stdout,
-      stderr: read.stderr,
-    });
+    expectNoCanary([canary], read.places);
     expect(read.result?.ok === false && read.result.finding.message).toContain("unknown");
     // The read failure's warning names the code it could vouch for, and nothing else.
     expect(read.events).toEqual([
       {
         type: "log",
-        op: "secret",
+        op: "canary",
         level: "warn",
         message: "security: stdout could not be read to the end: unknown",
       },
@@ -496,7 +526,9 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
       child.exit(0);
     });
     expectClean(canary, run);
-    expectFailure(run, "process.output-incomplete", canary.value.length + 1);
+    expect(expectFailure(run, "process.output-incomplete", canary.value.length + 1)).toContain(
+      "a process outside its group kept its stdout open",
+    );
     expectWiped(run.spawner.spawned[0]);
   });
 
@@ -509,7 +541,9 @@ describe("runner: sensitive mode, a child that prints a canary", () => {
       child.exit(0);
     });
     expectClean(canary, run);
-    expectFailure(run, "process.output-incomplete", canary.value.length + 1);
+    expect(expectFailure(run, "process.output-incomplete", canary.value.length + 1)).toContain(
+      "left processes running in its group",
+    );
     expectWiped(run.spawner.spawned[0]);
   });
 
@@ -609,6 +643,35 @@ describe("runner: sensitive mode, the runner's own buffers", () => {
       // The capture's chunk and the stderr ring at least; a classifier's copy too where one ran.
       expect({ name, buffers: seen.length >= 2 }).toEqual({ name, buffers: true });
       expect({ name, wiped: seen.every(zeros) }).toEqual({ name, wiped: true });
+    }
+  });
+
+  test("when the runner throws (a spawner that fails to signal), output that arrives later is never kept", async () => {
+    const canary = makeCanary();
+    let child: FakeChild | undefined;
+    const spawner = new FakeSpawner((c) => {
+      child = c;
+      c.write("stdout", `${canary.value}\n`);
+    });
+    spawner.signalGroup = () => {
+      throw new Error("signal failed");
+    };
+    const seen: Uint8Array[] = [];
+    bufferProbe.observe = (bytes) => seen.push(bytes);
+    try {
+      const thrown = await runProcess(spawner, spec({ classifyStderr: classes })).catch(
+        (error: unknown) => error,
+      );
+      expect(String(thrown)).toContain("signal failed");
+      const before = seen.length;
+      // The child keeps writing after the throw: a sealed capture takes none of it.
+      child?.write("stdout", `${canary.value}\n`);
+      child?.write("stderr", `${canary.value}\n`);
+      await Bun.sleep(20);
+      expect(seen.length).toBe(before);
+      expect(seen.every(zeros)).toBe(true);
+    } finally {
+      bufferProbe.observe = undefined;
     }
   });
 
