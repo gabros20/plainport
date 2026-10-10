@@ -42,30 +42,43 @@ const value = <T>(
   return result.value;
 };
 
-/** How long a store without immediate visibility is given to show a write: POLL_TRIES reads, POLL_MS apart. */
-const POLL_TRIES = 100;
-const POLL_MS = 20;
+/** How long a store without immediate visibility is given to show a write: `tries` reads, `ms` apart. */
+export interface PollBound {
+  tries: number;
+  ms: number;
+}
+const POLL: PollBound = { tries: 100, ms: 20 };
 
 /**
  * Reads until `done` holds: once where the profile promises immediate visibility (`immediate`), else after the
- * fixture's settle() or by polling within the bound. Returns the last read.
+ * fixture's settle() or by polling within the bound. Returns the last read, and whether `done` held.
  */
 const visible = async <T>(
   immediate: boolean,
   read: () => Promise<T>,
   done: (seen: T) => boolean,
   settle?: () => void,
-): Promise<T> => {
-  if (immediate) return read();
+  bound: PollBound = POLL,
+): Promise<{ seen: T; shown: boolean }> => {
+  if (immediate) {
+    const seen = await read();
+    return { seen, shown: done(seen) };
+  }
   settle?.();
   let seen = await read();
-  for (let tries = 1; !done(seen) && tries < POLL_TRIES; tries++) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  for (let tries = 1; !done(seen) && tries < bound.tries; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, bound.ms));
     settle?.();
     seen = await read();
   }
-  return seen;
+  return { seen, shown: done(seen) };
 };
+
+/** A probe that could not decide: the write did not show within the bound, which disproves nothing. */
+const inconclusive = (what: string, bound: PollBound): Error =>
+  new Error(
+    `inconclusive visibility: ${what} did not show within ${bound.tries * bound.ms} ms, so nothing is proven either way`,
+  );
 
 /** Faults only a fake (or a measuring harness) can cause; with them the probe also checks cancellation. */
 export interface SemanticFaults {
@@ -81,6 +94,8 @@ const LIST_PROBE_KEYS = 1001;
 export interface SemanticProbeOptions {
   /** Keys the listing probe writes; a small volume (the exFAT image) passes fewer. */
   listProbeKeys?: number;
+  /** How long a write is given to show where the profile does not promise it at once. */
+  poll?: PollBound;
 }
 
 /**
@@ -128,6 +143,8 @@ export const semanticViolations = async (
   const get = async (key: string): Promise<Uint8Array | null> => value(await store.get(key));
   const list = async (prefix: string): Promise<BlobEntry[]> => value(await store.list(prefix));
   const settle = () => faults?.settle?.();
+  const bound = options.poll ?? POLL;
+  let probeFailed = false;
 
   try {
     if (raw) {
@@ -145,7 +162,10 @@ export const semanticViolations = async (
         (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
       );
       for (let i = 0; i < keys.length; i += 50) {
-        await Promise.all(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
+        // Every write of the batch settles before a failure is thrown, so cleanup never races a write in flight.
+        const settled = await Promise.allSettled(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
+        const failed = settled.find((result) => result.status === "rejected");
+        if (failed !== undefined) throw failed.reason;
       }
       // Completeness is not visibility: without list-after-write, wait for the keys to show first.
       const listed = await visible(
@@ -153,8 +173,12 @@ export const semanticViolations = async (
         () => list(`${base}page/`),
         (seen) => seen.length === keys.length,
         settle,
+        bound,
       );
-      if (listed.length !== keys.length) violations.push("listComplete");
+      if (!listed.shown) {
+        if (!law) throw inconclusive(`the ${keys.length} listing keys`, bound);
+        violations.push("listComplete");
+      }
     }
     const publication = semanticValue(claims.publication);
     if (publication === "atomic-put" || publication === "temp-then-rename") {
@@ -164,23 +188,25 @@ export const semanticViolations = async (
       const key = `${base}whole`;
       let done = false;
       let torn = false;
+      // The rejection handler is attached as the loop starts: a read that fails during a slow write is held here,
+      // never an unhandled rejection.
       const observer = (async () => {
         while (!done) {
           const seen = await get(key);
           if (seen !== null && seen.length !== data.length) torn = true;
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
-      })();
+      })().then(
+        () => undefined,
+        (error: unknown) => error ?? new Error("the observer failed"),
+      );
       let observed: unknown;
       try {
         await put(key, data);
       } finally {
         // Stopped and joined even when the write fails, so no read loop outlives the probe.
         done = true;
-        observed = await observer.then(
-          () => undefined,
-          (error: unknown) => error,
-        );
+        observed = await observer;
       }
       if (observed !== undefined) throw observed; // the observer's read failed: an error, not a counterexample
       const final = await visible(
@@ -188,8 +214,10 @@ export const semanticViolations = async (
         () => get(key),
         (seen) => seen !== null,
         settle,
+        bound,
       );
-      if (torn || final === null || final.length !== data.length) violations.push("publication");
+      if (!final.shown && !raw) throw inconclusive(`the publication probe ${key}`, bound);
+      if (torn || final.seen === null || final.seen.length !== data.length) violations.push("publication");
     }
     if (semanticValue(claims.conditionalCreate) === true) {
       issued.add(`${base}cc`);
@@ -210,9 +238,22 @@ export const semanticViolations = async (
       const after = await get(`${base}late`);
       if (!cancelled.ok && before === null && after !== null) violations.push("cancellation");
     }
+  } catch (error) {
+    probeFailed = true;
+    throw error;
   } finally {
+    // Every issued key is deleted by name; a delete that fails is reported once all were tried, unless the probe
+    // is already failing with its own error.
     settle();
-    for (const key of issued) await store.delete(key);
+    const undeleted: string[] = [];
+    for (const key of issued) {
+      const deleted = await store.delete(key);
+      if (!deleted.ok) undeleted.push(`${key} (${deleted.finding.code}: ${deleted.finding.message})`);
+    }
+    if (undeleted.length > 0 && !probeFailed) {
+      // biome-ignore lint/correctness/noUnsafeFinally: a cleanup failure is the probe's error when nothing else failed
+      throw new Error(`the probe could not delete what it wrote: ${undeleted.join("; ")}`);
+    }
   }
   return violations;
 };
@@ -241,10 +282,10 @@ export const blobStoreContract = (
     });
 
     /** A read after a write: at once where the profile promises it, else once the write shows. */
-    const read = (key: string, done: (seen: Uint8Array | null) => boolean) =>
-      visible(raw, async () => value(await store.get(key)), done, fixture.settle);
-    const listed = (prefix: string, done: (seen: BlobEntry[]) => boolean) =>
-      visible(law, async () => value(await store.list(prefix)), done, fixture.settle);
+    const read = async (key: string, done: (seen: Uint8Array | null) => boolean) =>
+      (await visible(raw, async () => value(await store.get(key)), done, fixture.settle)).seen;
+    const listed = async (prefix: string, done: (seen: BlobEntry[]) => boolean) =>
+      (await visible(law, async () => value(await store.list(prefix)), done, fixture.settle)).seen;
 
     test("put then get returns the same bytes; a missing key is null", async () => {
       value(await store.put("meta/v1/events/a.json", bytes('{"a":1}\n')));

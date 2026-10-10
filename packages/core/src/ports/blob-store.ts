@@ -46,6 +46,11 @@ const property = <T extends z.ZodType>(value: T) =>
   z.union([z.literal("unknown"), z.strictObject({ value, evidence: EvidenceSchema })]);
 
 export const PublicationSchema = z.enum(["atomic-put", "temp-then-rename", "in-place"]);
+/**
+ * Durability has two unknowns on purpose: the property itself `"unknown"` means nobody has looked (not measured,
+ * documented or asserted), while `{ value: "unknown", evidence }` means someone looked and could not tell (the
+ * backend's documents are silent, or a measurement cannot show it without a power cut). Both fail release.
+ */
 export const DurabilitySchema = z.enum(["durable", "acked-unsynced", "unknown"]);
 export const CancellationSchema = z.enum(["never-lands-late", "may-land-late"]);
 

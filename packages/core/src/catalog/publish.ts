@@ -12,13 +12,25 @@
 
 import { type Failure, fail, finding, type Ok, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
-import { type BlobStore, requireEligible, semanticValue } from "../ports/blob-store.ts";
+import {
+  assertBlobKey,
+  assertBlobPrefix,
+  type BlobStore,
+  requireEligible,
+  semanticValue,
+} from "../ports/blob-store.ts";
 
-/** Whether the value at a key is the event a writer intends (the codec compares opened events; Task 11). */
-export type SameEvent = (existing: Uint8Array, intended: Uint8Array) => boolean | Promise<boolean>;
+/**
+ * Whether the value at a key is the event a writer intends (the codec compares opened events; Task 11). A failure
+ * says it cannot tell (the existing object does not open: another key, a damaged envelope) and is returned as is.
+ */
+export type SameEvent = (
+  existing: Uint8Array,
+  intended: Uint8Array,
+) => Result<boolean> | Promise<Result<boolean>>;
 
 /** Byte equality: the SameEvent of a plaintext catalog, and the fake the tests use. */
-export const sameBytes: SameEvent = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+export const sameBytes: SameEvent = (a, b) => ok(a.length === b.length && a.every((x, i) => x === b[i]));
 
 const keyExists = (key: string, store: string): Failure =>
   fail(
@@ -50,16 +62,18 @@ export const publishEvent = async (
   const existing = await store.get(input.key);
   if (!existing.ok) return { ...existing, mayLand: false };
   if (existing.value !== null) {
-    return (await input.sameEvent(existing.value, input.data))
-      ? ok({ written: false })
-      : { ...keyExists(input.key, name), mayLand: false };
+    const same = await input.sameEvent(existing.value, input.data);
+    if (!same.ok) return { ...same, mayLand: false };
+    return same.value ? ok({ written: false }) : { ...keyExists(input.key, name), mayLand: false };
   }
   const written = await store.put(input.key, input.data);
   if (written.ok) return ok({ written: true });
   // The acknowledgement may be all that was lost.
   const after = await store.get(input.key);
-  if (after.ok && after.value !== null && (await input.sameEvent(after.value, input.data))) {
-    return ok({ written: true });
+  if (after.ok && after.value !== null) {
+    const same = await input.sameEvent(after.value, input.data);
+    if (!same.ok) return { ...same, mayLand: true }; // cannot tell what is there: this write may be it
+    return same.value ? ok({ written: true }) : { ...keyExists(input.key, name), mayLand: false };
   }
   const neverLate =
     after.ok && after.value === null && semanticValue(semantics.cancellation) === "never-lands-late";
@@ -102,9 +116,14 @@ export interface Election {
    * another candidate and will never publish).
    */
   candidates: string;
-  /** This attempt's id (a ULID); the published value names it. */
+  /**
+   * This attempt's id (a ULID); the published value names it. The caller journals it before calling elect, since the
+   * candidacy is the first write, and recovery or a retry re-runs with that same id: only the same id can refuse or
+   * publish for an attempt, so a fresh id would leave the old candidacy undecided for everyone. Letters, digits, "_"
+   * and "-" only (no "/" or "."), so it cannot be mistaken for a key or a record's suffix.
+   */
   id: string;
-  /** What this attempt publishes when it wins. */
+  /** What this attempt publishes when it wins; winnerOf(value) must be `id`. */
   value: Uint8Array;
   /** The attempt a published value names; undefined for bytes that name none (torn, damaged, foreign). */
   winnerOf(published: Uint8Array): string | undefined;
@@ -156,14 +175,38 @@ const isRecord = (bytes: Uint8Array, id: string, decision: ElectionRecord["decis
   }
 };
 
+const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** Throws RangeError on an election a caller got wrong: a bug, like a bad key. */
+const assertElection = (e: Election): void => {
+  assertBlobKey(e.key);
+  assertBlobPrefix(e.candidates);
+  if (!e.candidates.endsWith("/")) {
+    throw new RangeError(`elect: candidates ${JSON.stringify(e.candidates)} must end in "/"`);
+  }
+  if (e.key.startsWith(e.candidates)) {
+    throw new RangeError(
+      `elect: the published key ${e.key} must not lie under the candidates ${e.candidates}`,
+    );
+  }
+  if (!ID_PATTERN.test(e.id)) {
+    throw new RangeError(`elect: the attempt id ${JSON.stringify(e.id)} must be letters, digits, "_" or "-"`);
+  }
+  if (e.winnerOf(e.value) !== e.id) {
+    throw new RangeError(`elect: the value to publish does not name the attempt ${e.id}`);
+  }
+};
+
 /**
  * Holds the election and, when this attempt wins, publishes its value. A store whose profile fails canElect refuses
  * with store.semantics-unknown before writing anything.
  *
- * - Where conditional create is proven, the value is created conditionally and read back.
- * - Otherwise (the sole-candidate rule, on a store with visibility both ways and complete listings): write the
- *   candidacy, list. As the sole candidate, write `<id>.publishing`, publish, read back. Seeing another candidate,
- *   write `<id>.refused` and never publish; the outcome is lost if a winner turns up while re-reading, else contested.
+ * One protocol for every device, whatever its own profile of the store (devices may have measured the store
+ * differently): write the candidacy, list. As the sole candidate, write `<id>.publishing`, publish, read back.
+ * Seeing another candidate, write `<id>.refused` and never publish; the outcome is lost if a winner turns up while
+ * re-reading, else contested. Only the final write follows this device's profile: a conditional create where it
+ * proves one, a plain put otherwise. A device with a proven conditional create still sees and respects every other
+ * device's candidacy, so two devices taking different final writes never both win.
  *
  * Why contested can be final: a candidate written after this attempt's listing lists after this candidacy was
  * acknowledged, so it sees it and refuses; so every attempt that could still be sole is visible here, and once each
@@ -172,10 +215,13 @@ const isRecord = (bytes: Uint8Array, id: string, decision: ElectionRecord["decis
  * published value naming it is a win.
  */
 export const elect = async (store: BlobStore, e: Election): Promise<Result<ElectionOutcome>> => {
+  assertElection(e);
   const name = e.store ?? "in use";
   const semantics = store.semantics();
   const allowed = requireEligible("elect", semantics, { store: name });
   if (!allowed.ok) return allowed;
+  const conditional = semanticValue(semantics.conditionalCreate) === true;
+  const listsAfterWrite = semanticValue(semantics.listAfterWrite) === true;
 
   const readPublished = async (): Promise<Result<Published>> => {
     const got = await store.get(e.key);
@@ -234,11 +280,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   if (first.value.kind === "winner") return decided(first.value.winner);
   if (first.value.kind === "unreadable") return unreadable();
 
-  if (semanticValue(semantics.conditionalCreate) === true) {
-    return afterWrite(await store.put(e.key, e.value, { ifNotExists: true }));
-  }
-
-  // The sole-candidate rule.
+  // The candidate protocol, the same on every device.
   const keyOf = (id: string, decision: ElectionRecord["decision"]): string =>
     `${e.candidates}${id}${SUFFIX[decision]}`;
   /**
@@ -281,7 +323,11 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   const listed = await listCandidates();
   if (!listed.ok) return listed;
   const mine = listed.value;
-  if (!mine.ids.includes(e.id)) return notSeen(candidacy);
+  if (!mine.ids.includes(e.id)) {
+    // Promised by list-after-write; without it (a device electing on its conditional create alone) it may show later.
+    if (listsAfterWrite) return notSeen(candidacy);
+    mine.ids = [...mine.ids, e.id].sort();
+  }
   const others = mine.ids.filter((id) => id !== e.id);
 
   // A decision already taken by this attempt stands; refusal wins, since a `.publishing` that failed is never acted on.
@@ -294,7 +340,8 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
         if (!there.ok || there.value === null || !isRecord(there.value, e.id, "publishing")) return intent; // never publish on an intent nobody can see
       }
     }
-    return afterWrite(await store.put(e.key, e.value));
+    // The final write is this device's only route choice: create-only where its profile proves it.
+    return afterWrite(await store.put(e.key, e.value, conditional ? { ifNotExists: true } : {}));
   }
 
   if (!hasRefused) {
@@ -328,7 +375,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   ]);
   const fix =
     undecided.length > 0
-      ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is`
+      ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is. Re-running an attempt with the same id (its recovery does) decides it. If an attempt will never run again (its device is gone), stop plainport on every device that uses the store ${name} and wait until none is running, then withdraw it by writing its refusal on its behalf (${undecided.map((id) => `${keyOf(id, "refused")} holding {"v":1,"id":"${id}","decision":"refused"}`).join("; ")}) and re-run`
       : `stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
   return ok({ outcome: "contested", candidates, undecided, fix });
 };

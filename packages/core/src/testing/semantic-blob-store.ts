@@ -101,8 +101,9 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
       finding("store.unreachable", { message: "the semantic fake lost the acknowledgement of a put" }),
     );
   };
-  const remember = (key: string): void => {
-    if (!before.has(key)) before.set(key, data.get(key) ?? null);
+  /** Records what readers saw of `key` before a write that landed (old: its value then, null when absent). */
+  const remember = (key: string, old: Uint8Array | null): void => {
+    if (!before.has(key)) before.set(key, old);
   };
   /** Whether readers are still shown the old value of `key`. */
   const hidden = (key: string): boolean => options.delayedVisibility === true && before.has(key);
@@ -117,8 +118,10 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
   ): Promise<Result<{ etag?: string }>> => {
     const target = options.tempThenRename ? `${FAKE_TEMP_PREFIX}${++temporaries}` : key;
     const half = bytes.subarray(0, Math.floor(bytes.length / 2));
+    const old = data.get(key) ?? null;
     const started = await inner.put(target, half, target === key ? opts : {});
     if (!started.ok) return started;
+    if (target === key) remember(key, old);
     if (tearPending) {
       tearPending = false;
       return fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` }));
@@ -129,7 +132,7 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
     } else {
       data.delete(target);
       if (opts.ifNotExists && data.has(key)) return exists(key);
-      remember(key);
+      remember(key, data.get(key) ?? null);
       data.set(key, bytes);
     }
     return lostAck() ?? ok({});
@@ -192,19 +195,26 @@ export const semanticBlobStore = (options: SemanticFakeOptions = {}): SemanticBl
         );
       }
       if (opts.ifNotExists && data.has(key)) return Promise.resolve(exists(key));
-      if (!(options.tempThenRename && options.tornWrites)) remember(key);
       if (options.tornWrites) return tornPut(key, copy, opts);
+      // Only a put that landed changes what readers are shown later (delayed visibility pins the old value). The
+      // memory store writes within the call, so whether it landed is known before anyone else can read.
+      const held = data.get(key);
+      const landed = (): void => {
+        if (data.get(key) !== held) remember(key, held ?? null);
+      };
       if (tearPending) {
         tearPending = false;
-        return inner
-          .put(key, copy.subarray(0, Math.floor(copy.length / 2)), opts)
-          .then((started) =>
-            started.ok
-              ? fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` }))
-              : started,
-          );
+        const started = inner.put(key, copy.subarray(0, Math.floor(copy.length / 2)), opts);
+        landed();
+        return started.then((result) =>
+          result.ok
+            ? fail(finding("store.failed", { message: `the put of ${key} stopped part way (tearNext)` }))
+            : result,
+        );
       }
-      return inner.put(key, copy, opts).then((put) => (put.ok ? (lostAck() ?? put) : put));
+      const put = inner.put(key, copy, opts);
+      landed();
+      return put.then((result) => (result.ok ? (lostAck() ?? result) : result));
     },
     delete: async (key) => {
       calls.delete++;

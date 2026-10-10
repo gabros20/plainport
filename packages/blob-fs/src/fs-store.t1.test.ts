@@ -50,8 +50,8 @@ if (process.platform === "darwin") {
           store: fsBlobStore(testHost(), dir),
           cleanup: () => rmSync(dir, { recursive: true, force: true }),
         };
-        // The 8 MB image holds about 950 small files: the listing probe stays well under that.
       },
+      // The 8 MB image holds about 950 small files: the listing probe stays well under that.
       { eligibility: ALL_ELIGIBLE, listProbeKeys: 200 },
     );
   });
