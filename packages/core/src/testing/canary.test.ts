@@ -14,6 +14,7 @@ import {
   findCanaries,
   makeCanary,
   makeMasterKeyCanary,
+  type RandomSource,
   recordArgv,
   recordOwnOutput,
 } from "./canary.ts";
@@ -246,18 +247,18 @@ describe("canary: pieces and other spellings", () => {
   const randomOf = (canary: { value: string }): string =>
     canary.value.slice(canary.value.lastIndexOf("_") + 1);
 
-  test("any 12-character piece of the random part is found, interior slices included", () => {
+  test("any 24-character piece of the random part is found, interior slices included", () => {
     const canary = makeCanary();
     const random = randomOf(canary);
-    const middle = canary.value.slice(13, 33);
-    const first15 = random.slice(0, 15);
-    const interior = random.slice(9, 21);
-    for (const piece of [middle, first15, interior]) {
+    const middle = canary.value.slice(13, 38);
+    const first30 = random.slice(0, 30);
+    const interior = random.slice(9, 33);
+    for (const piece of [middle, first30, interior]) {
       expect(findCanaries([canary], { findings: [{ message: `x ${piece} y` }] })).not.toEqual([]);
       expect(findCanaries([canary], { output: [`before${piece}after`] })).not.toEqual([]);
     }
-    // Shorter than 12, or only the fixed prefix that every canary of the label shares, is not a piece.
-    expect(findCanaries([canary], { output: [random.slice(0, 11)] })).toEqual([]);
+    // Shorter than a piece (72 bits: 19 hex characters, 23 with the prefix's edge), or only the fixed prefix that every canary of the label shares, is not a piece.
+    expect(findCanaries([canary], { output: [random.slice(0, 22)] })).toEqual([]);
     expect(findCanaries([canary], { output: ["canary_secret_"] })).toEqual([]);
     // The report names the form, never the piece.
     const hits = findCanaries([canary], { output: [interior] }).join("\n");
@@ -267,33 +268,33 @@ describe("canary: pieces and other spellings", () => {
 
   test("the cuts the default runner makes are found: the 600-character tail of a message, the 2000-character log line", async () => {
     const canary = makeCanary();
-    // lastOutput keeps the last 600 characters: a canary followed by 580 more keeps its last 20.
+    // lastOutput keeps the last 600 characters: a canary followed by 570 more keeps its last 30.
     const tail = await runProcess(
-      printing(`${canary.value}${"x".repeat(580)}`, null),
+      printing(`${canary.value}${"x".repeat(570)}`, null),
       spec({ idleTimeoutMs: 30, killGraceMs: 20 }),
     );
     expect(tail.ok).toBe(false);
     const message = tail.ok ? "" : tail.finding.message;
     expect(message).not.toContain(canary.value);
-    expect(message).toContain(canary.value.slice(-20));
+    expect(message).toContain(canary.value.slice(-30));
     expect(findCanaries([canary], { findings: tail.ok ? [] : [tail.finding] })).not.toEqual([]);
-    // A log line is cut at 2000 characters: "tool: " and 1964 more leave the canary's first 30.
+    // A log line is cut at 2000 characters: "tool: " and 1954 more leave the canary's first 40.
     const events: PlainportEvent[] = [];
     await runProcess(
-      printing(`${"y".repeat(1964)}${canary.value}`, 0),
+      printing(`${"y".repeat(1954)}${canary.value}`, 0),
       spec({ log: { op: "x", emit: (event) => events.push(event) } }),
     );
     const logged = JSON.stringify(events);
     expect(logged).not.toContain(canary.value);
-    expect(logged).toContain(canary.value.slice(0, 30));
+    expect(logged).toContain(canary.value.slice(0, 40));
     expect(findCanaries([canary], { events })).not.toEqual([]);
   });
 
-  test("a master key component cut to its first 15 hex characters, or a middle slice of its base64, is found", () => {
+  test("a master key component cut to its first 20 hex characters, or a middle slice of its base64, is found", () => {
     const master = makeMasterKeyCanary();
     const key = JSON.parse(master.value) as { encrypt: string; mac: { k: string } };
     const hex = Buffer.from(key.encrypt, "base64").toString("hex");
-    expect(findCanaries([master], { output: [hex.slice(0, 15)] }).join()).toContain("encrypt (hex)");
+    expect(findCanaries([master], { output: [hex.slice(0, 20)] }).join()).toContain("encrypt (hex)");
     expect(findCanaries([master], { findings: [{ message: key.mac.k.slice(5, 19) }] }).join()).toContain(
       "mac.k (base64)",
     );
@@ -385,27 +386,56 @@ describe("canary: expectRunLeaksNothing, the shared leak gate", () => {
 });
 
 describe("canary: pieces are positional, so two canaries of one label never match each other", () => {
-  test("1000 pairs of same-label canaries: neither's value or spellings is a hit for the other", () => {
+  /** A reproducible stream of bytes: SHA-256 of the seed and a counter, so a failing run can be replayed. */
+  const seeded = (seed: string): RandomSource => {
+    let counter = 0;
+    return (size) => {
+      const out = new Uint8Array(size);
+      for (let at = 0; at < size; at += 32)
+        out.set(
+          new Bun.CryptoHasher("sha256")
+            .update(`${seed}:${counter++}`)
+            .digest()
+            .subarray(0, size - at),
+          at,
+        );
+      return out;
+    };
+  };
+
+  test("1000 seeded pairs of same-label canaries: neither's value or spellings is a hit for the other", () => {
+    const source = seeded("canary-pairs-1");
     for (let run = 0; run < 1000; run++) {
-      const a = makeCanary();
-      const b = makeCanary();
+      const a = makeCanary("secret", source);
+      const b = makeCanary("secret", source);
       const hits = findCanaries([a], { output: [b.value, ...b.forms.map((form) => form.text)] });
       if (hits.length > 0)
-        throw new Error(`run ${run}: a second canary of the label was a hit: ${hits.join("; ")}`);
+        throw new Error(
+          `run ${run} (seed canary-pairs-1): a second canary of the label was a hit: ${hits.join("; ")}`,
+        );
     }
   });
 
-  test("the shared prefix and a few characters of another canary are no hit; 8 random characters on are", () => {
+  test("seeded master key canaries of two seeds never match each other either; a seed repeats its canary", () => {
+    for (let run = 0; run < 300; run++) {
+      const a = makeMasterKeyCanary(seeded(`key-a-${run}`));
+      const b = makeMasterKeyCanary(seeded(`key-b-${run}`));
+      expect(findCanaries([a], { output: [b.value, ...b.forms.map((form) => form.text)] })).toEqual([]);
+    }
+    expect(makeCanary("secret", seeded("x")).value).toBe(makeCanary("secret", seeded("x")).value);
+  });
+
+  test("the shared prefix and a few characters of another canary are no hit; 24 random characters on are", () => {
     const a = makeCanary();
     const b = makeCanary();
     const prefix = "canary_secret_";
     const random = a.value.slice(prefix.length);
-    for (const n of [1, 2, 3, 4]) {
+    for (const n of [1, 2, 4, 8, 16]) {
       expect(
         findCanaries([a], { output: [`${prefix}${b.value.slice(prefix.length, prefix.length + n)}`] }),
       ).toEqual([]);
     }
-    expect(findCanaries([a], { output: [`${prefix}${random.slice(0, 8)}`] })).not.toEqual([]);
+    expect(findCanaries([a], { output: [`${prefix}${random.slice(0, 24)}`] })).not.toEqual([]);
     // The same positional rule holds for the encoded spellings: base64 of the prefix alone is no hit.
     expect(findCanaries([a], { output: [Buffer.from(`${prefix}xxxx`).toString("base64")] })).toEqual([]);
     expect(findCanaries([a], { output: [Buffer.from(`${prefix}xxxx`).toString("hex")] })).toEqual([]);
