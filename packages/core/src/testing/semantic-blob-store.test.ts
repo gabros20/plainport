@@ -40,7 +40,51 @@ blobStoreContract(
   { eligibility: { ...ALL_ELIGIBLE, release: "post-grace-proof" } },
 );
 
+// A strong store without conditional create: every operation, elections through the sole-candidate fallback.
+blobStoreContract(
+  "semantic fake without conditional create",
+  () => ({ store: semanticBlobStore({ conditionalCreate: false }), cleanup: () => {} }),
+  { eligibility: ALL_ELIGIBLE },
+);
+
+// No read-after-write: the contract waits for visibility (settle) instead of asserting it, and only read and elect
+// (through conditional create) are eligible.
+blobStoreContract(
+  "semantic fake with delayed visibility",
+  () => {
+    const store = semanticBlobStore({ delayedVisibility: true });
+    return { store, cleanup: () => {}, settle: () => store.settle() };
+  },
+  {
+    eligibility: {
+      read: "eligible",
+      append: "refused",
+      elect: "eligible",
+      commit: "refused",
+      release: "refused",
+    },
+  },
+);
+
 describe("semantic probe: failure handling", () => {
+  test("an expected I/O failure while probing is an error, not a counterexample", async () => {
+    const inner = semanticBlobStore();
+    const flaky = {
+      ...inner,
+      get: (key: string) => {
+        if (key.endsWith("/raw")) inner.failNext("get");
+        return inner.get(key);
+      },
+    };
+    await expect(semanticViolations(flaky)).rejects.toThrow("store.unreachable");
+  });
+
+  test("probe cleanup removes every key it wrote, even where the listing is cut short", async () => {
+    const lying = semanticBlobStore({ truncateListAt: 1000, profile: STRONG });
+    expect(await semanticViolations(lying, lying)).toContain("listComplete");
+    expect([...lying.data.keys()].filter((key) => key.startsWith("probe/"))).toEqual([]);
+  });
+
   test("a probe write that fails stops and joins the observer, and removes the probe's keys", async () => {
     const inner = semanticBlobStore();
     const failing = {

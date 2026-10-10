@@ -176,6 +176,64 @@ const outcome = async (store: BlobStore, e: Election): Promise<ElectionOutcome> 
 };
 
 describe("publish: the elected publication", () => {
+  test("a final contested needs this attempt's own refusal read back (astra r2)", async () => {
+    const store = semanticBlobStore({ ...NO_CREATE, lateLanding: true });
+    const failing = (suffix: string, how: "cancel" | "fail"): BlobStore => ({
+      ...store,
+      put: (key, data, opts) => {
+        if (key.endsWith(suffix)) {
+          if (how === "cancel") store.cancelNext();
+          else store.failNext("put");
+        }
+        return store.put(key, data, opts);
+      },
+    });
+    // A is sole; its .publishing write is cancelled and stays pending.
+    expect((await elect(failing("A.publishing", "cancel"), election("A"))).ok).toBe(false);
+    // B joins and refuses; A has decided nothing visible.
+    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: ["A"] });
+    // A retries before its .publishing lands, and its .refused write fails without landing.
+    const retry = await elect(failing("A.refused", "fail"), election("A"));
+    if (retry.ok) expect(retry.value).not.toMatchObject({ outcome: "contested", undecided: [] });
+    // The pending .publishing lands: A was entitled to publish, and does.
+    store.settle();
+    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
+    expect(await outcome(store, election("B"))).toEqual({ outcome: "lost", winner: "A" });
+  });
+
+  test("candidate and decision records are schema-checked: a marker that does not validate counts for nothing", async () => {
+    const store = semanticBlobStore(NO_CREATE);
+    await store.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
+    // B's "refusal" names another attempt: it is not B's refusal, so B stays undecided.
+    await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"X","decision":"refused"}'));
+    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: ["B"] });
+    await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}\n'));
+    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: [] });
+    for (const key of keysOf(store, CANDIDATES)) {
+      expect(
+        ElectionRecordSchema.safeParse(JSON.parse(decode(store.data.get(key) as Uint8Array))).success,
+      ).toBe(true);
+    }
+  });
+
+  test("the election records are published as JSON Schema", () => {
+    expect(electionJsonSchemas()).toEqual({
+      "election-record": z.toJSONSchema(ElectionRecordSchema, {
+        target: "draft-2020-12",
+        io: "input",
+      }) as Record<string, unknown>,
+    });
+  });
+
+  test("without read-after-write, a publication not yet visible is no broken promise: re-run after it shows", async () => {
+    const store = semanticBlobStore({ delayedVisibility: true });
+    const first = await elect(store, election("A"));
+    expect(first.ok).toBe(false);
+    if (!first.ok) expect(first.finding.message).not.toContain("promises");
+    store.settle();
+    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
+  });
+
   for (const [route, options] of [
     ["conditional create", {}],
     ["sole candidate", NO_CREATE],
