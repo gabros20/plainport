@@ -1,5 +1,13 @@
 export { RingBuffer } from "./ring-buffer.ts";
-export { capturedOutput, RUN_DEFAULTS, runProcess, splitRecords } from "./runner.ts";
+export {
+  bytesInclude,
+  capturedOutput,
+  parseSensitiveJson,
+  RUN_DEFAULTS,
+  runProcess,
+  splitRecords,
+  stderrClasses,
+} from "./runner.ts";
 export type {
   ChildProcess,
   GroupSignal,
@@ -11,4 +19,6 @@ export type {
   RunSpec,
   Spawner,
   SpawnRequest,
+  StderrClasses,
+  TypedStderrClasses,
 } from "./types.ts";
