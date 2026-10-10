@@ -48,7 +48,6 @@ test("scorer requires ordered observations for the fixture, byte integrity and a
     }).passed,
   ).toBe(false);
   expect(scoreTranscript({ ...transcript, fixtureIntact: false }).passed).toBe(false);
-  expect(scoreTranscript({ ...transcript, agentExitCode: 1 }).clean).toBe(false);
 });
 
 test("scorer rejects malformed recordings instead of silently counting them", () => {

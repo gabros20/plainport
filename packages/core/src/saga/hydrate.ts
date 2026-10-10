@@ -131,6 +131,8 @@ const onPath = async (host: HostPorts, env: Env, name: string): Promise<string |
   return undefined;
 };
 
+const COREPACK_MANAGERS: ReadonlySet<string> = new Set(["pnpm", "yarn", "npm"]);
+
 /**
  * Whether the package manager the install will run is Corepack's shim: a link that resolves into the corepack
  * package. It is looked up the way the install finds it: through the version manager's own environment when the
@@ -144,6 +146,8 @@ const suppliedByCorepack = async (
   cwd: string,
   signal?: AbortSignal,
 ): Promise<boolean> => {
+  // Corepack shims only these three; anything else is never asked about.
+  if (!COREPACK_MANAGERS.has(name)) return false;
   try {
     let found: string | undefined;
     if (toolchain.manager === undefined) found = await onPath(host, env, name);

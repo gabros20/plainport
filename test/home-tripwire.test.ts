@@ -312,4 +312,20 @@ describe("home tripwire: temp folder leaks", () => {
       expect(readdirSync(tmp)).toEqual([]);
     });
   }
+
+  test("a folder another process made or shares (EEXIST, recursive mkdir inside it, a .lock) is neither blamed nor removed", () => {
+    const tmp = mkdtempSync(join(sandbox, "child-tmp-"));
+    onTestFinished(() => rmSync(tmp, { recursive: true, force: true }));
+    mkdirSync(join(tmp, "plainport-shared-owner"));
+    mkdirSync(join(tmp, "plainport-shared.lock"));
+    const run = Bun.spawnSync([process.execPath, "test", "./test/fixtures/temp-leak.fixture.ts"], {
+      cwd: repoRoot,
+      env: { ...process.env, TMPDIR: tmp, PLAINPORT_FIXTURE_LEAK: "shared" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(run.stdout.toString() + run.stderr.toString()).not.toContain("temp folder leak");
+    expect(run.exitCode).toBe(0);
+    expect(readdirSync(tmp).sort()).toEqual(["plainport-shared-owner", "plainport-shared.lock"]);
+  });
 });

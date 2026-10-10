@@ -9,7 +9,7 @@
 //   `com.apple.provenance` is the kernel's own mark on files that came from a program; it is not data and is left out.
 // - BSD flags (uchg, hidden, ...): macOS only, read with /usr/bin/stat; other systems have none to compare here.
 
-import { dlopen, FFIType, type Pointer, ptr, read } from "bun:ffi";
+import { dlopen, FFIType, type Pointer, read } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -43,16 +43,16 @@ export type StatRun = (argv: string[]) => { exitCode: number | null; stdout: str
 /** Where a tree's metadata comes from; tests replace it. `xattrs: null` is "no library". */
 export type TreeSources = { xattrs?: XattrApi | null; stat?: StatRun };
 
-const ERRNO_NAMES: Record<number, string> = {
-  1: "EPERM",
-  2: "ENOENT",
-  13: "EACCES",
-  22: "EINVAL",
-  34: "ERANGE",
-  61: "ENODATA",
-  93: "ENOATTR",
-};
-/** The file system has no extended attributes at all (ENOTSUP is 45 on macOS, 95 on Linux): nothing to compare. */
+/** errno labels for the message only; the numbers differ between macOS and Linux. */
+const ERRNO_NAMES: Record<number, string> =
+  process.platform === "darwin"
+    ? { 1: "EPERM", 2: "ENOENT", 13: "EACCES", 22: "EINVAL", 34: "ERANGE", 93: "ENOATTR" }
+    : { 1: "EPERM", 2: "ENOENT", 13: "EACCES", 22: "EINVAL", 34: "ERANGE", 61: "ENODATA" };
+/**
+ * The file system has no extended attributes at all (ENOTSUP is 45 on macOS, 95 on Linux). listxattr then reports
+ * "none" rather than unreadable: there is nothing to lose, and the same file system answers the same on both sides.
+ * It is the one failed listing that compares as an empty set; getxattr on such a file system stays an error.
+ */
 const UNSUPPORTED = new Set([45, 95]);
 
 const cstr = (text: string): Buffer => Buffer.from(`${text}\0`);
@@ -82,13 +82,11 @@ const xattrApi = (): XattrApi | null => {
     };
     const NOFOLLOW = 1;
     const list = (path: string, buf: Buffer | null, size: bigint) =>
-      darwin
-        ? sym.listxattr?.(ptr(cstr(path)), buf === null ? null : ptr(buf), size, NOFOLLOW)
-        : sym.llistxattr?.(ptr(cstr(path)), buf === null ? null : ptr(buf), size);
+      darwin ? sym.listxattr?.(cstr(path), buf, size, NOFOLLOW) : sym.llistxattr?.(cstr(path), buf, size);
     const get = (path: string, name: string, buf: Buffer | null, size: bigint) =>
       darwin
-        ? sym.getxattr?.(ptr(cstr(path)), ptr(cstr(name)), buf === null ? null : ptr(buf), size, 0, NOFOLLOW)
-        : sym.lgetxattr?.(ptr(cstr(path)), ptr(cstr(name)), buf === null ? null : ptr(buf), size);
+        ? sym.getxattr?.(cstr(path), cstr(name), buf, size, 0, NOFOLLOW)
+        : sym.lgetxattr?.(cstr(path), cstr(name), buf, size);
     // The two-step "how big, then read" protocol; a failure carries the errno of the call that failed.
     const read2 = (
       ask: (buf: Buffer | null, size: bigint) => number | bigint | Pointer | undefined,

@@ -5,7 +5,16 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// "shared": the parent made plainport-shared-owner and plainport-shared.lock in this TMPDIR before the run; this run
+// only tries to make them again and works inside the first, so it made none of them and must not be blamed.
 test("makes a temp folder", () => {
+  if (process.env.PLAINPORT_FIXTURE_LEAK === "shared") {
+    expect(() => mkdirSync(join(tmpdir(), "plainport-shared-owner"))).toThrow();
+    expect(() => mkdirSync(join(tmpdir(), "plainport-shared.lock"))).toThrow();
+    mkdirSync(join(tmpdir(), "plainport-shared-owner", "deep", "er"), { recursive: true });
+    mkdirSync(join(tmpdir(), "plainport-shared-owner", "deep"), { recursive: true });
+    return;
+  }
   const mkdir = process.env.PLAINPORT_FIXTURE_LEAK === "mkdir";
   const dir = mkdir ? join(tmpdir(), "plainport-leak-plain") : mkdtempSync(join(tmpdir(), "plainport-leak-"));
   if (mkdir) mkdirSync(dir);

@@ -6,14 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type PlainportPaths, resolvePaths } from "../paths.ts";
 
-const SETTLE_MS = 150;
-
 /**
  * Removes a test folder, also when a detached child of the code under test (an offload's delete) is still writing
- * into it: the removal is repeated until the folder has stayed gone for a whole settle window.
+ * into it: the removal is repeated until the folder has stayed gone for a whole settle window. Only for tests that
+ * start such a child; the wait yields, so in-process work keeps running.
  */
-export const removeSettled = (dir: string): void => {
-  const wait = new Int32Array(new SharedArrayBuffer(4));
+export const removeSettled = async (dir: string, settleMs = 150): Promise<void> => {
   const deadline = Date.now() + 15_000;
   let goneSince: number | undefined;
   while (Date.now() < deadline) {
@@ -23,9 +21,9 @@ export const removeSettled = (dir: string): void => {
     }
     if (!existsSync(dir)) {
       goneSince ??= Date.now();
-      if (Date.now() - goneSince >= SETTLE_MS) return;
+      if (Date.now() - goneSince >= settleMs) return;
     }
-    Atomics.wait(wait, 0, 0, 20);
+    await Bun.sleep(20);
   }
   throw new Error(`could not remove ${dir}`);
 };
@@ -66,6 +64,6 @@ export const makeSandbox = (prefix = "plainport-roots-"): Sandbox => {
       file(join(relative, ".git", "HEAD"), "ref: refs/heads/main\n");
       return join(home, relative);
     },
-    cleanup: () => removeSettled(home),
+    cleanup: () => rmSync(home, { recursive: true, force: true, maxRetries: 3 }),
   };
 };

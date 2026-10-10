@@ -62,7 +62,7 @@ const roundTrip = (label: string, registry: Registry, sandboxed = false) => {
         try {
           run = await capture([...example.argv, "--json"], registry, home && { ports: home.ports });
         } finally {
-          home?.cleanup();
+          await home?.cleanup();
         }
         expect({ argv: example.argv, code: run.code, out: run.code === 0 ? "" : run.out }).toEqual({
           argv: example.argv,
@@ -428,7 +428,7 @@ describe("contract round trip: every command's --json failures match the publish
             expect((await capture(failure.argv, REGISTRY, { ports })).code).toBe(failure.exit);
         } finally {
           unlock();
-          home.cleanup();
+          await home.cleanup();
         }
       }, 30_000);
     }

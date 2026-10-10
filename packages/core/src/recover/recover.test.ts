@@ -56,7 +56,7 @@ import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
 import { testHost } from "../testing/host.ts";
 import { captureTree, invariantViolations, type TreeCapture } from "../testing/invariants.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
-import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
+import { makeSandbox, removeSettled, type Sandbox } from "../testing/sandbox.ts";
 import { ulid } from "../ulid.ts";
 import {
   OFFLOAD_RECOVERY,
@@ -132,11 +132,12 @@ beforeEach(async () => {
   released = undefined;
 });
 
-afterEach(() => {
+afterEach(async () => {
   try {
     chmodSync(join(dir, "src/main.ts"), 0o644);
   } catch {}
-  box.cleanup();
+  // Detached deletes outlive the test that started them and write into the sandbox after it.
+  await removeSettled(box.home);
 });
 
 const env = () => ({ HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" });

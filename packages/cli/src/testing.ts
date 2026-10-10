@@ -268,27 +268,27 @@ export const FAKE_REGISTRY: Registry = [
  */
 export const exampleHome = async (
   options: { afterCreate?: (home: string) => void } = {},
-): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
+): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
   try {
     options.afterCreate?.(home);
     return await setUpExampleHome(home);
   } catch (error) {
-    removeSettled(home);
+    await removeSettled(home);
     throw error;
   }
 };
 
-const setUpExampleHome = async (home: string): Promise<{ home: string; ports: Ports; cleanup(): void }> => {
+const setUpExampleHome = async (
+  home: string,
+): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
   for (const dir of ["work/clients/acme/web", "personal", "Developer/Work"]) {
     mkdirSync(join(home, dir), { recursive: true });
   }
   const git = Bun.spawnSync(["git", "init", "-q", join(home, "work/clients/acme/web")], {
     env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
-  if (git.exitCode !== 0) {
-    throw new Error(`git init failed: ${git.stderr.toString()}`);
-  }
+  if (git.exitCode !== 0) throw new Error(`git init failed: ${git.stderr.toString()}`);
   const ports = sandboxPorts(home);
   const setup = await capture(
     ["init", "--root", "work=~/work", "--store-path", "~/store", "--device", "mbp", "--yes"],
@@ -306,9 +306,7 @@ const setUpExampleHome = async (home: string): Promise<{ home: string; ports: Po
   const apiGit = Bun.spawnSync(["git", "init", "-q", api], {
     env: { PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", ...QUIET_GIT_ENV },
   });
-  if (apiGit.exitCode !== 0) {
-    throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
-  }
+  if (apiGit.exitCode !== 0) throw new Error(`git init failed: ${apiGit.stderr.toString()}`);
   const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
   if (shelved.code !== 0) {
     throw new Error(`example home setup failed: ${shelved.err}`);

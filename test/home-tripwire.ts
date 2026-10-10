@@ -82,6 +82,8 @@ const realHomeKey = canonical(realHome);
 const repoKey = canonical(repoRoot);
 
 const tmp = resolve(originalTmpdir());
+// On macOS the temp directory is a symlink (/var/folders is /private/var/folders); both spellings name it.
+const realTmp = realpathNative(tmp);
 for (const [what, root] of [
   ["the real home", realHomeKey],
   ["the checkout", repoKey],
@@ -274,56 +276,83 @@ for (const name of ["realpath", "realpathSync"]) {
   wrap(fs[name] as Patchable, "native", (args) => guard(`${name}.native`, args[0], false));
 }
 
-// Temp folders this run makes under the temp directory: `plainport-*` ones still there after the last test are a leak.
-// Only this process's own folders are judged, so runs sharing a TMPDIR don't blame each other.
-const madeTemp = new Set<string>();
+// Temp folders this run made under the temp directory: a `plainport-*` one still there after the last test is a
+// leak. Only a folder this run's own call created counts (mkdtemp, or mkdir that succeeded and made the folder
+// itself), and it is remembered with its inode, so a shared folder another process made or owns is never blamed
+// and never removed. Lock folders (`*.lock`, e.g. plainport-hdiutil.lock) are shared between processes by design.
+const madeTemp = new Map<string, string>();
+const statSync = fs.statSync as (path: string) => { dev: number; ino: number };
+const identity = (dir: string): string | undefined => {
+  try {
+    const stat = statSync(dir);
+    return `${stat.dev}:${stat.ino}`;
+  } catch {
+    return undefined;
+  }
+};
+/** The first path segment below the temp directory (under either spelling), if the path is below it. */
+const belowTmp = (path: string): string | undefined => {
+  for (const root of [realTmp, tmp])
+    if (path !== root && path.startsWith(root + sep)) return path.slice(root.length + 1).split(sep)[0];
+  return undefined;
+};
+const remember = (top: string): void => {
+  if (!top.startsWith("plainport-") || top.endsWith(".lock")) return;
+  const dir = join(realTmp, top);
+  const id = identity(dir);
+  if (id !== undefined) madeTemp.set(dir, id);
+};
+/** Called after a mkdir returned without error: the folder is ours only if that call made the top folder itself. */
+const afterMkdir = (path: unknown, options: unknown, result: unknown): void => {
+  const target = toPath(path);
+  if (target === undefined) return;
+  const top = belowTmp(target);
+  if (top === undefined) return;
+  const recursive =
+    typeof options === "object" &&
+    options !== null &&
+    (options as { recursive?: unknown }).recursive === true;
+  const created = recursive ? (typeof result === "string" ? result : undefined) : target;
+  if (created !== undefined && belowTmp(created) === top && created.endsWith(sep + top)) remember(top);
+};
+const afterMkdtemp = (made: unknown): void => {
+  if (typeof made === "string" && belowTmp(made) === basename(made)) remember(basename(made));
+};
 for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
-  for (const variant of ["mkdtemp", "mkdtempSync"]) {
-    const original = target[variant];
-    if (typeof original !== "function") continue;
-    const remember = (made: unknown) => {
-      if (typeof made === "string" && basename(made).startsWith("plainport-") && dirname(made) === tmp)
-        madeTemp.add(made);
-      return made;
-    };
-    const wrapped = function (this: unknown, ...args: unknown[]) {
-      const last = args.at(-1);
-      if (typeof last === "function") {
-        args[args.length - 1] = (error: unknown, made: unknown) => {
-          remember(made);
-          (last as Fn)(error, made);
-        };
-        return (original as Fn).apply(this, args);
-      }
-      const made = (original as Fn).apply(this, args);
-      return made instanceof Promise ? made.then(remember) : remember(made);
-    };
-    Object.assign(wrapped, original);
-    target[variant] = wrapped;
+  for (const [variants, after] of [
+    [["mkdtemp", "mkdtempSync"], (_args: unknown[], made: unknown) => afterMkdtemp(made)],
+    [["mkdir", "mkdirSync"], (args: unknown[], made: unknown) => afterMkdir(args[0], args[1], made)],
+  ] as const) {
+    for (const variant of variants) {
+      const original = target[variant];
+      if (typeof original !== "function") continue;
+      const wrapped = function (this: unknown, ...args: unknown[]) {
+        const last = args.at(-1);
+        if (typeof last === "function") {
+          args[args.length - 1] = (error: unknown, made: unknown) => {
+            if (error == null) after(args.slice(0, -1), made);
+            (last as Fn)(error, made);
+          };
+          return (original as Fn).apply(this, args);
+        }
+        const made = (original as Fn).apply(this, args);
+        if (made instanceof Promise)
+          return made.then((value) => {
+            after(args, value);
+            return value;
+          });
+        after(args, made);
+        return made;
+      };
+      Object.assign(wrapped, original);
+      target[variant] = wrapped;
+    }
   }
 }
 
-// mkdir makes them too: a `plainport-*` folder under the temp directory, or anything inside one, counts.
-for (const target of new Set([fs, fsPromises, fs.promises as Patchable])) {
-  for (const variant of ["mkdir", "mkdirSync"]) {
-    const original = target[variant];
-    if (typeof original !== "function") continue;
-    const wrapped = function (this: unknown, ...args: unknown[]) {
-      const path = toPath(args[0]);
-      if (path !== undefined && isUnder(tmp, path) && path !== tmp) {
-        const first = path.slice(tmp.length + 1).split(sep)[0] as string;
-        if (first.startsWith("plainport-")) madeTemp.add(join(tmp, first));
-      }
-      return (original as Fn).apply(this, args);
-    };
-    Object.assign(wrapped, original);
-    target[variant] = wrapped;
-  }
-}
-
-/** The temp folders this run made and left behind. */
+/** The temp folders this run made and left behind (the same inode as when it made them). */
 export const leakedTempFolders = (): string[] =>
-  [...madeTemp].filter((dir) => (fs.existsSync as (path: string) => boolean)(dir));
+  [...madeTemp].filter(([dir, id]) => identity(dir) === id).map(([dir]) => dir);
 
 // After the last test: a leak fails the run (afterAll throws), and the folders are removed so they don't pile up.
 afterAll(() => {
@@ -331,7 +360,7 @@ afterAll(() => {
   for (const dir of leaked) rmSync(dir, { recursive: true, force: true });
   if (leaked.length > 0)
     throw new Error(
-      `temp folder leak: this run left ${leaked.length} temp folder${leaked.length === 1 ? "" : "s"} in ${tmp} (${leaked
+      `temp folder leak: this run left ${leaked.length} temp folder${leaked.length === 1 ? "" : "s"} in ${realTmp} (${leaked
         .map((dir) => basename(dir))
         .join(", ")}); the test that made each must remove it`,
     );
