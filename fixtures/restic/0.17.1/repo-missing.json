@@ -1,0 +1,13 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/missing",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "snapshots",
+    "--json"
+  ],
+  "exitCode": 10,
+  "stdout": "",
+  "stderr": "Fatal: repository does not exist: unable to open config file: stat /tmp/restic-fixture/missing/config: no such file or directory\nIs there a repository at the following location?\n/tmp/restic-fixture/missing\n"
+}

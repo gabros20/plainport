@@ -72,10 +72,16 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
-      - name: test:t1 (real restic and rclone)
-        run: |
-          bun scripts/fetch-tools.ts
-          bun run test:t1
+      - name: fetch the pinned restic and rclone
+        run: bun scripts/fetch-tools.ts
+      - name: T2 containers (compose.yaml)
+        # ubuntu-24.04 has Docker; GitHub's macOS runners do not, so T2 runs only here (ADR-0018).
+        run: scripts/testenv up
+      - name: test:t2 (T1 real restic and rclone, and the T2 store containers)
+        run: bun run test:t2
+      - name: take the T2 containers down
+        if: always()
+        run: scripts/testenv down
       - run: bun run build
       - name: binary prints its version
         run: |
@@ -87,6 +93,28 @@ jobs:
         run: |
           bun scripts/build.ts --target all
           ls -l dist/plainport-*
+
+  restic-matrix:
+    # engine-restic's T1 suite on every restic plainport supports: 0.17.1, the latest 0.18 and the pin (ADR-0021).
+    # tools.lock.json's `matrix` section holds their checksums; fixtures/restic/<version>/ their recorded output.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        restic: ["0.17.1", "0.18.1", "0.19.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - name: fetch restic ${{ matrix.restic }} (refuses a checksum mismatch)
+        run: bun scripts/fetch-tools.ts --restic ${{ matrix.restic }}
+      - name: engine-restic T1 on restic ${{ matrix.restic }}
+        run: bun test packages/engine-restic
+        env:
+          PLAINPORT_TEST_TIER: "1"
+          PLAINPORT_RESTIC_MATRIX: ${{ matrix.restic }}
 
   version:
     # VERSION, CHANGELOG.md, every `release: X.Y.Z` commit and every v* tag must agree (ADR-0020). It checks the

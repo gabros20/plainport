@@ -1,0 +1,9 @@
+{
+  "args": [
+    "version",
+    "--json"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"version\":\"0.17.1\",\"go_version\":\"go1.23.1\",\"go_os\":\"darwin\",\"go_arch\":\"arm64\"}\n",
+  "stderr": ""
+}

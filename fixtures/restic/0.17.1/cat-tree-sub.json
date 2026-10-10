@@ -1,0 +1,14 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "cat",
+    "tree",
+    "9327ea0f7f54ad0bb53c3cb33b30f2e967120a82984c0814174f97fd3536108e:/sub"
+  ],
+  "exitCode": 0,
+  "stdout": "{\"nodes\":[{\"name\":\"b\",\"type\":\"file\",\"mode\":420,\"mtime\":\"2026-10-10T12:12:41.764414681+02:00\",\"atime\":\"2026-10-10T12:12:41.764414681+02:00\",\"ctime\":\"2026-10-10T12:12:41.764414681+02:00\",\"uid\":501,\"gid\":20,\"user\":\"fixture-user\",\"group\":\"staff\",\"inode\":384848517,\"device_id\":16777229,\"size\":1,\"links\":1,\"extended_attributes\":[{\"name\":\"com.apple.provenance\",\"value\":\"AQIAdnBToLwn3KU=\"}],\"content\":[\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"]},{\"name\":\"odd -\\u003e name\",\"type\":\"symlink\",\"mode\":134218221,\"mtime\":\"2026-10-10T12:12:41.764612307+02:00\",\"atime\":\"2026-10-10T12:12:41.764612307+02:00\",\"ctime\":\"2026-10-10T12:12:41.764642599+02:00\",\"uid\":501,\"gid\":20,\"user\":\"fixture-user\",\"group\":\"staff\",\"inode\":384848521,\"device_id\":16777229,\"links\":1,\"linktarget\":\"x -\\u003e y\",\"extended_attributes\":[{\"name\":\"com.apple.provenance\",\"value\":\"AQIAdnBToLwn3KU=\"}],\"content\":null}]}\n",
+  "stderr": ""
+}

@@ -1,0 +1,13 @@
+{
+  "args": [
+    "--repo",
+    "/tmp/restic-fixture/repo",
+    "--cache-dir",
+    "/tmp/restic-fixture/cache",
+    "snapshots",
+    "--json"
+  ],
+  "exitCode": 0,
+  "stdout": "[{\"time\":\"2026-10-10T12:12:45.27635+02:00\",\"tree\":\"35c4d157262d01f6ad319104c971fb714e355d7247b6cd2c0d2e16f14003b4cd\",\"paths\":[\"/tmp/restic-fixture/src\"],\"hostname\":\"fixture-host\",\"username\":\"fixture-user\",\"uid\":501,\"gid\":20,\"excludes\":[\"/tmp/restic-fixture/src/node_modules\"],\"tags\":[\"plainport\",\"plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD\"],\"program_version\":\"restic 0.17.1\",\"summary\":{\"backup_start\":\"2026-10-10T12:12:45.27635+02:00\",\"backup_end\":\"2026-10-10T12:12:45.986143+02:00\",\"files_new\":2,\"files_changed\":0,\"files_unmodified\":0,\"dirs_new\":1,\"dirs_changed\":0,\"dirs_unmodified\":0,\"data_blobs\":2,\"tree_blobs\":2,\"data_added\":2205,\"data_added_packed\":1130,\"total_files_processed\":2,\"total_bytes_processed\":7},\"id\":\"9327ea0f7f54ad0bb53c3cb33b30f2e967120a82984c0814174f97fd3536108e\",\"short_id\":\"9327ea0f\"},{\"time\":\"2026-10-10T12:12:46.000782+02:00\",\"parent\":\"9327ea0f7f54ad0bb53c3cb33b30f2e967120a82984c0814174f97fd3536108e\",\"tree\":\"21174235b622e178a2e48986c0b49a2c05a8c38fe30752680a730da4f5903240\",\"paths\":[\"/tmp/restic-fixture/src\"],\"hostname\":\"fixture-host\",\"username\":\"fixture-user\",\"uid\":501,\"gid\":20,\"excludes\":[\"/tmp/restic-fixture/src/node_modules\"],\"tags\":[\"plainport\",\"plainport:project=01K6ZB7Q3M8XWJ5N2T4R6Y8VCD\"],\"program_version\":\"restic 0.17.1\",\"summary\":{\"backup_start\":\"2026-10-10T12:12:46.000782+02:00\",\"backup_end\":\"2026-10-10T12:12:46.713637+02:00\",\"files_new\":0,\"files_changed\":0,\"files_unmodified\":1,\"dirs_new\":0,\"dirs_changed\":1,\"dirs_unmodified\":0,\"data_blobs\":0,\"tree_blobs\":2,\"data_added\":1752,\"data_added_packed\":867,\"total_files_processed\":1,\"total_bytes_processed\":6},\"id\":\"c564f45050ddcbcc619ed471288f0d531113b5e5348608da7c21ad38d224132e\",\"short_id\":\"c564f450\"}]\n",
+  "stderr": ""
+}

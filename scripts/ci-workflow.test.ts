@@ -30,12 +30,13 @@ test("checks version consistency", () => {
   expect(runs("version")).toContain("bun run check:version");
 });
 
-test("fetches the pinned tools and runs test:t1 on macOS and Linux", () => {
-  for (const job of ["macos", "linux"]) {
+test("fetches the pinned tools and runs test:t1 on macOS, and test:t2 (T1 and more) on Linux", () => {
+  for (const [job, script] of [
+    ["macos", "bun run test:t1"],
+    ["linux", "bun run test:t2"],
+  ] as const) {
     expect(runs(job)).toContain("bun scripts/fetch-tools.ts\n");
-    expect(runs(job).indexOf("bun scripts/fetch-tools.ts")).toBeLessThan(
-      runs(job).indexOf("bun run test:t1"),
-    );
+    expect(runs(job).indexOf("bun scripts/fetch-tools.ts")).toBeLessThan(runs(job).indexOf(script));
   }
 });
 
@@ -58,4 +59,49 @@ test("both test jobs install npm, pnpm and Yarn Classic, so the real offline ins
       runs(job).indexOf("bun run test"),
     );
   }
+});
+
+type Job = {
+  "runs-on": string;
+  strategy?: { matrix?: Record<string, unknown> };
+  steps: (Step & Record<string, unknown>)[];
+};
+const job = (name: string): Job => (workflow.jobs as unknown as Record<string, Job>)[name] as Job;
+const lock = JSON.parse(readFileSync(join(import.meta.dir, "../tools.lock.json"), "utf8")) as {
+  tools: { restic: { version: string } };
+  matrix: { restic: { version: string }[] };
+};
+
+test("the Linux job brings up the T2 containers, runs test:t2 (which includes T1) and always takes them down", () => {
+  const linux = runs("linux");
+  const up = linux.indexOf("scripts/testenv up");
+  expect(up).toBeGreaterThan(linux.indexOf("bun scripts/fetch-tools.ts"));
+  expect(linux.indexOf("bun run test:t2")).toBeGreaterThan(up);
+  const down = job("linux").steps.find((step) => step.run?.includes("scripts/testenv down"));
+  expect(down?.if).toBe("always()");
+  expect(linux.indexOf("scripts/testenv down")).toBeGreaterThan(linux.indexOf("bun run test:t2"));
+});
+
+test("macOS runs no T2: GitHub's macOS runners have no Docker", () => {
+  expect(runs("macos")).not.toContain("scripts/testenv");
+  expect(runs("macos")).not.toContain("test:t2");
+});
+
+// biome-ignore lint/suspicious/noTemplateCurlyInString: a GitHub Actions expression, not a JS template.
+const MATRIX_RESTIC = "${{ matrix.restic }}";
+
+test("the restic matrix runs engine-restic's T1 suite on 0.17.1, the latest 0.18 and the pinned restic", () => {
+  const matrix = job("restic-matrix");
+  expect(matrix["runs-on"]).toBe("ubuntu-24.04");
+  const versions = matrix.strategy?.matrix?.restic as string[];
+  expect(versions).toEqual([...lock.matrix.restic.map((entry) => entry.version), lock.tools.restic.version]);
+  expect(versions[0]).toBe("0.17.1");
+  expect(versions.some((version) => version.startsWith("0.18."))).toBe(true);
+  // A matrix row that fails does not cancel the others: each version's result is its own.
+  expect((matrix.strategy as { "fail-fast"?: boolean })["fail-fast"]).toBe(false);
+  const steps = runs("restic-matrix");
+  expect(steps).toContain("bun install --frozen-lockfile");
+  expect(steps).toContain(`bun scripts/fetch-tools.ts --restic ${MATRIX_RESTIC}`);
+  const test = matrix.steps.find((step) => step.run?.includes("bun test packages/engine-restic"));
+  expect(test?.env).toEqual({ PLAINPORT_TEST_TIER: "1", PLAINPORT_RESTIC_MATRIX: MATRIX_RESTIC });
 });

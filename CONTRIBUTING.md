@@ -18,6 +18,7 @@ bun install
 bun run typecheck && bun run lint
 bun test              # T0: unit, fakes, in-process crash matrix
 bun run test:t1       # adds real restic and rclone (after `bun scripts/fetch-tools.ts`)
+bun run test:t2       # adds the store containers (after `scripts/testenv up`)
 bun run contract      # regenerates plainport.json, schemas/ and completions/; commit the result (CI runs --check)
 bun run build && ./dist/plainport --version
 ```
@@ -66,6 +67,46 @@ notice; a live one is refused with the exact `rm -r` to run if no install is run
 during one run) loses the restic beside it; the operation stops and `plainport recover` settles it. restic and rclone must match `tools.lock.json` (their pin files); `--tools <dir>` bundles other binaries
 and skips that check. `scripts/install --rollback` makes the previous version current again; `--prefix <dir>`
 replaces `~/.local`. Tests use only temp prefixes.
+
+### Test environments (T2, T3)
+
+Suites are tagged by tier in `test/tiers.ts`: `describeT1` (real binaries), `describeT2` (the store containers) and
+`describeT3` (the real R2 and B2 buckets and the Mac mini, M2 Task 28). `bun run test:t2` sets
+`PLAINPORT_TEST_TIER=2` and `test:t3` sets 3; each tier includes the ones below it. Below its tier a suite is
+skipped; at its tier, a T2 or T3 suite whose environment is missing fails and names the command to run. It never
+skips silently.
+
+`scripts/testenv` brings the T2 environment up and down; never build one by hand.
+
+- `up` starts `compose.yaml`: an S3 store, SFTP (`atmoz/sftp`, one key-only user), `restic/rest-server
+  --append-only` (smoke only, for M3) and Toxiproxy in front of the S3 store and SFTP. Every image is pinned by
+  digest and every port binds to `127.0.0.1` (base 39100). It waits for every health check, reaches each service
+  from the host, directly and through Toxiproxy, and writes `.testenv/` (gitignored, mode 0700): `env.json` with the
+  endpoints and the credentials generated for the run, the SFTP keys, a sandbox `known_hosts` and an ssh config.
+  Suites read it with `loadTestEnv()` from `scripts/testenv.ts`. A second `up` changes nothing and clears every
+  fault. MinIO no longer publishes images, so the S3 store is SeaweedFS, as the M2 plan allows; `minio` still names it.
+- `down` removes the containers, their volumes and network, and `.testenv/`. Running it twice is fine.
+- `status`, `env` (shell exports: `eval "$(scripts/testenv env)"`), and `restart <service>`, which restarts one
+  container without recreating it, for durability tests.
+- `fault <s3|sftp> <profile|clear>`, or `applyProfile()` from a test, applies a named Toxiproxy profile: `cut`
+  (reset both ways), `latency` (250 ms each way), `slow-close` (the close arrives 1.5 s late) and `lost-ack` (the
+  request reaches the store whole, then the client gets a reset instead of the response).
+- `--dir`, `--project` and `--port-base` run a second environment beside the first; the T2 smoke test does that.
+
+Tests run under a sandbox `HOME`, where the docker CLI finds neither its context nor its compose plugin, so `up`
+records both in `env.json` and T2 tests pass them to their children (`dockerEnv()`). GitHub's macOS runners have no
+Docker: CI runs T2 in the `linux` job only.
+
+`scripts/testenv linux [-- <command>]` is the reproducible Linux test recipe: `bun run test:t1` (or the command)
+in the pinned `oven/bun` image of `.bun-version`, with `--init`, as the unprivileged `bun` user, on a copy of the
+checkout without `node_modules`, `.tools` or `.git`. It prints its known gaps first (no git fsmonitor, no Node.js
+package managers, no git history, arm64 on Apple silicon).
+
+**The restic matrix.** CI's `restic-matrix` job runs `engine-restic`'s T1 suite on restic 0.17.1, the latest 0.18
+and the pin. `tools.lock.json`'s `matrix` section holds the older versions' checksums;
+`bun scripts/fetch-tools.ts --restic <version>` fetches one (refusing a mismatch) into
+`.tools/matrix/restic-<version>/`, and `PLAINPORT_RESTIC_MATRIX=<version>` makes the suite use it.
+`bun scripts/record-restic-fixtures.ts --restic <version>` records its fixtures into `fixtures/restic/<version>/`.
 
 ### The crash matrix
 
