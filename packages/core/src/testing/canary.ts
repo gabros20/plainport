@@ -22,14 +22,19 @@ export interface Canary {
    * three alignments a larger envelope can give it, plain and base64url; for a structured secret, each component the
    * same way. Each is long enough not to match by chance. */
   forms: readonly CanaryForm[];
-  /** Every PIECE-character slice of the forms holding at least 8 characters derived from the random bytes (a cut
-   * message keeps any slice, interior ones included), named by its form. Positional: never a slice of the prefix all
-   * canaries of the kind share (`canary_secret_`). Forms added later have no pieces. */
+  /** Every slice of the forms holding enough characters derived from the random bytes to carry PIECE_BITS bits of
+   * them (a cut message keeps any slice, interior ones included), named by its form. A slice is longer where a
+   * character carries less randomness (hex of hex text: 2 bits). Positional: never a slice of the prefix all canaries
+   * of the kind share (`canary_secret_`). Forms added later have no pieces. */
   pieces: readonly CanaryForm[];
 }
 
-/** How long a slice of a planted value must be to count: 48 bits of hex, 72 of base64, never a chance match. */
-export const PIECE = 12;
+/**
+ * How much randomness a slice of a planted value must hold to count. A chance match between two canaries must be
+ * impossible in practice: a test compares at most ~2^29 pairs of slices per run (1000 canary pairs, ~600 pieces and
+ * windows each), so 72 bits make a false hit about 2^-43 (1e-13) per run, whatever the spelling.
+ */
+export const PIECE_BITS = 72;
 
 /**
  * Where a test looks. Each is optional; a test passes what it collected. Each item is searched on its own, and each
@@ -57,7 +62,9 @@ export interface CanaryPlaces {
 
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 const base64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
-const random = (size: number): Uint8Array => crypto.getRandomValues(new Uint8Array(size));
+/** Where a canary's random bytes come from: the system's by default, a test's seeded stream to reproduce a failure. */
+export type RandomSource = (size: number) => Uint8Array;
+const random: RandomSource = (size) => crypto.getRandomValues(new Uint8Array(size));
 
 const base64url = (text: string): string => text.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 
@@ -81,22 +88,26 @@ const withHalves = (name: string, text: string): CanaryForm[] => {
 };
 
 /** A whole spelling, and the index in it where characters that depend on the random bytes begin. */
-type Spelling = CanaryForm & { randomFrom: number };
+type Spelling = CanaryForm & { randomFrom: number; bitsPerChar: number };
 
-/** How many random-derived characters a piece must hold: 32 bits of hex, 42 or more of base64. */
-const MIN_RANDOM = 8;
+/** How many characters of a spelling carrying `bitsPerChar` bits each hold PIECE_BITS (one more for the edge). */
+const randomChars = (bitsPerChar: number): number => Math.ceil(PIECE_BITS / bitsPerChar) + 1;
+/** Fixed characters a piece may start with, where the spelling has a fixed prefix. */
+const FIXED_EDGE = 4;
 
 /**
  * The spellings of some bytes whose first `fixed` bytes are the same in every canary of the kind (the `canary_<label>_`
  * prefix): hex, base64 at each alignment, each base64 also as base64url. randomFrom is where each stops depending on
  * the fixed bytes alone: 2 hex characters a byte; in base64, the first character that holds a random bit.
+ * `bitsPerByte` is the randomness of a random byte: 8, or 4 for the ASCII of a hex digit.
  */
-const spellingsOf = (name: string, bytes: Uint8Array, fixed: number): Spelling[] => {
+const spellingsOf = (name: string, bytes: Uint8Array, fixed: number, bitsPerByte: number): Spelling[] => {
   const firstRandom = (bitOffset: number): number => Math.floor(bitOffset / 6);
   const aligned: Spelling = {
     name: `${name} (base64)`,
     text: base64(bytes),
     randomFrom: firstRandom(8 * fixed),
+    bitsPerChar: (bitsPerByte * 3) / 4,
   };
   const shifted = [1, 2].map(
     (shift): Spelling => ({
@@ -104,10 +115,11 @@ const spellingsOf = (name: string, bytes: Uint8Array, fixed: number): Spelling[]
       text: shiftedBase64(bytes, shift),
       // shiftedBase64 drops the first group of 4 characters.
       randomFrom: Math.max(0, firstRandom(8 * (shift + fixed)) - 4),
+      bitsPerChar: (bitsPerByte * 3) / 4,
     }),
   );
   return [
-    { name: `${name} (hex)`, text: hex(bytes), randomFrom: 2 * fixed },
+    { name: `${name} (hex)`, text: hex(bytes), randomFrom: 2 * fixed, bitsPerChar: bitsPerByte / 2 },
     aligned,
     ...shifted,
     ...[aligned, ...shifted].map((spelling) => ({
@@ -125,15 +137,18 @@ const formsOf = (spellings: readonly Spelling[]): CanaryForm[] =>
   );
 
 /**
- * Every PIECE-character slice of the spellings that holds at least MIN_RANDOM characters derived from the random
- * bytes. The rule is positional, so it is the same for every canary: a slice made mostly of the fixed prefix is never
- * a piece, and two canaries of one label never match each other's pieces but by a 2^-32 chance.
+ * Every slice of the spellings that holds the characters derived from the random bytes that carry PIECE_BITS bits
+ * (and, where the spelling starts with a fixed prefix, up to FIXED_EDGE characters of it). The rule is positional, so
+ * it is the same for every canary: a slice made mostly of the fixed prefix is never a piece, and two canaries of one
+ * label never match each other's pieces but by a chance of about 2^-PIECE_BITS a pair.
  */
 const piecesOf = (spellings: readonly Spelling[]): CanaryForm[] => {
   const pieces = new Map<string, string>();
-  for (const { name, text, randomFrom } of spellings) {
-    for (let at = Math.max(0, randomFrom - (PIECE - MIN_RANDOM)); at + PIECE <= text.length; at++) {
-      const slice = text.slice(at, at + PIECE);
+  for (const { name, text, randomFrom, bitsPerChar } of spellings) {
+    const edge = randomFrom > 0 ? FIXED_EDGE : 0;
+    const length = randomChars(bitsPerChar) + edge;
+    for (let at = Math.max(0, randomFrom - edge); at + length <= text.length; at++) {
+      const slice = text.slice(at, at + length);
       if (!pieces.has(slice)) pieces.set(slice, `${name}, a piece`);
     }
   }
@@ -141,17 +156,18 @@ const piecesOf = (spellings: readonly Spelling[]): CanaryForm[] => {
 };
 
 /**
- * A unique value: one identifier token (`canary_<label>_<32 hex>`), so a parser that quotes the token it stopped at
- * (JSON.parse's "Unexpected identifier") quotes all of it. Its hex and base64 are looked for too.
+ * A unique value: one identifier token (`canary_<label>_<64 hex>`), so a parser that quotes the token it stopped at
+ * (JSON.parse's "Unexpected identifier") quotes all of it. Its hex and base64 are looked for too. The random part is
+ * 256 bits, so even a half of it, or of its hex, is too long to match another canary by chance.
  */
-export const makeCanary = (label = "secret"): Canary => {
+export const makeCanary = (label = "secret", source: RandomSource = random): Canary => {
   if (!/^[A-Za-z0-9]+$/.test(label))
     throw new Error(`makeCanary: the label must be letters and digits, got ${label}`);
   const prefix = `canary_${label}_`;
-  const value = `${prefix}${hex(random(16))}`;
+  const value = `${prefix}${hex(source(32))}`;
   const spellings: Spelling[] = [
-    { name: label, text: value, randomFrom: prefix.length },
-    ...spellingsOf(label, new TextEncoder().encode(value), prefix.length),
+    { name: label, text: value, randomFrom: prefix.length, bitsPerChar: 4 },
+    ...spellingsOf(label, new TextEncoder().encode(value), prefix.length, 4),
   ];
   return { value, forms: formsOf(spellings), pieces: piecesOf(spellings) };
 };
@@ -161,13 +177,13 @@ export const makeCanary = (label = "secret"): Canary => {
  * 16, 16 and 32 random bytes. The value is that JSON; each component is looked for in hex and base64 (every alignment,
  * plain and url), whole, halved and in pieces.
  */
-export const makeMasterKeyCanary = (): Canary => {
-  const parts = { "mac.k": random(16), "mac.r": random(16), encrypt: random(32) };
+export const makeMasterKeyCanary = (source: RandomSource = random): Canary => {
+  const parts = { "mac.k": source(16), "mac.r": source(16), encrypt: source(32) };
   const value = JSON.stringify({
     mac: { k: base64(parts["mac.k"]), r: base64(parts["mac.r"]) },
     encrypt: base64(parts.encrypt),
   });
-  const spellings = Object.entries(parts).flatMap(([name, bytes]) => spellingsOf(name, bytes, 0));
+  const spellings = Object.entries(parts).flatMap(([name, bytes]) => spellingsOf(name, bytes, 0, 8));
   return { value, forms: formsOf(spellings), pieces: piecesOf(spellings) };
 };
 
@@ -305,14 +321,16 @@ export const findCanaries = (canaries: readonly Canary[], places: CanaryPlaces):
   const forms = canaries.flatMap((canary) => canary.forms);
   const pieces = new Map<string, string>();
   for (const canary of canaries) for (const piece of canary.pieces ?? []) pieces.set(piece.text, piece.name);
-  /** The names of the forms and pieces a text holds: whole forms by includes, pieces by one sliding pass. */
+  const lengths = new Set([...pieces.keys()].map((piece) => piece.length));
+  /** The names of the forms and pieces a text holds: whole forms by includes, pieces by one sliding pass a length. */
   const held = (text: string): string[] => {
     const names = new Set<string>();
     for (const form of forms) if (text.includes(form.text)) names.add(form.name);
-    for (let at = 0; at + PIECE <= text.length; at++) {
-      const name = pieces.get(text.slice(at, at + PIECE));
-      if (name !== undefined) names.add(name);
-    }
+    for (const length of lengths)
+      for (let at = 0; at + length <= text.length; at++) {
+        const name = pieces.get(text.slice(at, at + length));
+        if (name !== undefined) names.add(name);
+      }
     return [...names];
   };
   const haystacks: [string, string[]][] = [];
