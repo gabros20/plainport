@@ -79,7 +79,9 @@ export const semanticViolations = async (
       { length: LIST_PROBE_KEYS },
       (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
     );
-    for (const key of keys) await store.put(key, bytes("p"));
+    for (let i = 0; i < keys.length; i += 50) {
+      await Promise.all(keys.slice(i, i + 50).map((key) => store.put(key, bytes("p"))));
+    }
     faults?.settle();
     const listed = await store.list(`${base}page/`);
     if (!listed.ok || listed.value.length !== keys.length) violations.push("listComplete");

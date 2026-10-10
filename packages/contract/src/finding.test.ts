@@ -130,6 +130,12 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.semantics-unknown": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.unreachable": { severity: "block", allowable: false, exitCode: 9, summary: expect.any(String) },
       "stub.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "command.unknown": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },

@@ -38,7 +38,7 @@ import { type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, type OffloadJournal, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import { planOffload } from "../plan/planner.ts";
-import type { BlobStore } from "../ports/blob-store.ts";
+import { type BlobStore, capabilitiesOf, UNKNOWN_SEMANTICS } from "../ports/blob-store.ts";
 import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -218,7 +218,8 @@ const newest = (times: (string | undefined)[]): string | undefined =>
 
 /** A store whose every call fails as `failure` did: the mirror that could not be opened, for loadCatalog. */
 const failingStore = (failure: Failure): BlobStore => ({
-  capabilities: () => ({ createIfAbsent: false, replaceIfMatch: false }),
+  semantics: () => UNKNOWN_SEMANTICS,
+  capabilities: () => capabilitiesOf(UNKNOWN_SEMANTICS),
   get: async () => failure,
   put: async () => failure,
   list: async () => failure,

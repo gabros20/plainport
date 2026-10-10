@@ -599,6 +599,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store's repository password could not be read from its secret reference (env: or file: in M1)",
   },
+  "store.semantics-unknown": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's semantics profile lacks a property this operation needs (read-after-write, whole publication, complete listings, durability…), or does not know it; the message names the property, the operation refuses before writing, and the store stays usable for what its profile allows (Q8)",
+  },
   "store.setup-pending": {
     severity: "warn",
     allowable: false,

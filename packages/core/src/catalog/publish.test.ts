@@ -3,7 +3,6 @@ import fc from "fast-check";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { semanticBlobStore } from "../testing/semantic-blob-store.ts";
-import { ulid } from "../ulid.ts";
 import {
   type Election,
   type ElectionOutcome,
@@ -117,10 +116,17 @@ describe("publish: an event is published whole", () => {
   test("a lost acknowledgement whose read-back also fails is retried by reading first: one event", async () => {
     const store = semanticBlobStore();
     store.loseAckNext("put");
-    store.failNext("get");
-    store.failNext("get");
+    // The read after the failed put fails too: the publisher cannot tell, so the write may have landed.
+    const flaky: BlobStore = {
+      ...store,
+      put: async (key, data, opts) => {
+        const put = await store.put(key, data, opts);
+        store.failNext("get");
+        return put;
+      },
+    };
     const input = { key: EVENT_KEY, data: bytes("e1"), op: OP, sameEvent: sameBytes };
-    expect(await publishEvent(store, input)).toMatchObject({ ok: false });
+    expect(await publishEvent(flaky, input)).toMatchObject({ ok: false, mayLand: true });
     expect(await publishEvent(store, input)).toEqual({ ok: true, value: { written: false } });
     expect(store.calls.put).toBe(1);
     expect(keysOf(store, "meta/v1/events/")).toEqual([EVENT_KEY]);
@@ -319,8 +325,7 @@ describe("publish: the elected publication", () => {
             const store = scheduled(inner, s);
             const ids = Array.from({ length: n }, (_, i) => `C${i}`);
             const running = Promise.all(ids.map((id) => elect(store, election(id))));
-            await s.waitAll();
-            const results = await running;
+            const results = await s.waitFor(running);
             const outcomes = results.flatMap((r) => (r.ok ? [r.value] : []));
             const won = ids.filter(
               (_, i) => results[i]?.ok && (results[i] as { value: ElectionOutcome }).value.outcome === "won",
@@ -336,7 +341,7 @@ describe("publish: the elected publication", () => {
             // A published value always names a claimant, and only one ever is.
             if (winner !== undefined) expect(ids).toContain(winner);
           }),
-          { numRuns: 200 },
+          { numRuns: 300 },
         );
       });
     }
