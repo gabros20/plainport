@@ -10,6 +10,7 @@ import {
   type HostPorts,
   nodeLocalIo,
   posixDeleteTrash,
+  readBootSession,
   runProcess,
   type Spawner,
 } from "@plainport/core";
@@ -55,7 +56,8 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
   const stopping = new AbortController();
   const runs = new Set<Promise<unknown>>();
   const groups = new Set<number>();
-  return {
+  let session: Promise<string | undefined> | undefined;
+  const host: MacosHost = {
     fs: guard === undefined ? nodeLocalIo.fs : guardedFs(nodeLocalIo.fs, guard),
     proc,
     clock: { now: () => new Date(), monotonicMs: () => proc.monotonicMs(), sleep: (ms) => proc.sleep(ms) },
@@ -88,6 +90,10 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
     },
     liveGroups: () => [...groups],
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
+    bootSession: () => {
+      session ??= readBootSession(host, process.platform);
+      return session;
+    },
     deleteTrashDetached: async (trash, journal, device, context) => {
       const self = options.self ?? selfCommand();
       await guard?.checkRun({ command: self[0] as string, args: [trash, journal], cwd: "/", env: {} });
@@ -101,6 +107,7 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
       );
     },
   };
+  return host;
 };
 
 /** The guard for the composition root: the real home a test run names, so a binary a test starts is guarded. */

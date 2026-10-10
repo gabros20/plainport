@@ -5,10 +5,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ok } from "@plainport/contract";
 import { STORE_IDENTITY_KEY } from "./catalog/identity.ts";
 import type { Store } from "./config/schema.ts";
+import type { Scheduler } from "./deadline.ts";
 import type { StoreOpener } from "./ports/store.ts";
-import { readRegistry } from "./registry.ts";
+import { readRegistry, updateRegistry } from "./registry.ts";
 import { checkStorePin, setUpStore } from "./store.ts";
 import { type FakeEngine, fakeEngine } from "./testing/fake-engine.ts";
 import { testHost } from "./testing/host.ts";
@@ -169,6 +171,98 @@ describe("setUpStore on a disk that fails I/O (rule 7)", () => {
       opener,
       mint: () => ulid(),
     });
+
+  /** A fake scheduler whose timers fire at once (AGENTS.md rule 5). */
+  const atOnce: Scheduler = {
+    setTimer: (fire) => {
+      queueMicrotask(fire);
+      return undefined;
+    },
+    clearTimer: () => {},
+  };
+  /** The disk under ~/ssd on a network mount that hangs: every stat, lstat and realpath there never returns. */
+  const hungUnder = (prefix: string) => {
+    const real = testHost();
+    const never =
+      <T>(call: (path: string) => Promise<T>) =>
+      (path: string) =>
+        path.startsWith(prefix) ? new Promise<T>(() => {}) : call(path);
+    return {
+      ...real,
+      fs: {
+        ...real.fs,
+        stat: never(real.fs.stat),
+        lstat: never(real.fs.lstat),
+        realpath: never(real.fs.realpath),
+      },
+    };
+  };
+  const options = {
+    env: { PLAINPORT_STORE_PASSWORD: "pw" },
+    name: "ssd",
+    store: { kind: "local" as const, path: "~/ssd/store" },
+    opener,
+    probe: { scheduler: atOnce },
+  };
+
+  test("a pinned store folder whose stat never returns (a hung network mount, D32) is store.unreachable at the deadline", async () => {
+    const first = await setUpWith(testHost());
+    expect(first.ok ? "set up" : first.finding.message).toBe("set up");
+    const result = await checkStorePin(hungUnder(join(box.home, "ssd")), { ...options, paths: box.paths });
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("did not answer within 10 seconds"),
+    ]);
+  });
+
+  test("a new, unpinned store on a hung mount is store.unreachable at the deadline: resolving its path is bounded too", async () => {
+    const result = await setUpStore(hungUnder(join(box.home, "ssd")), {
+      ...options,
+      paths: box.paths,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining(`resolving ${join(box.home, "ssd/store")} did not answer within 10 seconds`),
+    ]);
+    expect(await pinned()).toBeUndefined();
+  });
+
+  test("a registered project's folder on another hung mount: the message names the overlap check, not the store's path", async () => {
+    const updated = await updateRegistry(testHost(), box.paths, (registry) =>
+      ok({
+        ...registry,
+        projects: {
+          ...registry.projects,
+          [ulid()]: {
+            root: "work",
+            path: "web",
+            override: join(box.home, "nfs/web"),
+            registeredAt: "2026-10-04T12:00:00.000Z",
+          },
+        },
+      }),
+    );
+    expect(updated.ok).toBe(true);
+    // The probes before it answer, so this fake's timers fire after a short real wait rather than at once.
+    const soon: Scheduler = {
+      setTimer: (fire) => setTimeout(fire, 300),
+      clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    };
+    const result = await setUpStore(hungUnder(join(box.home, "nfs")), {
+      ...options,
+      probe: { scheduler: soon },
+      paths: box.paths,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining(
+        "checking store ssd against the registered projects' folders did not answer within 10 seconds",
+      ),
+    ]);
+    expect(await pinned()).toBeUndefined();
+  });
 
   test("a store folder that cannot be looked at is store.unreachable, never an exception", async () => {
     const result = await setUpWith(failing("stat", join(box.home, "ssd/store"), "EIO"));

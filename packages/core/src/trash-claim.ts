@@ -1,15 +1,23 @@
 // A released trash has one deleter at a time (D64): the detached delete (spawner.ts posixDeleteTrash) first writes
-// `<root>/.plainport-trash/<op>.claim` (this device's id, its pid, this host's boot time and when it started), then
-// deletes the trash, the claim and the journal, in that order (D67: a crash between the last two leaves a released
-// journal whose trash is gone, which housekeeping and gc read as finished and close). housekeeping, gc and recover leave a trash alone only
-// while its claim is live: this device's, from this boot, and its pid alive. Anything else is gone and taken over,
-// claim included: another device id (journals are per device, so only this device's delete can claim its trash), an
-// earlier boot, a dead pid, a claim that cannot be read (the trash is committed and released, so a takeover loses no
-// work). A pid reused within one boot keeps a claim live while that process lives (as D63).
+// `<root>/.plainport-trash/<op>.claim.boot` (its pid, start and this host's boot session, Q5 i), then
+// `<op>.claim` (this device's id, its pid, this host's boot time and when it started), then deletes the trash, the
+// claim, the `.claim.boot` and the journal, in that order (D67: a crash between the last two leaves a released journal
+// whose trash is gone, which housekeeping and gc read as finished and close). housekeeping, gc and recover leave a
+// trash alone only while its claim is live: this device's, from this boot, and its pid alive. Anything else is gone and
+// taken over, claim included: another device id (journals are per device, so only this device's delete can claim its
+// trash), an earlier boot, a dead pid, a claim that cannot be read (the trash is committed and released, so a takeover
+// loses no work). A pid reused within one boot keeps a claim live while that process lives (as D63).
+//
+// "From this boot" is boot.ts's fromThisBoot: by the boot session when the `.claim.boot` beside the claim reads and is
+// that claim's (same pid and start) and this host's session can be read, so a clock step cannot make a live claim
+// look an earlier boot's; by M1's boot-time rule otherwise. The session lives in a file of its own so the claim keeps
+// M1's shape: v0.1.1's strict parser reads a claim it cannot parse as gone, and would then run a second deleter.
 
 import { type Finding, FindingSchema } from "@plainport/contract";
 import { z } from "zod";
+import { fromThisBoot } from "./boot.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
+import type { HostPorts } from "./ports/host.ts";
 
 export const TrashClaimSchema = z
   .strictObject({
@@ -27,44 +35,103 @@ export const TrashClaimSchema = z
   });
 export type TrashClaim = z.infer<typeof TrashClaimSchema>;
 
+/** `<root>/.plainport-trash/<op>.claim.boot`: the boot session the claim beside it was written in (Q5 i). */
+export const TrashClaimBootSchema = z
+  .strictObject({
+    v: z.literal(1),
+    /** The claim's pid and startedAt: a `.claim.boot` left by another claim (a rollback's deleter) is not this one's. */
+    pid: z.int().positive(),
+    startedAt: z.iso.datetime(),
+    /** HostPorts.bootSession when the claim was written. */
+    session: z.string().min(1),
+  })
+  .meta({
+    title: "TrashClaimBoot",
+    description:
+      "<root>/.plainport-trash/<op>.claim.boot: the boot session of the claim beside it, written before the claim (Q5 i)",
+  });
+export type TrashClaimBoot = z.infer<typeof TrashClaimBootSchema>;
+
 /** The claim file of a trash folder (`<root>/.plainport-trash/<op>`). */
 export const trashClaimFile = (trash: string): string => `${trash}.claim`;
 
-/** Boot times computed at different moments differ by the clock's drift against uptime; a reboot moves it far more. */
-const SAME_BOOT_MS = 120_000;
+/** The boot session file beside the claim. */
+export const trashClaimBootFile = (trash: string): string => `${trash}.claim.boot`;
 
-/** Whether the trash is claimed by a live deleter on this device: `live`, `gone` (taken over), or `none`. */
-export const trashClaim = async (
-  io: LocalIo,
+/** Every file a claim on `trash` may leave: the claim, its `.claim.boot`, and the `.claim.tmp` a delete killed while claiming left. */
+export const trashClaimFiles = (trash: string): string[] => [
+  trashClaimFile(trash),
+  trashClaimBootFile(trash),
+  `${trashClaimFile(trash)}.tmp`,
+];
+
+/**
+ * What reads a claim: the files, this process's view of pids and the boot time, and this host's boot session (a host
+ * port's; one that cannot read a session returns undefined, and M1's rule decides).
+ */
+export type ClaimIo = LocalIo & Pick<HostPorts, "bootSession">;
+
+/**
+ * Parsed JSON of `path`: not found when it is not there; found without a value when it does not parse or cannot be
+ * read (another system error). Anything else is a bug and is thrown (AGENTS.md rule 7): a bug never reads as a claim
+ * that is gone, which another deleter would take over.
+ */
+const readJson = async (io: LocalIo, path: string): Promise<{ found: boolean; value?: unknown }> => {
+  try {
+    return { found: true, value: JSON.parse(await io.fs.readText(path)) };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { found: true };
+    return { found: systemErrorCode(error) !== "ENOENT" };
+  }
+};
+
+/** The state of the claim written at `file` (the claim, or a `.claim.tmp`) on `trash`; see trashClaim. */
+export const claimAt = async (
+  io: ClaimIo,
+  file: string,
   trash: string,
   device: string,
 ): Promise<{ state: "none" | "live" | "gone"; claim?: TrashClaim }> => {
-  let text: string;
-  try {
-    text = await io.fs.readText(trashClaimFile(trash));
-  } catch (error) {
-    if (systemErrorCode(error) === "ENOENT") return { state: "none" };
-    return { state: "gone" };
-  }
-  let claim: TrashClaim;
-  try {
-    const parsed = TrashClaimSchema.safeParse(JSON.parse(text));
-    if (!parsed.success) return { state: "gone" };
-    claim = parsed.data;
-  } catch {
-    return { state: "gone" };
-  }
+  const read = await readJson(io, file);
+  if (!read.found) return { state: "none" };
+  const parsed = TrashClaimSchema.safeParse(read.value);
+  if (!parsed.success) return { state: "gone" };
+  const claim = parsed.data;
   if (claim.device !== device) return { state: "gone", claim };
-  if (Math.abs(claim.bootedAt - io.proc.bootedAtMs()) > SAME_BOOT_MS) return { state: "gone", claim };
+  const boot = TrashClaimBootSchema.safeParse((await readJson(io, trashClaimBootFile(trash))).value);
+  const session =
+    boot.success && boot.data.pid === claim.pid && boot.data.startedAt === claim.startedAt
+      ? boot.data.session
+      : undefined;
+  const now = session === undefined ? undefined : await io.bootSession();
+  if (
+    !fromThisBoot(io.proc, { bootedAt: claim.bootedAt, ...(session === undefined ? {} : { session }) }, now)
+  )
+    return { state: "gone", claim };
   return { state: (await io.proc.isAlive(claim.pid)) ? "live" : "gone", claim };
 };
 
+/** Whether the trash is claimed by a live deleter on this device: `live`, `gone` (taken over), or `none`. */
+export const trashClaim = (
+  io: ClaimIo,
+  trash: string,
+  device: string,
+): Promise<{ state: "none" | "live" | "gone"; claim?: TrashClaim }> =>
+  claimAt(io, trashClaimFile(trash), trash, device);
+
 /** The JSON Schema of the trash claim, published in schemas/ by `bun run contract`. */
-export const trashClaimJsonSchemas = (): Record<"trash-claim", Record<string, unknown>> => ({
+export const trashClaimJsonSchemas = (): Record<
+  "trash-claim" | "trash-claim-boot",
+  Record<string, unknown>
+> => ({
   "trash-claim": z.toJSONSchema(TrashClaimSchema, { target: "draft-2020-12", io: "input" }) as Record<
     string,
     unknown
   >,
+  "trash-claim-boot": z.toJSONSchema(TrashClaimBootSchema, {
+    target: "draft-2020-12",
+    io: "input",
+  }) as Record<string, unknown>,
 });
 
 /**

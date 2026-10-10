@@ -1,10 +1,11 @@
 // An offload's snapshot (DESIGN.md "Offload process" step 6): restic backs the folder up with the strip set as
-// excludes, the previous snapshot as its parent and plainport's tags, journaled before (snapshot.start) and after
-// (snapshot.done, the restic id added to `attempts`). Restic's exit 3 is never a partial success (D28): the snapshot
+// excludes, the previous snapshot as its parent and plainport's tags (the folder's mode among them, Q5 ii),
+// journaled before (snapshot.start) and after (snapshot.done, the restic id added to `attempts`). Restic's exit 3 is never a partial success (D28): the snapshot
 // it wrote anyway is journaled and named by a snapshot-discarded event, so it can never become a head.
 
 import type { Failure, Result } from "@plainport/contract";
 import { ok } from "@plainport/contract";
+import { rootModeTag } from "../catalog/head.ts";
 import { appendEvent, type EventLog } from "../catalog/log.ts";
 import type { OffloadJournal } from "../journal/index.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
@@ -22,6 +23,8 @@ export interface SnapshotRequest {
   excludes: readonly string[];
   /** The restic id of the snapshot this one follows. */
   parent?: string;
+  /** The project folder's own mode, tagged so an onload whose event cannot be read still has it (Q5 ii). */
+  rootMode?: number;
   ctx: RunContext;
   /** The failure a cancelled snapshot reports. */
   cancelled(): Failure;
@@ -45,6 +48,7 @@ export const takeSnapshot = async (req: SnapshotRequest): Promise<Result<string>
         `plainport:path=${project.path}`,
         `plainport:op=${op}`,
         "plainport:kind=offload",
+        ...(req.rootMode === undefined ? [] : [rootModeTag(req.rootMode)]),
       ],
     },
     req.ctx,

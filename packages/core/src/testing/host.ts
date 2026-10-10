@@ -5,6 +5,7 @@
 
 import { userInfo } from "node:os";
 import { resolve } from "node:path";
+import { readBootSession } from "../boot.ts";
 import { type GuardPolicy, guardedFs, PathGuard } from "../guard.ts";
 import { nodeLocalIo } from "../node-io.ts";
 import { type FaultPlan, faultSeam, type HostPorts } from "../ports/host.ts";
@@ -32,7 +33,8 @@ export const childGuardEnv = (): Record<string, string> => ({
 export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
   const guard = new PathGuard(testGuard());
   const { proc } = nodeLocalIo;
-  return {
+  let session: Promise<string | undefined> | undefined;
+  const host: HostPorts = {
     fs: guardedFs(nodeLocalIo.fs, guard),
     proc,
     clock: { now: () => new Date(), monotonicMs: () => proc.monotonicMs(), sleep: (ms) => proc.sleep(ms) },
@@ -41,6 +43,10 @@ export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
       return runProcess(posixSpawner, spec);
     },
     faultAt: faultSeam(options.faults, () => process.kill(process.pid, "SIGKILL")),
+    bootSession: () => {
+      session ??= readBootSession(host, process.platform);
+      return session;
+    },
     deleteTrashDetached: async (trash, journal, device, context) => {
       await guard.checkRun({ command: SELF[0] as string, args: [trash, journal], cwd: "/", env: {} });
       return posixDeleteTrash({ fs: guardedFs(nodeLocalIo.fs, guard), proc }, trash, journal, device, {
@@ -50,4 +56,5 @@ export const testHost = (options: { faults?: FaultPlan } = {}): HostPorts => {
       });
     },
   };
+  return host;
 };

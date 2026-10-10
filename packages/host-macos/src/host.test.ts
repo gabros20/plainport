@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { finding } from "@plainport/contract";
 import { acquireLock, InjectedFault, nodeLocalIo } from "@plainport/core";
 import { macOnlyTests } from "../../../test/platform.ts";
-import { createMacosHost } from "./index.ts";
+import { createMacosHost, posixSpawner } from "./index.ts";
 import { testHost } from "./testing.ts";
 
 /** Tests that need the real macOS tools; skipped on Linux, counted on a Mac (test/platform.ts). */
@@ -156,5 +156,25 @@ describe("host: faultAt", () => {
       ok: true,
       value: { exitCode: null, signal: "SIGKILL", stdout: { text: "before\n" } },
     });
+  });
+});
+
+describe("host: the boot session (Q5 i)", () => {
+  testOnMac("is read once per host, through the runner, and kept", async () => {
+    const started: string[] = [];
+    const host = createMacosHost({
+      spawner: {
+        spawn: (request) => {
+          started.push([request.command, ...request.args].join(" "));
+          return posixSpawner.spawn(request);
+        },
+        signalGroup: (group, signal) => posixSpawner.signalGroup(group, signal),
+      },
+    });
+    const [first, second] = await Promise.all([host.bootSession(), host.bootSession()]);
+    const third = await host.bootSession();
+    expect(first).toMatch(/^[0-9A-Fa-f-]{16,64}$/);
+    expect([second, third]).toEqual([first, first]);
+    expect(started).toEqual(["/usr/sbin/sysctl -n kern.bootsessionuuid"]);
   });
 });
