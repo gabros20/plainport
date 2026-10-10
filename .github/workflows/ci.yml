@@ -19,6 +19,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -54,6 +55,8 @@ jobs:
 
   linux:
     runs-on: ubuntu-24.04
+    # T2 waits on Docker; a wedged daemon or a stalled pull must not hold the runner for GitHub's 6-hour default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -79,6 +82,9 @@ jobs:
         run: scripts/testenv up
       - name: test:t2 (T1 real restic and rclone, and the T2 store containers)
         run: bun run test:t2
+      - name: T2 container logs
+        if: failure()
+        run: scripts/testenv logs
       - name: take the T2 containers down
         if: always()
         run: scripts/testenv down
@@ -99,9 +105,12 @@ jobs:
     # later since run decision D93).
     # tools.lock.json's `matrix` section holds their checksums; fixtures/restic/<version>/ their recorded output.
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        # 0.19.1 is the pin, which the linux job's test:t2 also covers; its row here documents the pin beside the
+        # older versions, so the matrix states every restic plainport supports.
         restic: ["0.18.1", "0.19.1"]
     steps:
       - uses: actions/checkout@v4
@@ -122,6 +131,7 @@ jobs:
     # whole history, so the release commit is covered even when the next -dev commit is pushed with it, and a
     # tag push is checked against VERSION at the tagged commit.
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -134,6 +144,7 @@ jobs:
   secrets:
     # gitleaks over the whole history, from the same pinned Docker image `bun run secrets` uses locally.
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

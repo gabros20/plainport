@@ -81,7 +81,7 @@ skips silently. A T2 environment must also be live: the gate checks, with one `d
 
 - `up` starts `compose.yaml`: an S3 store, SFTP (`atmoz/sftp`, one key-only user), `restic/rest-server
   --append-only` (smoke only, for M3) and Toxiproxy in front of the S3 store and SFTP. Every image is pinned by
-  digest and every port binds to `127.0.0.1` (base 39100). It waits for every health check, reaches each service
+  digest and every port binds to `127.0.0.1`. It waits for every health check, reaches each service
   from the host, directly and through Toxiproxy, and writes `.testenv/` (gitignored, mode 0700): `env.json` with the
   endpoints and the credentials generated for the run, the SFTP keys, a sandbox `known_hosts` and an ssh config.
   Suites read it with `loadTestEnv()` from `scripts/testenv.ts`. A second `up` changes nothing and clears every
@@ -94,8 +94,16 @@ skips silently. A T2 environment must also be live: the gate checks, with one `d
   (reset both ways), `latency` (250 ms each way), `slow-close` (the close arrives 1.5 s late) and `lost-ack` (the
   request reaches the store whole, then the client gets a reset instead of the response; meaningful on the S3
   proxy only, since on SFTP the server speaks first and the reset lands in the SSH handshake, like `cut`).
-- `--dir`, `--project` and `--port-base` run a second environment beside the first; the T2 smoke test does that.
-  `PLAINPORT_TESTENV_DIR` and `PLAINPORT_TESTENV_PROJECT` set the default folder and project.
+- One environment per checkout: the default project (`plainport-testenv-<hash>`) and port base (30000 to 58900)
+  come from a hash of the checkout's path, so worktrees running T2 at once never share containers or ports. `up` and
+  `down` refuse a project whose containers another checkout started (compose's `working_dir` label).
+- `--dir`, `--project` and `--port-base` run a second environment beside the first; the T2 smoke test does that,
+  on a port base taken from its pid. `PLAINPORT_TESTENV_DIR` and `PLAINPORT_TESTENV_PROJECT` set the default folder
+  and project.
+- `logs` prints the last 200 lines of each container's log; CI runs it when a T2 step failed, before `down`.
+- Every child testenv starts has a deadline (15 minutes for `compose up`, which may pull images; 10 s for the T2
+  gate's `docker inspect`), and CI's jobs have `timeout-minutes`, so a wedged Docker fails a run instead of
+  hanging it.
 
 Tests run under a sandbox `HOME`, where the docker CLI finds neither its context nor its compose plugin, so `up`
 records both in `env.json` and T2 tests pass them to their children (`dockerEnv()`). GitHub's macOS runners have no

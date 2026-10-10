@@ -1,7 +1,8 @@
 # The T2 store containers (ADR-0018 "Environments as code"). Run them only through `scripts/testenv`, which
 # generates the credentials and keys for the run in .testenv/, passes them in, waits for every health check and
-# sets up Toxiproxy. Every image is pinned by digest and every port binds to 127.0.0.1. Ports come from one base
-# (default 39100), so a second environment can run beside the first (scripts/testenv.ts portsFor).
+# sets up Toxiproxy. Every image is pinned by digest and every port binds to 127.0.0.1. Ports come from one base,
+# by default derived from the checkout's path, so worktrees never collide (scripts/testenv.ts defaultsFor, portsFor).
+# testenv always passes every port; the :-defaults below only let compose parse the file without it.
 #
 # The S3 store is SeaweedFS: MinIO no longer publishes images (Docker Hub and Quay refuse the pull, 2026-10-10),
 # and the M2 plan names SeaweedFS as the fallback. `scripts/testenv restart minio` still names it.

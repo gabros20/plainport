@@ -19,20 +19,33 @@ import {
 } from "./testenv.ts";
 
 const TIMEOUT = 240_000;
+/** `up` pulls images on a first run: its own deadline for compose up is 15 minutes. */
+const UP_TIMEOUT = 960_000;
 const script = join(import.meta.dir, "testenv.ts");
+// Below the per-checkout bases (30000 to 58900), and per process, so two worktrees' smoke tests never share ports.
+const PORT_BASE = 20_000 + (process.pid % 90) * 100;
 
 describeT2("testenv: the T2 environment", () => {
   let scratch: string;
   let dir: string;
-  let env: TestEnv;
+  let env: TestEnv | undefined;
+  let first: { exitCode: number | null; stdout: string; stderr: string };
+  /** The environment the first `up` brought up; a test after a failed `up` names that failure, not a TypeError. */
+  const ready = (): TestEnv => {
+    if (env === undefined)
+      throw new Error(`scripts/testenv up failed (exit ${first?.exitCode}): ${first?.stderr}`);
+    return env;
+  };
   let dockerEnv: Record<string, string>;
   const project = `plainport-testenv-smoke-${process.pid}`;
 
   const testenv = (...args: string[]) => {
     const child = Bun.spawnSync(
-      ["bun", script, ...args, "--dir", dir, "--project", project, "--port-base", "39300"],
-      { env: { ...process.env, ...dockerEnv }, stdout: "pipe", stderr: "pipe" },
+      ["bun", script, ...args, "--dir", dir, "--project", project, "--port-base", String(PORT_BASE)],
+      { env: { ...process.env, ...dockerEnv }, stdout: "pipe", stderr: "pipe", timeout: UP_TIMEOUT },
     );
+    if (child.exitedDueToTimeout)
+      throw new Error(`scripts/testenv ${args[0]} did not finish within ${UP_TIMEOUT / 1000} s`);
     return { exitCode: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
   };
   const docker = (...args: string[]) =>
@@ -40,11 +53,12 @@ describeT2("testenv: the T2 environment", () => {
       env: { ...process.env, ...dockerEnv },
       stdout: "pipe",
       stderr: "pipe",
+      timeout: 30_000,
     })
       .stdout.toString()
       .trim();
 
-  const s3 = (endpoint: string) =>
+  const s3 = (endpoint: string, env = ready()) =>
     new Bun.S3Client({
       endpoint,
       bucket: env.s3.bucket,
@@ -63,7 +77,8 @@ describeT2("testenv: the T2 environment", () => {
   const sftp = (alias: string, commands: string) => {
     const batch = join(scratch, "batch");
     writeFileSync(batch, `${commands}\n`);
-    const child = Bun.spawnSync(["sftp", "-F", env.sftp.sshConfig, "-b", batch, alias], {
+    const child = Bun.spawnSync(["sftp", "-F", ready().sftp.sshConfig, "-b", batch, alias], {
+      timeout: 60_000,
       stdout: "pipe",
       stderr: "pipe",
       cwd: scratch,
@@ -76,7 +91,9 @@ describeT2("testenv: the T2 environment", () => {
     dockerEnv = testenvDockerEnv(shared);
     scratch = mkdtempSync(join(tmpdir(), "plainport-testenv-smoke-"));
     dir = join(scratch, "testenv");
-  });
+    first = testenv("up");
+    if (first.exitCode === 0) env = loadTestEnv(dir);
+  }, UP_TIMEOUT);
   afterAll(() => {
     // Whatever happened above, leave no container, volume or network behind.
     testenv("down");
@@ -86,17 +103,18 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "up is health-checked and idempotent, and writes endpoints, run credentials and a sandbox ssh setup",
     () => {
-      const first = testenv("up");
       expect(first).toMatchObject({ exitCode: 0 });
-      env = loadTestEnv(dir);
+      const env = ready();
       expect(env.project).toBe(project);
       expect(env.containers).toHaveLength(4);
-      expect(env.s3.endpoint).toBe("http://127.0.0.1:39300");
+      expect(env.s3.endpoint).toBe(`http://127.0.0.1:${PORT_BASE}`);
       expect(env.s3.accessKeyId).toMatch(/^[A-Z0-9]{20}$/);
       for (const file of ["env.json", "ssh/config", "ssh/known_hosts", "ssh/id_ed25519", "rest.htpasswd"]) {
         expect(existsSync(join(dir, file))).toBe(true);
       }
-      expect(readFileSync(join(dir, "ssh/known_hosts"), "utf8")).toContain("[127.0.0.1]:39322 ssh-ed25519 ");
+      expect(readFileSync(join(dir, "ssh/known_hosts"), "utf8")).toContain(
+        `[127.0.0.1]:${PORT_BASE + 22} ssh-ed25519 `,
+      );
 
       const before = readFileSync(join(dir, "env.json"), "utf8");
       const second = testenv("up");
@@ -107,7 +125,9 @@ describeT2("testenv: the T2 environment", () => {
       expect(status.exitCode).toBe(0);
       for (const service of ["s3", "sftp", "rest", "toxiproxy"])
         expect(status.stdout).toMatch(new RegExp(`${service}\\s+healthy`));
-      expect(testenv("env").stdout).toContain("export PLAINPORT_T2_S3_ENDPOINT='http://127.0.0.1:39300'");
+      expect(testenv("env").stdout).toContain(
+        `export PLAINPORT_T2_S3_ENDPOINT='http://127.0.0.1:${PORT_BASE}'`,
+      );
     },
     TIMEOUT,
   );
@@ -115,6 +135,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "every service answers, directly and through Toxiproxy, and refuses the unauthenticated",
     async () => {
+      const env = ready();
       for (const endpoint of [env.s3.endpoint, env.s3.proxied]) {
         await s3(endpoint).write(`reach/${endpoint.split(":").at(-1)}`, "hello");
         expect(
@@ -123,7 +144,7 @@ describeT2("testenv: the T2 environment", () => {
             .text(),
         ).toBe("hello");
       }
-      expect(await outcome(fetch(`${env.s3.endpoint}/${env.s3.bucket}/reach/39300`))).toBe(403);
+      expect(await outcome(fetch(`${env.s3.endpoint}/${env.s3.bucket}/reach/${PORT_BASE}`))).toBe(403);
 
       writeFileSync(join(scratch, "upload.txt"), "over sftp\n");
       for (const alias of [env.sftp.alias, env.sftp.proxiedAlias]) {
@@ -147,7 +168,7 @@ describeT2("testenv: the T2 environment", () => {
           "/dev/null",
           env.sftp.alias,
         ],
-        { stdout: "pipe", stderr: "pipe" },
+        { stdout: "pipe", stderr: "pipe", timeout: 60_000 },
       );
       expect(password.exitCode).not.toBe(0);
       expect(password.stderr.toString()).toContain("Permission denied");
@@ -177,6 +198,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "cut resets S3 and SFTP connections both ways, and clearing it restores them",
     async () => {
+      const env = ready();
       await applyProfile(env, "s3", "cut");
       await applyProfile(env, "sftp", "cut");
       expect(await outcome(fetch(`${env.s3.proxied}/`))).toBe("ECONNRESET");
@@ -195,6 +217,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "latency slows every request by its delay both ways",
     async () => {
+      const env = ready();
       const delay = PROFILES.latency.reduce((sum, toxic) => sum + Number(toxic.attributes.latency), 0);
       await applyProfile(env, "s3", "latency");
       const started = performance.now();
@@ -208,6 +231,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "slow-close holds the connection open after the server closed it",
     async () => {
+      const env = ready();
       const delay = Number(PROFILES["slow-close"][0]?.attributes.delay);
       await applyProfile(env, "s3", "slow-close");
       const port = Number(new URL(env.s3.proxied).port);
@@ -234,6 +258,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "lost-ack: the request reaches the store whole while the client sees a reset",
     async () => {
+      const env = ready();
       await applyProfile(env, "s3", "lost-ack");
       const body = "written, but the client never hears it\n".repeat(100);
       const url = s3(env.s3.proxied).presign("lost-ack/object", { method: "PUT", expiresIn: 300 });
@@ -247,6 +272,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "restart restarts one service and what it stored survives (`minio` names the S3 service)",
     async () => {
+      const env = ready();
       await s3(env.s3.endpoint).write("durable/object", "still here");
       const before = docker(
         "ps",
@@ -281,6 +307,7 @@ describeT2("testenv: the T2 environment", () => {
   test(
     "down is idempotent and leaves no container, volume, network or .testenv folder behind",
     () => {
+      ready();
       const label = `label=com.docker.compose.project=${project}`;
       // The images' anonymous volumes carry no compose label, so they are named before `down`.
       const containers = docker("ps", "-aq", "--filter", label).split("\n").filter(Boolean);

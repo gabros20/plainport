@@ -105,3 +105,20 @@ test("the restic matrix runs engine-restic's T1 suite on the latest 0.18 and the
   const test = matrix.steps.find((step) => step.run?.includes("bun test packages/engine-restic"));
   expect(test?.env).toEqual({ PLAINPORT_TEST_TIER: "1", PLAINPORT_RESTIC_MATRIX: MATRIX_RESTIC });
 });
+
+test("every job has a timeout, so a wedged Docker or a stalled pull cannot hold the runner for 6 hours", () => {
+  for (const [name, spec] of Object.entries(
+    workflow.jobs as unknown as Record<string, { "timeout-minutes"?: number }>,
+  )) {
+    expect({ name, timeout: typeof spec["timeout-minutes"] }).toEqual({ name, timeout: "number" });
+    expect(spec["timeout-minutes"]).toBeLessThanOrEqual(60);
+  }
+});
+
+test("a failed T2 run dumps the container logs before the containers are taken down", () => {
+  const steps = job("linux").steps;
+  const logs = steps.findIndex((step) => step.run?.includes("scripts/testenv logs"));
+  expect(logs).toBeGreaterThan(-1);
+  expect(steps[logs]?.if).toBe("failure()");
+  expect(logs).toBeLessThan(steps.findIndex((step) => step.run?.includes("scripts/testenv down")));
+});

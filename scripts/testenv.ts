@@ -7,7 +7,8 @@
 //   keys, a sandbox known_hosts and an ssh config. It is idempotent: a second `up` reuses the credentials and keys,
 //   changes nothing that runs, and clears every fault.
 // - `down` removes the containers, their volumes and network, and .testenv/. Idempotent.
-// - `status` prints each service's health; exit 0 only when all four are healthy.
+// - `status` prints each service's health; exit 0 only when all four are healthy. `logs` prints the last 200 lines
+//   of each container's log (CI runs it when a T2 step failed).
 // - `env` prints the endpoints as shell exports: `eval "$(scripts/testenv env)"`.
 // - `restart <service>` restarts one container (not a recreate: what it stored survives) and waits until it is
 //   healthy again. `minio` names the S3 service.
@@ -16,12 +17,14 @@
 //   oven/bun image, with --init, on a copy of the checkout. LINUX_GAPS lists what it does not reproduce.
 //
 // Options: --dir <dir> (default .testenv/ in the checkout, or PLAINPORT_TESTENV_DIR), --project <name> (default
-// PLAINPORT_TESTENV_PROJECT, else plainport-testenv), --port-base <port> (default 39100). After `up`, the other
-// commands read the project and the ports from <dir>/env.json. The credentials are throwaway values for containers bound to 127.0.0.1; they live in
+// PLAINPORT_TESTENV_PROJECT, else plainport-testenv-<hash of the checkout path>), --port-base <port> (default from
+// the same hash, 30000 to 58900), so worktrees never share an environment. After `up`, the other commands read the
+// project and the ports from <dir>/env.json. `up` and `down` refuse a project whose containers another checkout
+// started. Every child runs with a deadline. The credentials are throwaway values for containers bound to 127.0.0.1; they live in
 // .testenv/ (mode 0700) and in the children's environment, never in argv. Scripts may spawn directly and validate
 // their own dev-only files by hand (run decisions D8 and D10).
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -39,8 +42,22 @@ import { basename, dirname, join, resolve } from "node:path";
 const checkout = resolve(import.meta.dir, "..");
 const composeFile = join(checkout, "compose.yaml");
 
-export const DEFAULT_PROJECT = "plainport-testenv";
-export const DEFAULT_PORT_BASE = 39100;
+/** The default project and port base of one checkout, from a hash of its path. */
+export const defaultsFor = (path: string): { project: string; portBase: number } => {
+  const hash = createHash("sha256").update(path).digest("hex");
+  return {
+    project: `plainport-testenv-${hash.slice(0, 8)}`,
+    portBase: 30_000 + (Number.parseInt(hash.slice(8, 12), 16) % 290) * 100,
+  };
+};
+const defaults = defaultsFor(checkout);
+const defaultProject = (options: Options) =>
+  options.project ?? (process.env.PLAINPORT_TESTENV_PROJECT || defaults.project);
+
+/** The checkouts other than `checkout` that a project's containers were started from (compose's working_dir label). */
+export const foreignCheckouts = (workingDirs: string[], checkout: string): string[] => [
+  ...new Set(workingDirs.filter((dir) => dir !== "" && dir !== checkout)),
+];
 const BUCKET = "plainport-t2";
 const SFTP_USER = "plainport";
 
@@ -234,7 +251,7 @@ export const envLines = (env: TestEnv): string[] =>
 export const applyProfile = async (env: TestEnv, proxy: ProxyName, profile: ProfileName | "clear") => {
   const base = `${env.toxiproxy.api}/proxies/${env.toxiproxy.proxies[proxy]}/toxics`;
   const call = async (url: string, init: RequestInit = {}) => {
-    const response = await fetch(url, init);
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), ...init });
     if (!response.ok) {
       throw new Error(
         `toxiproxy ${init.method ?? "GET"} ${url}: ${response.status} ${await response.text()}`,
@@ -303,14 +320,14 @@ export const linuxCommand = (options: { checkout: string; run: string }): string
 };
 
 export type Command =
-  | { command: "up" | "down" | "status" | "env" }
+  | { command: "up" | "down" | "status" | "env" | "logs" }
   | { command: "restart"; service: Service }
   | { command: "fault"; proxy: ProxyName; profile: ProfileName | "clear" }
   | { command: "linux"; run: string };
 export type Options = { dir?: string; project?: string; portBase?: number };
 
 const USAGE =
-  "usage: scripts/testenv up | down | status | env | restart <service> | fault <s3|sftp> <profile|clear> | " +
+  "usage: scripts/testenv up | down | status | env | logs | restart <service> | fault <s3|sftp> <profile|clear> | " +
   "linux [-- <command>]  [--dir <dir>] [--project <name>] [--port-base <port>]\n" +
   "environment: PLAINPORT_TESTENV_DIR (default --dir), PLAINPORT_TESTENV_PROJECT (default --project)";
 
@@ -348,6 +365,7 @@ export const parseCommand = (
     case "down":
     case "status":
     case "env":
+    case "logs":
       if (operands.length > 0) return fail(`${command} takes no arguments`);
       return { ok: true, command, ...options };
     case "restart": {
@@ -387,45 +405,75 @@ export const parseCommand = (
 
 type Ran = { exitCode: number; stdout: string; stderr: string };
 
-const spawn = (
+/** Runs a child to completion, stopping it at its deadline: a wedged Docker must not hang a run or a CI job. */
+export const runBounded = (
   argv: string[],
-  env: Record<string, string | undefined> = process.env,
-  stdin?: string,
+  options: { env?: Record<string, string | undefined>; stdin?: string; timeoutMs: number },
 ): Ran => {
   const child = Bun.spawnSync(argv, {
     // Bun passes the resolved path as argv[0]; a multi-call binary (OrbStack's docker-compose) needs its own name.
     argv0: basename(argv[0] ?? ""),
-    env,
-    stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
+    env: options.env ?? process.env,
+    stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
     stdout: "pipe",
     stderr: "pipe",
+    timeout: options.timeoutMs,
   });
+  if (child.exitedDueToTimeout) {
+    refuse(
+      `${basename(argv[0] ?? "")} (${argv.slice(1, 3).join(" ")}) did not finish within ` +
+        `${options.timeoutMs / 1000} s; it was stopped`,
+    );
+  }
   return { exitCode: child.exitCode ?? 1, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
 };
 
-class TestenvError extends Error {}
+const spawn = (
+  argv: string[],
+  env: Record<string, string | undefined> = process.env,
+  stdin?: string,
+  timeoutMs = 30_000,
+): Ran => runBounded(argv, { env, timeoutMs, ...(stdin === undefined ? {} : { stdin }) });
+
+export class TestenvError extends Error {}
 const refuse = (message: string): never => {
   throw new TestenvError(message);
 };
 
 const sleep = (ms: number) => Bun.sleep(ms);
-const until = async <T>(
+/**
+ * Retries `attempt` until it returns a value or `timeoutMs` passes. Each attempt gets at most 10 s (its signal aborts
+ * then), so one hung request cannot outlast the deadline. A TestenvError from an attempt is a refusal, not a miss:
+ * it is thrown at once.
+ */
+export const until = async <T>(
   what: string,
   timeoutMs: number,
-  attempt: () => Promise<T | undefined>,
+  attempt: (signal: AbortSignal) => Promise<T | undefined>,
 ): Promise<T> => {
   const deadline = Date.now() + timeoutMs;
   let last = "";
   for (;;) {
+    const budget = Math.max(1, Math.min(deadline - Date.now(), 10_000));
+    const signal = AbortSignal.timeout(budget);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const value = await attempt();
+      const value = await Promise.race([
+        attempt(signal),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer within ${budget / 1000} s`)), budget);
+        }),
+      ]);
       if (value !== undefined) return value;
     } catch (error) {
+      if (error instanceof TestenvError) throw error;
       last = (error as Error).message;
+    } finally {
+      clearTimeout(timer);
     }
-    if (Date.now() > deadline)
+    if (Date.now() >= deadline)
       return refuse(`${what} did not answer within ${timeoutMs / 1000} s${last ? `: ${last}` : ""}`);
-    await sleep(500);
+    await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
   }
 };
 
@@ -484,15 +532,24 @@ const composeBinary = (): string | undefined => {
     '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}',
   ]);
   const path = ran.stdout.trim();
-  if (ran.exitCode !== 0 || !path) return undefined;
-  return lstatSync(path).isSymbolicLink() ? resolve(dirname(path), readlinkSync(path)) : path;
+  return ran.exitCode !== 0 || !path ? undefined : pluginBinary(path);
+};
+
+/** A compose plugin path, a symlink followed one step; undefined when it is missing or dangling. */
+export const pluginBinary = (path: string): string | undefined => {
+  try {
+    const target = lstatSync(path).isSymbolicLink() ? resolve(dirname(path), readlinkSync(path)) : path;
+    return existsSync(target) ? target : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /**
  * Why the environment in `dir` cannot serve T2 suites, or undefined when its containers are all running and healthy.
  * One `docker inspect` of the containers `up` recorded: cheap enough for describeT2 to run once per process.
  */
-export const environmentProblem = (dir: string): string | undefined => {
+export const environmentProblem = (dir: string, timeoutMs = 10_000): string | undefined => {
   let env: TestEnv;
   try {
     env = loadTestEnv(dir);
@@ -504,14 +561,21 @@ export const environmentProblem = (dir: string): string | undefined => {
   }
   let ran: Ran;
   try {
-    ran = spawn(["docker", "inspect", "--format", "{{.State.Health.Status}}", ...env.containers], {
-      ...process.env,
-      ...dockerEnv(env),
+    ran = runBounded(["docker", "inspect", "--format", "{{.State.Health.Status}}", ...env.containers], {
+      env: { ...process.env, ...dockerEnv(env) },
+      timeoutMs,
     });
   } catch (error) {
+    if (error instanceof TestenvError) return `docker did not answer within ${timeoutMs / 1000} s`;
     return `docker could not run: ${(error as Error).message}`;
   }
-  if (ran.exitCode !== 0) return "its containers are gone";
+  if (ran.exitCode !== 0) {
+    const said = ran.stderr
+      .split("\n")
+      .find((line) => line.trim())
+      ?.trim();
+    return `its containers are gone${said ? ` (${said})` : ""}`;
+  }
   const states = ran.stdout.split("\n").filter((line) => line.trim());
   if (states.length !== env.containers.length || states.some((state) => state.trim() !== "healthy")) {
     return `its containers are not all healthy (${states.join(", ") || "no state"})`;
@@ -531,7 +595,7 @@ const composeEnv = (
   credentials: Credentials | undefined,
 ): Record<string, string | undefined> => {
   const f = files(dir);
-  const ports = portsFor(credentials?.portBase ?? DEFAULT_PORT_BASE);
+  const ports = portsFor(credentials?.portBase ?? defaults.portBase);
   // `down`, `ps` and `restart` must interpolate compose.yaml too; without credentials any value will do.
   const placeholder = "unused";
   return {
@@ -550,7 +614,13 @@ const composeEnv = (
   };
 };
 
-const compose = (project: string, dir: string, credentials: Credentials | undefined, args: string[]): Ran => {
+const compose = (
+  project: string,
+  dir: string,
+  credentials: Credentials | undefined,
+  args: string[],
+  timeoutMs = 60_000,
+): Ran => {
   const binary = process.env.PLAINPORT_TESTENV_COMPOSE
     ? [process.env.PLAINPORT_TESTENV_COMPOSE]
     : ["docker", "compose"];
@@ -558,7 +628,33 @@ const compose = (project: string, dir: string, credentials: Credentials | undefi
     // --env-file /dev/null: never read a stray .env in the checkout.
     [...binary, "--project-name", project, "--file", composeFile, "--env-file", "/dev/null", ...args],
     composeEnv(dir, credentials),
+    undefined,
+    timeoutMs,
   );
+};
+
+/** Refuses a project whose containers another checkout started: worktrees must not take over each other's. */
+const refuseForeign = (project: string) => {
+  const ran = spawn([
+    "docker",
+    "ps",
+    "--all",
+    "--filter",
+    `label=com.docker.compose.project=${project}`,
+    "--format",
+    '{{.Label "com.docker.compose.project.working_dir"}}',
+  ]);
+  if (ran.exitCode !== 0) refuse(`docker ps failed: ${ran.stderr.trim()}`);
+  const others = foreignCheckouts(
+    ran.stdout.split("\n").map((line) => line.trim()),
+    checkout,
+  );
+  if (others.length > 0) {
+    refuse(
+      `project ${project} belongs to another checkout (${others.join(", ")}); run testenv there, ` +
+        "or use another --project and --port-base",
+    );
+  }
 };
 
 const readCredentials = (dir: string): Credentials | undefined => {
@@ -603,8 +699,8 @@ const prepare = async (dir: string, options: Options): Promise<Credentials> => {
     if (ran.exitCode !== 0) refuse(`ssh-keygen failed: ${ran.stderr.trim()}`);
   }
   const credentials: Credentials = {
-    project: options.project ?? process.env.PLAINPORT_TESTENV_PROJECT ?? DEFAULT_PROJECT,
-    portBase: options.portBase ?? DEFAULT_PORT_BASE,
+    project: defaultProject(options),
+    portBase: options.portBase ?? defaults.portBase,
     s3: { accessKeyId: randomId(20), secretAccessKey: randomBytes(30).toString("base64url") },
     rest: { password: randomBytes(24).toString("hex") },
   };
@@ -665,8 +761,9 @@ const writeSsh = (env: TestEnv) => {
 
 const populateProxies = async (env: TestEnv) => {
   const body = Object.entries(PROXIES).map(([name, proxy]) => ({ name, ...proxy, enabled: true }));
-  await until("Toxiproxy", 60_000, async () => {
+  await until("Toxiproxy", 60_000, async (signal) => {
     const response = await fetch(`${env.toxiproxy.api}/populate`, {
+      signal,
       method: "POST",
       body: JSON.stringify(body),
       headers: { "Content-Type": "application/json" },
@@ -675,7 +772,10 @@ const populateProxies = async (env: TestEnv) => {
     return true;
   });
   // A clean slate: every proxy enabled, no toxic left from an earlier run.
-  const reset = await fetch(`${env.toxiproxy.api}/reset`, { method: "POST" });
+  const reset = await fetch(`${env.toxiproxy.api}/reset`, {
+    method: "POST",
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!reset.ok) refuse(`toxiproxy reset: ${reset.status}`);
 };
 
@@ -711,15 +811,15 @@ const probe = async (env: TestEnv, services: readonly Service[]) => {
         });
       }
     } else if (service === "rest") {
-      await until("rest-server", 60_000, async () => {
+      await until("rest-server", 60_000, async (signal) => {
         const auth = `Basic ${btoa(`${env.rest.user}:${env.rest.password}`)}`;
-        const response = await fetch(`${env.rest.url}/`, { headers: { Authorization: auth } });
+        const response = await fetch(`${env.rest.url}/`, { headers: { Authorization: auth }, signal });
         if (response.status === 401) refuse("rest-server refused the run's credentials");
         return true;
       });
     } else {
-      await until("Toxiproxy", 60_000, async () =>
-        (await fetch(`${env.toxiproxy.api}/version`)).ok ? true : undefined,
+      await until("Toxiproxy", 60_000, async (signal) =>
+        (await fetch(`${env.toxiproxy.api}/version`, { signal })).ok ? true : undefined,
       );
     }
   }
@@ -741,7 +841,12 @@ const waitHealthy = async (project: string, dir: string, service: Service) =>
   );
 
 const up = async (dir: string, options: Options) => {
+  // Another checkout's project is refused before anything is written: before new keys are made, or, for an existing
+  // .testenv/, once prepare has checked it is whole (which needs no Docker).
+  const existing = readCredentials(dir);
+  if (existing === undefined) refuseForeign(defaultProject(options));
   const credentials = await prepare(dir, options);
+  if (existing !== undefined) refuseForeign(credentials.project);
   const host = dockerHost();
   const binary = composeBinary();
   const env = describe(dir, credentials, {
@@ -749,14 +854,14 @@ const up = async (dir: string, options: Options) => {
     ...(binary === undefined ? {} : { compose: binary }),
   });
   writeSsh(env);
-  const started = compose(credentials.project, dir, credentials, [
-    "up",
-    "--detach",
-    "--wait",
-    "--wait-timeout",
-    "180",
-    "--remove-orphans",
-  ]);
+  // 15 minutes: a first run pulls about 800 MB of images before the 180 s health wait.
+  const started = compose(
+    credentials.project,
+    dir,
+    credentials,
+    ["up", "--detach", "--wait", "--wait-timeout", "180", "--remove-orphans"],
+    900_000,
+  );
   if (started.exitCode !== 0) {
     refuse(
       `docker compose up failed:\n${started.stderr.trim()}\nRun \`scripts/testenv down\` and try again.`,
@@ -780,8 +885,8 @@ const up = async (dir: string, options: Options) => {
 
 const down = (dir: string, options: Options) => {
   const credentials = readCredentials(dir);
-  const project =
-    credentials?.project ?? options.project ?? process.env.PLAINPORT_TESTENV_PROJECT ?? DEFAULT_PROJECT;
+  const project = credentials?.project ?? defaultProject(options);
+  refuseForeign(project);
   const f = files(dir);
   // Refuse before stopping anything: a refusal after `compose down` would leave an env.json that describes
   // containers that are gone.
@@ -799,7 +904,13 @@ const down = (dir: string, options: Options) => {
     // env.json first, so no suite takes the environment for up while it goes down.
     if (existsSync(f.env)) unlinkSync(f.env);
   }
-  const ran = compose(project, dir, credentials, ["down", "--volumes", "--remove-orphans", "--timeout", "5"]);
+  const ran = compose(
+    project,
+    dir,
+    credentials,
+    ["down", "--volumes", "--remove-orphans", "--timeout", "5"],
+    120_000,
+  );
   if (ran.exitCode !== 0) refuse(`docker compose down failed: ${ran.stderr.trim()}`);
   if (existsSync(dir)) {
     for (const name of OWN_FILES.filter((name) => name !== "ssh")) {
@@ -815,11 +926,7 @@ const down = (dir: string, options: Options) => {
 };
 
 const status = (dir: string, options: Options): number => {
-  const project =
-    readCredentials(dir)?.project ??
-    options.project ??
-    process.env.PLAINPORT_TESTENV_PROJECT ??
-    DEFAULT_PROJECT;
+  const project = readCredentials(dir)?.project ?? defaultProject(options);
   const rows = ps(project, dir);
   let healthy = 0;
   for (const service of SERVICES) {
@@ -834,7 +941,7 @@ const status = (dir: string, options: Options): number => {
 const restart = async (dir: string, service: Service) => {
   const env = loadTestEnv(dir);
   const credentials = readCredentials(dir);
-  const ran = compose(env.project, dir, credentials, ["restart", "--timeout", "10", service]);
+  const ran = compose(env.project, dir, credentials, ["restart", "--timeout", "10", service], 120_000);
   if (ran.exitCode !== 0) refuse(`docker compose restart ${service} failed: ${ran.stderr.trim()}`);
   await waitHealthy(env.project, dir, service);
   // Toxiproxy keeps its proxies in memory only.
@@ -862,6 +969,18 @@ const main = async (argv: string[]): Promise<number> => {
     case "env":
       for (const line of envLines(loadTestEnv(dir))) console.log(line);
       return 0;
+    case "logs": {
+      const credentials = readCredentials(dir);
+      const ran = compose(credentials?.project ?? defaultProject(parsed), dir, credentials, [
+        "logs",
+        "--no-color",
+        "--tail",
+        "200",
+      ]);
+      process.stdout.write(ran.stdout);
+      process.stderr.write(ran.stderr);
+      return ran.exitCode;
+    }
     case "restart":
       await restart(dir, parsed.service);
       return 0;
@@ -877,7 +996,10 @@ const main = async (argv: string[]): Promise<number> => {
         stdin: "ignore",
         stdout: "inherit",
         stderr: "inherit",
+        timeout: 3_600_000,
       });
+      if (child.exitedDueToTimeout)
+        refuse("the Linux recipe did not finish within 60 minutes; it was stopped");
       return child.exitCode ?? 1;
     }
   }

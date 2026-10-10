@@ -1,20 +1,36 @@
 // T0: the parts of scripts/testenv.ts that need no Docker. The T2 smoke test (testenv.t2.test.ts) runs the real thing.
 import { describe, expect, test } from "bun:test";
-import { accessSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  defaultsFor,
+  environmentProblem,
   envLines,
+  foreignCheckouts,
   LINUX_GAPS,
   LINUX_IMAGE,
   linuxCommand,
   PROFILES,
   PROXIES,
   parseCommand,
+  pluginBinary,
   portsFor,
+  runBounded,
   serviceName,
   sshConfig,
   type TestEnv,
+  TestenvError,
+  until,
 } from "./testenv.ts";
 
 const checkout = join(import.meta.dir, "..");
@@ -183,12 +199,100 @@ describe("testenv: ports, ssh and env", () => {
   });
 });
 
+describe("testenv: one environment per checkout", () => {
+  test("the default project and port base derive from the checkout path, so worktrees do not share them", () => {
+    const a = defaultsFor("/work/pp-m2-t4");
+    const b = defaultsFor("/work/plainport-main");
+    expect(a).toEqual(defaultsFor("/work/pp-m2-t4"));
+    expect(a.project).toMatch(/^plainport-testenv-[0-9a-f]{8}$/);
+    expect(a.project).not.toBe(b.project);
+    expect(a.portBase).not.toBe(b.portBase);
+    for (const { portBase } of [a, b]) {
+      expect(portBase % 100).toBe(0);
+      expect(portBase).toBeGreaterThanOrEqual(30_000);
+      expect(portBase + 80).toBeLessThan(60_000);
+    }
+  });
+
+  test("containers whose compose working_dir is another checkout are named, so up and down refuse them", () => {
+    expect(foreignCheckouts(["/work/a", "/work/a"], "/work/a")).toEqual([]);
+    expect(foreignCheckouts(["/work/a", "/work/b", "/work/b"], "/work/a")).toEqual(["/work/b"]);
+    expect(foreignCheckouts([], "/work/a")).toEqual([]);
+  });
+});
+
+describe("testenv: deadlines", () => {
+  test("a child that outlives its deadline is stopped and refused with a clear message", () => {
+    const started = performance.now();
+    expect(() => runBounded(["sleep", "5"], { timeoutMs: 200 })).toThrow(
+      "sleep (5) did not finish within 0.2 s",
+    );
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  test("until bounds each attempt, and a refusal inside an attempt is not retried", async () => {
+    const started = performance.now();
+    await expect(until("hung", 400, () => new Promise(() => {}))).rejects.toThrow(
+      "hung did not answer within 0.4 s",
+    );
+    expect(performance.now() - started).toBeLessThan(3_000);
+
+    let attempts = 0;
+    await expect(
+      until("rest-server", 60_000, async () => {
+        attempts++;
+        throw new TestenvError("rest-server refused the run's credentials");
+      }),
+    ).rejects.toThrow("rest-server refused the run's credentials");
+    expect(attempts).toBe(1);
+  });
+
+  test("the compose plugin path: a link is followed one step, a dangling one means plain `docker compose`", () => {
+    const dir = mkdtempSync(join(tmpdir(), "plainport-testenv-plugin-"));
+    try {
+      writeFileSync(join(dir, "docker-tools"), "");
+      symlinkSync("docker-tools", join(dir, "docker-compose"));
+      symlinkSync(join(dir, "gone"), join(dir, "dangling"));
+      expect(pluginBinary(join(dir, "docker-compose"))).toBe(join(dir, "docker-tools"));
+      expect(pluginBinary(join(dir, "docker-tools"))).toBe(join(dir, "docker-tools"));
+      expect(pluginBinary(join(dir, "dangling"))).toBeUndefined();
+      expect(pluginBinary(join(dir, "missing"))).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the T2 gate's probe gives up after its deadline and passes on docker's own error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "plainport-testenv-probe-"));
+    const path = process.env.PATH;
+    try {
+      writeFileSync(
+        join(dir, "env.json"),
+        JSON.stringify({ containers: ["c1", "c2", "c3", "c4"], docker: {} }),
+      );
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      const fake = (script: string) =>
+        writeFileSync(join(bin, "docker"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+      process.env.PATH = `${bin}:${path}`;
+      fake("sleep 5");
+      expect(environmentProblem(dir, 300)).toBe("docker did not answer within 0.3 s");
+      fake("echo 'Error: No such object: c1' >&2; exit 1");
+      expect(environmentProblem(dir, 5_000)).toBe("its containers are gone (Error: No such object: c1)");
+    } finally {
+      process.env.PATH = path;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("testenv: command line", () => {
   test("parses every subcommand and refuses an unknown one", () => {
     expect(parseCommand(["up"])).toMatchObject({ ok: true, command: "up" });
     expect(parseCommand(["down"])).toMatchObject({ ok: true, command: "down" });
     expect(parseCommand(["status"])).toMatchObject({ ok: true, command: "status" });
     expect(parseCommand(["env"])).toMatchObject({ ok: true, command: "env" });
+    expect(parseCommand(["logs"])).toMatchObject({ ok: true, command: "logs" });
     expect(parseCommand(["restart", "minio"])).toMatchObject({ ok: true, command: "restart", service: "s3" });
     expect(parseCommand(["fault", "s3", "lost-ack"])).toMatchObject({
       ok: true,
