@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import { ulid } from "../ulid.ts";
-import { claimStoreRoot, ROOT_CLAIM_KEY } from "./root-claim.ts";
+import { claimStoreRoot, ROOT_CLAIM_KEY, ROOT_CLAIMS_PREFIX } from "./root-claim.ts";
 
 const text = (bytes: Uint8Array | undefined) =>
   bytes === undefined ? undefined : new TextDecoder().decode(bytes);
@@ -33,13 +33,68 @@ describe("the store's root claim (D50)", () => {
     expect(store.calls.put).toBe(puts);
   });
 
-  test("of two roots claiming at once, exactly one wins and both see it", async () => {
+  test("of two roots claiming at once, at most one wins and both agree; with no winner nothing is claimed", async () => {
     const store = memoryBlobStore();
     const [a, b] = [ulid(), ulid()];
     const results = await Promise.all([claimStoreRoot(store, a), claimStoreRoot(store, b)]);
-    const roots = results.map((r) => (r.ok ? r.value.root : "failed"));
-    expect(new Set(roots).size).toBe(1);
-    expect(results.filter((r) => r.ok && r.value.created)).toHaveLength(1);
+    const roots = results.flatMap((r) => (r.ok ? [r.value.root] : []));
+    expect(new Set(roots).size).toBeLessThanOrEqual(1);
+    expect(results.filter((r) => r.ok && r.value.created).length).toBeLessThanOrEqual(1);
+    if (roots.length === 0) {
+      for (const r of results)
+        expect(r.ok ? "" : r.finding.code).toMatch(/^store\.root-claim-(contested|undecided)$/);
+      expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
+    }
+  });
+
+  test("the root claim is the elected publication under meta/v1/root-claims/, the root's id its attempt (Q9)", async () => {
+    const store = memoryBlobStore();
+    const root = ulid();
+    await claimStoreRoot(store, root);
+    expect([...store.data.keys()].filter((k) => k.startsWith(ROOT_CLAIMS_PREFIX)).sort()).toEqual([
+      `${ROOT_CLAIMS_PREFIX}${root}.json`,
+      `${ROOT_CLAIMS_PREFIX}${root}.publishing`,
+    ]);
+    // root.json keeps format 1's shape, so v0.1.1 reads the claim as before.
+    expect(text(store.data.get(ROOT_CLAIM_KEY))).toBe(claimFile(root));
+  });
+
+  const record = (id: string, decision: string) =>
+    new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision })}\n`);
+
+  test("two roots that both stand and both refuse: store.root-claim-contested, nothing claimed, the fix is the quiesced cleanup", async () => {
+    const store = memoryBlobStore();
+    const [a, b] = [ulid(), ulid()];
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.refused`, record(b, "refused"));
+    const result = await claimStoreRoot(store, a, { wait: async () => {} });
+    expect(result.ok ? "" : result.finding.code).toBe("store.root-claim-contested");
+    expect(result.ok ? "" : result.finding.fix).toContain("every device");
+    expect(result.ok ? "" : result.finding.message).toContain(b);
+    expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
+  });
+
+  test("a rival root that has not decided yet: store.root-claim-undecided, re-run later, nothing removed", async () => {
+    const store = memoryBlobStore();
+    const [a, b] = [ulid(), ulid()];
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
+    const result = await claimStoreRoot(store, a, { wait: async () => {} });
+    expect(result.ok ? "" : result.finding.code).toBe("store.root-claim-undecided");
+    expect(result.ok ? "" : result.finding.message).toContain(b);
+    expect(result.ok ? "" : result.finding.fix).toContain("re-run");
+    expect(store.data.has(`${ROOT_CLAIMS_PREFIX}${b}.json`)).toBe(true);
+    // The same root re-run, once the rival publishes, sees the claim and is refused as before (store.root-mismatch).
+    store.data.set(ROOT_CLAIM_KEY, new TextEncoder().encode(claimFile(b)));
+    expect(await claimStoreRoot(store, a)).toEqual({ ok: true, value: { root: b, created: false } });
+  });
+
+  test("a claim v0.1.1 made (root.json with no candidates) holds: another root sees it, and nothing is written", async () => {
+    const store = memoryBlobStore();
+    const old = ulid();
+    store.data.set(ROOT_CLAIM_KEY, new TextEncoder().encode(claimFile(old)));
+    const puts = store.calls.put;
+    expect(await claimStoreRoot(store, ulid())).toEqual({ ok: true, value: { root: old, created: false } });
+    expect(store.calls.put).toBe(puts);
   });
 
   /** A linkless store (D41): a create-only put makes the file empty, waits for `gate`, then writes its bytes. */
@@ -52,7 +107,7 @@ describe("the store's root claim (D50)", () => {
     const puts: string[] = [];
     const put = store.put;
     store.put = async (key, data, opts) => {
-      puts.push(text(data) ?? "");
+      if (key === ROOT_CLAIM_KEY) puts.push(text(data) ?? "");
       if (!opts?.ifNotExists) return put(key, data, opts);
       const made = await put(key, new Uint8Array(), opts);
       if (!made.ok) return made;
