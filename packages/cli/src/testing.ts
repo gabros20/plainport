@@ -264,11 +264,11 @@ export const FAKE_REGISTRY: Registry = [
 /**
  * A sandboxed home where every registry example can run: device mbp set up with root work at ~/work (holding one
  * project, an empty git repository, and a shelved one, work:clients/acme/api), store local, and the folders the
- * examples name (~/personal, ~/Developer/Work). cleanup() removes it.
+ * examples name (~/personal, ~/Developer/Work). cleanup() removes it (settleMs: how long it must stay gone, see removeSettled).
  */
 export const exampleHome = async (
   options: { afterCreate?: (home: string) => void } = {},
-): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
+): Promise<{ home: string; ports: Ports; cleanup(settleMs?: number): Promise<void> }> => {
   const home = mkdtempSync(join(tmpdir(), "plainport-example-"));
   try {
     options.afterCreate?.(home);
@@ -281,7 +281,7 @@ export const exampleHome = async (
 
 const setUpExampleHome = async (
   home: string,
-): Promise<{ home: string; ports: Ports; cleanup(): Promise<void> }> => {
+): Promise<{ home: string; ports: Ports; cleanup(settleMs?: number): Promise<void> }> => {
   for (const dir of ["work/clients/acme/web", "personal", "Developer/Work"]) {
     mkdirSync(join(home, dir), { recursive: true });
   }
@@ -311,7 +311,7 @@ const setUpExampleHome = async (
   if (shelved.code !== 0) {
     throw new Error(`example home setup failed: ${shelved.err}`);
   }
-  return { home, ports, cleanup: () => removeSettled(home) };
+  return { home, ports, cleanup: (settleMs) => removeSettled(home, settleMs) };
 };
 
 export interface Captured {

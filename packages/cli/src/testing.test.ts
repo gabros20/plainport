@@ -1,7 +1,7 @@
 // The example home's own hygiene: cleanup() leaves nothing behind in $TMPDIR (M2 Task 3, the temp-folder leak).
 
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REGISTRY } from "./commands/index.ts";
@@ -20,19 +20,22 @@ test("exampleHome cleanup outlasts a writer that is delayed beyond a single look
   const home = await exampleHome();
   const gate = mkdtempSync(join(tmpdir(), "plainport-gate-writer-"));
   try {
-    const marker = join(gate, "go");
-    // A detached child, like an offload's delete: once the marker appears it waits 80 ms, then writes into the home.
+    const wrote = join(gate, "wrote");
+    // A detached child, like an offload's delete. It is gated on the cleanup's first removal, not on the clock: it
+    // waits until the home is gone, then writes into it again and leaves a marker. (Bounded: 20 s of polling.)
     const child = Bun.spawn(
       [
         "sh",
         "-c",
-        `while [ ! -e "${marker}" ]; do sleep 0.01; done; sleep 0.08; mkdir -p "${home.home}/late" && echo x > "${home.home}/late/f"`,
+        `n=0; while [ -e "${home.home}" ] && [ $n -lt 2000 ]; do n=$((n+1)); sleep 0.01; done; ` +
+          `mkdir -p "${home.home}/late" && echo x > "${home.home}/late/f" && : > "${wrote}"`,
       ],
       { stdout: "ignore", stderr: "ignore" },
     );
-    writeFileSync(marker, "");
-    await home.cleanup();
+    // A settle window far wider than the writer's poll, so a slow runner cannot end the wait before the write.
+    await home.cleanup(3000);
     await child.exited;
+    expect(existsSync(wrote)).toBe(true);
     expect(existsSync(home.home)).toBe(false);
   } finally {
     rmSync(gate, { recursive: true, force: true });
