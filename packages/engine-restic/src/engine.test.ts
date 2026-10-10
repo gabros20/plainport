@@ -105,6 +105,45 @@ describe("restic engine: the version check", () => {
     expect(result.finding.fix).toBeDefined();
     expect(host.calls).toHaveLength(1);
   });
+
+  // restic 0.17 prints `version --json` without message_type (0.18 added it); DESIGN.md supports 0.17.1 or later.
+  test("restic 0.17.1's version line, recorded without message_type, passes the check", async () => {
+    const host = replayHost([fixture("version", "0.17.1"), fixture("snapshots")]);
+    const engine = resticEngine({
+      host,
+      restic: "/r",
+      repository: REPO,
+      password: "p",
+      env: {},
+      expectedVersion: "0.17.1",
+    });
+    expect(value(await engine.list({})).length).toBeGreaterThan(0);
+  });
+
+  test("the version line is still checked strictly: a missing or malformed version, or another message type, is refused", async () => {
+    const base = fixture("version", "0.17.1");
+    for (const stdout of [
+      '{"go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
+      '{"version":17,"go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
+      '{"version":"0.17.1"}\n',
+      '{"message_type":"summary","version":"0.17.1","go_version":"go1.23.1","go_os":"darwin","go_arch":"arm64"}\n',
+    ]) {
+      const host = replayHost([edited(base, { stdout })]);
+      const engine = resticEngine({
+        host,
+        restic: "/r",
+        repository: REPO,
+        password: "p",
+        env: {},
+        expectedVersion: "0.17.1",
+      });
+      expect({ stdout, code: failure(await engine.list({})).finding.code }).toEqual({
+        stdout,
+        code: "restic.output-invalid",
+      });
+      expect(host.calls).toHaveLength(1);
+    }
+  });
 });
 
 describe("restic engine: how restic is run", () => {
