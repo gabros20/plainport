@@ -1,6 +1,6 @@
 # M2 · Remote stores: orchestrate plan
 
-Status: **draft, waiting for the owner's approval.** Revised twice from gpt-6-astra's architecture reviews: round 1
+Status: **approved by the owner on 2026-10-10.** Revised twice from gpt-6-astra's architecture reviews: round 1
 (`.orchestrate/review-m2-plan-astra.md`: 2 Critical, 16 Important, 1 Minor, 11 missing tasks) and round 2
 (`.orchestrate/review-m2-plan-astra-r2.md`: 6 Important, 2 Minor, R2-1 to R2-8). The tables at the end map every
 finding to where this plan resolves it. Run on branch `m2-remote-stores` once the owner decisions
