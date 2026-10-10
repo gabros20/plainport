@@ -276,6 +276,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); fix is plainport init |
 | `store.root-mismatch` | block | no | 6 | The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store |
 | `store.secret-missing` | block | no | 6 | The store's repository password could not be read from its secret reference (env: or file: in M1) |
+| `store.semantics-unknown` | block | no | 6 | The store's semantics profile lacks a property this operation needs (read-after-write, whole publication, complete listings, durability…), or does not know it; the message names the property, the operation refuses before writing, and the store stays usable for what its profile allows (Q8) |
 | `store.setup-pending` | warn | no | 6 | init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable |
 | `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved |
 | `store.unsupported` | block | no | 6 | This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder) |

@@ -16,6 +16,11 @@
 // (D32), though the stat itself cannot be cancelled and waits on in the background (deadline.ts). One probe at a time
 // per store: calls made while one is out share it, and while one that timed out still hangs every call is
 // store.unreachable at once, so a dead mount holds one thread of Bun's pool, not one per call.
+//
+// Its semantics (FS_SEMANTICS) are a local file system's: a write is seen at once by get and list, a listing is
+// complete, a plain put is whole (temporary file, fsync, rename), and create-only is exclusive. Durability is
+// asserted under D24: plain fsync, with every saga's recovery correct if a power loss drops the last write. On a file
+// system without hard links a create-only write is in place (D41), so a reader can see it torn while it is written.
 
 import { dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
@@ -24,12 +29,14 @@ import {
   assertBlobPrefix,
   type BlobEntry,
   type BlobStore,
+  capabilitiesOf,
   type Deadlined,
   type FileKind,
   type LocalIo,
   type ProbeOptions,
   type PutOptions,
   probeDeadline,
+  type StoreSemantics,
   systemErrorCode,
   TEMP_SUFFIX,
   tempPathFor,
@@ -48,6 +55,17 @@ const MAC_METADATA = (name: string): boolean => name.startsWith("._") || name ==
 const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** What a local file system guarantees (see the file comment). */
+export const FS_SEMANTICS: StoreSemantics = Object.freeze<StoreSemantics>({
+  readAfterWrite: { value: true, evidence: "documented" },
+  listAfterWrite: { value: true, evidence: "documented" },
+  listComplete: { value: true, evidence: "documented" },
+  publication: { value: "atomic-put", evidence: "documented" },
+  conditionalCreate: { value: true, evidence: "documented" },
+  durability: { value: "durable", evidence: "asserted" },
+  cancellation: { value: "never-lands-late", evidence: "documented" },
+});
 
 /** probe: the root probe's deadline, STORE_PROBE_DEADLINE_MS on the real timers by default (tests fake it). */
 export const fsBlobStore = (io: LocalIo, root: string, probe: ProbeOptions = {}): BlobStore => {
@@ -256,7 +274,8 @@ export const fsBlobStore = (io: LocalIo, root: string, probe: ProbeOptions = {})
 
   // Keys are checked before anything is awaited, so a bad key throws at the call (a bug), not as a rejection.
   return {
-    capabilities: () => ({ createIfAbsent: true, replaceIfMatch: false }),
+    semantics: () => FS_SEMANTICS,
+    capabilities: () => capabilitiesOf(FS_SEMANTICS),
     get: (key) => {
       assertBlobKey(key);
       return get(key);

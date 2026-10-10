@@ -8,8 +8,14 @@
 //
 // Keys are `/`-separated paths relative to the store's root, such as `meta/v1/events/<ulid>.json`: no leading or
 // trailing `/`, no empty, `.` or `..` segments, no NUL. A bad key is a bug in the caller and throws.
+//
+// Every store also states its semantics (DESIGN.md "Remote stores: consistency and publication", Q8): typed
+// properties, each with its evidence or unknown. Each operation has one eligibility predicate over that profile, and
+// an operation whose predicate fails refuses with store.semantics-unknown, naming the property, while the store stays
+// usable for the others. capabilities() stays for its callers and derives from the profile (capabilitiesOf).
 
-import type { Result } from "@plainport/contract";
+import { fail, finding, ok, type Result } from "@plainport/contract";
+import { z } from "zod";
 
 export interface BlobCapabilities {
   /** put(…, { ifNotExists: true }) is atomic: of two writers, exactly one creates the key. */
@@ -31,7 +37,192 @@ export interface PutOptions {
   ifMatch?: string;
 }
 
+export const EvidenceSchema = z.enum(["measured", "documented", "asserted"]);
+/** How a property is known: measured by `store test`, documented by the backend, or asserted by the owner. */
+export type Evidence = z.infer<typeof EvidenceSchema>;
+
+/** A property's value with its evidence, or "unknown"; unknown fails every predicate that names the property. */
+const property = <T extends z.ZodType>(value: T) =>
+  z.union([z.literal("unknown"), z.strictObject({ value, evidence: EvidenceSchema })]);
+
+export const PublicationSchema = z.enum(["atomic-put", "temp-then-rename", "in-place"]);
+/**
+ * Durability has two unknowns on purpose: the property itself `"unknown"` means nobody has looked (not measured,
+ * documented or asserted), while `{ value: "unknown", evidence }` means someone looked and could not tell (the
+ * backend's documents are silent, or a measurement cannot show it without a power cut). Both fail release.
+ */
+export const DurabilitySchema = z.enum(["durable", "acked-unsynced", "unknown"]);
+export const CancellationSchema = z.enum(["never-lands-late", "may-land-late"]);
+
+export const StoreSemanticsSchema = z
+  .strictObject({
+    /** A get right after an acknowledged put sees it. */
+    readAfterWrite: property(z.boolean()),
+    /** A list right after an acknowledged put names it. */
+    listAfterWrite: property(z.boolean()),
+    /** A listing returns every key under the prefix, across every page. */
+    listComplete: property(z.boolean()),
+    /**
+     * How put() makes a value visible: the backend shows an object only when complete (`atomic-put`); the adapter
+     * uploads to its own nonce-named temporary under a reserved prefix and moves it onto the key (`temp-then-rename`,
+     * D98: leftovers are swept by age, by gc); or the bytes are written in place and a reader may see a torn prefix
+     * (`in-place`). Either of the first two is a whole put.
+     */
+    publication: property(PublicationSchema),
+    /** put(…, { ifNotExists: true }) is atomic: of racing writers exactly one creates the key. */
+    conditionalCreate: property(z.boolean()),
+    /** Whether an acknowledged write survives the server's crash or power loss. */
+    durability: property(DurabilitySchema),
+    /** Whether a put that failed or was cancelled can still land afterwards. */
+    cancellation: property(CancellationSchema),
+  })
+  .meta({
+    title: "StoreSemantics",
+    description: "What a store guarantees, each property with its evidence (Q8)",
+  });
+export type StoreSemantics = z.infer<typeof StoreSemanticsSchema>;
+
+/** The profile's JSON Schema, published in schemas/ by `bun run contract` (the per-store sidecar holds one, Q4). */
+export const storeSemanticsJsonSchemas = (): Record<"store-semantics", Record<string, unknown>> => ({
+  "store-semantics": z.toJSONSchema(StoreSemanticsSchema, { target: "draft-2020-12", io: "input" }) as Record<
+    string,
+    unknown
+  >,
+});
+export type SemanticProperty = keyof StoreSemantics;
+
+/** A store nothing is known about: it can be read, and nothing else. */
+export const UNKNOWN_SEMANTICS: StoreSemantics = Object.freeze<StoreSemantics>({
+  readAfterWrite: "unknown",
+  listAfterWrite: "unknown",
+  listComplete: "unknown",
+  publication: "unknown",
+  conditionalCreate: "unknown",
+  durability: "unknown",
+  cancellation: "unknown",
+});
+
+/** A property's value, or "unknown". */
+export const semanticValue = <T>(p: "unknown" | { value: T }): T | "unknown" =>
+  p === "unknown" ? "unknown" : p.value;
+
+/** The capabilities a profile gives: create-if-absent only when conditional create is known to hold. */
+export const capabilitiesOf = (semantics: StoreSemantics): BlobCapabilities => ({
+  createIfAbsent: semanticValue(semantics.conditionalCreate) === true,
+  replaceIfMatch: false,
+});
+
+export type Eligibility = { eligible: true } | { eligible: false; missing: SemanticProperty[] };
+
+const verdict = (missing: SemanticProperty[]): Eligibility =>
+  missing.length === 0 ? { eligible: true } : { eligible: false, missing };
+
+/** Reading the catalog (and ls) needs only a listing that works, which the call itself shows. */
+export const canRead = (_semantics: StoreSemantics): Eligibility => ({ eligible: true });
+
+/** Appending an event needs whole publication and read-after-write. */
+export const canAppend = (s: StoreSemantics): Eligibility => {
+  const missing: SemanticProperty[] = [];
+  if (semanticValue(s.readAfterWrite) !== true) missing.push("readAfterWrite");
+  const publication = semanticValue(s.publication);
+  if (publication !== "atomic-put" && publication !== "temp-then-rename") missing.push("publication");
+  return verdict(missing);
+};
+
+/**
+ * An election needs a conditional create, or else (the sole-candidate fallback) visibility both ways and complete
+ * listings. A missing conditional create alone only routes elections to the fallback, so it is never named.
+ */
+export const canElect = (s: StoreSemantics): Eligibility => {
+  if (semanticValue(s.conditionalCreate) === true) return verdict([]);
+  const missing: SemanticProperty[] = [];
+  for (const p of ["readAfterWrite", "listAfterWrite", "listComplete"] as const) {
+    if (semanticValue(s[p]) !== true) missing.push(p);
+  }
+  return verdict(missing);
+};
+
+/** A commit needs append and elect. */
+export const canCommit = (s: StoreSemantics): Eligibility => {
+  const append = canAppend(s);
+  const elect = canElect(s);
+  const missing = [...(append.eligible ? [] : append.missing), ...(elect.eligible ? [] : elect.missing)];
+  return verdict([...new Set(missing)]);
+};
+
+export interface ReleaseProof {
+  /** Q21's proof: no earlier than the grace period after the commit, the event re-read and restic lists the snapshot. */
+  postGraceProof?: boolean;
+}
+
+/** Deleting a local folder needs commit, and a durable store or an acked-unsynced one with Q21's post-grace proof. */
+export const canRelease = (s: StoreSemantics, proof: ReleaseProof = {}): Eligibility => {
+  const commit = canCommit(s);
+  const missing = commit.eligible ? [] : [...commit.missing];
+  const durability = semanticValue(s.durability);
+  if (!(durability === "durable" || (durability === "acked-unsynced" && proof.postGraceProof === true))) {
+    missing.push("durability");
+  }
+  return verdict(missing);
+};
+
+export const STORE_OPERATIONS = ["read", "append", "elect", "commit", "release"] as const;
+export type StoreOperation = (typeof STORE_OPERATIONS)[number];
+
+/** The predicate of each operation. */
+export const eligibility = (
+  op: StoreOperation,
+  semantics: StoreSemantics,
+  proof: ReleaseProof = {},
+): Eligibility => {
+  switch (op) {
+    case "read":
+      return canRead(semantics);
+    case "append":
+      return canAppend(semantics);
+    case "elect":
+      return canElect(semantics);
+    case "commit":
+      return canCommit(semantics);
+    case "release":
+      return canRelease(semantics, proof);
+  }
+};
+
+const DOING: Record<StoreOperation, string> = {
+  read: "read its catalog",
+  append: "append catalog events",
+  elect: "hold an election (bootstrap or root claim)",
+  commit: "commit an offload",
+  release: "release a folder after an offload",
+};
+
+const describeProperty = (semantics: StoreSemantics, p: SemanticProperty): string => {
+  const value = semantics[p];
+  return value === "unknown" ? `${p} is unknown` : `${p} is ${String(value.value)} (${value.evidence})`;
+};
+
+/** Ok when `op` is eligible on the profile; otherwise store.semantics-unknown, naming each property it lacks. */
+export const requireEligible = (
+  op: StoreOperation,
+  semantics: StoreSemantics,
+  context: { store: string; proof?: ReleaseProof },
+): Result<void> => {
+  const verdictOf = eligibility(op, semantics, context.proof);
+  if (verdictOf.eligible) return ok(undefined);
+  const lacks = verdictOf.missing.map((p) => describeProperty(semantics, p)).join("; ");
+  return fail(
+    finding("store.semantics-unknown", {
+      message: `the store ${context.store} cannot ${DOING[op]}: its ${lacks}; nothing was written for it`,
+      fix: `use a store whose profile provides ${verdictOf.missing.join(", ")} for this (a local disk provides every property); the store ${context.store} stays usable for what its profile allows`,
+    }),
+  );
+};
+
 export interface BlobStore {
+  /** What the store guarantees (Q8). */
+  semantics(): StoreSemantics;
+  /** Derived from semantics() (capabilitiesOf); kept for its callers. */
   capabilities(): BlobCapabilities;
   /** The key's bytes, or null when there is no such key. */
   get(key: string): Promise<Result<Uint8Array | null>>;
