@@ -41,13 +41,18 @@ if (process.platform === "darwin") {
       });
     });
 
-    blobStoreContract("exFAT", () => {
-      const dir = join(mount, `store-${next++}`);
-      mkdirSync(dir);
-      return {
-        store: fsBlobStore(testHost(), dir),
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
-      };
-    });
+    blobStoreContract(
+      "exFAT",
+      () => {
+        const dir = join(mount, `store-${next++}`);
+        mkdirSync(dir);
+        return {
+          store: fsBlobStore(testHost(), dir),
+          cleanup: () => rmSync(dir, { recursive: true, force: true }),
+        };
+        // The 8 MB image holds about 950 small files: the listing probe stays well under that.
+      },
+      { listProbeKeys: 200 },
+    );
   });
 }

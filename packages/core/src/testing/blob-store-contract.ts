@@ -41,8 +41,13 @@ export interface SemanticFaults {
   settle(): void;
 }
 
-/** Keys the listing probe writes: more than one page of the usual 1000-key listing. */
+/** Keys the listing probe writes by default: more than one page of the usual 1000-key listing. */
 const LIST_PROBE_KEYS = 1001;
+
+export interface SemanticProbeOptions {
+  /** Keys the listing probe writes; a small volume (the exFAT image) passes fewer. */
+  listProbeKeys?: number;
+}
 const PUBLICATION_PROBE_BYTES = 256 * 1024;
 
 const known = <T>(property: "unknown" | { value: T }): T | "unknown" =>
@@ -55,32 +60,37 @@ const known = <T>(property: "unknown" | { value: T }): T | "unknown" =>
 export const semanticViolations = async (
   store: BlobStore,
   faults?: SemanticFaults,
+  options: SemanticProbeOptions = {},
 ): Promise<SemanticProperty[]> => {
   const claims = store.semantics();
   const base = `probe/semantics-${crypto.randomUUID()}/`;
   const violations: SemanticProperty[] = [];
+  /** A probe write that fails says nothing about a property: it is an error, not a violation. */
+  const put = async (key: string, data: Uint8Array): Promise<void> => {
+    value(await store.put(key, data));
+  };
   const getBytes = async (key: string): Promise<Uint8Array | null | undefined> => {
     const got = await store.get(key);
     return got.ok ? got.value : undefined;
   };
 
   if (known(claims.readAfterWrite) === true) {
-    await store.put(`${base}raw`, bytes("raw"));
+    await put(`${base}raw`, bytes("raw"));
     if (text((await getBytes(`${base}raw`)) ?? null) !== "raw") violations.push("readAfterWrite");
   }
   if (known(claims.listAfterWrite) === true) {
-    await store.put(`${base}law/one`, bytes("law"));
+    await put(`${base}law/one`, bytes("law"));
     const listed = await store.list(`${base}law/`);
     if (!listed.ok || !listed.value.some((entry) => entry.key === `${base}law/one`))
       violations.push("listAfterWrite");
   }
   if (known(claims.listComplete) === true) {
     const keys = Array.from(
-      { length: LIST_PROBE_KEYS },
+      { length: options.listProbeKeys ?? LIST_PROBE_KEYS },
       (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
     );
     for (let i = 0; i < keys.length; i += 50) {
-      await Promise.all(keys.slice(i, i + 50).map((key) => store.put(key, bytes("p"))));
+      await Promise.all(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
     }
     faults?.settle();
     const listed = await store.list(`${base}page/`);
@@ -100,11 +110,11 @@ export const semanticViolations = async (
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     })();
-    if (publication === "atomic-put") await store.put(key, data);
+    if (publication === "atomic-put") await put(key, data);
     else if (store.rename === undefined) torn = true;
     else {
-      await store.put(`${base}whole.tmp`, data);
-      await store.rename(`${base}whole.tmp`, key);
+      await put(`${base}whole.tmp`, data);
+      value(await store.rename(`${base}whole.tmp`, key));
     }
     done = true;
     await observer;
@@ -136,6 +146,7 @@ export const semanticViolations = async (
 export const blobStoreContract = (
   name: string,
   make: () => BlobStoreFixture | Promise<BlobStoreFixture>,
+  probe: SemanticProbeOptions = {},
 ): void => {
   describe(`${name}: BlobStore contract`, () => {
     let fixture: BlobStoreFixture;
@@ -224,7 +235,7 @@ export const blobStoreContract = (
     });
 
     test("semantics: what the profile claims holds when probed", async () => {
-      expect(await semanticViolations(store)).toEqual([]);
+      expect(await semanticViolations(store, undefined, probe)).toEqual([]);
     });
 
     test("semantics: the store passes every operation's predicate", () => {
