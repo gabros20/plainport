@@ -25,6 +25,13 @@ export class RingBuffer {
     return Math.max(0, this.total - this.capacity);
   }
 
+  /** Overwrites every kept byte with zeros and starts empty again (a sensitive run's end). */
+  wipe(): void {
+    this.buffer.fill(0);
+    this.end = 0;
+    this.total = 0;
+  }
+
   /** The kept bytes, oldest first. */
   bytes(): Uint8Array {
     if (this.total < this.capacity) return this.buffer.slice(0, this.end);

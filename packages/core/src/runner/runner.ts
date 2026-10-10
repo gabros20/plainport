@@ -7,6 +7,8 @@
 // - when the child exits on its own but leaves processes in its group, those are stopped the same way.
 // Expected failures (cannot start, deadlines, cancelled) come back as Results with a finding. Exceptions mean bugs:
 // an onLine or log callback that throws stops the group first, then propagates.
+// A sensitive run (output that may hold a secret, AGENTS.md rule 9) keeps its output out of every line, event, message
+// and error, and overwrites what it held when it ends; see RunSpec.sensitive.
 //
 // Known limits: a grandchild that calls setsid() leaves the group and is out of reach; a group whose last member
 // exits between our liveness check and our KILL could, in theory, have its id reused by a new group in that
@@ -219,6 +221,40 @@ class Collector {
 }
 
 /**
+ * One stream of a sensitive run: no lines, no log events, only a byte count for failure messages. stderr keeps its
+ * newest bytes for the ok outcome; stdout keeps none (the capture holds it). wipe() overwrites what it kept.
+ */
+class PrivateCollector {
+  bytes = 0;
+  private readonly ring: RingBuffer | undefined;
+
+  constructor(keep: number | undefined) {
+    this.ring = keep === undefined ? undefined : new RingBuffer(keep);
+  }
+
+  push(chunk: Uint8Array): void {
+    this.bytes += chunk.length;
+    this.ring?.push(chunk);
+  }
+
+  end(): void {}
+
+  tail(): OutputTail {
+    if (this.ring === undefined) return { text: "", droppedBytes: 0 };
+    const bytes = this.ring.bytes();
+    try {
+      return { text: new TextDecoder().decode(bytes), droppedBytes: this.ring.droppedBytes };
+    } finally {
+      bytes.fill(0);
+    }
+  }
+
+  wipe(): void {
+    this.ring?.wipe();
+  }
+}
+
+/**
  * All of stdout, up to a hard cap. Past it, the bytes are let go, the run fails (never a shortened ok), and bytes()
  * throws, so no partial capture can reach a caller.
  */
@@ -236,13 +272,19 @@ class Capture {
     if (this.overflowed) return;
     if (this.size + chunk.length > this.maxBytes) {
       this.overflowed = true;
-      this.chunks = [];
-      this.size = 0;
+      this.wipe();
       this.onOverflow();
       return;
     }
     this.chunks.push(chunk.slice());
     this.size += chunk.length;
+  }
+
+  /** Overwrites every kept chunk with zeros and lets them go. */
+  wipe(): void {
+    for (const chunk of this.chunks) chunk.fill(0);
+    this.chunks = [];
+    this.size = 0;
   }
 
   bytes(): Uint8Array {
@@ -290,6 +332,19 @@ export const capturedOutput = (
 };
 
 /**
+ * A sensitive run's captured stdout parsed as JSON, or undefined when it is not UTF-8 JSON. Never JSON.parse it bare:
+ * its errors quote the input ("Unexpected identifier …"), which would carry a secret into a message. The caller names
+ * its own finding for undefined.
+ */
+export const parseSensitiveJson = (bytes: Uint8Array): { value: unknown } | undefined => {
+  try {
+    return { value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * Reads a stream to its end (or until cancelled) into the collector. A read that fails ends the pump and is
  * reported to onError: what was read is kept, but the stream is not known to be whole. It never rejects.
  */
@@ -299,6 +354,8 @@ const pump = async (
   onChunk: () => void,
   onError: (error: unknown) => void,
   readers: { cancel(): Promise<void> }[],
+  /** A sensitive run: each chunk is overwritten once the collector has taken what it keeps. */
+  wipe: boolean,
 ): Promise<void> => {
   const reader = stream.getReader();
   readers.push(reader);
@@ -308,6 +365,7 @@ const pump = async (
       if (done) break;
       onChunk();
       collector.push(value);
+      if (wipe) value.fill(0);
     }
   } catch (error) {
     onError(error);
@@ -335,19 +393,26 @@ const lastOutput = (stdout: OutputTail, stderr: OutputTail): string => {
   return `; its last output: ${text.length > TAIL_CHARS_IN_MESSAGE ? `…${text.slice(-TAIL_CHARS_IN_MESSAGE)}` : text}`;
 };
 
+/** What a sensitive run's failure may say about its output: how much there was, never what. */
+const byteCounts = (stdout: number, stderr: number): string =>
+  `; it printed ${stdout} bytes on stdout and ${stderr} bytes on stderr`;
+
 const spawnFailed = (spec: RunSpec, error: unknown): Failure => {
   const reason = error instanceof Error ? error.message : String(error);
   const code = errorCode(error);
   return fail(
     finding("process.spawn-failed", {
-      message: `could not start ${spec.command} in ${spec.cwd}: ${reason}${code === undefined || reason.includes(code) ? "" : ` (${code})`}`,
+      // A sensitive run names the error's code only: its text is not the runner's to vouch for.
+      message: spec.sensitive
+        ? `could not start ${basename(spec.command)} in ${spec.cwd} (${code ?? "no error code"})`
+        : `could not start ${spec.command} in ${spec.cwd}: ${reason}${code === undefined || reason.includes(code) ? "" : ` (${code})`}`,
       fix: `check that ${spec.command} exists and is executable, and that ${spec.cwd} is a folder`,
       paths: [spec.command, spec.cwd],
     }),
   );
 };
 
-const incompleteFailure = (label: string, incomplete: Incomplete): Failure => {
+const incompleteFailure = (label: string, incomplete: Incomplete, sensitive: boolean): Failure => {
   switch (incomplete.why) {
     case "held-open":
       return fail(
@@ -366,7 +431,7 @@ const incompleteFailure = (label: string, incomplete: Incomplete): Failure => {
     case "read-error":
       return fail(
         finding("process.output-incomplete", {
-          message: `${label}'s ${incomplete.stream} could not be read to the end: ${describeError(incomplete.error)}`,
+          message: `${label}'s ${incomplete.stream} could not be read to the end: ${sensitive ? (errorCode(incomplete.error) ?? "a read error") : describeError(incomplete.error)}`,
           fix: "run the command again; if it repeats, check the disk and the terminal plainport runs in",
         }),
       );
@@ -377,10 +442,9 @@ const stoppedFailure = (
   stop: Exclude<Stop, "error" | "incomplete">,
   label: string,
   settings: Settings & { captureMaxBytes?: number },
-  stdout: OutputTail,
-  stderr: OutputTail,
+  /** lastOutput's tail, or a sensitive run's byteCounts. */
+  said: string,
 ): Failure => {
-  const said = lastOutput(stdout, stderr);
   switch (stop) {
     case "idle":
       return fail(
@@ -415,18 +479,51 @@ const stoppedFailure = (
   }
 };
 
+type RunSettings = Settings & { captureMaxBytes?: number };
+
 /** Runs one child to completion through the spawner. See the file comment for what it guarantees. */
 export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Result<RunOutcome>> => {
-  const settings = { ...settingsOf(spec), captureMaxBytes: spec.capture?.maxBytes };
+  const base = settingsOf(spec);
+  // A sensitive run always captures stdout: its bound defaults to outputLimitBytes.
+  const settings: RunSettings = {
+    ...base,
+    captureMaxBytes: spec.capture?.maxBytes ?? (spec.sensitive ? base.outputLimitBytes : undefined),
+  };
   if (spec.capture !== undefined) positive("capture.maxBytes", spec.capture.maxBytes);
   if (spec.wholeStdout && spec.onLine === undefined)
     throw new RangeError("runProcess: wholeStdout needs onLine");
   if (spec.wholeStdout && spec.capture !== undefined)
     throw new RangeError("runProcess: wholeStdout and capture exclude each other");
+  if (spec.sensitive && (spec.onLine !== undefined || spec.wholeStdout))
+    throw new RangeError(
+      "runProcess: a sensitive run takes no onLine or wholeStdout; its output reaches no callback",
+    );
   const label = basename(spec.command);
-  const empty: OutputTail = { text: "", droppedBytes: 0 };
-  if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, empty, empty);
+  if (spec.signal?.aborted) return stoppedFailure("cancelled", label, settings, "");
 
+  const stdin = typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin;
+  const wipers: (() => void)[] = [];
+  try {
+    return await runChild(spawner, spec, settings, label, stdin, wipers);
+  } finally {
+    if (spec.sensitive) {
+      for (const wipe of wipers) wipe();
+      // Only the copy the runner made: a caller's own bytes are the caller's to overwrite.
+      if (typeof spec.stdin === "string") stdin?.fill(0);
+    }
+  }
+};
+
+/** runProcess once its spec is checked; a sensitive run registers in `wipers` every buffer it holds. */
+const runChild = async (
+  spawner: Spawner,
+  spec: RunSpec,
+  settings: RunSettings,
+  label: string,
+  stdin: Uint8Array | undefined,
+  wipers: (() => void)[],
+): Promise<Result<RunOutcome>> => {
+  const sensitive = spec.sensitive === true;
   const started = performance.now();
   let child: ChildProcess;
   try {
@@ -435,7 +532,7 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
       args: spec.args ?? [],
       cwd: spec.cwd,
       env: spec.env,
-      stdin: typeof spec.stdin === "string" ? new TextEncoder().encode(spec.stdin) : spec.stdin,
+      stdin,
     });
   } catch (error) {
     return spawnFailed(spec, error);
@@ -481,24 +578,34 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
 
   const onError = (error: unknown): void => requestStop("error", error);
   let lineTooLong = false;
-  const stdout = new Collector(
-    "stdout",
-    settings,
-    label,
-    spec,
-    onError,
-    spec.wholeStdout
-      ? () => {
-          lineTooLong = true;
-          requestStop("line-too-long");
-        }
-      : undefined,
-  );
-  const stderr = new Collector("stderr", settings, label, spec, onError);
+  const quiet = sensitive
+    ? { stdout: new PrivateCollector(undefined), stderr: new PrivateCollector(settings.outputLimitBytes) }
+    : undefined;
+  const stdout =
+    quiet?.stdout ??
+    new Collector(
+      "stdout",
+      settings,
+      label,
+      spec,
+      onError,
+      spec.wholeStdout
+        ? () => {
+            lineTooLong = true;
+            requestStop("line-too-long");
+          }
+        : undefined,
+    );
+  const stderr = quiet?.stderr ?? new Collector("stderr", settings, label, spec, onError);
   const capture =
-    spec.capture === undefined
+    settings.captureMaxBytes === undefined
       ? undefined
-      : new Capture(spec.capture.maxBytes, () => requestStop("too-large"));
+      : new Capture(settings.captureMaxBytes, () => requestStop("too-large"));
+  if (quiet !== undefined)
+    wipers.push(
+      () => quiet.stderr.wipe(),
+      () => capture?.wipe(),
+    );
   const stdoutSink = {
     push: (chunk: Uint8Array): void => {
       stdout.push(chunk);
@@ -522,18 +629,19 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
         type: "log",
         op: spec.log.op,
         level: "warn",
-        message: `${label}: ${stream} could not be read to the end: ${describeError(error)}`.slice(
-          0,
-          LOG_MESSAGE_MAX,
-        ),
+        message:
+          `${label}: ${stream} could not be read to the end: ${sensitive ? (errorCode(error) ?? "a read error") : describeError(error)}`.slice(
+            0,
+            LOG_MESSAGE_MAX,
+          ),
       });
     } catch (thrown) {
       onError(thrown); // a log sink that throws is a bug, as for lines
     }
   };
   const pumps = Promise.all([
-    pump(child.stdout, stdoutSink, touch, onReadError("stdout"), readers),
-    pump(child.stderr, stderr, touch, onReadError("stderr"), readers),
+    pump(child.stdout, stdoutSink, touch, onReadError("stdout"), readers, sensitive),
+    pump(child.stderr, stderr, touch, onReadError("stderr"), readers, sensitive),
   ]);
 
   let exit: { code: number | null; signal: string | null } | undefined;
@@ -619,8 +727,16 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
   if (stopError !== undefined || reason === "error") {
     throw stopError ?? new Error("runProcess: stopped for a callback error that was not recorded");
   }
-  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete);
-  if (reason !== undefined) return stoppedFailure(reason, label, settings, stdout.tail(), stderr.tail());
+  if (reason === "incomplete") return incompleteFailure(label, incomplete as Incomplete, sensitive);
+  if (reason !== undefined) {
+    const said =
+      quiet === undefined
+        ? lastOutput(stdout.tail(), stderr.tail())
+        : byteCounts(quiet.stdout.bytes, quiet.stderr.bytes);
+    return stoppedFailure(reason, label, settings, said);
+  }
+  // A sensitive run hands over stdout only when the child succeeded: other output is not the secret it was for.
+  const withheld = sensitive && (exit?.code !== 0 || (exit?.signal ?? null) !== null);
   return ok({
     exitCode: exit?.code ?? null,
     signal: exit?.signal ?? null,
@@ -628,6 +744,6 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     stderr: stderr.tail(),
     leftoversStopped,
     durationMs: Math.round(performance.now() - started),
-    ...(capture === undefined ? {} : { captured: capture.bytes() }),
+    ...(capture === undefined || withheld ? {} : { captured: capture.bytes() }),
   });
 };

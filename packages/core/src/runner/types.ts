@@ -60,6 +60,16 @@ export interface RunSpec {
    * name), and decoded as UTF-8 with invalid bytes replaced by U+FFFD. For byte-exact records, use capture.
    */
   wholeStdout?: boolean;
+  /**
+   * The output may hold a secret (`security … -w`, `op read`, `restic cat masterkey`; AGENTS.md rule 9). stdout is
+   * captured privately, bounded by capture.maxBytes (default outputLimitBytes), and returned only as `captured` in an
+   * ok outcome whose exit code is 0; stdout's tail stays empty. stderr's bounded tail is in the ok outcome only, for
+   * the caller to classify, never to quote. Nothing either stream says reaches log events, a finding's message, error
+   * data or a thrown error, on any path: a failure names the program, why it stopped and byte counts only. Every
+   * buffer the runner held, read chunks and a string stdin included, is overwritten when the run ends. Excludes onLine
+   * and wholeStdout, which would hand the lines to a callback. Parse `captured` with parseSensitiveJson.
+   */
+  sensitive?: boolean;
   /** Every complete line as it arrives (parsers, progress). A throw is a bug: the group is stopped, then it
    * propagates. */
   onLine?: (line: OutputLine) => void;
@@ -88,7 +98,8 @@ export interface RunOutcome {
   signal: string | null;
   stdout: OutputTail;
   stderr: OutputTail;
-  /** All of stdout when RunSpec.capture was given; absent otherwise. */
+  /** All of stdout when RunSpec.capture was given; absent otherwise. With sensitive, present only when the exit code
+   * is 0. */
   captured?: Uint8Array;
   /** The child exited but left processes in its group; the runner stopped them (TERM, then KILL). With capture,
    * this is a process.output-incomplete failure instead, since a stopped process may have been writing. */
