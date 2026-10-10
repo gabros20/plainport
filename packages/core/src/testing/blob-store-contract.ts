@@ -4,9 +4,15 @@
 // and idempotent delete. Its semantic cases (DESIGN.md "Remote stores: consistency and publication") check that what
 // a store's semantics() claims holds when probed, and that each operation's predicate gives what the backend expects
 // (every one for the local stores; release only with Q21's post-grace proof for an acked-unsynced store).
+//
+// The suite is driven by the store's own profile: create-only cases run only where conditional create is claimed, and
+// a read or listing right after a write is asserted at once only where read-after-write or list-after-write is
+// claimed. Otherwise the suite waits for visibility: the fixture's settle() when it has one (the fakes), else
+// polling within a bound.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  type BlobEntry,
   type BlobStore,
   capabilitiesOf,
   eligibility,
@@ -14,17 +20,21 @@ import {
   STORE_OPERATIONS,
   type StoreOperation,
   StoreSemanticsSchema,
+  semanticValue,
 } from "../ports/blob-store.ts";
 
 export interface BlobStoreFixture {
   store: BlobStore;
   cleanup(): void | Promise<void>;
+  /** Makes everything the store will still show on its own visible now (a fake's settle). */
+  settle?(): void;
 }
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const text = (data: Uint8Array | null): string | null =>
   data === null ? null : new TextDecoder().decode(data);
 
+/** The value of an expected result; a failure (an I/O error) is an error of the test, never a counterexample. */
 const value = <T>(
   result: { ok: true; value: T } | { ok: false; finding: { code: string; message: string } },
 ): T => {
@@ -32,12 +42,37 @@ const value = <T>(
   return result.value;
 };
 
+/** How long a store without immediate visibility is given to show a write: POLL_TRIES reads, POLL_MS apart. */
+const POLL_TRIES = 100;
+const POLL_MS = 20;
+
+/**
+ * Reads until `done` holds: once where the profile promises immediate visibility (`immediate`), else after the
+ * fixture's settle() or by polling within the bound. Returns the last read.
+ */
+const visible = async <T>(
+  immediate: boolean,
+  read: () => Promise<T>,
+  done: (seen: T) => boolean,
+  settle?: () => void,
+): Promise<T> => {
+  if (immediate) return read();
+  settle?.();
+  let seen = await read();
+  for (let tries = 1; !done(seen) && tries < POLL_TRIES; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    settle?.();
+    seen = await read();
+  }
+  return seen;
+};
+
 /** Faults only a fake (or a measuring harness) can cause; with them the probe also checks cancellation. */
 export interface SemanticFaults {
   /** The next put is cancelled: it fails, and lands later or never, as the store does. */
-  cancelNext(): void;
+  cancelNext?(): void;
   /** Whatever the store will still do on its own happens now (visibility, late landings). */
-  settle(): void;
+  settle?(): void;
 }
 
 /** Keys the listing probe writes by default: more than one page of the usual 1000-key listing. */
@@ -66,14 +101,14 @@ export interface ContractOptions extends SemanticProbeOptions {
   /** Per operation, what this backend's profile gives. */
   eligibility: Readonly<Record<StoreOperation, Expected>>;
 }
+
 const PUBLICATION_PROBE_BYTES = 256 * 1024;
 
-const known = <T>(property: "unknown" | { value: T }): T | "unknown" =>
-  property === "unknown" ? "unknown" : property.value;
-
 /**
- * The properties a store's semantics() claims that a probe contradicts, under a fresh `probe/` prefix it removes
- * afterwards. A property the store does not claim is not probed. Durability cannot be probed without a power cut.
+ * The properties a store's semantics() claims that a probe contradicts, under a fresh `probe/` prefix. A property
+ * the store does not claim is not probed, and durability cannot be probed without a power cut. An I/O failure is
+ * thrown as an error, never reported as a counterexample. Every key the probe issued is deleted afterwards, by name,
+ * whatever the listing shows.
  */
 export const semanticViolations = async (
   store: BlobStore,
@@ -81,29 +116,30 @@ export const semanticViolations = async (
   options: SemanticProbeOptions = {},
 ): Promise<SemanticProperty[]> => {
   const claims = store.semantics();
+  const raw = semanticValue(claims.readAfterWrite) === true;
+  const law = semanticValue(claims.listAfterWrite) === true;
   const base = `probe/semantics-${crypto.randomUUID()}/`;
   const violations: SemanticProperty[] = [];
-  /** A probe write that fails says nothing about a property: it is an error, not a violation. */
+  const issued = new Set<string>();
   const put = async (key: string, data: Uint8Array): Promise<void> => {
+    issued.add(key);
     value(await store.put(key, data));
   };
-  const getBytes = async (key: string): Promise<Uint8Array | null | undefined> => {
-    const got = await store.get(key);
-    return got.ok ? got.value : undefined;
-  };
+  const get = async (key: string): Promise<Uint8Array | null> => value(await store.get(key));
+  const list = async (prefix: string): Promise<BlobEntry[]> => value(await store.list(prefix));
+  const settle = () => faults?.settle?.();
 
   try {
-    if (known(claims.readAfterWrite) === true) {
+    if (raw) {
       await put(`${base}raw`, bytes("raw"));
-      if (text((await getBytes(`${base}raw`)) ?? null) !== "raw") violations.push("readAfterWrite");
+      if (text(await get(`${base}raw`)) !== "raw") violations.push("readAfterWrite");
     }
-    if (known(claims.listAfterWrite) === true) {
+    if (law) {
       await put(`${base}law/one`, bytes("law"));
-      const listed = await store.list(`${base}law/`);
-      if (!listed.ok || !listed.value.some((entry) => entry.key === `${base}law/one`))
+      if (!(await list(`${base}law/`)).some((entry) => entry.key === `${base}law/one`))
         violations.push("listAfterWrite");
     }
-    if (known(claims.listComplete) === true) {
+    if (semanticValue(claims.listComplete) === true) {
       const keys = Array.from(
         { length: options.listProbeKeys ?? LIST_PROBE_KEYS },
         (_, i) => `${base}page/${String(i).padStart(5, "0")}`,
@@ -111,56 +147,76 @@ export const semanticViolations = async (
       for (let i = 0; i < keys.length; i += 50) {
         await Promise.all(keys.slice(i, i + 50).map((key) => put(key, bytes("p"))));
       }
-      faults?.settle();
-      const listed = await store.list(`${base}page/`);
-      if (!listed.ok || listed.value.length !== keys.length) violations.push("listComplete");
+      // Completeness is not visibility: without list-after-write, wait for the keys to show first.
+      const listed = await visible(
+        law,
+        () => list(`${base}page/`),
+        (seen) => seen.length === keys.length,
+        settle,
+      );
+      if (listed.length !== keys.length) violations.push("listComplete");
     }
-    const publication = known(claims.publication);
+    const publication = semanticValue(claims.publication);
     if (publication === "atomic-put" || publication === "temp-then-rename") {
-      // An observer reads the key while it is written: it sees nothing or every byte, never a part.
+      // An observer reads the key while it is written: it sees nothing or every byte, never a part. Whether it shows
+      // at once is read-after-write's business: without it, the final read waits for the value to show.
       const data = new Uint8Array(PUBLICATION_PROBE_BYTES).fill(7);
       const key = `${base}whole`;
       let done = false;
       let torn = false;
       const observer = (async () => {
         while (!done) {
-          const seen = await getBytes(key);
-          if (seen != null && seen.length !== data.length) torn = true;
+          const seen = await get(key);
+          if (seen !== null && seen.length !== data.length) torn = true;
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
       })();
+      let observed: unknown;
       try {
         await put(key, data);
       } finally {
         // Stopped and joined even when the write fails, so no read loop outlives the probe.
         done = true;
-        await observer;
+        observed = await observer.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
       }
-      faults?.settle();
-      const final = await getBytes(key);
-      if (torn || final == null || final.length !== data.length) violations.push("publication");
+      if (observed !== undefined) throw observed; // the observer's read failed: an error, not a counterexample
+      const final = await visible(
+        raw,
+        () => get(key),
+        (seen) => seen !== null,
+        settle,
+      );
+      if (torn || final === null || final.length !== data.length) violations.push("publication");
     }
-    if (known(claims.conditionalCreate) === true) {
+    if (semanticValue(claims.conditionalCreate) === true) {
+      issued.add(`${base}cc`);
       const results = await Promise.all(
         Array.from({ length: 5 }, (_, i) => store.put(`${base}cc`, bytes(`w${i}`), { ifNotExists: true })),
       );
+      for (const result of results) {
+        if (!result.ok && result.finding.code !== "store.key-exists") value(result);
+      }
       if (results.filter((result) => result.ok).length !== 1) violations.push("conditionalCreate");
     }
-    if (faults !== undefined && known(claims.cancellation) === "never-lands-late") {
+    if (faults?.cancelNext !== undefined && semanticValue(claims.cancellation) === "never-lands-late") {
+      issued.add(`${base}late`);
       faults.cancelNext();
       const cancelled = await store.put(`${base}late`, bytes("late"));
-      const before = await getBytes(`${base}late`);
-      faults.settle();
-      const after = await getBytes(`${base}late`);
-      if (!cancelled.ok && before === null && after != null) violations.push("cancellation");
+      const before = await get(`${base}late`);
+      settle();
+      const after = await get(`${base}late`);
+      if (!cancelled.ok && before === null && after !== null) violations.push("cancellation");
     }
   } finally {
-    faults?.settle();
-    const left = await store.list(base);
-    if (left.ok) for (const { key } of left.value) await store.delete(key);
+    settle();
+    for (const key of issued) await store.delete(key);
   }
   return violations;
 };
+
 export const blobStoreContract = (
   name: string,
   make: () => BlobStoreFixture | Promise<BlobStoreFixture>,
@@ -169,22 +225,36 @@ export const blobStoreContract = (
   describe(`${name}: BlobStore contract`, () => {
     let fixture: BlobStoreFixture;
     let store: BlobStore;
+    let raw: boolean;
+    let law: boolean;
+    let conditional: boolean;
     beforeEach(async () => {
       fixture = await make();
       store = fixture.store;
+      const semantics = store.semantics();
+      raw = semanticValue(semantics.readAfterWrite) === true;
+      law = semanticValue(semantics.listAfterWrite) === true;
+      conditional = semanticValue(semantics.conditionalCreate) === true;
     });
     afterEach(async () => {
       await fixture.cleanup();
     });
 
+    /** A read after a write: at once where the profile promises it, else once the write shows. */
+    const read = (key: string, done: (seen: Uint8Array | null) => boolean) =>
+      visible(raw, async () => value(await store.get(key)), done, fixture.settle);
+    const listed = (prefix: string, done: (seen: BlobEntry[]) => boolean) =>
+      visible(law, async () => value(await store.list(prefix)), done, fixture.settle);
+
     test("put then get returns the same bytes; a missing key is null", async () => {
       value(await store.put("meta/v1/events/a.json", bytes('{"a":1}\n')));
-      expect(text(value(await store.get("meta/v1/events/a.json")))).toBe('{"a":1}\n');
+      expect(text(await read("meta/v1/events/a.json", (seen) => seen !== null))).toBe('{"a":1}\n');
       expect(value(await store.get("meta/v1/events/missing.json"))).toBeNull();
     });
 
     test("stat reports the size; a missing key is null", async () => {
       value(await store.put("k/one", bytes("12345")));
+      await read("k/one", (seen) => seen !== null);
       expect(value(await store.stat("k/one"))).toMatchObject({ size: 5 });
       expect(value(await store.stat("k/two"))).toBeNull();
     });
@@ -192,18 +262,23 @@ export const blobStoreContract = (
     test("a plain put replaces the key", async () => {
       value(await store.put("state.json", bytes("old")));
       value(await store.put("state.json", bytes("new")));
-      expect(text(value(await store.get("state.json")))).toBe("new");
+      expect(text(await read("state.json", (seen) => text(seen) === "new"))).toBe("new");
+    });
+
+    test("create-if-absent is offered exactly when the profile claims conditional create", () => {
+      expect(store.capabilities().createIfAbsent).toBe(conditional);
     });
 
     test("create-only refuses an existing key with store.key-exists and leaves it as it was", async () => {
-      expect(store.capabilities().createIfAbsent).toBe(true);
+      if (!conditional) return; // not offered: nothing to check
       value(await store.put("meta/v1/events/x.json", bytes("first"), { ifNotExists: true }));
       const second = await store.put("meta/v1/events/x.json", bytes("second"), { ifNotExists: true });
       expect(second).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
-      expect(text(value(await store.get("meta/v1/events/x.json")))).toBe("first");
+      expect(text(await read("meta/v1/events/x.json", (seen) => seen !== null))).toBe("first");
     });
 
     test("of racing create-only writers exactly one wins, and the key holds its bytes", async () => {
+      if (!conditional) return; // not offered: nothing to check
       const results = await Promise.all(
         Array.from({ length: 12 }, (_, i) => store.put("race", bytes(`writer ${i}`), { ifNotExists: true })),
       );
@@ -212,7 +287,7 @@ export const blobStoreContract = (
       for (const result of results) {
         if (!result.ok) expect(result.finding.code).toBe("store.key-exists");
       }
-      expect(text(value(await store.get("race")))).toBe(`writer ${winners[0]}`);
+      expect(text(await read("race", (seen) => seen !== null))).toBe(`writer ${winners[0]}`);
     });
 
     test("list returns every key under a prefix, sorted, with sizes; nothing else", async () => {
@@ -224,6 +299,7 @@ export const blobStoreContract = (
       ]) {
         value(await store.put(key, bytes(key)));
       }
+      await listed("", (seen) => seen.length === 4);
       expect(value(await store.list("meta/v1/events/"))).toEqual([
         expect.objectContaining({ key: "meta/v1/events/01.json", size: "meta/v1/events/01.json".length }),
         expect.objectContaining({ key: "meta/v1/events/02.json", size: "meta/v1/events/02.json".length }),
@@ -240,10 +316,11 @@ export const blobStoreContract = (
 
     test("delete removes a key, and deleting a missing key is fine", async () => {
       value(await store.put("a/b", bytes("x")));
+      await read("a/b", (seen) => seen !== null);
       value(await store.delete("a/b"));
-      expect(value(await store.get("a/b"))).toBeNull();
+      expect(await read("a/b", (seen) => seen === null)).toBeNull();
       value(await store.delete("a/b"));
-      expect(value(await store.list("a/"))).toEqual([]);
+      expect(await listed("a/", (seen) => seen.length === 0)).toEqual([]);
     });
 
     test("semantics: the profile is well formed and capabilities() derives from it", () => {
@@ -253,7 +330,7 @@ export const blobStoreContract = (
     });
 
     test("semantics: what the profile claims holds when probed", async () => {
-      expect(await semanticViolations(store, undefined, options)).toEqual([]);
+      expect(await semanticViolations(store, { settle: fixture.settle }, options)).toEqual([]);
     });
 
     test("semantics: each operation's predicate gives what this backend expects", () => {

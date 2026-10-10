@@ -11,6 +11,7 @@
 // landed; absent on a store that never lands a put late, it never will; otherwise it counts as possibly landed.
 
 import { type Failure, fail, finding, type Ok, ok, type Result } from "@plainport/contract";
+import { z } from "zod";
 import { type BlobStore, requireEligible, semanticValue } from "../ports/blob-store.ts";
 
 /** Whether the value at a key is the event a writer intends (the codec compares opened events; Task 11). */
@@ -67,6 +68,31 @@ export const publishEvent = async (
 
 // --- The elected publication -------------------------------------------------------------------------------------
 
+/**
+ * One record of the candidate protocol (D99), at `<candidates><id>.json` (decision "candidate"), `<id>.publishing`
+ * or `<id>.refused`. A record whose id or decision disagrees with its file name counts for nothing.
+ */
+export const ElectionRecordSchema = z
+  .strictObject({
+    v: z.literal(1),
+    id: z.string().min(1),
+    decision: z.enum(["candidate", "publishing", "refused"]),
+  })
+  .meta({
+    title: "ElectionRecord",
+    description:
+      "A candidate's record in an elected publication (bootstrap, root claim): its candidacy or its decision",
+  });
+export type ElectionRecord = z.infer<typeof ElectionRecordSchema>;
+
+/** The election records' JSON Schema, published in schemas/ by `bun run contract`. */
+export const electionJsonSchemas = (): Record<"election-record", Record<string, unknown>> => ({
+  "election-record": z.toJSONSchema(ElectionRecordSchema, { target: "draft-2020-12", io: "input" }) as Record<
+    string,
+    unknown
+  >,
+});
+
 export interface Election {
   /** The key the winner publishes, e.g. meta/v1/store.json. */
   key: string;
@@ -93,9 +119,10 @@ export type ElectionOutcome =
   /** A winner is published, and named. */
   | { outcome: "lost"; winner: string }
   /**
-   * No winner is published and this attempt refuses: it will never publish. `undecided` names visible candidates
-   * that have not refused; while any is left this is not final (re-run later: it ends lost if one publishes). With
-   * none left every visible candidate refuses (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps.
+   * No winner is published and this attempt refuses: it will never publish (D99). `undecided` names visible
+   * candidates without a refusal read back from the store; while any is left this is not final (re-run later: it ends
+   * lost if one publishes). With none left, this attempt's own refusal included, every visible candidate refuses
+   * (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps.
    */
   | { outcome: "contested"; candidates: string[]; undecided: string[]; fix: string };
 
@@ -112,11 +139,22 @@ interface Candidates {
   publishing: Set<string>;
 }
 
-const CANDIDACY = ".json";
-const REFUSED = ".refused";
-const PUBLISHING = ".publishing";
+const SUFFIX = { candidate: ".json", publishing: ".publishing", refused: ".refused" } as const;
 
-const marker = (bytes: string): Uint8Array => new TextEncoder().encode(`${bytes}\n`);
+const record = (id: string, decision: ElectionRecord["decision"]): Uint8Array =>
+  new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision } satisfies ElectionRecord)}\n`);
+
+/** Whether `bytes` are the record `decision` of attempt `id`. */
+const isRecord = (bytes: Uint8Array, id: string, decision: ElectionRecord["decision"]): boolean => {
+  try {
+    const checked = ElectionRecordSchema.safeParse(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+    );
+    return checked.success && checked.data.id === id && checked.data.decision === decision;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Holds the election and, when this attempt wins, publishes its value. A store whose profile fails canElect refuses
@@ -167,11 +205,20 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     );
   const notSeen = (key: string): Failure =>
     fail(
-      finding("store.failed", {
-        message: `the store ${name} did not show ${key} right after it was written, which its profile promises; nothing more was written`,
-        fix: `the store ${name} does not behave as its semantics profile says; re-run, and if it happens again use another store for this`,
-        paths: [key],
-      }),
+      finding(
+        "store.failed",
+        semanticValue(semantics.readAfterWrite) === true
+          ? {
+              message: `the store ${name} did not show ${key} right after it was written, which its profile promises; nothing more was written`,
+              fix: `the store ${name} does not behave as its semantics profile says; re-run, and if it happens again use another store for this`,
+              paths: [key],
+            }
+          : {
+              message: `the store ${name} does not show ${key} yet (its profile does not promise read-after-write); the election is not decided here`,
+              fix: "re-run later: the election reads the published key first, and ends won or lost once it shows",
+              paths: [key],
+            },
+      ),
     );
   /** After the publishing write: the published value names the winner, or the write failed / is not seen. */
   const afterWrite = async (write: Result<unknown>): Promise<Result<ElectionOutcome>> => {
@@ -192,7 +239,12 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   }
 
   // The sole-candidate rule.
-  const keyOf = (id: string, suffix: string): string => `${e.candidates}${id}${suffix}`;
+  const keyOf = (id: string, decision: ElectionRecord["decision"]): string =>
+    `${e.candidates}${id}${SUFFIX[decision]}`;
+  /**
+   * The candidates and their decisions. A candidacy counts by its name alone (more candidates only means more
+   * refusals); a decision counts only when its record validates for that attempt, since recovery acts on it.
+   */
   const listCandidates = async (): Promise<Result<Candidates>> => {
     const listed = await store.list(e.candidates);
     if (!listed.ok) return listed;
@@ -202,19 +254,26 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     for (const { key } of listed.value) {
       const rest = key.slice(e.candidates.length);
       if (rest.includes("/")) continue;
-      for (const [suffix, into] of [
-        [CANDIDACY, ids],
-        [REFUSED, refused],
-        [PUBLISHING, publishing],
-      ] as const) {
-        if (rest.endsWith(suffix) && rest.length > suffix.length) into.add(rest.slice(0, -suffix.length));
+      for (const decision of ["candidate", "publishing", "refused"] as const) {
+        const suffix = SUFFIX[decision];
+        if (!rest.endsWith(suffix) || rest.length === suffix.length) continue;
+        const id = rest.slice(0, -suffix.length);
+        if (decision === "candidate") {
+          ids.add(id);
+          continue;
+        }
+        const bytes = await store.get(key);
+        if (!bytes.ok) return bytes;
+        if (bytes.value !== null && isRecord(bytes.value, id, decision)) {
+          (decision === "refused" ? refused : publishing).add(id);
+        }
       }
     }
     return ok({ ids: [...ids].sort(), refused, publishing });
   };
 
-  const candidacy = keyOf(e.id, CANDIDACY);
-  const written = await store.put(candidacy, marker(JSON.stringify({ v: 1, id: e.id })));
+  const candidacy = keyOf(e.id, "candidate");
+  const written = await store.put(candidacy, record(e.id, "candidate"));
   if (!written.ok) {
     const there = await store.get(candidacy);
     if (!there.ok || there.value === null) return written; // it may still land: a later election sees it, undecided
@@ -229,18 +288,24 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   const hasRefused = mine.refused.has(e.id);
   if (!hasRefused && (mine.publishing.has(e.id) || others.length === 0)) {
     if (!mine.publishing.has(e.id)) {
-      const intent = await store.put(keyOf(e.id, PUBLISHING), marker(JSON.stringify({ v: 1, id: e.id })));
+      const intent = await store.put(keyOf(e.id, "publishing"), record(e.id, "publishing"));
       if (!intent.ok) {
-        const there = await store.get(keyOf(e.id, PUBLISHING));
-        if (!there.ok || there.value === null) return intent; // never publish on an intent nobody can see
+        const there = await store.get(keyOf(e.id, "publishing"));
+        if (!there.ok || there.value === null || !isRecord(there.value, e.id, "publishing")) return intent; // never publish on an intent nobody can see
       }
     }
     return afterWrite(await store.put(e.key, e.value));
   }
 
   if (!hasRefused) {
-    // Best effort: a refusal that does not land leaves this attempt undecided to others, which only delays them.
-    await store.put(keyOf(e.id, REFUSED), marker(JSON.stringify({ v: 1, id: e.id })));
+    // The refusal must be read back before anything is final (D99): a refusal that did not land leaves this attempt
+    // free to act on a .publishing still in flight, so a failure here ends the run with the error, never contested.
+    const refusal = await store.put(keyOf(e.id, "refused"), record(e.id, "refused"));
+    const back = await store.get(keyOf(e.id, "refused"));
+    if (!back.ok) return back;
+    if (back.value === null || !isRecord(back.value, e.id, "refused")) {
+      return refusal.ok ? notSeen(keyOf(e.id, "refused")) : refusal;
+    }
   }
   let undecided: string[] = others;
   let candidates = mine.ids;
@@ -251,11 +316,16 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     const now = await listCandidates();
     if (!now.ok) return now;
     candidates = now.value.ids;
-    undecided = candidates.filter((id) => id !== e.id && !now.value.refused.has(id));
+    // Final only when every visible candidate, this attempt included, has a refusal read back from the store.
+    undecided = candidates.filter((id) => !now.value.refused.has(id));
     if (undecided.length === 0) break;
     await e.wait(WAIT_MS);
   }
-  const keys = candidates.flatMap((id) => [keyOf(id, CANDIDACY), keyOf(id, REFUSED), keyOf(id, PUBLISHING)]);
+  const keys = candidates.flatMap((id) => [
+    keyOf(id, "candidate"),
+    keyOf(id, "refused"),
+    keyOf(id, "publishing"),
+  ]);
   const fix =
     undecided.length > 0
       ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is`

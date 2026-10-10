@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
+import { z } from "zod";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import { FAKE_TEMP_PREFIX, semanticBlobStore } from "../testing/semantic-blob-store.ts";
-import { type Election, type ElectionOutcome, elect, publishEvent, sameBytes } from "./publish.ts";
+import {
+  type Election,
+  type ElectionOutcome,
+  ElectionRecordSchema,
+  elect,
+  electionJsonSchemas,
+  publishEvent,
+  sameBytes,
+} from "./publish.ts";
 
 const encoder = new TextEncoder();
 const bytes = (text: string): Uint8Array => encoder.encode(text);
@@ -383,8 +392,8 @@ describe("publish: the elected publication", () => {
 
   test("a terminal contested names no undecided candidate, and its fix is the quiesced cleanup", async () => {
     const store = semanticBlobStore(NO_CREATE);
-    await store.put(`${CANDIDATES}B.json`, bytes("{}"));
-    await store.put(`${CANDIDATES}B.refused`, bytes("{}"));
+    await store.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
+    await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}'));
     const o = await outcome(store, election("A"));
     expect(o).toMatchObject({ outcome: "contested", candidates: ["A", "B"], undecided: [] });
     if (o.outcome === "contested") expect(o.fix).toContain("every device");
@@ -448,34 +457,41 @@ describe("publish: the elected publication", () => {
     ["conditional create", {}],
     ["sole candidate", NO_CREATE],
   ] as const) {
-    test(`${route}: a cancelled write that lands late never makes a second winner`, async () => {
+    test(`${route}: a cancelled write that lands late never makes a second winner or a wrong final contested`, async () => {
       await fc.assert(
-        fc.asyncProperty(fc.scheduler(), fc.nat(6), async (s, skip) => {
+        fc.asyncProperty(fc.scheduler(), fc.nat(8), fc.nat(8), async (s, cancelAt, failAt) => {
           const inner = semanticBlobStore({ ...options, lateLanding: true });
-          // Cancel the (skip+1)-th put: a candidate, a marker or a publication.
+          // Cancel one put (it may land late) and fail another (it never lands): candidacies, markers, publications.
           let puts = 0;
-          const cancelling: BlobStore = {
+          const faulty: BlobStore = {
             ...inner,
             put: (key, data, opts) => {
-              if (puts++ === skip) inner.cancelNext();
+              const n = puts++;
+              if (n === cancelAt) inner.cancelNext();
+              else if (n === failAt) inner.failNext("put");
               return inner.put(key, data, opts);
             },
           };
-          const store = scheduled(cancelling, s);
+          const store = scheduled(faulty, s);
           const ids = ["C0", "C1"];
           const settling = s.schedule(Promise.resolve()).then(() => inner.settle());
           const first = await s.waitFor(Promise.all(ids.map((id) => elect(store, election(id)))));
+          // Retries before the late write lands (astra r2), then after everything has landed (recovery).
+          const early = await s.waitFor(Promise.all(ids.map((id) => elect(store, election(id)))));
           await s.waitFor(settling);
           inner.settle();
-          // Every attempt re-runs once everything has landed (its recovery).
           const again = await Promise.all(ids.map((id) => elect(inner, election(id))));
           const won = new Set<string>();
-          for (const results of [first, again]) {
+          let final = false;
+          for (const results of [first, early, again]) {
             results.forEach((r, i) => {
               if (r.ok && r.value.outcome === "won") won.add(ids[i] as string);
+              if (r.ok && r.value.outcome === "contested" && r.value.undecided.length === 0) final = true;
             });
           }
           expect(won.size).toBeLessThanOrEqual(1);
+          // A final contested is never wrong: nobody wins, then or later.
+          if (final) expect([...won]).toEqual([]);
           const published = inner.data.get(PUBLISHED);
           if (won.size === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe([...won][0]);
           for (const r of again) {

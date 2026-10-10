@@ -10,6 +10,7 @@ import { contractJsonSchemas, EXIT, EXIT_CODE_MEANINGS, FINDINGS, PLAINPORT_JSON
 import {
   catalogJsonSchemas,
   configJsonSchemas,
+  electionJsonSchemas,
   journalJsonSchemas,
   stagingJsonSchemas,
   storeSemanticsJsonSchemas,
@@ -263,6 +264,7 @@ export const generateFiles = (registry: Registry): Map<string, string> => {
     ...journalJsonSchemas(),
     ...stagingJsonSchemas(),
     ...storeSemanticsJsonSchemas(),
+    ...electionJsonSchemas(),
     ...trashClaimJsonSchemas(),
   };
   for (const name of Object.keys(schemas).sort()) {
