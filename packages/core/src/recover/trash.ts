@@ -15,7 +15,7 @@
 // Only plainport's own trash and journals are deleted, and only for operations whose journal says committed and
 // released; nothing else is touched.
 
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
 import { type DeleteGuardContext, deleteGuard } from "../delete-guard.ts";
 import { readDevice } from "../device.ts";
@@ -43,6 +43,8 @@ import {
   claimAt,
   noteRefusal,
   readRefusal,
+  TrashClaimBootSchema,
+  TrashClaimSchema,
   trashClaim,
   trashClaimFile,
   trashClaimFiles,
@@ -344,15 +346,57 @@ export const collectTrash = async (
   return ok(report);
 };
 
-/** The files a claim leaves beside its trash: `<op>.claim`, `<op>.claim.boot`, `<op>.claim.tmp`. */
+/** The files a claim leaves beside its trash: exactly `<op>.claim`, `<op>.claim.boot`, `<op>.claim.tmp`. */
 const CLAIM_NAME = /^([0-9A-HJKMNP-TV-Z]{26})\.claim(?:\.boot|\.tmp)?$/;
+
+/**
+ * The holder as a real folder, or undefined: `.plainport-trash` itself must be a folder, not a link, and resolve to
+ * itself beside its parent's real path, so a holder that is (or became) a link to anywhere else, a project included,
+ * is never swept. The sweep then works under the real path it checked.
+ */
+const realHolder = async (io: LocalIo, holder: string): Promise<string | undefined> => {
+  try {
+    if ((await io.fs.lstat(holder)).kind !== "dir") return undefined;
+    const real = await io.fs.realpath(holder);
+    return real === join(await io.fs.realpath(dirname(holder)), basename(holder)) ? real : undefined;
+  } catch (error) {
+    assertSystemError(error);
+    return undefined;
+  }
+};
+
+/**
+ * Whether every claim file of `trash` that is there is a regular file that parses as what its name says: a claim
+ * (the `.claim.tmp` too) or a `.claim.boot`. Anything else is not known to be plainport's claim, so it is kept.
+ */
+const claimFilesSound = async (io: LocalIo, trash: string): Promise<boolean> => {
+  const [claim, boot, tmp] = trashClaimFiles(trash) as [string, string, string];
+  for (const [file, schema] of [
+    [claim, TrashClaimSchema],
+    [boot, TrashClaimBootSchema],
+    [tmp, TrashClaimSchema],
+  ] as const) {
+    try {
+      if ((await io.fs.lstat(file)).kind !== "file") return false;
+      if (!schema.safeParse(JSON.parse(await io.fs.readText(file))).success) return false;
+    } catch (error) {
+      if (error instanceof SyntaxError) return false;
+      if (systemErrorCode(error) !== "ENOENT") return false;
+    }
+  }
+  return true;
+};
 
 /**
  * Orphan claims (D64, D67): in the trash holder of every root of this device, of every registered `--to` landing and
  * of every open offload journal, the claim files of a trash folder that is gone, once neither the claim nor a stray
  * `.claim.tmp` is live (D64's test). A delete killed after its trash went leaves them, and so does an older version's
- * delete, which never removes a `.claim.boot`. Only those files go, never a folder, and only beside a trash that is
- * no longer there: nothing they claimed is left to lose. What cannot be read or removed now is left for the next run.
+ * delete, which never removes a `.claim.boot`. Only those files go, never a folder, and only:
+ * - in a holder that is a real folder, reached by no link of its own (realHolder), and lies in no registered project
+ *   (D84);
+ * - named exactly as a claim file, regular files, and parsing as one (claimFilesSound): anything else is kept;
+ * - beside a trash that is no longer there: nothing they claimed is left to lose.
+ * What cannot be read or removed now is left for the next run.
  */
 const sweepOrphanClaims = async (
   deps: TrashDeps,
@@ -373,7 +417,14 @@ const sweepOrphanClaims = async (
     for (const e of Object.values(registry.value.projects))
       if (e.override !== undefined) holders.add(join(dirname(e.override), TRASH_DIR));
   for (const j of journals) if (j.kind === "offload") holders.add(dirname(j.trash ?? offloadTrashOf(j)));
-  for (const holder of holders) {
+  for (const listed of holders) {
+    const holder = await realHolder(host, listed);
+    if (holder === undefined) continue;
+    const apart = await notAProject(host, paths, deps.env, holder);
+    if (!apart.ok) {
+      deps.log("info", `the claims in ${listed} were left: ${apart.finding.message}`);
+      continue;
+    }
     let names: string[];
     try {
       names = await host.fs.readdir(holder);
@@ -390,6 +441,7 @@ const sweepOrphanClaims = async (
         assertSystemError(error);
         continue;
       }
+      if (!(await claimFilesSound(host, trash))) continue;
       const claimed = await claimAt(host, trashClaimFile(trash), trash, self);
       const claiming = await claimAt(host, `${trashClaimFile(trash)}.tmp`, trash, self);
       if (claimed.state === "live" || claiming.state === "live") continue;

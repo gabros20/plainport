@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { STORE_IDENTITY_KEY } from "./catalog/identity.ts";
 import type { Store } from "./config/schema.ts";
+import type { Scheduler } from "./deadline.ts";
 import type { StoreOpener } from "./ports/store.ts";
 import { readRegistry } from "./registry.ts";
 import { checkStorePin, setUpStore } from "./store.ts";
@@ -170,25 +171,60 @@ describe("setUpStore on a disk that fails I/O (rule 7)", () => {
       mint: () => ulid(),
     });
 
-  test("a pinned store folder whose stat never returns (a hung network mount, D32) is store.unreachable within the deadline", async () => {
+  /** A fake scheduler whose timers fire at once (AGENTS.md rule 5). */
+  const atOnce: Scheduler = {
+    setTimer: (fire) => {
+      queueMicrotask(fire);
+      return undefined;
+    },
+    clearTimer: () => {},
+  };
+  /** The disk under ~/ssd on a network mount that hangs: every stat, lstat and realpath there never returns. */
+  const hungUnder = (prefix: string) => {
+    const real = testHost();
+    const never =
+      <T>(call: (path: string) => Promise<T>) =>
+      (path: string) =>
+        path.startsWith(prefix) ? new Promise<T>(() => {}) : call(path);
+    return {
+      ...real,
+      fs: {
+        ...real.fs,
+        stat: never(real.fs.stat),
+        lstat: never(real.fs.lstat),
+        realpath: never(real.fs.realpath),
+      },
+    };
+  };
+  const options = {
+    env: { PLAINPORT_STORE_PASSWORD: "pw" },
+    name: "ssd",
+    store: { kind: "local" as const, path: "~/ssd/store" },
+    opener,
+    probe: { scheduler: atOnce },
+  };
+
+  test("a pinned store folder whose stat never returns (a hung network mount, D32) is store.unreachable at the deadline", async () => {
     const first = await setUpWith(testHost());
     expect(first.ok ? "set up" : first.finding.message).toBe("set up");
-    const real = testHost();
-    const hung = { ...real, fs: { ...real.fs, stat: () => new Promise<never>(() => {}) } };
-    const started = performance.now();
-    const result = await checkStorePin(hung, {
-      paths: box.paths,
-      env: { PLAINPORT_STORE_PASSWORD: "pw" },
-      name: "ssd",
-      store: { kind: "local", path: "~/ssd/store" },
-      opener,
-      probeDeadlineMs: 50,
-    });
-    expect(performance.now() - started).toBeLessThan(2_000);
+    const result = await checkStorePin(hungUnder(join(box.home, "ssd")), { ...options, paths: box.paths });
     expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
       "store.unreachable",
-      expect.stringContaining("did not answer within"),
+      expect.stringContaining("did not answer within 10 seconds"),
     ]);
+  });
+
+  test("a new, unpinned store on a hung mount is store.unreachable at the deadline: resolving its path is bounded too", async () => {
+    const result = await setUpStore(hungUnder(join(box.home, "ssd")), {
+      ...options,
+      paths: box.paths,
+      mint: () => ulid(),
+    });
+    expect(result.ok ? 0 : [result.finding.code, result.finding.message]).toEqual([
+      "store.unreachable",
+      expect.stringContaining("did not answer within 10 seconds"),
+    ]);
+    expect(await pinned()).toBeUndefined();
   });
 
   test("a store folder that cannot be looked at is store.unreachable, never an exception", async () => {

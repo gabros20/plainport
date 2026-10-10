@@ -645,7 +645,14 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       );
     };
 
-    type Verified = { prepared: PreparedOffload; snapshot: string; files: number; bytes: number };
+    /** rootMode: the folder's own mode, read once before the snapshot, for its tag and its event alike (Q5 ii). */
+    type Verified = {
+      prepared: PreparedOffload;
+      snapshot: string;
+      files: number;
+      bytes: number;
+      rootMode?: number;
+    };
 
     /** Plans, snapshots and verifies, once more when the folder changed during the upload (DESIGN steps 3–7). */
     const snapshotVerified = async (approved: Plan | undefined): Promise<Result<Verified>> => {
@@ -709,12 +716,18 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           return stale("the folder changed between the plan and the snapshot");
         const excluded = new Set(stripped);
         for (const s of prepared.tree.skipped) if (!isExcluded(excluded, s.path)) excluded.add(s.path);
-        // The folder's own mode, as a tag too (Q5 ii); one that cannot be read is left out, as in the event.
+        // The folder's own mode, which the snapshot does not hold (D55), read once: the tag (Q5 ii) and the event both
+        // record this value, so an onload restores the same mode whichever of them it reads. A chmod during the upload
+        // is not part of this snapshot, as an edit after verification is not.
         let folderMode: number | undefined;
         try {
           folderMode = (await io.fs.lstat(folder)).mode;
         } catch (error) {
           assertSystemError(error);
+          deps.log(
+            "warn",
+            `the mode of ${folder} could not be read; an onload gives the folder a new folder's mode`,
+          );
         }
         const taken = await takeSnapshot({
           saga,
@@ -744,7 +757,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           ctx,
         });
         if (!checked.ok) return signal?.aborted ? cancelled() : checked;
-        if (!checked.value.changed) return ok({ prepared, snapshot: taken.value, ...checked.value.totals });
+        if (!checked.value.changed)
+          return ok({
+            prepared,
+            snapshot: taken.value,
+            ...checked.value.totals,
+            ...(folderMode === undefined ? {} : { rootMode: folderMode }),
+          });
         phase("verify", "end");
         if (approved !== undefined)
           return stale(
@@ -781,17 +800,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       if (sharedNow !== undefined) return fail(rootMismatch(store.name, ref.root, sharedNow));
       const head = headCheck(current.value, projectId, base, ref.address);
       if (head.kind === "incomplete") return fail(head.finding);
-      // The folder's own mode, which the snapshot does not hold (D55): onload gives it back.
-      let rootMode: number | undefined;
-      try {
-        rootMode = (await io.fs.lstat(folder)).mode;
-      } catch (error) {
-        assertSystemError(error);
-        deps.log(
-          "warn",
-          `the mode of ${folder} could not be read; an onload gives the folder a new folder's mode`,
-        );
-      }
+      // The folder's own mode as the snapshot's tag records it (D55, Q5 ii): onload gives it back.
+      const { rootMode } = verified;
       const event: CatalogEvent = {
         v: 1,
         id: ulid(clock().getTime()),

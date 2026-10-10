@@ -5,7 +5,14 @@ export { TEMP_SUFFIX, tempPathFor } from "./atomic.ts";
 export { type BootMark, fromThisBoot, readBootSession, SAME_BOOT_MS } from "./boot.ts";
 export * from "./catalog/index.ts";
 export * from "./config/index.ts";
-export { STORE_PROBE_DEADLINE_MS, withinDeadline } from "./deadline.ts";
+export {
+  type ProbeOptions,
+  probeWithin,
+  realScheduler,
+  type Scheduler,
+  STORE_PROBE_DEADLINE_MS,
+  withinDeadline,
+} from "./deadline.ts";
 export { type DeleteGuardContext, deleteGuard } from "./delete-guard.ts";
 export * from "./device.ts";
 export { type GuardPolicy, guardedFs, PATH_REFUSED, PathGuard, PathRefused } from "./guard.ts";

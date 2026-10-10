@@ -20,7 +20,7 @@ import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
-import { STORE_PROBE_DEADLINE_MS, withinDeadline } from "./deadline.ts";
+import { type ProbeOptions, probeWithin, STORE_PROBE_DEADLINE_MS } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
@@ -127,8 +127,11 @@ export interface SetUpStoreOptions {
   store: Store;
   opener: StoreOpener;
   mint: () => string;
-  /** How long a probe of the store's folder may take; STORE_PROBE_DEADLINE_MS by default (tests shorten it). */
-  probeDeadlineMs?: number;
+  /**
+   * The deadline of every probe of the store's path before anything is written (D32): STORE_PROBE_DEADLINE_MS on the
+   * real timers by default; tests pass a fake scheduler.
+   */
+  probe?: ProbeOptions;
 }
 
 type SetUpOptions = Omit<SetUpStoreOptions, "mint">;
@@ -143,6 +146,21 @@ const unreachableAt = (name: string, root: string, detail: string) =>
   );
 
 /**
+ * store.unreachable for a probe of `path` that did not answer within its deadline (D32): a network mount that hangs.
+ * The call itself cannot be cancelled and waits on in the background (deadline.ts).
+ */
+const hung = (name: string, root: string, path: string, probe: ProbeOptions) =>
+  unreachableAt(
+    name,
+    root,
+    `${path} did not answer within ${(probe.deadlineMs ?? STORE_PROBE_DEADLINE_MS) / 1000} seconds (a network mount that hangs?)`,
+  );
+
+/** A probe of the store's path (D32) under its deadline; store.unreachable when it does not answer in time. */
+const bounded = <T>(work: Promise<Result<T>>, name: string, root: string, probe: ProbeOptions) =>
+  probeWithin<Result<T>>(work, probe, () => hung(name, root, root, probe));
+
+/**
  * Whether `path` is a folder: undefined when nothing is there; store.unreachable when it cannot be looked at (a failing
  * or locked disk), never an exception (AGENTS.md rule 7).
  */
@@ -151,18 +169,16 @@ const folderAt = async (
   path: string,
   name: string,
   root: string,
-  deadline: number,
+  probe: ProbeOptions,
 ): Promise<Result<boolean | undefined>> => {
   try {
-    // A network mount that hangs (D32): unreachable once the deadline passes; the stat itself cannot be cancelled.
-    const probed = await withinDeadline(io.fs.stat(path), deadline);
-    if (probed.timedOut)
-      return unreachableAt(
-        name,
-        root,
-        `${path} did not answer within ${deadline / 1000} seconds (a network mount that hangs?)`,
-      );
-    return ok(probed.value.kind === "dir");
+    const kind = await probeWithin(
+      io.fs.stat(path).then((stat) => stat.kind),
+      probe,
+      () => undefined,
+    );
+    if (kind === undefined) return hung(name, root, path, probe);
+    return ok(kind === "dir");
   } catch (error) {
     const code = systemErrorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return ok(undefined);
@@ -175,14 +191,14 @@ const storeFolder = async (
   io: LocalIo,
   name: string,
   root: string,
-  deadline = STORE_PROBE_DEADLINE_MS,
+  probe: ProbeOptions = {},
 ): Promise<Result<boolean | undefined>> => {
   const parent = dirname(root);
-  const above = await folderAt(io, parent, name, root, deadline);
+  const above = await folderAt(io, parent, name, root, probe);
   if (!above.ok) return above;
   if (above.value !== true)
     return unreachableAt(name, root, `${parent} is not a folder (a disk not mounted?)`);
-  const here = await folderAt(io, root, name, root, deadline);
+  const here = await folderAt(io, root, name, root, probe);
   if (!here.ok) return here;
   if (here.value === false) return unreachableAt(name, root, `${root} is not a folder`);
   return here;
@@ -213,7 +229,7 @@ export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise
   const pinned = registry.value.stores?.[name];
   if (pinned === undefined) return ok(null);
   const root = storeRoot(store, paths.home);
-  const folder = await storeFolder(io, name, root, options.probeDeadlineMs);
+  const folder = await storeFolder(io, name, root, options.probe);
   if (!folder.ok) return folder;
   const here = folder.value;
   const changed = (found: string | null) => {
@@ -240,18 +256,30 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
   const pin = await checkStorePin(io, options);
   if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
-  // Never in plainport's own holders, whose folders gc deletes (D87).
-  const reserved = await notReserved(io, root, paths.home, `store ${name}'s folder`);
+  const probe = options.probe ?? {};
+  // Never in plainport's own holders, whose folders gc deletes (D87). Every probe of the store's path before anything
+  // is written has the deadline (D32): resolving it as much as looking at it.
+  const reserved = await bounded(
+    notReserved(io, root, paths.home, `store ${name}'s folder`),
+    name,
+    root,
+    probe,
+  );
   if (!reserved.ok) return reserved;
-  const folder = await storeFolder(io, name, root, options.probeDeadlineMs);
+  const folder = await storeFolder(io, name, root, probe);
   if (!folder.ok) return folder;
   // Never inside, or holding, a registered project's folder: its offload would delete the store (D83).
-  const projects = await registeredFolders(io, paths, options.env);
-  if (!projects.ok) return projects;
-  for (const project of projects.value) {
-    const overlap = await storeOverlap(io, paths.home, project.folder, [{ name, root }]);
-    if (!overlap.ok) return overlap;
-  }
+  const overlaps = async (): Promise<Result<void>> => {
+    const projects = await registeredFolders(io, paths, options.env);
+    if (!projects.ok) return projects;
+    for (const project of projects.value) {
+      const overlap = await storeOverlap(io, paths.home, project.folder, [{ name, root }]);
+      if (!overlap.ok) return overlap;
+    }
+    return ok(undefined);
+  };
+  const apart = await bounded(overlaps(), name, root, probe);
+  if (!apart.ok) return apart;
   if (folder.value === undefined) {
     try {
       await io.fs.mkdirp(root);

@@ -23,12 +23,13 @@ import {
   type BlobEntry,
   type BlobStore,
   type LocalIo,
+  type ProbeOptions,
   type PutOptions,
+  probeWithin,
   STORE_PROBE_DEADLINE_MS,
   systemErrorCode,
   TEMP_SUFFIX,
   tempPathFor,
-  withinDeadline,
 } from "@plainport/core";
 
 /** `<name>.<pid>.<12 hex>.tmp`: what a write leaves behind if the process dies before its link or rename. */
@@ -45,14 +46,10 @@ const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
 
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-export interface FsBlobStoreOptions {
-  /** How long the root's probe may take; STORE_PROBE_DEADLINE_MS by default (tests shorten it). */
-  probeDeadlineMs?: number;
-}
-
-export const fsBlobStore = (io: LocalIo, root: string, options: FsBlobStoreOptions = {}): BlobStore => {
+/** probe: the deadline of the root's probe, STORE_PROBE_DEADLINE_MS on the real timers by default (tests fake it). */
+export const fsBlobStore = (io: LocalIo, root: string, probe: ProbeOptions = {}): BlobStore => {
   const { fs } = io;
-  const deadline = options.probeDeadlineMs ?? STORE_PROBE_DEADLINE_MS;
+  const seconds = (probe.deadlineMs ?? STORE_PROBE_DEADLINE_MS) / 1000;
   const pathOf = (key: string): string => join(root, ...key.split("/"));
 
   const unreachable = (detail: string): Failure =>
@@ -82,10 +79,14 @@ export const fsBlobStore = (io: LocalIo, root: string, options: FsBlobStoreOptio
   /** Undefined when the root is a folder; store.unreachable when it is missing or is not one. */
   const checkRoot = async (): Promise<Failure | undefined> => {
     try {
-      const probed = await withinDeadline(fs.stat(root), deadline);
-      if (probed.timedOut)
-        return unreachable(`did not answer within ${deadline / 1000} seconds (a network mount that hangs?)`);
-      if (probed.value.kind === "dir") return undefined;
+      const kind = await probeWithin(
+        fs.stat(root).then((stat) => stat.kind),
+        probe,
+        () => undefined,
+      );
+      if (kind === undefined)
+        return unreachable(`did not answer within ${seconds} seconds (a network mount that hangs?)`);
+      if (kind === "dir") return undefined;
       return unreachable("is not a folder");
     } catch (error) {
       const code = systemErrorCode(error);

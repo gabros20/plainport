@@ -22,6 +22,7 @@ import {
   PathGuard,
   readEvents,
   resolvePaths,
+  type Scheduler,
   STORE_PROBE_DEADLINE_MS,
   storeEventLog,
   ulid,
@@ -268,29 +269,34 @@ describe("blob-fs carries the catalog", () => {
 describe("a store folder on a network mount that hangs (D32)", () => {
   /** A stat that never returns, as on a hung SMB or NFS mount. */
   const hung: LocalIo = { ...io, fs: { ...io.fs, stat: () => new Promise(() => {}) } };
+  /** A fake scheduler whose timers fire at once, recording the deadline each was given. */
+  const deadlines: number[] = [];
+  const atOnce: Scheduler = {
+    setTimer: (fire, ms) => {
+      deadlines.push(ms);
+      queueMicrotask(fire);
+      return undefined;
+    },
+    clearTimer: () => {},
+  };
 
-  test("every call's root probe fails as store.unreachable within the deadline", async () => {
+  test("every call's root probe fails as store.unreachable at the deadline, 10 seconds by default", async () => {
     const dir = temp();
     try {
-      const store = fsBlobStore(hung, dir, { probeDeadlineMs: 50 });
-      const started = performance.now();
+      const store = fsBlobStore(hung, dir, { scheduler: atOnce });
       const results = await Promise.all([
         store.get("meta/x"),
         store.list("meta/"),
         store.put("meta/y", new Uint8Array()),
       ]);
-      expect(performance.now() - started).toBeLessThan(2_000);
       for (const result of results)
         expect(result.ok ? "ok" : [result.finding.code, result.finding.message]).toEqual([
           "store.unreachable",
-          expect.stringContaining("did not answer within"),
+          expect.stringContaining("did not answer within 10 seconds"),
         ]);
+      expect(deadlines).toEqual([STORE_PROBE_DEADLINE_MS, STORE_PROBE_DEADLINE_MS, STORE_PROBE_DEADLINE_MS]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  test("the deadline is 10 seconds by default", () => {
-    expect(STORE_PROBE_DEADLINE_MS).toBe(10_000);
   });
 });

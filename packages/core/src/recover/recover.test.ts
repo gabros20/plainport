@@ -16,7 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
@@ -2331,6 +2331,47 @@ describe("orphan claims: a claim whose trash is gone and whose claimer is not li
     expect(left(dead)).toEqual([".claim", ".claim.boot", ".claim.tmp"]);
     await housekeeping(trashDeps());
     expect([left(dead), left(live)]).toEqual([[], [".claim", ".claim.boot", ".claim.tmp"]]);
+  });
+
+  test("a .plainport-trash that is a symlink (here into the project) is never swept, by gc or housekeeping", async () => {
+    const inner = join(dir, "inner");
+    mkdirSync(inner);
+    symlinkSync(inner, holder());
+    const trash = join(holder(), ulid());
+    const startedAt = new Date().toISOString();
+    const claim = {
+      v: 1,
+      device: device.id,
+      pid: 99_999_999,
+      bootedAt: testHost().proc.bootedAtMs(),
+      startedAt,
+    };
+    for (const suffix of [".claim", ".claim.tmp"]) writeFileSync(`${trash}${suffix}`, JSON.stringify(claim));
+    writeFileSync(`${trash}.claim.boot`, JSON.stringify({ v: 1, pid: 99_999_999, startedAt, session: "S" }));
+    value(await collectTrash(trashDeps(), { early: false }));
+    await housekeeping(trashDeps());
+    expect(readdirSync(inner).sort()).toEqual(
+      [".claim", ".claim.boot", ".claim.tmp"].map((suffix) => `${basename(trash)}${suffix}`).sort(),
+    );
+  });
+
+  test("a claim file that does not parse, or is no regular file, keeps its op's files; names that only look like claims stay", async () => {
+    const torn = await orphan(99_999_999);
+    writeFileSync(`${torn}.claim`, "{ torn");
+    const tornBoot = await orphan(99_999_999);
+    writeFileSync(`${tornBoot}.claim.boot`, '{"v":1,');
+    const tornTmp = await orphan(99_999_999);
+    writeFileSync(`${tornTmp}.claim.tmp`, '{"v":1,"pid":');
+    const folder = await orphan(99_999_999);
+    rmSync(`${folder}.claim`);
+    mkdirSync(`${folder}.claim`);
+    const lookalikes = [`${ulid()}.claim.old`, `${ulid().toLowerCase()}.claim`, `x${ulid()}.claim`];
+    for (const name of lookalikes) writeFileSync(join(holder(), name), "{}");
+    value(await collectTrash(trashDeps(), { early: false }));
+    await housekeeping(trashDeps());
+    for (const trash of [torn, tornBoot, tornTmp, folder])
+      expect([trash, left(trash)]).toEqual([trash, [".claim", ".claim.boot", ".claim.tmp"]]);
+    for (const name of lookalikes) expect(existsSync(join(holder(), name))).toBe(true);
   });
 
   test("a claim beside a trash that is still there is no orphan: gc leaves it to the journal's own settling", async () => {
