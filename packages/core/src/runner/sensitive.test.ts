@@ -14,7 +14,15 @@ import {
   recordArgv,
 } from "../testing/canary.ts";
 import { RingBuffer } from "./ring-buffer.ts";
-import { bufferProbe, bytesInclude, parseSensitiveJson, runProcess, stderrClasses } from "./runner.ts";
+import {
+  bufferProbe,
+  bytesInclude,
+  Capture,
+  PrivateCollector,
+  parseSensitiveJson,
+  runProcess,
+  stderrClasses,
+} from "./runner.ts";
 import type { ChildProcess, GroupSignal, RunSpec, Spawner } from "./types.ts";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -646,7 +654,7 @@ describe("runner: sensitive mode, the runner's own buffers", () => {
     }
   });
 
-  test("when the runner throws (a spawner that fails to signal), output that arrives later is never kept", async () => {
+  test("when the runner throws (a spawner that fails to signal), it cancels its readers and drains them first", async () => {
     const canary = makeCanary();
     let child: FakeChild | undefined;
     const spawner = new FakeSpawner((c) => {
@@ -664,12 +672,35 @@ describe("runner: sensitive mode, the runner's own buffers", () => {
       );
       expect(String(thrown)).toContain("signal failed");
       const before = seen.length;
-      // The child keeps writing after the throw: a sealed capture takes none of it.
+      // The child keeps writing after the throw: the readers were cancelled and drained, so none of it is read.
       child?.write("stdout", `${canary.value}\n`);
       child?.write("stderr", `${canary.value}\n`);
       await Bun.sleep(20);
       expect(seen.length).toBe(before);
       expect(seen.every(zeros)).toBe(true);
+    } finally {
+      bufferProbe.observe = undefined;
+    }
+  });
+
+  test("sealed: a capture or private collector takes nothing once the run's wipers ran", () => {
+    const seen: Uint8Array[] = [];
+    bufferProbe.observe = (bytes) => seen.push(bytes);
+    try {
+      const capture = new Capture(1024, () => {});
+      capture.push(encode("before"));
+      capture.seal();
+      capture.push(encode("after the run ended"));
+      expect(capture.bytes()).toEqual(new Uint8Array(0));
+      const collector = new PrivateCollector(64);
+      collector.push(encode("before"));
+      collector.wipe();
+      collector.push(encode("after the run ended"));
+      expect(collector.bytes).toBe(6);
+      expect(collector.kept()).toEqual(new Uint8Array(0));
+      // Only what came before the seal was ever copied, and it is all zeros now.
+      expect(seen.every(zeros)).toBe(true);
+      expect(seen.some((bytes) => bytes.length === "after the run ended".length)).toBe(false);
     } finally {
       bufferProbe.observe = undefined;
     }

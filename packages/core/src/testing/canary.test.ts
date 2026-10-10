@@ -383,3 +383,31 @@ describe("canary: expectRunLeaksNothing, the shared leak gate", () => {
     expect(String(thrown.errors[0])).toContain("boom");
   });
 });
+
+describe("canary: pieces are positional, so two canaries of one label never match each other", () => {
+  test("1000 pairs of same-label canaries: neither's value or spellings is a hit for the other", () => {
+    for (let run = 0; run < 1000; run++) {
+      const a = makeCanary();
+      const b = makeCanary();
+      const hits = findCanaries([a], { output: [b.value, ...b.forms.map((form) => form.text)] });
+      if (hits.length > 0)
+        throw new Error(`run ${run}: a second canary of the label was a hit: ${hits.join("; ")}`);
+    }
+  });
+
+  test("the shared prefix and a few characters of another canary are no hit; 8 random characters on are", () => {
+    const a = makeCanary();
+    const b = makeCanary();
+    const prefix = "canary_secret_";
+    const random = a.value.slice(prefix.length);
+    for (const n of [1, 2, 3, 4]) {
+      expect(
+        findCanaries([a], { output: [`${prefix}${b.value.slice(prefix.length, prefix.length + n)}`] }),
+      ).toEqual([]);
+    }
+    expect(findCanaries([a], { output: [`${prefix}${random.slice(0, 8)}`] })).not.toEqual([]);
+    // The same positional rule holds for the encoded spellings: base64 of the prefix alone is no hit.
+    expect(findCanaries([a], { output: [Buffer.from(`${prefix}xxxx`).toString("base64")] })).toEqual([]);
+    expect(findCanaries([a], { output: [Buffer.from(`${prefix}xxxx`).toString("hex")] })).toEqual([]);
+  });
+});

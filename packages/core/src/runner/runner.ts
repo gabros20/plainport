@@ -243,7 +243,7 @@ class Collector {
  * One stream of a sensitive run: no lines, no log events, no tail, only a byte count. stderr keeps its newest bytes
  * when classifyStderr will read them; stdout keeps none (the capture holds it). wipe() overwrites what it kept.
  */
-class PrivateCollector {
+export class PrivateCollector {
   bytes = 0;
   private readonly ring: RingBuffer | undefined;
   /** Once wiped it takes nothing more: a read that resumes after the run ended keeps no copy. */
@@ -283,7 +283,7 @@ class PrivateCollector {
  * All of stdout, up to a hard cap. Past it, the bytes are let go, the run fails (never a shortened ok), and bytes()
  * throws, so no partial capture can reach a caller.
  */
-class Capture {
+export class Capture {
   private chunks: Uint8Array[] = [];
   private size = 0;
   overflowed = false;

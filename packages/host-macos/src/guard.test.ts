@@ -131,6 +131,29 @@ describe("host guard: protected paths are refused", () => {
     expect(result).toMatchObject({ ok: true, value: { exitCode: 0 } });
   });
 
+  test("an env value spelled through a root's real path is refused too, still without resolving the value", async () => {
+    // tmpdir() is /var/folders/… on macOS, whose real path is /private/var/folders/…: a root given one way and a
+    // value spelled the other.
+    const spelled = mkdtempSync(join(tmpdir(), "plainport-guard-spelled-"));
+    try {
+      const real = realpathSync(spelled);
+      if (real === spelled) return; // No symlink in this temp folder's path: nothing to show here.
+      const guarded = createMacosHost({ guard: { refuse: [spelled], readOnly: [] } });
+      const error = await guarded
+        .run({
+          command: "/bin/echo",
+          args: [],
+          cwd: outside,
+          env: { ...env, TOKEN: join(real, "never-created") },
+        })
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: REFUSED });
+      expect(String((error as Error).message)).toContain("the value of TOKEN");
+    } finally {
+      rmSync(spelled, { recursive: true, force: true });
+    }
+  });
+
   test("a child may get PATH entries, read-only paths and paths elsewhere", async () => {
     const result = await host.run({
       command: "/bin/echo",

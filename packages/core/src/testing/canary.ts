@@ -22,8 +22,9 @@ export interface Canary {
    * three alignments a larger envelope can give it, plain and base64url; for a structured secret, each component the
    * same way. Each is long enough not to match by chance. */
   forms: readonly CanaryForm[];
-  /** Every PIECE-character slice of the forms (a cut message keeps any slice, interior ones included), named by its
-   * form, less the slices every canary of the kind shares (`canary_secret_`). Forms added later have no pieces. */
+  /** Every PIECE-character slice of the forms holding at least 8 characters derived from the random bytes (a cut
+   * message keeps any slice, interior ones included), named by its form. Positional: never a slice of the prefix all
+   * canaries of the kind share (`canary_secret_`). Forms added later have no pieces. */
   pieces: readonly CanaryForm[];
 }
 
@@ -79,36 +80,61 @@ const withHalves = (name: string, text: string): CanaryForm[] => {
   ];
 };
 
-/** The spellings of some bytes: hex and base64 whole and halved, base64 shifted, each base64 also as base64url. */
-const encodings = (name: string, bytes: Uint8Array): CanaryForm[] => {
-  const aligned = base64(bytes);
+/** A whole spelling, and the index in it where characters that depend on the random bytes begin. */
+type Spelling = CanaryForm & { randomFrom: number };
+
+/** How many random-derived characters a piece must hold: 32 bits of hex, 42 or more of base64. */
+const MIN_RANDOM = 8;
+
+/**
+ * The spellings of some bytes whose first `fixed` bytes are the same in every canary of the kind (the `canary_<label>_`
+ * prefix): hex, base64 at each alignment, each base64 also as base64url. randomFrom is where each stops depending on
+ * the fixed bytes alone: 2 hex characters a byte; in base64, the first character that holds a random bit.
+ */
+const spellingsOf = (name: string, bytes: Uint8Array, fixed: number): Spelling[] => {
+  const firstRandom = (bitOffset: number): number => Math.floor(bitOffset / 6);
+  const aligned: Spelling = {
+    name: `${name} (base64)`,
+    text: base64(bytes),
+    randomFrom: firstRandom(8 * fixed),
+  };
   const shifted = [1, 2].map(
-    (shift): CanaryForm => ({
+    (shift): Spelling => ({
       name: `${name} (base64, shifted ${shift})`,
       text: shiftedBase64(bytes, shift),
+      // shiftedBase64 drops the first group of 4 characters.
+      randomFrom: Math.max(0, firstRandom(8 * (shift + fixed)) - 4),
     }),
   );
   return [
-    ...withHalves(`${name} (hex)`, hex(bytes)),
-    ...withHalves(`${name} (base64)`, aligned),
+    { name: `${name} (hex)`, text: hex(bytes), randomFrom: 2 * fixed },
+    aligned,
     ...shifted,
-    { name: `${name} (base64url)`, text: base64url(aligned) },
-    ...shifted.map((form) => ({
-      name: form.name.replace("base64", "base64url"),
-      text: base64url(form.text),
+    ...[aligned, ...shifted].map((spelling) => ({
+      ...spelling,
+      name: spelling.name.replace("base64", "base64url"),
+      text: base64url(spelling.text),
     })),
   ];
 };
 
-/** Every PIECE-character slice of the forms, less those of `shared` (the same kind of value with other random bytes). */
-const piecesOf = (forms: readonly CanaryForm[], shared: readonly CanaryForm[]): CanaryForm[] => {
-  const slices = (text: string): string[] =>
-    Array.from({ length: Math.max(0, text.length - PIECE + 1) }, (_, at) => text.slice(at, at + PIECE));
-  const common = new Set(shared.flatMap((form) => slices(form.text)));
+/** The whole forms of the spellings: each, and the value, hex and aligned base64 also halved. */
+const formsOf = (spellings: readonly Spelling[]): CanaryForm[] =>
+  spellings.flatMap(({ name, text }) =>
+    name.includes("shifted") || name.includes("base64url") ? [{ name, text }] : withHalves(name, text),
+  );
+
+/**
+ * Every PIECE-character slice of the spellings that holds at least MIN_RANDOM characters derived from the random
+ * bytes. The rule is positional, so it is the same for every canary: a slice made mostly of the fixed prefix is never
+ * a piece, and two canaries of one label never match each other's pieces but by a 2^-32 chance.
+ */
+const piecesOf = (spellings: readonly Spelling[]): CanaryForm[] => {
   const pieces = new Map<string, string>();
-  for (const form of forms) {
-    for (const slice of slices(form.text)) {
-      if (!common.has(slice) && !pieces.has(slice)) pieces.set(slice, `${form.name}, a piece`);
+  for (const { name, text, randomFrom } of spellings) {
+    for (let at = Math.max(0, randomFrom - (PIECE - MIN_RANDOM)); at + PIECE <= text.length; at++) {
+      const slice = text.slice(at, at + PIECE);
+      if (!pieces.has(slice)) pieces.set(slice, `${name}, a piece`);
     }
   }
   return [...pieces].map(([text, name]) => ({ name, text }));
@@ -121,14 +147,13 @@ const piecesOf = (forms: readonly CanaryForm[], shared: readonly CanaryForm[]): 
 export const makeCanary = (label = "secret"): Canary => {
   if (!/^[A-Za-z0-9]+$/.test(label))
     throw new Error(`makeCanary: the label must be letters and digits, got ${label}`);
-  const formsOf = (value: string): CanaryForm[] => [
-    ...withHalves(label, value),
-    ...encodings(label, new TextEncoder().encode(value)),
+  const prefix = `canary_${label}_`;
+  const value = `${prefix}${hex(random(16))}`;
+  const spellings: Spelling[] = [
+    { name: label, text: value, randomFrom: prefix.length },
+    ...spellingsOf(label, new TextEncoder().encode(value), prefix.length),
   ];
-  const value = `canary_${label}_${hex(random(16))}`;
-  const forms = formsOf(value);
-  // A canary with other random bytes shares only what every canary of the label shares: those slices are no leak.
-  return { value, forms, pieces: piecesOf(forms, formsOf(`canary_${label}_${hex(random(16))}`)) };
+  return { value, forms: formsOf(spellings), pieces: piecesOf(spellings) };
 };
 
 /**
@@ -142,8 +167,8 @@ export const makeMasterKeyCanary = (): Canary => {
     mac: { k: base64(parts["mac.k"]), r: base64(parts["mac.r"]) },
     encrypt: base64(parts.encrypt),
   });
-  const forms = Object.entries(parts).flatMap(([name, bytes]) => encodings(name, bytes));
-  return { value, forms, pieces: piecesOf(forms, []) };
+  const spellings = Object.entries(parts).flatMap(([name, bytes]) => spellingsOf(name, bytes, 0));
+  return { value, forms: formsOf(spellings), pieces: piecesOf(spellings) };
 };
 
 /** Wraps a spawner so every argv it is asked to start is recorded, for CanaryPlaces.argv. */

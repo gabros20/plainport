@@ -16,8 +16,10 @@
 //
 // Known limits: a refused root that is itself a symlink is matched by its spelling and its parent's real path
 // only (resolving it would touch it); a child gets checked its cwd, its arguments that are absolute paths or
-// `name=/absolute/path`, and every absolute path in its env values except PATH; what a child does with relative
-// paths or inside a shell script is out of sight, and paths given to a child count as reads.
+// `name=/absolute/path`, and every absolute path in its env values except PATH; an env value may be a secret, so it is
+// checked as spelled only (against the roots spelled and resolved), never resolved itself, and a spelling that reaches
+// a root only through a symlink of its own is not caught; what a child does with relative paths or inside a shell
+// script is out of sight, and paths given to a child count as reads.
 
 import { lstat, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -133,10 +135,10 @@ export class PathGuard {
 
   /**
    * Checks what a child would be handed: its cwd, absolute path arguments and env paths. An env value may be a secret
-   * that only looks like a path (base64 can start with "/"), so it is opaque: checked as spelled against the roots as
-   * spelled, never resolved on disk (no realpath, lstat or readlink sees it), and a refusal names the variable, never
-   * its value (AGENTS.md rule 9). A spelling that reaches a root only through a symlink is therefore not caught there;
-   * the cwd and arguments, where secrets never go, are still resolved.
+   * that only looks like a path (base64 can start with "/"), so it is opaque: checked as spelled against the roots,
+   * both as spelled and as resolved, but never resolved on disk itself (no realpath, lstat or readlink sees it), and a
+   * refusal names the variable, never its value (AGENTS.md rule 9). A spelling that reaches a root only through a
+   * symlink of its own is therefore not caught there; the cwd and arguments, where secrets never go, are resolved.
    */
   async checkRun(spec: RunSpec): Promise<void> {
     const label = basename(spec.command);
@@ -150,7 +152,10 @@ export class PathGuard {
       if (name === "PATH") continue;
       for (const piece of value.split(":")) {
         if (!piece.startsWith("/")) continue;
-        const refused = PathGuard.verdict(this.literal, fold(resolve(piece)), false);
+        // The value as spelled, against the roots as spelled and as resolved (only the roots are ever resolved).
+        const key = fold(resolve(piece));
+        const refused =
+          PathGuard.verdict(this.literal, key, false) ?? PathGuard.verdict(await this.roots(), key, false);
         if (refused !== undefined)
           throw new PathRefused(`run ${label} with`, `the value of ${name}`, refused.path);
       }

@@ -49,17 +49,28 @@ beforeEach(() => {
   recorded.argv.length = 0;
 });
 
-/** Helpers a test started outside every process group (the held-open case's perl): killed after each test. */
-const helpers: number[] = [];
+/**
+ * A helper a test started outside every process group (the held-open case's perl) writes its pid to helper.pid in the
+ * sandbox; afterEach kills whatever it names before the sandbox goes, so it is stopped even when the test failed before
+ * reading it (a leak assertion inside runCase).
+ */
+const killHelper = (): void => {
+  let pid: number;
+  try {
+    pid = Number(readFileSync(join(dir, "helper.pid"), "utf8"));
+  } catch {
+    return; // No helper this test.
+  }
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+};
 
 afterEach(() => {
-  for (const pid of helpers.splice(0)) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
+  killHelper();
   rmSync(dir, { recursive: true, force: true });
   const left: string[] = [];
   for (const pgid of groups.splice(0)) {
@@ -216,9 +227,8 @@ describeT1("runner: sensitive mode against real process groups (host-macos)", ()
       // leader goes, nothing is left in its group, and stdout is held only from outside it.
       'printf "%s\\n" "$SECRET"; /usr/bin/perl -MPOSIX -e \'POSIX::setsid(); open(my $f, ">", "helper.tmp") or die; print $f $$; close $f; rename("helper.tmp", "helper.pid"); sleep 30\' & while [ ! -e helper.pid ]; do sleep 0.01; done; exit 0',
     );
-    const pid = Number(readFileSync(join(dir, "helper.pid"), "utf8"));
-    expect(pid).toBeGreaterThan(1);
-    helpers.push(pid);
+    // afterEach kills it, whatever happened above.
+    expect(Number(readFileSync(join(dir, "helper.pid"), "utf8"))).toBeGreaterThan(1);
     expect(result).toMatchObject({ ok: false, finding: { code: "process.output-incomplete" } });
     // The held-open path, not the leftovers one: the helper had left the group.
     expect(messageOf(result)).toContain("a process outside its group kept its stdout open");
