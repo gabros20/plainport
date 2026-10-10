@@ -23,7 +23,11 @@ ADR-0022, since M2 builds on them. The real-project gate with hydration on (D78)
 
 ---
 
-## Owner decisions needed
+## Owner decisions
+
+**Approved by the owner on 2026-10-10: Q1–Q21 as recommended below**, including Q16's residual race (a fork arriving
+after the final check can lose a folder's local copy, never its snapshot) and Q2's residual (a v0.1 first offload that
+outlasts the quiet window behaves as M1 did). The owner will provide the T3 inputs (Q19, Task 28) later in M2.
 
 Each question is a place where `DESIGN.md` is silent or ambiguous, or where M2 changes a persisted format or the
 public contract. For each: the options, the planner's view, astra's view, and one final recommendation. **Blocks**
