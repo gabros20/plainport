@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "string",
+  "enum": [
+    "resolve",
+    "preflight",
+    "scan",
+    "plan",
+    "snapshot",
+    "verify",
+    "commit",
+    "release",
+    "restore",
+    "swap",
+    "agents",
+    "toolchain",
+    "hydrate",
+    "hooks"
+  ],
+  "title": "Phase"
+}

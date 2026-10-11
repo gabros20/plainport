@@ -25,7 +25,6 @@ import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -41,9 +40,9 @@ import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/inde
 import type { RecoveryReport } from "../../packages/core/src/recover/recover.ts";
 import { captureTree, namesIn, type TreeCapture } from "../../packages/core/src/testing/invariants.ts";
 import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandbox.ts";
-import { hostTarget } from "../../packages/core/src/tools.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
+import { binaryEnv, buildHookedBinary, toolsCopy } from "../binary-env.ts";
 import { attachImage, type DiskImage } from "../disk-image.ts";
 import { macOnlyTests, onMac } from "../platform.ts";
 import { describeT1, tierEnabled } from "../tiers.ts";
@@ -85,12 +84,6 @@ import {
 const checkout = resolve(import.meta.dir, "../..");
 const PASSWORD = "crash-matrix-pw";
 const STORE = "local";
-const REAL_HOME = process.env.PLAINPORT_TRIPWIRE_REAL_HOME ?? "";
-/** The test's PATH without the folders under the real home, which the binary's guard refuses (git, lsof, find stay). */
-const PATH = (process.env.PATH ?? "/usr/bin:/bin")
-  .split(":")
-  .filter((p) => REAL_HOME === "" || !(p === REAL_HOME || p.startsWith(`${REAL_HOME}/`)))
-  .join(":");
 /** Rows at once. */
 const PARALLEL = (() => {
   const asked = Number(process.env.PLAINPORT_CRASH_PARALLEL);
@@ -117,27 +110,9 @@ beforeAll(async () => {
   if (!tierEnabled(1) || !onMac) return;
   scratch = mkdtempSync(join(tmpdir(), "plainport-crash-sub-"));
   binary = join(scratch, "plainport");
-  const build = Bun.spawnSync(
-    [
-      process.execPath,
-      "build",
-      "--compile",
-      join(checkout, "packages/cli/src/main.ts"),
-      "--outfile",
-      binary,
-      "--define",
-      "globalThis.PLAINPORT_TEST_HOOKS=true",
-    ],
-    { cwd: checkout, stdout: "pipe", stderr: "pipe" },
-  );
-  if (build.exitCode !== 0) throw new Error(`building the matrix binary: ${build.stderr.toString()}`);
+  buildHookedBinary(binary);
   // The binary refuses every path under the real home (guardFromEnv), the checkout's .tools included: a copy.
-  const target = hostTarget();
-  if (target === undefined) throw new Error(`no tools for ${process.platform}-${process.arch}`);
-  tools = join(scratch, "tools");
-  mkdirSync(tools);
-  copyFileSync(join(checkout, ".tools", target, "restic"), join(tools, "restic"));
-  chmodSync(join(tools, "restic"), 0o755);
+  tools = toolsCopy(scratch);
   template = makeProjectTemplate();
   if (onMac) {
     image = await attachImage(join(scratch, "image"), {
@@ -285,19 +260,7 @@ class RowRun {
 
   /** The binary's environment: the row's sandbox named in full (the tripwire fills in what a child's env leaves out). */
   env(extra: Record<string, string> = {}): Record<string, string> {
-    const home = this.box.home;
-    return {
-      HOME: home,
-      XDG_CONFIG_HOME: join(home, ".config"),
-      XDG_STATE_HOME: join(home, ".local/state"),
-      XDG_CACHE_HOME: join(home, ".cache"),
-      XDG_DATA_HOME: join(home, ".local/share"),
-      PATH,
-      PLAINPORT_STORE_PASSWORD: PASSWORD,
-      PLAINPORT_TRIPWIRE_REAL_HOME: REAL_HOME,
-      PLAINPORT_TOOLS_DIR: tools,
-      ...extra,
-    };
+    return binaryEnv(this.box.home, tools, PASSWORD, extra);
   }
 
   spawn(args: string[], extra: Record<string, string> = {}, executable = binary) {

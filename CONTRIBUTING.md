@@ -143,6 +143,25 @@ Two more knobs for the matrix itself: `PLAINPORT_CRASH_PARALLEL` sets how many s
 harm done after recover (a deleted `.env` or stub) and passes only if each row reports it, which proves the checks
 still bite.
 
+### The compatibility matrix
+
+`test/compat/` holds DESIGN's "Formats and compatibility" to the real released v0.1.1. `binaries.ts` compiles v0.1.1
+from its tag in a temporary `git worktree` (removed afterwards) with the crash matrix's test hook on, and caches it under
+`.tools/compat/` keyed by the tag's commit. The build runs as its own script because the home tripwire forbids a test to
+write the checkout, and it needs the tag and its history (`fetch-depth: 0` in CI). The T0 contract test reads v0.1.1's
+published files from `test/fixtures/compat-v0.1.1/`, so it needs neither.
+
+- `PLAINPORT_TEST_TIER=1 bun test test/compat` runs the binaries and the T0 checks (DESIGN against the tests, the
+  schemas against the vendored tag files).
+- `bun test test/compat` runs the T0 checks alone.
+- `bun run test:t1 -t compat` is not used: `-t` loads every suite, and the home tripwire's temp-folder leak check then
+  fails on suites that never ran.
+- `bun run test:compat-gate` is the M2 gate's form: it sets `PLAINPORT_COMPAT_GATE=1`, which makes the guard fail
+  while a `test.todo`, `test.skip` or `test.skipIf(true)` remains.
+
+A test title starts with the ids of the rows it proves, `[store.json.v1]`; a row a later task owns is a `test.todo`
+the task turns on.
+
 ## Definition of Done
 
 A task's review checks every line. A "no" sends it back.

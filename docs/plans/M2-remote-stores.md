@@ -1937,7 +1937,7 @@ Not applicable: this task runs the gate. The script is tested on a fixture with 
 
 ### Verification
 `bun scripts/gate-m2.ts --tiers 1,2[,3]`, `bun test`, `bun run test:t1`, `scripts/testenv up && bun run test:t2`,
-`bun run contract --check`, and `bun run test:t1 -t compat`.
+`bun run contract --check`, and `bun run test:compat-gate` (Task 7's form of `test:t1 -t compat`, which trips the temp-leak check; it sets `PLAINPORT_COMPAT_GATE=1`, so a remaining todo fails).
 
 ### Report
 `.orchestrate/reports/task-29.md`, plus an M2 summary for `docs/HANDOFF.md`:

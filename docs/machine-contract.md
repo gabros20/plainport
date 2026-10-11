@@ -333,6 +333,19 @@ own finding (`project.locked` exit 11, `journal.pending` exit 6). `lease.held` i
   config, files it owns) stays strict, so a mistyped key is an error rather than silently ignored (run decision
   D16).
 - Consumers should key on `plainport_json` and the schemas, not on the plainport version string.
+- **Persisted formats are not covered by additivity.** What plainport writes to disk or to a store is read by strict
+  parsers (D16), so on the same `v` an added field or event type is skipped or refused by an older plainport, not
+  ignored (ADR-0023 Q1). Which versions can read which format, and what a rollback to the released v0.1.1 leaves
+  working, is the compatibility matrix in `DESIGN.md` ("Formats and compatibility"), tested against the real v0.1.1
+  binary in `test/compat/`. A change to a persisted format, a closed value or a published schema file adds or changes
+  a row there; `test/compat/contract.test.ts` fails when a schema under `schemas/` differs from the v0.1.1 tag
+  without being listed with its row.
+- M2 changes to printed output, all additive and all checked against the schemas published at v0.1.1:
+  `onload --dry-run` and its plan, the optional `Plan.git` and `Plan.nested`, `git.unpushed` paths for tags that no
+  remote has, the hydrate step's `via: "corepack"`, `untrustedKnown` (always `false`), the finding `fs.case-unknown`,
+  the trash claim's sibling file `<op>.claim.boot` (`schemas/trash-claim-boot.json`), and the schemas for the election
+  records (`schemas/election-record.json`) and a store's semantics profile (`schemas/store-semantics.json`), both new. `ProjectState`, `Phase`,
+  exit codes and risk classes are unchanged, and `plainport_json` stays 1.
 - Tests hold this: the exit-code table and the finding catalogue are frozen literals in
   `packages/contract`, and every command's `--json` output is validated against its declared schema in CI.
 
