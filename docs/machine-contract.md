@@ -350,7 +350,10 @@ own finding (`project.locked` exit 11, `journal.pending` exit 6). `lease.held` i
   `onload --dry-run` and its plan, the optional `Plan.git` and `Plan.nested`, `git.unpushed` paths for tags that no
   remote has, the hydrate step's `via: "corepack"`, `untrustedKnown` (always `false`), the finding `fs.case-unknown`,
   the trash claim's sibling file `<op>.claim.boot` (`schemas/trash-claim-boot.json`), and the schemas for the election
-  records (`schemas/election-record.json`) and a store's semantics profile (`schemas/store-semantics.json`), both new. `ProjectState`, `Phase`,
+  records (`schemas/election-record.json`), a store's semantics profile (`schemas/store-semantics.json`) and a store
+  setup's journal (`schemas/bootstrap-journal.json`), all new; `schemas/store-identity.json` now accepts format 2 beside
+  format 1. The bootstrap and root-claim findings (`store.bootstrap-lost`, `-contested`, `-undecided`,
+  `store.root-contested`, `store.root-undecided`, `store.locked`) are new codes. `ProjectState`, `Phase`,
   exit codes and risk classes are unchanged, and `plainport_json` stays 1.
 - Tests hold this: the exit-code table and the finding catalogue are frozen literals in
   `packages/contract`, and every command's `--json` output is validated against its declared schema in CI.
