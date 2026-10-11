@@ -7,12 +7,11 @@
 // real v0.1.1 at one of its saga steps (PLAINPORT_TEST_PAUSE_AT) or kills it there (PLAINPORT_TEST_FAULT_AT). The
 // released v0.1.1 carries no hook (D67): this build is the test double of the release, from the same source.
 //
-// Two test processes may ask at once (`bun test test/compat` beside `bun run test:t1 -t compat`): a lock folder next to
+// Two test processes may ask at once (`bun test test/compat` beside `PLAINPORT_TEST_TIER=1 bun test test/compat`): a lock folder next to
 // the cache serialises the build, and the binary is moved into place only when complete.
 
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,7 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { hostTarget } from "../../packages/core/src/tools.ts";
+import { buildHookedBinary, toolsCopy as sharedToolsCopy } from "../binary-env.ts";
 
 export const checkout = resolve(import.meta.dir, "../..");
 /** The tag the matrix's "released reader" is. */
@@ -39,8 +38,40 @@ const run = (command: string[], cwd: string): string => {
   return ran.stdout.toString().trim();
 };
 
+const NO_TAG = "(are tags fetched? CI's checkout needs fetch-depth: 0)";
+
+/** A file as the tag has it; throws, naming the missing tag, when git cannot show it. */
+export const released = (path: string): string => {
+  const ran = Bun.spawnSync(["git", "show", `${RELEASED_TAG}:${path}`], {
+    cwd: checkout,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (ran.exitCode !== 0)
+    throw new Error(`git show ${RELEASED_TAG}:${path}: ${ran.stderr.toString().trim()} ${NO_TAG}`);
+  return ran.stdout.toString();
+};
+
+/** The file names under a folder at the tag. */
+export const releasedNames = (dir: string): string[] =>
+  run(["git", "ls-tree", "--name-only", RELEASED_TAG, `${dir}/`], checkout)
+    .split("\n")
+    .filter(Boolean)
+    .map((p) => p.slice(dir.length + 1));
+
+/** Whether the tag and its objects are here (a shallow, tagless checkout has neither). */
+export const tagAvailable = (): boolean =>
+  Bun.spawnSync(["git", "cat-file", "-e", `${RELEASED_TAG}^{commit}`], {
+    cwd: checkout,
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exitCode === 0;
+
 /** The commit the tag names, so the cache key follows the tag and not its name. */
-export const releasedCommit = (): string => run(["git", "rev-parse", `${RELEASED_TAG}^{commit}`], checkout);
+export const releasedCommit = (): string => {
+  if (!tagAvailable()) throw new Error(`${RELEASED_TAG} is not in this checkout ${NO_TAG}`);
+  return run(["git", "rev-parse", `${RELEASED_TAG}^{commit}`], checkout);
+};
 
 /** `.tools/compat/plainport-<tag>-<commit>-<os>-<arch>-hooks`: where the cached v0.1.1 build lives. */
 export const releasedBinaryPath = (commit = releasedCommit()): string =>
@@ -77,7 +108,9 @@ const withLock = async <T>(lock: string, work: () => T | Promise<T>): Promise<T>
       try {
         owner = Number(readFileSync(join(lock, "pid"), "utf8"));
       } catch {}
-      // No pid yet means its owner is between mkdir and write: give it a moment before calling it stale.
+      // No pid yet means its owner is between mkdir and write: not stale. Two waiters may both find one stale and the
+      // second remove the first's new lock; both then build, and the atomic rename of distinct partial files keeps the
+      // result right at the cost of a second build.
       if (Number.isInteger(owner) && owner > 0 && !alive(owner))
         rmSync(lock, { recursive: true, force: true });
       else if (Date.now() > deadline)
@@ -119,7 +152,12 @@ const buildReleased = (commit: string, out: string): void => {
       renameSync(partial, out);
     } finally {
       rmSync(partial, { force: true });
-      run(["git", "worktree", "remove", "--force", tree], checkout);
+      // Not run(): a failing removal must not hide the build's own error; the outer finally prunes what is left.
+      Bun.spawnSync(["git", "worktree", "remove", "--force", tree], {
+        cwd: checkout,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
     }
   } finally {
     rmSync(parent, { recursive: true, force: true });
@@ -158,36 +196,10 @@ export const releasedBinary = (): string => {
 };
 
 /** The checkout's own binary (what v0.2 will ship, plus the hook), into `dir`. Hooks on. */
-export const currentBinary = (dir: string): string => {
-  const out = join(dir, "plainport-current");
-  run(
-    [
-      process.execPath,
-      "build",
-      "--compile",
-      join(checkout, "packages/cli/src/main.ts"),
-      "--outfile",
-      out,
-      ...HOOKS_ON,
-    ],
-    checkout,
-  );
-  return out;
-};
+export const currentBinary = (dir: string): string => buildHookedBinary(join(dir, "plainport-current"));
 
-/**
- * A copy of the pinned restic in `dir`. Both binaries refuse every path under the real home (guardFromEnv), the
- * checkout's `.tools` included, so PLAINPORT_TOOLS_DIR names this copy.
- */
-export const toolsCopy = (dir: string): string => {
-  const target = hostTarget();
-  if (target === undefined) throw new Error(`no tools for ${process.platform}-${process.arch}`);
-  const tools = join(dir, "tools");
-  mkdirSync(tools, { recursive: true });
-  copyFileSync(join(checkout, ".tools", target, "restic"), join(tools, "restic"));
-  chmodSync(join(tools, "restic"), 0o755);
-  return tools;
-};
+/** A copy of the pinned restic that both binaries can read (they refuse paths under the real home). */
+export const toolsCopy = (dir: string): string => sharedToolsCopy(dir);
 
 if (import.meta.main) {
   console.log(await ensureReleased());

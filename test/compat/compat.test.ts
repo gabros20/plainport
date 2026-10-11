@@ -26,7 +26,7 @@ import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
 import { describeT1 } from "../tiers.ts";
-import { currentBinary, releasedBinary, toolsCopy } from "./binaries.ts";
+import { currentBinary, released, releasedBinary, toolsCopy } from "./binaries.ts";
 import { type Binaries, envelope, expectOk, type Ran, treeDigest, World } from "./world.ts";
 
 const offloadArgs = ["offload", "work:web", "--yes", "--json"];
@@ -42,7 +42,7 @@ const scenario = async (body: (w: World) => Promise<void>): Promise<void> => {
   try {
     await body(w);
   } finally {
-    w.cleanup();
+    await w.cleanup();
   }
 };
 
@@ -81,7 +81,21 @@ const keptTrash = async (w: World): Promise<{ op: string; trash: string; journal
   return { op: trashOp, trash: join(trashDir(w), trashOp), journal: join(w.box.paths.journalDir, journal) };
 };
 
-const settledFor = (ms: number) => Bun.sleep(ms);
+/** Polls until `done` holds or `ms` pass; whether it held. */
+const waitUntil = async (done: () => boolean, ms: number): Promise<boolean> => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (done()) return true;
+    await Bun.sleep(25);
+  }
+  return done();
+};
+
+/** How long, after a command ends, a trash it handed to a detached delete takes to go (milliseconds). */
+const goneAfter = async (trash: string, ms = 15_000): Promise<number | undefined> => {
+  const start = Date.now();
+  return (await waitUntil(() => !existsSync(trash), ms)) ? Date.now() - start : undefined;
+};
 
 describeT1("compat: v0.2 and the released v0.1.1", () => {
   beforeAll(() => {
@@ -98,7 +112,7 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   });
 
-  test("[store.json.v1][root.json][registry.json][device.json][config.keys][managed.toml][mirror][stub][journal][restic.tags][event.registered][event.root-created][event.offloaded][event.onloaded] v0.2 onloads and offloads on an M1 store and v0.1.1 reads everything it wrote", async () => {
+  test("[store.json.v1][root.json][registry.json][device.json][managed.toml][mirror][stub][journal][restic.tags][event.registered][event.root-created][event.offloaded][event.onloaded] v0.2 onloads and offloads on an M1 store and v0.1.1 reads everything it wrote", async () => {
     await scenario(async (w) => {
       expectOk(await w.old(w.initArgs), "old init");
       expectOk(await w.old(offloadArgs), "old offload");
@@ -167,6 +181,9 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
       const ls = await w.old(["ls", "--json"]);
       expectOk(ls, "old ls");
       expect(ls.err).not.toContain(SKIPPED);
+      // Read, not merely not skipped: the catalog is readable and v0.1.1 shows the project the events registered.
+      expect(ls.out).not.toContain("catalog-unreadable");
+      expect(ls.out).toContain(project);
     });
   }, 120_000);
 
@@ -251,7 +268,8 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
           const ls = await w.current(["ls", "--json"]);
           expectOk(ls, `current ls while v0.1.1 is at ${at}`);
           const second = await w.current(offloadArgs);
-          expect(second.code, "a second offload while one runs").not.toBe(0);
+          expect(second.code, "a second offload while one runs").toBe(11);
+          expect(`${second.out}${second.err}`).toContain("locked");
         });
         expectOk(ran, `old offload resumed from ${at}`);
         await settleJournals(w.box.paths);
@@ -295,7 +313,9 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
   }, 600_000);
 
   test("[claim][claim.boot] v0.1.1 parses a claim written beside a .claim.boot, and a live one keeps the trash", async () => {
-    for (const live of [true, false]) {
+    // The dead claim first: it is the positive control, and says how long v0.1.1 takes to delete once it may.
+    let tookMs = 0;
+    for (const live of [false, true]) {
       await scenario(async (w) => {
         const { op, trash } = await keptTrash(w);
         const device = JSON.parse(readFileSync(w.box.paths.deviceFile, "utf8")).id;
@@ -317,23 +337,46 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
         writeFileSync(`${trash}.claim.boot`, `${JSON.stringify(boot)}\n`);
         writeFileSync(`${trash}.claim`, `${JSON.stringify(claim)}\n`);
         const gc = await w.old(["gc", "--now", "--yes", "--json"]);
-        await settledFor(500);
-        expect(existsSync(trash), `${live ? "live" : "dead"} claim, ${op}: ${gc.out}${gc.err}`).toBe(live);
+        if (!live) {
+          const took = await goneAfter(trash);
+          expect(took, `a dead claim leaves the trash to be taken over: ${gc.out}${gc.err}`).toBeDefined();
+          tookMs = took ?? 0;
+        } else {
+          // Long enough for any delete the dead case showed v0.1.1 can make.
+          const went = await goneAfter(trash, Math.max(2000, tookMs * 3));
+          expect(went, `a live claim (${op}) keeps its trash: ${gc.out}${gc.err}`).toBeUndefined();
+        }
       });
     }
   }, 300_000);
 
   test("[journal.held][journal] a trash held at a step v0.1.1 does not know stays through its recover, gc, gc --now, housekeeping and detached delete", async () => {
+    const hold = (journal: string, step: string, keepUntil: string | undefined) => {
+      const data = JSON.parse(readFileSync(journal, "utf8"));
+      data.step = step;
+      data.history.push({ step, at: new Date().toISOString() });
+      if (keepUntil === undefined) delete data.keepUntil;
+      else data.keepUntil = keepUntil;
+      writeFileSync(journal, `${JSON.stringify(data, null, 2)}\n`);
+    };
+    // The positive control: the same trash at M1's own step, past its deadline, is handed to a detached delete by a
+    // write command's housekeeping and goes. How long that takes sizes the wait below, and shows the wait can fail.
+    let tookMs = 0;
+    await scenario(async (w) => {
+      const { trash, journal } = await keptTrash(w);
+      hold(journal, "offload.release.delete", "2020-01-01T00:00:00.000Z");
+      await w.old(["root", "scan", "work", "--json"]);
+      const took = await goneAfter(trash);
+      expect(
+        took,
+        "M1's own step past its deadline is deleted by housekeeping's detached delete",
+      ).toBeDefined();
+      tookMs = took ?? 0;
+    });
     for (const keepUntil of ["2999-01-01T00:00:00.000Z", "2020-01-01T00:00:00.000Z", undefined]) {
       await scenario(async (w) => {
         const { trash, journal } = await keptTrash(w);
-        const data = JSON.parse(readFileSync(journal, "utf8"));
-        data.step = "offload.release.held";
-        data.history.push({ step: "offload.release.held", at: new Date().toISOString() });
-        if (keepUntil === undefined) delete data.keepUntil;
-        else data.keepUntil = keepUntil;
-        writeFileSync(journal, `${JSON.stringify(data, null, 2)}\n`);
-        const held = () => [existsSync(join(trash, "web")), existsSync(journal)];
+        hold(journal, "offload.release.held", keepUntil);
         for (const args of [
           ["recover", "--json"],
           ["gc", "--json"],
@@ -342,11 +385,10 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
           ["root", "scan", "work", "--json"],
         ]) {
           await w.old(args);
-          await settledFor(700);
-          expect(held(), `after old ${args.slice(0, 2).join(" ")} (keepUntil ${keepUntil})`).toEqual([
-            true,
-            true,
-          ]);
+          const went = await goneAfter(join(trash, "web"), Math.max(2000, tookMs * 3));
+          const where = `after old ${args.slice(0, 2).join(" ")} (keepUntil ${keepUntil})`;
+          expect(went, where).toBeUndefined();
+          expect(existsSync(journal), where).toBe(true);
         }
       });
     }
@@ -392,14 +434,7 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
-  test("[output.additive][output.plan-git][output.plan-nested][output.onload-plan][output.git-unpushed-tags][output.untrusted-known][output.hydrate-via][value.offload-kind][value.exit-codes] v0.2's output validates against the schemas published at v0.1.1", async () => {
-    const released = (path: string) => {
-      const ran = Bun.spawnSync(["git", "show", `v0.1.1:${path}`], {
-        cwd: join(import.meta.dir, "../.."),
-        stdout: "pipe",
-      });
-      return ran.stdout.toString();
-    };
+  test("[output.additive][output.plan-git][output.plan-nested][output.onload-plan][output.git-unpushed-tags][output.untrusted-known][output.hydrate-via] v0.2's output validates against the schemas published at v0.1.1", async () => {
     const manifest = JSON.parse(released("plainport.json"));
     const ajv = new Ajv2020({ strict: false, allErrors: true });
     const checkEnvelope = ajv.compile(JSON.parse(released("schemas/envelope.json")));
@@ -415,10 +450,11 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
           .slice(0, name.startsWith("root ") ? 2 : 1)
           .join(" "),
       );
-      if (env?.ok && env.data !== undefined && !dry) {
-        const check = ajv.compile(command.output);
+      if (env?.ok && env.data !== undefined) {
+        // A dry run's data is the command's plan, published apart from its output.
+        const check = ajv.compile(dry ? command.plan : command.output);
         expect(check(env.data), `${name}: data ${JSON.stringify(check.errors)}`).toBe(true);
-        seen.push(name);
+        seen.push(dry ? `${name} --dry-run` : name);
       }
     };
     await scenario(async (w) => {
@@ -427,13 +463,13 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
       validate("root list", await w.current(["root", "list", "--json"]));
       validate("offload", await w.current(["offload", "work:web", "--dry-run", "--json"]), true);
       const off = await w.current(offloadArgs);
-      validate("offload", { ...off, out: off.out.trim().split("\n").slice(-1).join("\n") });
+      validate("offload", off);
       await settleJournals(w.box.paths);
       validate("status", await w.current(["status", "work:web", "--json"]));
       validate("recover", await w.current(["recover", "--json"]));
       validate("gc", await w.current(["gc", "--json"]));
       const on = await w.current(onloadArgs);
-      validate("onload", { ...on, out: on.out.trim().split("\n").slice(-1).join("\n") });
+      validate("onload", on);
       validate("version", await w.current(["version", "--json"]));
       // onload --dry-run (D96) has no v0.1.1 counterpart: its plan is checked against the current schema by
       // contract.test.ts; here the optional fields it adds are looked for in a real preview.
@@ -444,7 +480,17 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
       expect([shown?.data?.kind, shown?.data?.hydrate?.untrustedKnown]).toEqual(["onload", false]);
     });
     expect(seen).toEqual(
-      expect.arrayContaining(["init", "ls", "offload", "status", "recover", "gc", "onload", "version"]),
+      expect.arrayContaining([
+        "init",
+        "ls",
+        "offload",
+        "status",
+        "recover",
+        "gc",
+        "onload",
+        "version",
+        "offload --dry-run",
+      ]),
     );
   }, 300_000);
 

@@ -111,7 +111,9 @@ export const testsIn = (sources: readonly string[]): CompatTest[] => {
       const title = (m[2] ?? m[3] ?? m[4]) as string;
       const lead = /^((?:\[[a-z0-9.-]+\])+)/.exec(title)?.[1] ?? "";
       const ids = [...lead.matchAll(/\[([a-z0-9.-]+)\]/g)].map((x) => x[1] as string);
-      out.push({ title, todo: m[1] === ".todo", ids });
+      // A skipped test proves nothing, so it is as open as a todo: .skip and .skipIf(true) count for the gate too.
+      const todo = m[1] === ".todo" || m[1] === ".skip" || /^\.skipIf\(\s*true\s*\)$/.test(m[1] ?? "");
+      out.push({ title, todo, ids });
     }
   }
   return out;

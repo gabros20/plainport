@@ -3,20 +3,14 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { released, releasedNames, tagAvailable } from "./binaries.ts";
 import { CHANGED_SCHEMAS, NEW_SCHEMAS } from "./matrix.ts";
 import { notAssignable } from "./schema-diff.ts";
 
 const checkout = resolve(import.meta.dir, "../..");
-const released = (path: string): string => {
-  const ran = Bun.spawnSync(["git", "show", `v0.1.1:${path}`], {
-    cwd: checkout,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (ran.exitCode !== 0)
-    throw new Error(`git show v0.1.1:${path}: ${ran.stderr.toString()} (are tags fetched?)`);
-  return ran.stdout.toString();
-};
+/** v0.1.1's published files, vendored from the tag so this T0 test needs neither the tag nor the history (CI's checkout is shallow). */
+const vendored = join(checkout, "test/fixtures/compat-v0.1.1");
+const releasedFile = (path: string): string => readFileSync(join(vendored, path), "utf8");
 const now = (path: string): string => readFileSync(join(checkout, path), "utf8");
 const names = (dir: string): string[] => readdirSync(join(checkout, dir)).filter((f) => f.endsWith(".json"));
 
@@ -33,15 +27,48 @@ describe("compat contract: schema-diff", () => {
     expect(notAssignable({ ...old, properties: { a: { type: "number" } } }, old)).not.toEqual([]);
     expect(notAssignable({ type: "object", properties: {}, required: [] }, old)).not.toEqual([]);
   });
+
+  test("catches what the generator's other keywords change", () => {
+    const record = (v: string) => ({ type: "object", additionalProperties: { type: v } });
+    expect(notAssignable(record("number"), record("string"))).not.toEqual([]);
+    expect(notAssignable(record("string"), record("string"))).toEqual([]);
+    expect(notAssignable({ type: "string" }, { type: "string", format: "date-time" })).not.toEqual([]);
+    expect(notAssignable({ type: "object" }, { type: "object", additionalProperties: false })).not.toEqual(
+      [],
+    );
+    expect(
+      notAssignable({ type: "array", items: {} }, { type: "array", items: {}, minItems: 1 }),
+    ).not.toEqual([]);
+    expect(
+      notAssignable({ type: "array", items: {}, minItems: 2 }, { type: "array", items: {}, minItems: 1 }),
+    ).toEqual([]);
+    expect(
+      notAssignable({ type: "object" }, { type: "object", propertyNames: { pattern: "^a" } }),
+    ).not.toEqual([]);
+    expect(notAssignable({ oneOf: [] }, { oneOf: [{ type: "string" }] })).not.toEqual([]);
+    expect(
+      notAssignable(
+        { type: "string", description: "new words" },
+        { type: "string", description: "old words" },
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe("compat contract: v0.1.1's published files", () => {
-  const tagged = JSON.parse(released("plainport.json"));
+  const tagged = JSON.parse(releasedFile("plainport.json"));
   const current = JSON.parse(now("plainport.json"));
 
+  test.skipIf(!tagAvailable())("the vendored copies are the tag's files", () => {
+    expect(releasedFile("plainport.json")).toBe(released("plainport.json"));
+    expect(names("test/fixtures/compat-v0.1.1/schemas").sort()).toEqual(releasedNames("schemas").sort());
+    for (const f of releasedNames("schemas"))
+      expect(releasedFile(`schemas/${f}`), f).toBe(released(`schemas/${f}`));
+  });
+
   test("[output.additive][claim.boot] every schema file is unchanged, or listed with its matrix row; new ones are listed too", () => {
-    const old = readdirSync(join(checkout, "schemas")).length > 0 ? released_names() : [];
-    const changed = old.filter((f) => released(`schemas/${f}`) !== now(`schemas/${f}`));
+    const old = names("test/fixtures/compat-v0.1.1/schemas");
+    const changed = old.filter((f) => releasedFile(`schemas/${f}`) !== now(`schemas/${f}`));
     expect(changed.map((f) => f.replace(".json", "")).sort()).toEqual(Object.keys(CHANGED_SCHEMAS).sort());
     const added = names("schemas").filter((f) => !old.includes(f));
     expect(added.map((f) => f.replace(".json", "")).sort()).toEqual(Object.keys(NEW_SCHEMAS).sort());
@@ -81,21 +108,9 @@ describe("compat contract: v0.1.1's published files", () => {
     expect(tagged.findings.some((f: { code: string }) => f.code === "fs.case-unknown")).toBe(false);
   });
 
-  test("[value.project-state][value.phases][value.plan-fp] the closed sets (ProjectState, Phase, RiskClass, ExitCode) are the same sets", () => {
+  test("[value.project-state][value.phases] the closed sets (ProjectState, Phase, RiskClass, ExitCode) are the same sets", () => {
     for (const f of ["project-state", "phase", "risk-class", "exit-code"]) {
-      expect(JSON.parse(now(`schemas/${f}.json`)), f).toEqual(JSON.parse(released(`schemas/${f}.json`)));
+      expect(JSON.parse(now(`schemas/${f}.json`)), f).toEqual(JSON.parse(releasedFile(`schemas/${f}.json`)));
     }
   });
 });
-
-function released_names(): string[] {
-  const ran = Bun.spawnSync(["git", "ls-tree", "--name-only", "v0.1.1", "schemas/"], {
-    cwd: checkout,
-    stdout: "pipe",
-  });
-  return ran.stdout
-    .toString()
-    .split("\n")
-    .filter(Boolean)
-    .map((p) => p.replace("schemas/", ""));
-}

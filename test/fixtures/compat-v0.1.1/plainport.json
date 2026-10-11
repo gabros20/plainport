@@ -1,0 +1,4983 @@
+{
+  "schema": "plainport.json/1",
+  "plainport_json": 1,
+  "globalOptions": [
+    {
+      "name": "json",
+      "type": "boolean",
+      "summary": "Print NDJSON: event lines, then exactly one final envelope"
+    },
+    {
+      "name": "yes",
+      "type": "boolean",
+      "summary": "Allow a confirm-class command to run; --plan <id> stands in for it on a command that runs a --dry-run's plan"
+    },
+    {
+      "name": "no-input",
+      "type": "boolean",
+      "summary": "Never prompt; implied when stdin is not a terminal"
+    },
+    {
+      "name": "dry-run",
+      "type": "boolean",
+      "summary": "Preview only: build and print the plan, change nothing"
+    },
+    {
+      "name": "store",
+      "type": "string",
+      "summary": "Use this store instead of the default"
+    },
+    {
+      "name": "config",
+      "type": "string",
+      "summary": "Read this config file instead of the default"
+    },
+    {
+      "name": "quiet",
+      "type": "boolean",
+      "summary": "Print only results, warnings and errors"
+    },
+    {
+      "name": "verbose",
+      "type": "boolean",
+      "summary": "Print debug logs too"
+    }
+  ],
+  "commands": [
+    {
+      "name": "help",
+      "summary": "Show every command, or one command's arguments, options and risk class",
+      "usage": "plainport help [<command...>]",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [
+        {
+          "name": "command",
+          "summary": "A command, e.g. version or root add",
+          "required": false,
+          "variadic": true
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "A command, e.g. version or root add",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "topic": {
+            "description": "The command asked about; absent for the full list",
+            "type": "string"
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "usage": {
+                  "type": "string"
+                },
+                "risk": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "safe_write",
+                    "confirm"
+                  ],
+                  "title": "RiskClass"
+                },
+                "dryRun": {
+                  "type": "boolean"
+                },
+                "acceptsPlan": {
+                  "type": "boolean",
+                  "description": "Whether --plan <id> from its --dry-run stands in for --yes"
+                },
+                "group": {
+                  "type": "string",
+                  "description": "Where help's overview lists it: projects, recovery, roots or setup today; an open set"
+                },
+                "positionals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "variadic": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "summary",
+                      "required",
+                      "variadic"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "boolean",
+                          "string"
+                        ]
+                      },
+                      "multiple": {
+                        "type": "boolean"
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "risk": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "safe_write",
+                          "confirm"
+                        ],
+                        "title": "RiskClass"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "type",
+                      "multiple",
+                      "summary"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "examples": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "argv": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "summary": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "argv",
+                      "summary"
+                    ],
+                    "additionalProperties": {}
+                  }
+                }
+              },
+              "required": [
+                "name",
+                "summary",
+                "usage",
+                "risk",
+                "dryRun",
+                "acceptsPlan",
+                "group",
+                "positionals",
+                "options",
+                "examples"
+              ],
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "commands"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "help"
+          ],
+          "summary": "List every command"
+        },
+        {
+          "argv": [
+            "help",
+            "version"
+          ],
+          "summary": "Show one command"
+        }
+      ]
+    },
+    {
+      "name": "init",
+      "summary": "Name this device, set up its roots and record the store snapshots go to",
+      "usage": "plainport init [--root <value>...] [--store-path <value>] [--store-secret <value>] [--device <value>]",
+      "risk": "confirm",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "string",
+          "multiple": true,
+          "summary": "A root, as <key>=<path> (repeatable); without one, a TTY offers a scan"
+        },
+        {
+          "name": "store-path",
+          "type": "string",
+          "multiple": false,
+          "summary": "A local folder for the store, e.g. on an external disk; --store names it (default local)"
+        },
+        {
+          "name": "store-secret",
+          "type": "string",
+          "multiple": false,
+          "summary": "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD"
+        },
+        {
+          "name": "device",
+          "type": "string",
+          "multiple": false,
+          "summary": "This device's name in every root's bindings; default: the host name"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "description": "A root, as <key>=<path> (repeatable); without one, a TTY offers a scan",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "store-path": {
+            "description": "A local folder for the store, e.g. on an external disk; --store names it (default local)",
+            "type": "string",
+            "minLength": 1
+          },
+          "store-secret": {
+            "description": "Where the store's repository password is: env:<VARIABLE> or file:<path>; default env:PLAINPORT_STORE_PASSWORD",
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "device": {
+            "description": "This device's name in every root's bindings; default: the host name",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "created": {
+                "type": "boolean",
+                "description": "This run created the identity"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "role",
+              "created"
+            ],
+            "additionalProperties": {}
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "store": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "id": {
+                "description": "The id in its meta/v1/store.json, once it is set up",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "path"
+            ],
+            "additionalProperties": {}
+          },
+          "files": {
+            "type": "object",
+            "properties": {
+              "config": {
+                "type": "string"
+              },
+              "managed": {
+                "type": "string"
+              },
+              "device": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "config",
+              "managed",
+              "device"
+            ],
+            "additionalProperties": {}
+          },
+          "changed": {
+            "type": "boolean",
+            "description": "This run wrote managed.toml, created device.json or set the store up"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "device",
+          "roots",
+          "files",
+          "changed",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "init",
+            "--root",
+            "work=~/work",
+            "--store-path",
+            "/Volumes/Archive/plainport",
+            "--yes"
+          ],
+          "summary": "Set up without prompts"
+        },
+        {
+          "argv": [
+            "init",
+            "--yes"
+          ],
+          "summary": "Re-check setup from the roots and store already configured (on a TTY, asks for what is missing)"
+        }
+      ]
+    },
+    {
+      "name": "ls",
+      "summary": "Every project with its root, state, device, size and last activity",
+      "usage": "plainport ls [--root <value>] [--local] [--shelved] [--sort <value>]",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "string",
+          "multiple": false,
+          "summary": "Only this root's projects"
+        },
+        {
+          "name": "local",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Only projects whose folder is on this device"
+        },
+        {
+          "name": "shelved",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Only shelved projects"
+        },
+        {
+          "name": "sort",
+          "type": "string",
+          "multiple": false,
+          "summary": "size: largest first; age: least recently used first"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "description": "Only this root's projects",
+            "type": "string"
+          },
+          "local": {
+            "description": "Only projects whose folder is on this device",
+            "type": "boolean"
+          },
+          "shelved": {
+            "description": "Only shelved projects",
+            "type": "boolean"
+          },
+          "sort": {
+            "description": "size: largest first; age: least recently used first",
+            "type": "string",
+            "enum": [
+              "size",
+              "age"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "description": "root:path"
+                },
+                "root": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The project's ULID"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "offloading",
+                    "shelved",
+                    "onloading",
+                    "restored-unhydrated",
+                    "conflicted",
+                    "unavailable"
+                  ],
+                  "title": "ProjectState",
+                  "description": "The project's one lifecycle state on this device: unavailable (its root's volume is not mounted), offloading or onloading (a journal is open), conflicted, restored-unhydrated, local or shelved"
+                },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
+                },
+                "dir": {
+                  "description": "Its folder on this device",
+                  "type": "string"
+                },
+                "here": {
+                  "type": "boolean",
+                  "description": "The folder is on this device"
+                },
+                "stub": {
+                  "description": "Its .plainport stub, when one is here",
+                  "type": "string"
+                },
+                "store": {
+                  "description": "The store whose catalog holds it",
+                  "type": "string"
+                },
+                "head": {
+                  "description": "The catalog's head; null when there is none",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "base": {
+                  "description": "The snapshot this device's copy came from",
+                  "type": "string"
+                },
+                "lease": {
+                  "description": "The device whose onload holds the lease, and whether it is this one",
+                  "type": "object",
+                  "properties": {
+                    "device": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    },
+                    "base": {
+                      "type": "string"
+                    },
+                    "here": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "device",
+                    "at",
+                    "base",
+                    "here"
+                  ],
+                  "additionalProperties": {}
+                },
+                "snapshots": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes": {
+                  "description": "Files' bytes in the head snapshot",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "strippedBytes": {
+                  "description": "Dependencies the head's offload stripped, which an onload installs again",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "lastActivity": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean",
+                  "description": "The catalog was read from this device's mirror: the store did not answer"
+                },
+                "syncedAt": {
+                  "description": "When the catalog last came from the store; absent: never",
+                  "type": "string"
+                },
+                "gitWarnings": {
+                  "description": "status, for a project whose folder is here: the git findings a scan makes now",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                        "title": "FindingCode",
+                        "description": "Stable dotted code, e.g. git.unpushed"
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "info",
+                          "warn",
+                          "block"
+                        ]
+                      },
+                      "message": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "fix": {
+                        "description": "The exact next step, e.g. a command to run",
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "allowable": {
+                        "type": "boolean",
+                        "description": "May --allow <code> override it?"
+                      }
+                    },
+                    "required": [
+                      "code",
+                      "severity",
+                      "message",
+                      "allowable"
+                    ],
+                    "additionalProperties": {},
+                    "title": "Finding"
+                  }
+                },
+                "strippableBytes": {
+                  "description": "status, for a project whose folder is here: what an offload would strip now",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "journal": {
+                  "description": "Its newest open journal; when not running, plainport recover settles it",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "offload",
+                        "onload"
+                      ]
+                    },
+                    "step": {
+                      "type": "string"
+                    },
+                    "running": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "op",
+                    "kind",
+                    "step",
+                    "running"
+                  ],
+                  "additionalProperties": {}
+                },
+                "journals": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "offload",
+                          "onload"
+                        ]
+                      },
+                      "step": {
+                        "type": "string"
+                      },
+                      "running": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "kind",
+                      "step",
+                      "running"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "Every open journal of it, oldest first (the order recover settles them in)"
+                },
+                "trash": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "op": {
+                        "type": "string"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "keepUntil": {
+                        "type": "string"
+                      },
+                      "deleting": {
+                        "type": "boolean"
+                      },
+                      "due": {
+                        "type": "boolean",
+                        "description": "Past its keepUntil (or none): gc deletes it when nothing is deleting it"
+                      },
+                      "refused": {
+                        "description": "The delete guard's last refusal of it (delete.guard-refused, D87): why it stays and the way out; gc tries again",
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                            "title": "FindingCode",
+                            "description": "Stable dotted code, e.g. git.unpushed"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "info",
+                              "warn",
+                              "block"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "paths": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "fix": {
+                            "description": "The exact next step, e.g. a command to run",
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "allowable": {
+                            "type": "boolean",
+                            "description": "May --allow <code> override it?"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "severity",
+                          "message",
+                          "allowable"
+                        ],
+                        "additionalProperties": {},
+                        "title": "Finding"
+                      }
+                    },
+                    "required": [
+                      "op",
+                      "path",
+                      "deleting",
+                      "due"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "Released offloads' trash awaiting deletion: kept until keepUntil, or deleting while its detached delete runs (D64)"
+                },
+                "conditionDetails": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "condition": {
+                        "type": "string",
+                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "finding": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                            "title": "FindingCode",
+                            "description": "Stable dotted code, e.g. git.unpushed"
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "info",
+                              "warn",
+                              "block"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "paths": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "fix": {
+                            "description": "The exact next step, e.g. a command to run",
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "allowable": {
+                            "type": "boolean",
+                            "description": "May --allow <code> override it?"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "severity",
+                          "message",
+                          "allowable"
+                        ],
+                        "additionalProperties": {},
+                        "title": "Finding"
+                      }
+                    },
+                    "required": [
+                      "condition",
+                      "message"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "description": "One sentence per condition, with the finding behind it when there is one"
+                },
+                "next": {
+                  "description": "What to do next, when anything is to be done",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "command",
+                    "reason"
+                  ],
+                  "additionalProperties": {}
+                },
+                "unreadableJournals": {
+                  "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "address",
+                "root",
+                "path",
+                "id",
+                "state",
+                "conditions",
+                "here",
+                "head",
+                "snapshots",
+                "stale",
+                "journals",
+                "trash",
+                "conditionDetails"
+              ],
+              "additionalProperties": {},
+              "description": "A project as this device sees it"
+            }
+          },
+          "stores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "syncedAt": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "name",
+                "stale"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Each store's catalog: stale when it did not answer"
+          },
+          "unreadableJournals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every journal this version cannot read: each holds its project back, or every project when it names none"
+          }
+        },
+        "required": [
+          "projects",
+          "stores",
+          "unreadableJournals"
+        ],
+        "additionalProperties": {},
+        "description": "The projects, and how fresh each store's catalog is"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "ls"
+          ],
+          "summary": "Every project this device knows"
+        },
+        {
+          "argv": [
+            "ls",
+            "--shelved",
+            "--sort",
+            "size"
+          ],
+          "summary": "Shelved projects, largest first"
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "summary": "One project in detail: its state, head, lease and what to do next",
+      "usage": "plainport status [<project>]",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "description": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "root:path"
+          },
+          "root": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "The project's ULID"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "local",
+              "offloading",
+              "shelved",
+              "onloading",
+              "restored-unhydrated",
+              "conflicted",
+              "unavailable"
+            ],
+            "title": "ProjectState",
+            "description": "The project's one lifecycle state on this device: unavailable (its root's volume is not mounted), offloading or onloading (a journal is open), conflicted, restored-unhydrated, local or shelved"
+          },
+          "conditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
+          },
+          "dir": {
+            "description": "Its folder on this device",
+            "type": "string"
+          },
+          "here": {
+            "type": "boolean",
+            "description": "The folder is on this device"
+          },
+          "stub": {
+            "description": "Its .plainport stub, when one is here",
+            "type": "string"
+          },
+          "store": {
+            "description": "The store whose catalog holds it",
+            "type": "string"
+          },
+          "head": {
+            "description": "The catalog's head; null when there is none",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base": {
+            "description": "The snapshot this device's copy came from",
+            "type": "string"
+          },
+          "lease": {
+            "description": "The device whose onload holds the lease, and whether it is this one",
+            "type": "object",
+            "properties": {
+              "device": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "base": {
+                "type": "string"
+              },
+              "here": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "device",
+              "at",
+              "base",
+              "here"
+            ],
+            "additionalProperties": {}
+          },
+          "snapshots": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "description": "Files' bytes in the head snapshot",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "strippedBytes": {
+            "description": "Dependencies the head's offload stripped, which an onload installs again",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "lastActivity": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "The catalog was read from this device's mirror: the store did not answer"
+          },
+          "syncedAt": {
+            "description": "When the catalog last came from the store; absent: never",
+            "type": "string"
+          },
+          "gitWarnings": {
+            "description": "status, for a project whose folder is here: the git findings a scan makes now",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "strippableBytes": {
+            "description": "status, for a project whose folder is here: what an offload would strip now",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "journal": {
+            "description": "Its newest open journal; when not running, plainport recover settles it",
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "offload",
+                  "onload"
+                ]
+              },
+              "step": {
+                "type": "string"
+              },
+              "running": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op",
+              "kind",
+              "step",
+              "running"
+            ],
+            "additionalProperties": {}
+          },
+          "journals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offload",
+                    "onload"
+                  ]
+                },
+                "step": {
+                  "type": "string"
+                },
+                "running": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "op",
+                "kind",
+                "step",
+                "running"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Every open journal of it, oldest first (the order recover settles them in)"
+          },
+          "trash": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "deleting": {
+                  "type": "boolean"
+                },
+                "due": {
+                  "type": "boolean",
+                  "description": "Past its keepUntil (or none): gc deletes it when nothing is deleting it"
+                },
+                "refused": {
+                  "description": "The delete guard's last refusal of it (delete.guard-refused, D87): why it stays and the way out; gc tries again",
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                      "title": "FindingCode",
+                      "description": "Stable dotted code, e.g. git.unpushed"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "info",
+                        "warn",
+                        "block"
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fix": {
+                      "description": "The exact next step, e.g. a command to run",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "allowable": {
+                      "type": "boolean",
+                      "description": "May --allow <code> override it?"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "severity",
+                    "message",
+                    "allowable"
+                  ],
+                  "additionalProperties": {},
+                  "title": "Finding"
+                }
+              },
+              "required": [
+                "op",
+                "path",
+                "deleting",
+                "due"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Released offloads' trash awaiting deletion: kept until keepUntil, or deleting while its detached delete runs (D64)"
+          },
+          "conditionDetails": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "condition": {
+                  "type": "string",
+                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                      "title": "FindingCode",
+                      "description": "Stable dotted code, e.g. git.unpushed"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "info",
+                        "warn",
+                        "block"
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fix": {
+                      "description": "The exact next step, e.g. a command to run",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "allowable": {
+                      "type": "boolean",
+                      "description": "May --allow <code> override it?"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "severity",
+                    "message",
+                    "allowable"
+                  ],
+                  "additionalProperties": {},
+                  "title": "Finding"
+                }
+              },
+              "required": [
+                "condition",
+                "message"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "One sentence per condition, with the finding behind it when there is one"
+          },
+          "next": {
+            "description": "What to do next, when anything is to be done",
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
+          "unreadableJournals": {
+            "description": "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "address",
+          "root",
+          "path",
+          "id",
+          "state",
+          "conditions",
+          "here",
+          "head",
+          "snapshots",
+          "stale",
+          "journals",
+          "trash",
+          "conditionDetails"
+        ],
+        "additionalProperties": {},
+        "description": "A project as this device sees it"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "status",
+            "work:clients/acme/api"
+          ],
+          "summary": "A shelved project's head and how to bring it back"
+        }
+      ]
+    },
+    {
+      "name": "offload",
+      "summary": "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
+      "risk": "confirm",
+      "dryRun": true,
+      "acceptsPlan": true,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path, . or a stub; one for now",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "options": [
+        {
+          "name": "plan",
+          "type": "string",
+          "multiple": false,
+          "summary": "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)"
+        },
+        {
+          "name": "keep-deps",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped"
+        },
+        {
+          "name": "allow",
+          "type": "string",
+          "multiple": true,
+          "summary": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "minItems": 1,
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "An address (root:path), a unique name, a path, . or a stub; one for now"
+          },
+          "plan": {
+            "description": "Run the plan a --dry-run saved, by its id, instead of --yes; it runs only while the folder still matches it (else plan.stale, exit 6)",
+            "type": "string"
+          },
+          "keep-deps": {
+            "description": "Keep installed dependencies (node_modules) in the snapshot. Either way, gitignored files such as .env and local databases always travel; only what a plugin declares regenerable (node_modules, build output) is stripped",
+            "type": "boolean"
+          },
+          "allow": {
+            "description": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "exitCode": {
+                "type": "number",
+                "const": 0
+              },
+              "project": {
+                "type": "string"
+              },
+              "snapshot": {
+                "type": "string"
+              },
+              "freedBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Bytes freed now: the whole folder once its detached delete has started; 0 while the local copy is kept (offload.keepLocalFor) or waits for recover, and then keptBytes has them"
+              },
+              "keptBytes": {
+                "description": "Bytes the local copy still holds in the trash: the whole folder while it is kept or waits for recover, else 0. They are freed by freedBy",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "freedBy": {
+                "description": "With keptBytes: what frees them. plainport gc once keepUntil has passed (a write command's housekeeping also hands a due trash to a detached delete; plainport gc --now --yes frees it early), or plainport recover when the delete could not start",
+                "type": "string"
+              },
+              "store": {
+                "type": "string"
+              },
+              "stub": {
+                "description": "The .plainport stub left where the folder was",
+                "type": "string"
+              },
+              "trash": {
+                "description": "Where the folder was moved: kept there, or waiting there for recover. Absent when localCopy is deleted: it is already being deleted (D77)",
+                "type": "string"
+              },
+              "localCopy": {
+                "description": "deleted: keepLocalFor is 0 and the folder's detached delete has started, so nothing is kept (freedBytes has it). kept: offload.keepLocalFor keeps it until keepUntil, and onload renames it back. waiting: the delete could not start; plainport recover deletes it",
+                "type": "string",
+                "enum": [
+                  "deleted",
+                  "kept",
+                  "waiting"
+                ]
+              },
+              "keepUntil": {
+                "description": "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "deleteStarted": {
+                "description": "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "op",
+              "exitCode",
+              "project",
+              "snapshot",
+              "freedBytes",
+              "store"
+            ],
+            "additionalProperties": {}
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "exitCode": {
+                "type": "number",
+                "const": 8
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fork",
+                  "diverged-after-commit"
+                ],
+                "description": "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)"
+              },
+              "project": {
+                "type": "string"
+              },
+              "snapshot": {
+                "type": "string"
+              },
+              "store": {
+                "type": "string"
+              },
+              "stored": {
+                "type": "string",
+                "description": "The store's restic id for the snapshot"
+              }
+            },
+            "required": [
+              "op",
+              "exitCode",
+              "kind",
+              "project",
+              "snapshot",
+              "store",
+              "stored"
+            ],
+            "additionalProperties": {},
+            "description": "Exit 8: the snapshot is kept as a fork (the head moved), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way (D14, D52)"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "title": "Ulid",
+                "description": "A ULID: 26 upper-case Crockford base32 characters"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "offload",
+                  "onload",
+                  "move",
+                  "relocate",
+                  "restore",
+                  "resolve",
+                  "checkpoint",
+                  "hydrate",
+                  "dehydrate",
+                  "forget",
+                  "kit-apply",
+                  "prune"
+                ],
+                "title": "OperationKind"
+              },
+              "project": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "root:path"
+                  },
+                  "root": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "id": {
+                    "description": "The project's ULID, when this device knows it",
+                    "type": "string",
+                    "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                    "title": "Ulid"
+                  },
+                  "dir": {
+                    "description": "Its folder on this device, absolute",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "store": {
+                    "description": "The store the operation would use",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "address",
+                  "root",
+                  "path"
+                ],
+                "additionalProperties": {},
+                "title": "ProjectView"
+              },
+              "fingerprint": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The scan's tree hash over the included paths (the strip set left out); re-checked when the plan runs"
+              },
+              "fp": {
+                "description": "The fingerprint's kind (D53); a plan without it is of an older kind, never compared, so its approval is stale",
+                "type": "number",
+                "const": 2
+              },
+              "include": {
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "largest": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Relative to the project folder"
+                        },
+                        "bytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "bytes"
+                      ],
+                      "additionalProperties": {},
+                      "title": "SizedPath"
+                    },
+                    "description": "The ten largest included files, largest first"
+                  },
+                  "gitignored": {
+                    "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
+                    "type": "object",
+                    "properties": {
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "The first 20, sorted"
+                      },
+                      "incomplete": {
+                        "description": "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "files",
+                      "paths"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "files",
+                  "bytes",
+                  "largest"
+                ],
+                "additionalProperties": {}
+              },
+              "strip": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Relative to the project folder; left out of the snapshot"
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "plugin": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The plugin that claimed it, or \"config\" for strip.extra"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Why it can be regenerated"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "bytes",
+                    "plugin",
+                    "reason"
+                  ],
+                  "additionalProperties": {},
+                  "title": "StripEntry"
+                }
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                      "title": "FindingCode",
+                      "description": "Stable dotted code, e.g. git.unpushed"
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "info",
+                        "warn",
+                        "block"
+                      ]
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fix": {
+                      "description": "The exact next step, e.g. a command to run",
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "allowable": {
+                      "type": "boolean",
+                      "description": "May --allow <code> override it?"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "severity",
+                    "message",
+                    "allowable"
+                  ],
+                  "additionalProperties": {},
+                  "title": "Finding"
+                }
+              },
+              "phases": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "resolve",
+                    "preflight",
+                    "scan",
+                    "plan",
+                    "snapshot",
+                    "verify",
+                    "commit",
+                    "release",
+                    "restore",
+                    "swap",
+                    "agents",
+                    "toolchain",
+                    "hydrate",
+                    "hooks"
+                  ],
+                  "title": "Phase"
+                }
+              },
+              "next": {
+                "description": "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "description": "The exact command, e.g. plainport offload work:web --plan <id>"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command",
+                  "reason"
+                ],
+                "additionalProperties": {}
+              },
+              "arrival": {
+                "description": "What each part becomes where the project lands; for an offload, how it comes back",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "part": {
+                      "type": "string",
+                      "enum": [
+                        "files",
+                        "deps",
+                        "agent-session",
+                        "secrets",
+                        "git-access",
+                        "process"
+                      ]
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "restore",
+                        "reuse",
+                        "hydrate",
+                        "resume",
+                        "handoff",
+                        "withheld",
+                        "suggest",
+                        "skip"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "description": "e.g. \"pnpm install --frozen-lockfile\", \"claude --resume <id>\""
+                    },
+                    "note": {
+                      "description": "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "part",
+                    "outcome",
+                    "detail"
+                  ],
+                  "additionalProperties": {},
+                  "title": "ArrivalItem"
+                }
+              },
+              "options": {
+                "description": "What the plan was made with: options and the release settings. An approved plan runs only with the same",
+                "type": "object",
+                "properties": {
+                  "keepDeps": {
+                    "type": "boolean"
+                  },
+                  "allow": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "--allow codes, sorted"
+                  },
+                  "store": {
+                    "description": "--store, when it was given",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "storeId": {
+                    "description": "The id in the store's meta/v1/store.json (D45): an approval holds for that store only (D48)",
+                    "type": "string",
+                    "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                    "title": "Ulid"
+                  },
+                  "keepLocalFor": {
+                    "type": "string"
+                  },
+                  "stub": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "keepDeps",
+                  "allow",
+                  "keepLocalFor",
+                  "stub"
+                ],
+                "additionalProperties": {}
+              },
+              "estimate": {
+                "type": "object",
+                "properties": {
+                  "uploadBytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "downloadBytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "freeBytesNeeded": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "additionalProperties": {}
+              },
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                "description": "After this, --plan <id> no longer runs it"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "fingerprint",
+              "include",
+              "strip",
+              "findings",
+              "phases",
+              "estimate",
+              "expiresAt"
+            ],
+            "additionalProperties": {},
+            "title": "Plan",
+            "description": "Exit 6 (plan.stale): the fresh plan to review and approve (D14, D38)"
+          }
+        ]
+      },
+      "plan": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "title": "Ulid",
+            "description": "A ULID: 26 upper-case Crockford base32 characters"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "offload",
+              "onload",
+              "move",
+              "relocate",
+              "restore",
+              "resolve",
+              "checkpoint",
+              "hydrate",
+              "dehydrate",
+              "forget",
+              "kit-apply",
+              "prune"
+            ],
+            "title": "OperationKind"
+          },
+          "project": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string",
+                "minLength": 1,
+                "description": "root:path"
+              },
+              "root": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "description": "The project's ULID, when this device knows it",
+                "type": "string",
+                "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "title": "Ulid"
+              },
+              "dir": {
+                "description": "Its folder on this device, absolute",
+                "type": "string",
+                "minLength": 1
+              },
+              "store": {
+                "description": "The store the operation would use",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "address",
+              "root",
+              "path"
+            ],
+            "additionalProperties": {},
+            "title": "ProjectView"
+          },
+          "fingerprint": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The scan's tree hash over the included paths (the strip set left out); re-checked when the plan runs"
+          },
+          "fp": {
+            "description": "The fingerprint's kind (D53); a plan without it is of an older kind, never compared, so its approval is stale",
+            "type": "number",
+            "const": 2
+          },
+          "include": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "largest": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Relative to the project folder"
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "bytes"
+                  ],
+                  "additionalProperties": {},
+                  "title": "SizedPath"
+                },
+                "description": "The ten largest included files, largest first"
+              },
+              "gitignored": {
+                "description": "Included files git ignores (.gitignore files, .git/info/exclude, core.excludesFile), such as .env and local databases: they travel in the snapshot, since only what a plugin declares regenerable is stripped (gitignored does not mean disposable). Absent when there are none, and for a folder that is no git repository; incomplete when git could not be asked",
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The first 20, sorted"
+                  },
+                  "incomplete": {
+                    "description": "git could not be asked in every repository (it failed or was stopped), so more gitignored files may travel than files counts",
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "files",
+                  "paths"
+                ],
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "files",
+              "bytes",
+              "largest"
+            ],
+            "additionalProperties": {}
+          },
+          "strip": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Relative to the project folder; left out of the snapshot"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "plugin": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The plugin that claimed it, or \"config\" for strip.extra"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Why it can be regenerated"
+                }
+              },
+              "required": [
+                "path",
+                "bytes",
+                "plugin",
+                "reason"
+              ],
+              "additionalProperties": {},
+              "title": "StripEntry"
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          },
+          "phases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "resolve",
+                "preflight",
+                "scan",
+                "plan",
+                "snapshot",
+                "verify",
+                "commit",
+                "release",
+                "restore",
+                "swap",
+                "agents",
+                "toolchain",
+                "hydrate",
+                "hooks"
+              ],
+              "title": "Phase"
+            }
+          },
+          "next": {
+            "description": "What runs this plan, as a project view's next does: absent when a blocker stops it, or when it could not be saved (then --yes runs the offload)",
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The exact command, e.g. plainport offload work:web --plan <id>"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
+          "arrival": {
+            "description": "What each part becomes where the project lands; for an offload, how it comes back",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "part": {
+                  "type": "string",
+                  "enum": [
+                    "files",
+                    "deps",
+                    "agent-session",
+                    "secrets",
+                    "git-access",
+                    "process"
+                  ]
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "restore",
+                    "reuse",
+                    "hydrate",
+                    "resume",
+                    "handoff",
+                    "withheld",
+                    "suggest",
+                    "skip"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "description": "e.g. \"pnpm install --frozen-lockfile\", \"claude --resume <id>\""
+                },
+                "note": {
+                  "description": "When this step may not happen, e.g. the install skipped while onload renames back the local copy offload.keepLocalFor keeps (D71)",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "part",
+                "outcome",
+                "detail"
+              ],
+              "additionalProperties": {},
+              "title": "ArrivalItem"
+            }
+          },
+          "options": {
+            "description": "What the plan was made with: options and the release settings. An approved plan runs only with the same",
+            "type": "object",
+            "properties": {
+              "keepDeps": {
+                "type": "boolean"
+              },
+              "allow": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "--allow codes, sorted"
+              },
+              "store": {
+                "description": "--store, when it was given",
+                "type": "string",
+                "minLength": 1
+              },
+              "storeId": {
+                "description": "The id in the store's meta/v1/store.json (D45): an approval holds for that store only (D48)",
+                "type": "string",
+                "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "title": "Ulid"
+              },
+              "keepLocalFor": {
+                "type": "string"
+              },
+              "stub": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "keepDeps",
+              "allow",
+              "keepLocalFor",
+              "stub"
+            ],
+            "additionalProperties": {}
+          },
+          "estimate": {
+            "type": "object",
+            "properties": {
+              "uploadBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "downloadBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "freeBytesNeeded": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": {}
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+            "description": "After this, --plan <id> no longer runs it"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "fingerprint",
+          "include",
+          "strip",
+          "findings",
+          "phases",
+          "estimate",
+          "expiresAt"
+        ],
+        "additionalProperties": {},
+        "title": "Plan"
+      },
+      "examples": [
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--dry-run"
+          ],
+          "summary": "Plan offloading a project; --plan <id> then runs that plan, instead of --yes"
+        },
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--yes"
+          ],
+          "summary": "Offload a project without a prompt"
+        }
+      ]
+    },
+    {
+      "name": "onload",
+      "summary": "Restore a shelved project into place and reinstall its dependencies",
+      "usage": "plainport onload <project> [--to <value>] [--snapshot <value>] [--no-hydrate]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "to",
+          "type": "string",
+          "multiple": false,
+          "summary": "Land it in this folder instead of its root's place; always restored from the store"
+        },
+        {
+          "name": "snapshot",
+          "type": "string",
+          "multiple": false,
+          "summary": "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy"
+        },
+        {
+          "name": "no-hydrate",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "to": {
+            "description": "Land it in this folder instead of its root's place; always restored from the store",
+            "type": "string"
+          },
+          "snapshot": {
+            "description": "Restore this snapshot from the store instead of the head; naming the head itself still reuses a kept local copy",
+            "type": "string"
+          },
+          "no-hydrate": {
+            "description": "Restore the files without installing dependencies: the restored tree stays exactly as stored, and no network is needed; a reused kept copy has its dependencies either way",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 0
+              },
+              {
+                "type": "number",
+                "const": 10
+              }
+            ],
+            "description": "10: the files are restored but the install failed; this is then the error's data (D14)"
+          },
+          "project": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "The snapshot restored"
+          },
+          "over": {
+            "type": "string",
+            "description": "The head the onload was written over; the copy's next offload builds on it (D43)"
+          },
+          "store": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "Where the project now is"
+          },
+          "restored": {
+            "type": "string",
+            "enum": [
+              "restore",
+              "reuse"
+            ],
+            "description": "restore: restored from the store. reuse: nothing was restored; the folder the offload of this same head released was still kept (offload.keepLocalFor) and unchanged since it was verified, so it was renamed back from the trash (see reused). To restore from the store instead, plainport gc --now --yes deletes the kept copy first; --to and an older --snapshot always restore from the store"
+          },
+          "reused": {
+            "description": "Only with restored: reuse",
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "The trash folder renamed back: <root>/.plainport-trash/<op>/<name>"
+              },
+              "offload": {
+                "type": "string",
+                "description": "The offload that released it; its trash and journal are gone now"
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why it was renamed back instead of restored from the store"
+              }
+            },
+            "required": [
+              "from",
+              "offload",
+              "reason"
+            ],
+            "additionalProperties": {}
+          },
+          "files": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "hydrate": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "installed",
+                  "failed",
+                  "skipped",
+                  "reused",
+                  "none"
+                ],
+                "description": "installed: every install succeeded. failed: one failed (restored-unhydrated, exit 10). skipped: --no-hydrate. reused: the folder came back with its dependencies. none: nothing to install"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The install root, relative to the project; \"\" is the project"
+                    },
+                    "command": {
+                      "type": "string",
+                      "description": "The frozen install, e.g. npm ci"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "exitCode": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "command",
+                    "ok"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "untrusted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)"
+              },
+              "reason": {
+                "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "steps",
+              "untrusted"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "op",
+          "exitCode",
+          "project",
+          "snapshot",
+          "over",
+          "store",
+          "dir",
+          "restored",
+          "files",
+          "bytes",
+          "hydrate"
+        ],
+        "additionalProperties": {},
+        "description": "The project onloaded; with exit 10, restored but not hydrated (D14)"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api"
+          ],
+          "summary": "Bring a shelved project back. While offload.keepLocalFor keeps its folder, onloading the head renames that folder back instead (restored: reuse, nothing installed); plainport gc --now --yes deletes the kept copy first, so onload restores from the store; plainport restore --to <path> checks the stored snapshot side by side"
+        },
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api",
+            "--no-hydrate"
+          ],
+          "summary": "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them"
+        },
+        {
+          "argv": [
+            "onload",
+            "work:clients/acme/api",
+            "--to",
+            "~/Developer/api",
+            "--no-hydrate"
+          ],
+          "summary": "Land it elsewhere, files only"
+        }
+      ]
+    },
+    {
+      "name": "hydrate",
+      "summary": "Install a project's dependencies again with its own package manager (frozen)",
+      "usage": "plainport hydrate <project>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or .",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or ."
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 0
+              },
+              {
+                "type": "number",
+                "const": 10
+              }
+            ]
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          },
+          "hydrate": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "installed",
+                  "failed",
+                  "skipped",
+                  "reused",
+                  "none"
+                ],
+                "description": "installed: every install succeeded. failed: one failed (restored-unhydrated, exit 10). skipped: --no-hydrate. reused: the folder came back with its dependencies. none: nothing to install"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "The install root, relative to the project; \"\" is the project"
+                    },
+                    "command": {
+                      "type": "string",
+                      "description": "The frozen install, e.g. npm ci"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "exitCode": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "command",
+                    "ok"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "untrusted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "What the project's .plainport.toml asks to run (hydrate.command, hooks.<name>) and was skipped: it runs only once a later milestone lets a project be trusted (D54)"
+              },
+              "reason": {
+                "description": "Why nothing was installed. With reused: the folder came back with the dependencies it had when it was offloaded. With skipped: the offload stripped nothing, so the restored files are the whole folder and the project is local, not restored-unhydrated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "steps",
+              "untrusted"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "op",
+          "exitCode",
+          "project",
+          "dir",
+          "hydrate"
+        ],
+        "additionalProperties": {},
+        "description": "The installs run; with exit 10, the one that failed (D14)"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "hydrate",
+            "work:clients/acme/web"
+          ],
+          "summary": "Reinstall a project's dependencies"
+        }
+      ]
+    },
+    {
+      "name": "dehydrate",
+      "summary": "Remove a project's installed dependencies (only what a plugin claims and git does not track)",
+      "usage": "plainport dehydrate <project>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or .",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or ."
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "path",
+                "bytes"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "freedBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "dir",
+          "removed",
+          "freedBytes"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "dehydrate",
+            "work:clients/acme/web"
+          ],
+          "summary": "Free the space its node_modules takes"
+        }
+      ]
+    },
+    {
+      "name": "restore",
+      "summary": "Restore a snapshot side by side into a free path: no lease, no hydration",
+      "usage": "plainport restore <project> --to <value> [--snapshot <value>]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "to",
+          "type": "string",
+          "multiple": false,
+          "summary": "Where the copy goes; nothing may stand there"
+        },
+        {
+          "name": "snapshot",
+          "type": "string",
+          "multiple": false,
+          "summary": "The snapshot to restore; the head when absent"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "to": {
+            "type": "string",
+            "description": "Where the copy goes; nothing may stand there"
+          },
+          "snapshot": {
+            "description": "The snapshot to restore; the head when absent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          },
+          "store": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "Where the copy now is"
+          },
+          "files": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "snapshot",
+          "store",
+          "dir",
+          "files",
+          "bytes"
+        ],
+        "additionalProperties": {},
+        "description": "The snapshot restored side by side; the project itself is unchanged"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "restore",
+            "work:clients/acme/api",
+            "--to",
+            "~/personal/api-copy"
+          ],
+          "summary": "Read the head beside everything else"
+        }
+      ]
+    },
+    {
+      "name": "recover",
+      "summary": "Settle interrupted operations: roll back what had not committed, finish what had",
+      "usage": "plainport recover",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "recovery",
+      "positionals": [],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offload",
+                    "onload"
+                  ]
+                },
+                "project": {
+                  "type": "string",
+                  "description": "root:path"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "step": {
+                  "type": "string",
+                  "description": "The journal step recover found"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "rolled-back",
+                    "finished",
+                    "forked",
+                    "diverged-after-commit",
+                    "trash-deleted",
+                    "trash-kept",
+                    "pending"
+                  ],
+                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "offloading",
+                    "shelved",
+                    "onloading",
+                    "restored-unhydrated",
+                    "conflicted",
+                    "unavailable"
+                  ],
+                  "title": "ProjectState",
+                  "description": "The project's state on this device afterwards"
+                },
+                "snapshot": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                },
+                "conflict": {
+                  "description": "diverged-after-commit: exit 8's data, as offload gives it (D52)",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "fork",
+                        "diverged-after-commit"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "op",
+                "kind",
+                "project",
+                "projectId",
+                "step",
+                "outcome",
+                "state",
+                "snapshot"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "unreadable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Journal files this version cannot read: never touched"
+          }
+        },
+        "required": [
+          "operations",
+          "unreadable"
+        ],
+        "additionalProperties": {},
+        "description": "What recover did with each open journal. A failure carries this report as data, with the most severe code across every project (D64): 130 when Ctrl-C stopped it, then 8 (diverged-after-commit), 7, 6 (a pending or unreadable journal), 11 (a lock held), 9 (a store that did not answer), 5, 10, 4, 3, 2, 1"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "recover"
+          ],
+          "summary": "Settle whatever was interrupted on this device"
+        }
+      ]
+    },
+    {
+      "name": "gc",
+      "summary": "Delete released trash past its keepLocalFor deadline; --now deletes it early",
+      "usage": "plainport gc [--now]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "recovery",
+      "positionals": [],
+      "options": [
+        {
+          "name": "now",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Also delete kept trash before its deadline",
+          "risk": "confirm"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "now": {
+            "description": "Also delete kept trash before its deadline",
+            "risk": "confirm",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "kept": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Before its deadline, or being renamed back by an onload"
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                },
+                "keepUntil": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "op",
+                "project",
+                "projectId",
+                "trash",
+                "finding"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "freedBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "staging": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Staging folders no live operation owned (a crashed restore's, an onload's whose journal is gone), removed (D60)"
+          },
+          "stagingKept": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "staging": {
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "staging",
+                "finding"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "A crashed restore's staging folder gc could not reach (its volume away), kept with its record"
+          }
+        },
+        "required": [
+          "deleted",
+          "kept",
+          "skipped",
+          "freedBytes",
+          "staging",
+          "stagingKept"
+        ],
+        "additionalProperties": {},
+        "description": "The trash deleted and kept, and the abandoned staging removed"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "gc"
+          ],
+          "summary": "Delete trash whose deadline has passed"
+        },
+        {
+          "argv": [
+            "gc",
+            "--now",
+            "--yes"
+          ],
+          "summary": "Delete every kept trash now"
+        }
+      ]
+    },
+    {
+      "name": "root add",
+      "summary": "Add a root, optionally with this device's folder for it; the global --store sets its store",
+      "usage": "plainport root add <key> [<path>] [--label <value>] [--create]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
+      "positionals": [
+        {
+          "name": "key",
+          "summary": "The root's key, a lower-case word such as work",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "name": "path",
+          "summary": "This device's folder for the root",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "label",
+          "type": "string",
+          "multiple": false,
+          "summary": "A display name, e.g. Work"
+        },
+        {
+          "name": "create",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Create the folder if it does not exist"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The root's key, a lower-case word such as work"
+          },
+          "path": {
+            "description": "This device's folder for the root",
+            "type": "string"
+          },
+          "label": {
+            "description": "A display name, e.g. Work",
+            "type": "string",
+            "minLength": 1
+          },
+          "create": {
+            "description": "Create the folder if it does not exist",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "path": {
+                "description": "This device's folder for the root, absolute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "additionalProperties": {}
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "root",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "root",
+            "add",
+            "personal",
+            "~/personal"
+          ],
+          "summary": "Add root personal at ~/personal"
+        },
+        {
+          "argv": [
+            "root",
+            "add",
+            "studio",
+            "--label",
+            "Studio",
+            "--store",
+            "mini"
+          ],
+          "summary": "Add a root, unbound here"
+        }
+      ]
+    },
+    {
+      "name": "root bind",
+      "summary": "Point a root at its folder on this device",
+      "usage": "plainport root bind <key> <path> [--device <value>] [--create]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
+      "positionals": [
+        {
+          "name": "key",
+          "summary": "The root's key, a lower-case word such as work",
+          "required": true,
+          "variadic": false
+        },
+        {
+          "name": "path",
+          "summary": "The root's folder on this device",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "device",
+          "type": "string",
+          "multiple": false,
+          "summary": "The device to bind; only this one until pairing arrives (M3)"
+        },
+        {
+          "name": "create",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Create the folder if it does not exist"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The root's key, a lower-case word such as work"
+          },
+          "path": {
+            "type": "string",
+            "description": "The root's folder on this device"
+          },
+          "device": {
+            "description": "The device to bind; only this one until pairing arrives (M3)",
+            "type": "string"
+          },
+          "create": {
+            "description": "Create the folder if it does not exist",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "path": {
+                "description": "This device's folder for the root, absolute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "additionalProperties": {}
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "root",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "root",
+            "bind",
+            "work",
+            "~/Developer/Work"
+          ],
+          "summary": "Move root work's folder here"
+        }
+      ]
+    },
+    {
+      "name": "root list",
+      "summary": "Show every root, its folder on each device and its state here",
+      "usage": "plainport root list",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
+      "positionals": [],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "device": {
+            "description": "This device's name; absent before plainport init",
+            "type": "string"
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "store": {
+                  "type": "string"
+                },
+                "devices": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "bindings": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Device name → folder, as the config writes it"
+                },
+                "path": {
+                  "description": "This device's folder, absolute; absent when unbound here",
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "unbound",
+                    "missing",
+                    "unavailable"
+                  ]
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "config",
+                    "managed",
+                    "both"
+                  ],
+                  "description": "Which config file defines the root"
+                },
+                "projects": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Projects registered under it on this device. offload also takes an unregistered project folder under the root as it is (offload <root>:<folder>); root scan lists and registers them"
+                }
+              },
+              "required": [
+                "key",
+                "bindings",
+                "state",
+                "source",
+                "projects"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "roots",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "root",
+            "list"
+          ],
+          "summary": "List roots"
+        }
+      ]
+    },
+    {
+      "name": "root scan",
+      "summary": "List and register the project folders under a root; offload takes an unregistered one as it is",
+      "usage": "plainport root scan <key>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "roots",
+      "positionals": [
+        {
+          "name": "key",
+          "summary": "The root's key, a lower-case word such as work",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The root's key, a lower-case word such as work"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "address": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "dir": {
+                  "type": "string"
+                },
+                "marker": {
+                  "type": "string",
+                  "description": ".git, package.json, pyproject.toml, Cargo.toml or go.mod"
+                },
+                "new": {
+                  "type": "boolean",
+                  "description": "Registered by this scan"
+                }
+              },
+              "required": [
+                "id",
+                "address",
+                "path",
+                "dir",
+                "marker",
+                "new"
+              ],
+              "additionalProperties": {}
+            }
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "projects"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "root",
+            "scan",
+            "work"
+          ],
+          "summary": "Register work's projects"
+        }
+      ]
+    },
+    {
+      "name": "version",
+      "summary": "Print plainport's version",
+      "usage": "plainport version",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "version"
+          ],
+          "summary": "Print the version"
+        }
+      ]
+    }
+  ],
+  "exitCodes": [
+    {
+      "code": 0,
+      "name": "ok",
+      "meaning": "Success"
+    },
+    {
+      "code": 1,
+      "name": "unexpected",
+      "meaning": "Unexpected failure"
+    },
+    {
+      "code": 2,
+      "name": "usage",
+      "meaning": "Usage error, or an ambiguous project name"
+    },
+    {
+      "code": 3,
+      "name": "confirm",
+      "meaning": "Needs --yes; the message names the exact re-run"
+    },
+    {
+      "code": 4,
+      "name": "notFound",
+      "meaning": "Not found: project, snapshot, device, store or command"
+    },
+    {
+      "code": 5,
+      "name": "denied",
+      "meaning": "Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission"
+    },
+    {
+      "code": 6,
+      "name": "blocked",
+      "meaning": "Blocked by a preflight finding, or the plan is stale"
+    },
+    {
+      "code": 7,
+      "name": "verifyFailed",
+      "meaning": "Verification failed"
+    },
+    {
+      "code": 8,
+      "name": "conflict",
+      "meaning": "Conflict, or a strict lease held elsewhere"
+    },
+    {
+      "code": 9,
+      "name": "unreachable",
+      "meaning": "Store or peer unreachable"
+    },
+    {
+      "code": 10,
+      "name": "unhydrated",
+      "meaning": "Restored but not hydrated"
+    },
+    {
+      "code": 11,
+      "name": "locked",
+      "meaning": "Another operation holds the lock"
+    },
+    {
+      "code": 130,
+      "name": "cancelled",
+      "meaning": "Cancelled"
+    }
+  ],
+  "findings": [
+    {
+      "code": "catalog.head-moved",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted"
+    },
+    {
+      "code": "catalog.event-skipped",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed"
+    },
+    {
+      "code": "catalog.head-uncertain",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)"
+    },
+    {
+      "code": "catalog.incomplete",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; connect or sync the store that holds every snapshot"
+    },
+    {
+      "code": "command.cancelled",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "The person answering init's prompts cancelled; nothing was written"
+    },
+    {
+      "code": "command.unknown",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No registered command has this name; the message suggests the closest one and fix is the corrected command line"
+    },
+    {
+      "code": "config.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A config file does not parse or does not match its schema, and there is no last good copy to keep; paths names the file and the message the line or key"
+    },
+    {
+      "code": "config.kept-last-good",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A config file broke since it was last loaded in this process; its last good contents stay in effect"
+    },
+    {
+      "code": "config.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another process holds managed.toml.lock; the message names its PID, host and start time"
+    },
+    {
+      "code": "config.no-home",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "HOME is unset or not an absolute path, so plainport cannot find its config and state"
+    },
+    {
+      "code": "config.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The file named by --config or PLAINPORT_CONFIG does not exist"
+    },
+    {
+      "code": "config.owned",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 5,
+      "summary": "config.toml already sets this root binding or store and wins over managed.toml; fix names the key and file to edit"
+    },
+    {
+      "code": "config.read-only",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 5,
+      "summary": "A write would rewrite config.toml, which plainport never does"
+    },
+    {
+      "code": "config.write-failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "managed.toml or device.json could not be written; the old file is intact"
+    },
+    {
+      "code": "contract.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A value crossing an edge did not match its schema"
+    },
+    {
+      "code": "deps.ambiguous",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A package folder holds lockfiles of more than one package manager and no packageManager field; onload uses the first in DESIGN's table"
+    },
+    {
+      "code": "delete.guard-refused",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "plainport did not delete a folder because the check right before every recursive delete refused it: it holds a mount point, a store plainport made or a restic repository, it is, holds or lies inside a registered project's folder (or one cannot be resolved), or the configuration does not read cleanly; the journal stays and the message names the fix (D87)"
+    },
+    {
+      "code": "deps.no-lockfile",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A package folder has no lockfile for its package manager, so onload would install fresh versions; fix suggests --keep-deps"
+    },
+    {
+      "code": "device.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "device.json, this device's identity, is unreadable; plainport never replaces it"
+    },
+    {
+      "code": "device.none",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "This device has no identity yet; fix points at plainport init"
+    },
+    {
+      "code": "env.docker-mount",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A running container bind-mounts the project folder or a folder inside it; offloading would pull files from under it"
+    },
+    {
+      "code": "fs.dataless",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A file is an iCloud or Dropbox placeholder (dataless): reading it triggers a download or fails"
+    },
+    {
+      "code": "fs.link-outside",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A symlink points outside the project; the link is stored, its target is not"
+    },
+    {
+      "code": "fs.unreadable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "plainport cannot read some files or folders in the project, so a snapshot would be incomplete"
+    },
+    {
+      "code": "fs.cross-volume",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The project folder is on another volume than the folder it would be moved aside into, so release could not rename it in one step"
+    },
+    {
+      "code": "fs.write-failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A file or folder an operation keeps for itself (its journal, lock, trash or stub) could not be read, written or moved; after a commit, fix is plainport recover"
+    },
+    {
+      "code": "git.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A git command plainport runs to read the repository's state failed; the message is git's"
+    },
+    {
+      "code": "git.in-progress",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A rebase, merge, cherry-pick, revert or bisect is in progress; it restores exactly as it is"
+    },
+    {
+      "code": "git.is-worktree",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The folder is a linked git worktree or submodule: its .git is only a pointer to a repository elsewhere"
+    },
+    {
+      "code": "git.locked",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "The repository's index.lock exists: a git process is running or crashed"
+    },
+    {
+      "code": "git.nested-repos",
+      "severity": "info",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Repositories inside the project (nested clones, submodules) travel as plain files, their own .git included; paths lists them"
+    },
+    {
+      "code": "git.unpushed",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "Commits or stashes exist only in this copy of the repository, so the snapshot becomes their only copy"
+    },
+    {
+      "code": "git.unpushed-required",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "requirePushed is set and work exists only in this copy of the repository; it replaces git.unpushed (D30)"
+    },
+    {
+      "code": "git.worktrees",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Linked worktrees of this repository live outside the folder; offloading would orphan them"
+    },
+    {
+      "code": "internal.unexpected",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A bug: an exception escaped a command; the message names it"
+    },
+    {
+      "code": "journal.pending",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "An earlier operation on the project was interrupted and its journal is still open; fix is plainport recover. From recover itself: a journal file this version cannot read, left as it is"
+    },
+    {
+      "code": "path.reserved",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The path is, or lies inside, a folder plainport reserves for itself (.plainport-staging, .plainport-trash, any .plainport-*), whose contents gc deletes: it is never a project's place, a restore's landing folder or a root (D84)"
+    },
+    {
+      "code": "path.stub-occupied",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Something other than this project's stub is at <project>.plainport, where the stub would go; plainport never overwrites it (D47)"
+    },
+    {
+      "code": "plan.expired",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The saved plan is more than an hour old; fix plans again with --dry-run"
+    },
+    {
+      "code": "offload.diverged-after-commit",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "Raised by offload (an edit between verification and the rename) and by plainport recover (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no resolve is needed. The error's data has kind: \"diverged-after-commit\", where a fork (catalog.head-moved) has kind: \"fork\" (D51, D52); from recover, data is its report, and the operation's conflict holds that kind"
+    },
+    {
+      "code": "operation.cancelled",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56). Also the envelope of a command a signal ended before it reported, under --json: one that runs no operation, or a second signal while an operation wound down, when plainport recover settles what it journaled (D81)"
+    },
+    {
+      "code": "plan.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No saved plan has this id on this device"
+    },
+    {
+      "code": "plan.stale",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The folder, the options or the config changed since the approved plan was made, or the plan is for another project; a fresh plan is saved, fix names its id and the error's data is that plan (D14)"
+    },
+    {
+      "code": "proc.cwd",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "Another process has its working directory inside the project folder"
+    },
+    {
+      "code": "proc.cwd-shell",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "The shell or agent that started plainport has its working directory inside the project folder"
+    },
+    {
+      "code": "proc.open-files",
+      "severity": "block",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "A process holds files open inside the project folder (an editor, a dev server, an agent)"
+    },
+    {
+      "code": "process.cancelled",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "A child process (restic, rclone, git, an install, a hook) was cancelled; its whole process group was stopped"
+    },
+    {
+      "code": "process.idle-timeout",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process printed nothing for its idle deadline; its whole process group was stopped and the message ends with its last output"
+    },
+    {
+      "code": "process.output-incomplete",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process exited, but its stdout, parsed as data, cannot be taken as whole: something outside its process group kept it open, reading it failed, or processes it left in its group were stopped"
+    },
+    {
+      "code": "process.output-too-large",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process printed more on stdout than its caller can take whole (a file list, a JSON document); it was stopped, never read in part"
+    },
+    {
+      "code": "process.spawn-failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process could not be started; paths names the program and its working folder"
+    },
+    {
+      "code": "process.timeout",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A child process ran past its overall deadline; its whole process group was stopped and the message ends with its last output"
+    },
+    {
+      "code": "project.ambiguous",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "A project name matches more than one project; the message lists every candidate address"
+    },
+    {
+      "code": "project.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another plainport process holds the project's lock (locks/<project>.lock), or the lock of a registered project nested with it (D53); a lock left by a dead process is broken instead"
+    },
+    {
+      "code": "project.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No project matches the name, address or path"
+    },
+    {
+      "code": "project.unregistered",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)"
+    },
+    {
+      "code": "registry.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "registry.json, this device's project registry, is unreadable; plainport never overwrites it"
+    },
+    {
+      "code": "registry.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another process holds registry.json.lock"
+    },
+    {
+      "code": "registry.unreadable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "registry.json exists but plainport may not read it; fix is about permissions, and the file is left as it is"
+    },
+    {
+      "code": "restic.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "restic exited with a fatal error (exit code 1, or one plainport does not map); the message is restic's"
+    },
+    {
+      "code": "restic.interrupted",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 130,
+      "summary": "restic was interrupted (exit code 130) before it finished"
+    },
+    {
+      "code": "restic.locked",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 11,
+      "summary": "Another restic process holds a lock on the store's repository (restic exit code 11)"
+    },
+    {
+      "code": "restic.output-invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "restic's JSON output did not match what this restic version is known to print"
+    },
+    {
+      "code": "restic.repo-exists",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A restic repository already exists where a new one was to be created"
+    },
+    {
+      "code": "restic.repo-missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No restic repository exists at the store's location (restic exit code 10)"
+    },
+    {
+      "code": "restic.snapshot-not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The store's repository has no snapshot with this id"
+    },
+    {
+      "code": "restic.symlinks-unclear",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Too many symlinks in a snapshot have names or targets that restic's listing cannot place in one pass (line breaks, ' -> '); the message lists them"
+    },
+    {
+      "code": "restic.unreadable-files",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "restic could not read some files (restic exit code 3); the snapshot is incomplete and counts as failed, never as a partial success"
+    },
+    {
+      "code": "restic.version-mismatch",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The restic binary found is not the version this plainport pins and was tested with"
+    },
+    {
+      "code": "restic.wrong-password",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 5,
+      "summary": "The store's password does not open its restic repository (restic exit code 12)"
+    },
+    {
+      "code": "risk.needs-yes",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 3,
+      "summary": "A confirm-class command ran without --yes or an approved --plan; fix is the exact re-run"
+    },
+    {
+      "code": "root.defined-twice",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "config.toml and managed.toml both define a root; config.toml wins key by key, and fix says where to edit"
+    },
+    {
+      "code": "root.exists",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A root with this key already exists; fix is the root bind command"
+    },
+    {
+      "code": "root.none",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "The folder is outside every root; file it with --root and --as, or add a root that holds it"
+    },
+    {
+      "code": "root.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "No root has this key"
+    },
+    {
+      "code": "root.not-writable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "plainport cannot write to the root's folder"
+    },
+    {
+      "code": "root.overlap",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Two roots on this device overlap or resolve to the same real path (symlinks resolved, case folded on case-insensitive volumes); paths names both folders"
+    },
+    {
+      "code": "root.path-missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The root's folder on this device does not exist or is not a folder; --create makes it"
+    },
+    {
+      "code": "root.synced-folder",
+      "severity": "warn",
+      "allowable": true,
+      "exitCode": 6,
+      "summary": "The root is inside an iCloud Drive or Dropbox folder, whose sync clients fight with node_modules and half-written files"
+    },
+    {
+      "code": "root.unbound",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The root has no folder on this device; fix is plainport root bind <root> <path>"
+    },
+    {
+      "code": "store.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A read or write in a store failed (permissions, a full disk, an I/O error); the message names the key and the error"
+    },
+    {
+      "code": "store.identity-changed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced"
+    },
+    {
+      "code": "store.inside-project",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A local store and a project overlap (the store lies inside the project's folder, or the project inside the store), compared by real path: an offload would move the store into the trash with the folder and delete its snapshots, so setup, offload and its release refuse; move one of them (D83)"
+    },
+    {
+      "code": "store.key-exists",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 1,
+      "summary": "A create-only write found the key already there; the existing value is left as it was"
+    },
+    {
+      "code": "store.not-set-up",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init"
+    },
+    {
+      "code": "store.root-mismatch",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store"
+    },
+    {
+      "code": "store.secret-missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store's repository password could not be read from its secret reference (env: or file: in M1)"
+    },
+    {
+      "code": "store.setup-pending",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable"
+    },
+    {
+      "code": "store.unreachable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 9,
+      "summary": "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved"
+    },
+    {
+      "code": "store.unsupported",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder)"
+    },
+    {
+      "code": "stub.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A .plainport stub file does not match the stub schema"
+    },
+    {
+      "code": "usage.dry-run-unsupported",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "--dry-run was given to a command that has no preview; fix depends on the risk class (machine-contract §4)"
+    },
+    {
+      "code": "usage.invalid",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 2,
+      "summary": "The arguments or options do not match the command's declared arguments; fix is plainport help <command>. Also restore without --snapshot when the project has no head (incomplete or conflicted): the message lists the candidate ids (D60); and offload.verify = \"full\" in config, which arrives in M5 and is refused rather than downgraded (D50)"
+    },
+    {
+      "code": "fs.case-collision",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The snapshot holds names that differ only by case (Foo.ts, foo.ts) and the landing volume ignores case, so one would overwrite the other; onload to a case-sensitive volume with --to"
+    },
+    {
+      "code": "fs.no-space",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The landing volume has less free space than the snapshot, the dependencies recorded at offload and a 10% margin need; nothing is restored"
+    },
+    {
+      "code": "hydrate.failed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 10,
+      "summary": "The files are restored but installing the dependencies failed (restored-unhydrated). The error's data is the command's output with the install that failed (onload's also names the snapshot, D14), and fix is plainport hydrate <project>"
+    },
+    {
+      "code": "lease.held",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "Another device holds the project's lease; a warning, or a refusal with exit 8 when onload.leases = \"strict\""
+    },
+    {
+      "code": "path.occupied",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Something already stands where onload or restore would put the project; it never merges, and fix names --to <path> (or, for the folder offload.diverged-after-commit kept, says to keep working in it). Also from an offload's release, finished by recover, when a folder stands at the project's place after the project folder was moved aside: neither is touched and no stub is written"
+    },
+    {
+      "code": "project.already-local",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "onload --to while the project's own onloaded copy is on this device: a device holds one working copy; fix names plainport restore <project> --snapshot <id> --to <path> for a side-by-side copy (D56)"
+    },
+    {
+      "code": "project.nested",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The folder holds another registered project's effective folder (its --to override, else its root's place) on this device, so offload refuses and fix offloads the inner project first; onload --to refuses a landing folder inside another registered project's folder (D53)"
+    },
+    {
+      "code": "snapshot.not-found",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 4,
+      "summary": "The catalog has no snapshot of the project with this id (--snapshot), or the store holds no copy of it; fix names the head or the store that holds it"
+    },
+    {
+      "code": "toolchain.mismatch",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The project asks for a tool version (.nvmrc, engines, packageManager) that is not active and no version manager (mise, fnm, Volta) on PATH can activate; the install runs with what is there"
+    },
+    {
+      "code": "strip.kept",
+      "severity": "info",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Paths a plugin or strip.extra proposed stay in the snapshot; the message says why for each (git tracks it, strip.keep or strip.never matches, it holds a repository, dependencies are kept)"
+    },
+    {
+      "code": "verify.changed",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 7,
+      "summary": "Files changed while the snapshot was made, again after one retry; nothing local was deleted"
+    },
+    {
+      "code": "verify.mismatch",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 7,
+      "summary": "The snapshot's listing does not match the folder (entries, types, sizes, modes or link targets): at offload the scan of the project, and nothing local was deleted; at onload the restored staging folder, which is removed while the stub stays"
+    },
+    {
+      "code": "tool.missing",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A bundled binary (restic or rclone) was not found; paths lists every place searched"
+    }
+  ]
+}

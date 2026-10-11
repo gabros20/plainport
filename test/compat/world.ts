@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, type Sandbox } from "../../packages/core/src/testing/sandbox.ts";
+import { binaryEnv } from "../binary-env.ts";
 import {
   copyProject,
   EXTRA_MODE,
@@ -18,13 +19,6 @@ import {
 } from "../crash-matrix/fixture.ts";
 
 export const PASSWORD = "compat-pw";
-const REAL_HOME = process.env.PLAINPORT_TRIPWIRE_REAL_HOME ?? "";
-/** The test's PATH without the folders under the real home, which the binaries' guard refuses (git, lsof, find stay). */
-const PATH = (process.env.PATH ?? "/usr/bin:/bin")
-  .split(":")
-  .filter((p) => REAL_HOME === "" || !(p === REAL_HOME || p.startsWith(`${REAL_HOME}/`)))
-  .join(":");
-
 export interface Binaries {
   /** v0.1.1, built from its tag with the test hook on. */
   old: string;
@@ -79,6 +73,7 @@ export class World {
   readonly root: string;
   readonly dir: string;
   readonly store: string;
+  /** What no run may change: the project's tree before any run. */
   reference: TreeHash;
   private readonly children = new Set<Bun.Subprocess>();
 
@@ -93,19 +88,7 @@ export class World {
   }
 
   env(extra: Record<string, string> = {}): Record<string, string> {
-    const home = this.box.home;
-    return {
-      HOME: home,
-      XDG_CONFIG_HOME: join(home, ".config"),
-      XDG_STATE_HOME: join(home, ".local/state"),
-      XDG_CACHE_HOME: join(home, ".cache"),
-      XDG_DATA_HOME: join(home, ".local/share"),
-      PATH,
-      PLAINPORT_STORE_PASSWORD: PASSWORD,
-      PLAINPORT_TRIPWIRE_REAL_HOME: REAL_HOME,
-      PLAINPORT_TOOLS_DIR: this.bins.tools,
-      ...extra,
-    };
+    return binaryEnv(this.box.home, this.bins.tools, PASSWORD, extra);
   }
 
   /** Starts a binary; stop() kills what is still running when the scenario ends. */
@@ -177,27 +160,38 @@ export class World {
     ];
   }
 
-  /** What no run may change: the project's tree before it. */
+  /** Kills what is still running: the binaries and the process groups of their children (restic). */
   stop() {
     for (const child of this.children) {
       if (child.exitCode !== null || child.signalCode !== null) continue;
-      try {
-        process.kill(child.pid, "SIGKILL");
-      } catch {}
+      for (const pid of childrenOf(child.pid)) signal(-pid, "SIGKILL");
+      signal(child.pid, "SIGKILL");
     }
   }
 
-  cleanup() {
+  /** Stops what runs, then removes the sandbox, repeating while a detached delete may still write into it (removeSettled). */
+  async cleanup(): Promise<void> {
     this.stop();
     try {
       chmodSync(join(this.dir, "src/extra.ts"), EXTRA_MODE);
     } catch {}
-    // A detached delete may still be writing into the sandbox for a moment.
-    for (let i = 0; i < 20 && existsSync(this.box.home); i++) {
-      rmSync(this.box.home, { recursive: true, force: true, maxRetries: 3 });
-    }
+    await this.box.cleanupSettled();
   }
 }
+
+/** The processes a process started (pgrep -P). */
+const childrenOf = (parent: number): number[] =>
+  Bun.spawnSync(["pgrep", "-P", String(parent)], { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe" })
+    .stdout.toString()
+    .split("\n")
+    .filter(Boolean)
+    .map(Number);
+
+const signal = (pid: number, sig: NodeJS.Signals) => {
+  try {
+    process.kill(pid, sig);
+  } catch {}
+};
 
 export const expectOk = (ran: Ran, what: string): void => {
   if (ran.code !== 0) throw new Error(`${what} exited ${ran.code ?? ran.signal}: ${ran.err}${ran.out}`);

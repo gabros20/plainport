@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-type Step = { run?: string };
+type Step = { run?: string; uses?: string; with?: Record<string, unknown> };
 type Workflow = {
   on: { push: { branches?: string[]; tags?: string[] } };
   jobs: Record<string, { steps: Step[] }>;
@@ -24,6 +24,15 @@ test("compile-smokes all four targets and runs only the native binary", () => {
   expect(runs("linux")).toContain("bun scripts/build.ts --target all");
   expect(runs("linux")).toContain("./dist/plainport --version");
   expect(runs("macos")).toContain("./dist/plainport --version");
+});
+
+test("the jobs that run the tests fetch full history and tags, which the compatibility suite builds v0.1.1 from", () => {
+  for (const job of ["macos", "linux"]) {
+    const checkout = (workflow.jobs[job]?.steps ?? []).find((step) =>
+      step.uses?.startsWith("actions/checkout"),
+    );
+    expect(checkout?.with?.["fetch-depth"], job).toBe(0);
+  }
 });
 
 test("checks version consistency", () => {

@@ -147,47 +147,17 @@ still bite.
 
 `test/compat/` holds DESIGN's "Formats and compatibility" to the real released v0.1.1. `binaries.ts` compiles v0.1.1
 from its tag in a temporary `git worktree` (removed afterwards) with the crash matrix's test hook on, and caches it under
-`.tools/compat/` keyed by the tag's commit; the build runs as its own script because the home tripwire forbids a test to
-write the checkout. `PLAINPORT_TEST_TIER=1 bun test test/compat` runs the binaries and the T0 checks; `bun test test/compat` alone the T0 checks (`bun run test:t1 -t compat` trips the home tripwire's temp-folder leak check, because `-t` loads every suite, and is not used) (DESIGN against
-the tests, the schemas against the tag). A test title starts with the ids of the rows it proves, `[store.json.v1]`; a
-row a later task owns is a `test.todo` the task turns on. `PLAINPORT_COMPAT_GATE=1` makes the guard fail while one
-remains; the M2 gate sets it.
+`.tools/compat/` keyed by the tag's commit. The build runs as its own script because the home tripwire forbids a test to
+write the checkout, and it needs the tag and its history (`fetch-depth: 0` in CI). The T0 contract test reads v0.1.1's
+published files from `test/fixtures/compat-v0.1.1/`, so it needs neither.
 
-## Definition of Done
+- `PLAINPORT_TEST_TIER=1 bun test test/compat` runs the binaries and the T0 checks (DESIGN against the tests, the
+  schemas against the vendored tag files).
+- `bun test test/compat` runs the T0 checks alone.
+- `bun run test:t1 -t compat` is not used: `-t` loads every suite, and the home tripwire's temp-folder leak check then
+  fails on suites that never ran.
+- `bun run test:compat-gate` is the M2 gate's form: it sets `PLAINPORT_COMPAT_GATE=1`, which makes the guard fail
+  while a `test.todo`, `test.skip` or `test.skipIf(true)` remains.
 
-A task's review checks every line. A "no" sends it back.
-
-- [ ] The acceptance test was written first, and the report shows its red run and its green run.
-- [ ] Every bug fix has a test that fails without it.
-- [ ] Tests touch only temp directories and the sandboxed home; nothing reaches the real home, real stores or
-      agent folders.
-- [ ] `bun run typecheck`, `bun run lint`, `bun test` and gitleaks pass; CI is green on `main` after the orchestrator's merge.
-- [ ] If a command, output, exit code or finding changed: `bun run contract` was run and the regenerated files
-      are committed, and `docs/machine-contract.md` agrees. A breaking contract change bumps the contract version.
-- [ ] If behaviour changed: `docs/DESIGN.md` is updated in the same change, and a changed decision has a new
-      ADR in `docs/adr/`.
-- [ ] Code copied from plainkeep starts with a provenance comment naming the source path and commit (ADR-0003).
-- [ ] Every child process goes through the one process runner; every side effect goes through a port.
-- [ ] Expected failures return values with exit and finding codes; refusals name the finding code and the exact
-      fix.
-- [ ] No secret value is written to a file, log, config or fixture.
-- [ ] `CHANGELOG.md` has a line under `[Unreleased]` for anything a user would notice.
-
-## Releases
-
-Each milestone gate is a release, and the routine follows plainkeep's (ADR-0020):
-
-1. Merge the milestone branch into `main` and confirm CI is green on `main`.
-2. Commit `release: X.Y.Z`: drop the `-dev` suffix from `VERSION`, and date the `[Unreleased]` section of
-   `CHANGELOG.md` as `[X.Y.Z] — YYYY-MM-DD`.
-3. Tag `vX.Y.Z` and push the commit and the tag.
-4. Commit the next version as `X.Y+1.0-dev` with a fresh `[Unreleased]` section.
-5. Update `docs/HANDOFF.md` and the status table in `docs/ROADMAP.md`.
-
-No signing, notarization, checksum files or package-manager taps. Third-party tool downloads are still checked
-against `tools.lock.json`.
-
-## Updating dependencies
-
-By hand, in a reviewed commit: bump the version in `package.json` or `tools.lock.json` (with the new checksums
-from the project's official release), run the full suite including `test:t1`, and note it in `CHANGELOG.md`.
+A test title starts with the ids of the rows it proves, `[store.json.v1]`; a row a later task owns is a `test.todo`
+the task turns on.

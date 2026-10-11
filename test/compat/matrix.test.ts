@@ -45,9 +45,15 @@ describe("compat matrix: the todo guard", () => {
 
   test("sees it.todo, single-quoted and template titles", () => {
     const source =
-      "it.todo('[a] one', () => {});\ntest.todo(`[b] two`, () => {});\ntest.skipIf(true)(\"[c] three\", () => {});";
+      "it.todo('[a] one', () => {});\ntest.todo(`[b] two`, () => {});\ntest.skipIf(false)(\"[c] three\", () => {});";
     expect(remainingTodos([source])).toEqual(["[a] one", "[b] two"]);
     expect(testsIn([source]).map((t) => t.ids)).toEqual([["a"], ["b"], ["c"]]);
+  });
+
+  test("counts .skip and .skipIf(true) as open, and .skipIf(cond) as a test", () => {
+    const source =
+      'test.skip("[a] x", () => {});\ntest.skipIf(true)("[b] y", () => {});\ntest.skipIf(!tier)("[c] z", () => {});';
+    expect(remainingTodos([source])).toEqual(["[a] x", "[b] y"]);
   });
 
   test("[guard] fails the M2 gate while a todo remains (PLAINPORT_COMPAT_GATE=1)", () => {

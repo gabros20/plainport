@@ -4,9 +4,9 @@
 // that makes a valid new output invalid under the old schema: a removed or newly optional key, a changed type, a value
 // outside an old enum or const, a looser bound or pattern.
 //
-// Only the JSON Schema constructs plainport's generator emits are understood (type, properties, required, items, enum,
-// const, anyOf, minimum/maximum, minLength/maxLength, pattern); anything else is compared by deep equality, which
-// errs toward reporting a difference.
+// The keywords understood are those plainport's generator emits (UNDERSTOOD below). Annotations (ANNOTATIONS) are
+// ignored. Any other keyword the released schema has must be deep-equal in the current one, which errs toward
+// reporting a difference.
 
 type Schema = Record<string, unknown> | boolean;
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -20,6 +20,27 @@ const valuesOf = (schema: Record<string, unknown>): unknown[] | undefined => {
   if ("const" in schema) return [schema.const];
   return undefined;
 };
+
+const UNDERSTOOD = new Set([
+  "type",
+  "properties",
+  "required",
+  "items",
+  "enum",
+  "const",
+  "anyOf",
+  "minimum",
+  "maximum",
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+  "pattern",
+  "format",
+  "additionalProperties",
+  "propertyNames",
+]);
+const ANNOTATIONS = new Set(["$schema", "$id", "title", "description", "examples", "default", "deprecated"]);
 
 const TYPE_OK: Record<string, string[]> = { integer: ["integer", "number"], number: ["number"] };
 
@@ -72,6 +93,8 @@ export const notAssignable = (neu: Schema, old: Schema, path = "$"): string[] =>
     ["minLength", (n: number, o: number) => n >= o],
     ["maximum", (n: number, o: number) => n <= o],
     ["maxLength", (n: number, o: number) => n <= o],
+    ["minItems", (n: number, o: number) => n >= o],
+    ["maxItems", (n: number, o: number) => n <= o],
   ] as const) {
     const o = old[bound];
     if (typeof o !== "number") continue;
@@ -81,6 +104,25 @@ export const notAssignable = (neu: Schema, old: Schema, path = "$"): string[] =>
   }
   if (typeof old.pattern === "string" && neu.pattern !== old.pattern)
     problems.push(`${path}: pattern ${String(neu.pattern)} where ${old.pattern} was published`);
+  if (typeof old.format === "string" && neu.format !== old.format)
+    problems.push(`${path}: format ${String(neu.format)} where ${old.format} was published`);
+  // A closed object stays closed; a value schema of the open part stays assignable.
+  if (old.additionalProperties === false) {
+    if (neu.additionalProperties !== false) problems.push(`${path}: was closed to other keys, is open now`);
+  } else if (isObject(old.additionalProperties)) {
+    if (!isObject(neu.additionalProperties))
+      problems.push(`${path}: the values of other keys are no longer described`);
+    else problems.push(...notAssignable(neu.additionalProperties, old.additionalProperties, `${path}{}`));
+  }
+  if (isObject(old.propertyNames)) {
+    if (!isObject(neu.propertyNames)) problems.push(`${path}: key names are no longer constrained`);
+    else problems.push(...notAssignable(neu.propertyNames, old.propertyNames, `${path}<key>`));
+  }
+  for (const [keyword, value] of Object.entries(old))
+    if (!UNDERSTOOD.has(keyword) && !ANNOTATIONS.has(keyword) && !same(neu[keyword], value))
+      problems.push(
+        `${path}: ${keyword} changed from ${JSON.stringify(value)} to ${JSON.stringify(neu[keyword])}`,
+      );
   if (isObject(old.properties)) {
     const props = isObject(neu.properties) ? neu.properties : {};
     const required = list(neu.required);
