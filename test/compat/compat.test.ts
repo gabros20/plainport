@@ -25,7 +25,6 @@ import { ulid } from "../../packages/core/src/ulid.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
-import { onMac } from "../platform.ts";
 import { describeT1 } from "../tiers.ts";
 import { currentBinary, releasedBinary, toolsCopy } from "./binaries.ts";
 import { type Binaries, envelope, expectOk, type Ran, treeDigest, World } from "./world.ts";
@@ -393,7 +392,7 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
-  test("[output.additive][value.offload-kind][value.exit-codes] v0.2's output validates against the schemas published at v0.1.1", async () => {
+  test("[output.additive][output.plan-git][output.plan-nested][output.onload-plan][output.git-unpushed-tags][output.untrusted-known][output.hydrate-via][value.offload-kind][value.exit-codes] v0.2's output validates against the schemas published at v0.1.1", async () => {
     const released = (path: string) => {
       const ran = Bun.spawnSync(["git", "show", `v0.1.1:${path}`], {
         cwd: join(import.meta.dir, "../.."),
@@ -436,6 +435,13 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
       const on = await w.current(onloadArgs);
       validate("onload", { ...on, out: on.out.trim().split("\n").slice(-1).join("\n") });
       validate("version", await w.current(["version", "--json"]));
+      // onload --dry-run (D96) has no v0.1.1 counterpart: its plan is checked against the current schema by
+      // contract.test.ts; here the optional fields it adds are looked for in a real preview.
+      const preview = await w.current(["onload", "work:web", "--dry-run", "--json"]);
+      const shown = envelope(preview) as
+        | { data?: { kind?: string; hydrate?: { untrustedKnown?: boolean } } }
+        | undefined;
+      expect([shown?.data?.kind, shown?.data?.hydrate?.untrustedKnown]).toEqual(["onload", false]);
     });
     expect(seen).toEqual(
       expect.arrayContaining(["init", "ls", "offload", "status", "recover", "gc", "onload", "version"]),
@@ -489,5 +495,3 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
   test.todo("[config.keys] Tasks 15, 18, 24: v0.2 accepts the S3 credential keys, secret providers and offload.conflictGrace that v0.1.1 refuses", () => {});
   test.todo("[value.offload-kind] Task 23: a fork after the commit keeps kind fork and adds detail after-commit", () => {});
 });
-
-void onMac;

@@ -43,6 +43,13 @@ describe("compat matrix: the todo guard", () => {
     expect(remainingTodos([source])).toEqual(["[a.b] later", "[c] more"]);
   });
 
+  test("sees it.todo, single-quoted and template titles", () => {
+    const source =
+      "it.todo('[a] one', () => {});\ntest.todo(`[b] two`, () => {});\ntest.skipIf(true)(\"[c] three\", () => {});";
+    expect(remainingTodos([source])).toEqual(["[a] one", "[b] two"]);
+    expect(testsIn([source]).map((t) => t.ids)).toEqual([["a"], ["b"], ["c"]]);
+  });
+
   test("[guard] fails the M2 gate while a todo remains (PLAINPORT_COMPAT_GATE=1)", () => {
     const todos = remainingTodos();
     if (process.env.PLAINPORT_COMPAT_GATE === "1")

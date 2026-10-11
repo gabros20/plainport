@@ -59,7 +59,7 @@ describe("compat contract: v0.1.1's published files", () => {
     }
   });
 
-  test("[output.additive][plan] commands keep their risk class, options and positionals; outputs stay assignable to the released schema", () => {
+  test("[output.additive][plan][output.plan-git][output.plan-nested][output.onload-plan][output.git-unpushed-tags][output.untrusted-known][output.hydrate-via] commands keep their risk class, options and positionals; outputs stay assignable to the released schema", () => {
     for (const c of tagged.commands) {
       const now = current.commands.find((x: { name: string }) => x.name === c.name);
       expect(now, `${c.name} was removed`).toBeDefined();
@@ -73,6 +73,12 @@ describe("compat contract: v0.1.1's published files", () => {
       expect(now.positionals.slice(0, c.positionals.length)).toEqual(c.positionals);
       expect(notAssignable(now.output, c.output), `${c.name}: output`).toEqual([]);
     }
+  });
+
+  test("[finding.case-unknown] the new finding is a warn with exit 6, and added to the catalogue", () => {
+    const found = current.findings.find((f: { code: string }) => f.code === "fs.case-unknown");
+    expect([found?.severity, found?.exitCode]).toEqual(["warn", 6]);
+    expect(tagged.findings.some((f: { code: string }) => f.code === "fs.case-unknown")).toBe(false);
   });
 
   test("[value.project-state][value.phases][value.plan-fp] the closed sets (ProjectState, Phase, RiskClass, ExitCode) are the same sets", () => {

@@ -10,7 +10,17 @@
 // Two test processes may ask at once (`bun test test/compat` beside `bun run test:t1 -t compat`): a lock folder next to
 // the cache serialises the build, and the binary is moved into place only when complete.
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { hostTarget } from "../../packages/core/src/tools.ts";
@@ -40,17 +50,41 @@ export const releasedBinaryPath = (commit = releasedCommit()): string =>
     `plainport-${RELEASED_TAG}-${commit.slice(0, 12)}-${process.platform}-${process.arch}-hooks`,
   );
 
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/**
+ * Serialises builds with a lock folder holding its owner's pid. A lock whose owner is gone (a killed build) is taken
+ * over; one held by a live process is waited for, and the error names the folder to remove.
+ */
 const withLock = async <T>(lock: string, work: () => T | Promise<T>): Promise<T> => {
   mkdirSync(resolve(lock, ".."), { recursive: true });
   const deadline = Date.now() + LOCK_MS;
   for (;;) {
     try {
       mkdirSync(lock);
+      writeFileSync(join(lock, "pid"), String(process.pid));
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() > deadline) throw new Error(`${lock} has been held for ${LOCK_MS / 1000} s`);
-      await Bun.sleep(250);
+      let owner = Number.NaN;
+      try {
+        owner = Number(readFileSync(join(lock, "pid"), "utf8"));
+      } catch {}
+      // No pid yet means its owner is between mkdir and write: give it a moment before calling it stale.
+      if (Number.isInteger(owner) && owner > 0 && !alive(owner))
+        rmSync(lock, { recursive: true, force: true });
+      else if (Date.now() > deadline)
+        throw new Error(
+          `${lock} is held by process ${String(owner)} after ${LOCK_MS / 1000} s; remove that folder if no build is running`,
+        );
+      else await Bun.sleep(250);
     }
   }
   try {
@@ -66,9 +100,9 @@ const buildReleased = (commit: string, out: string): void => {
   const tree = join(parent, "v0.1.1");
   try {
     run(["git", "worktree", "add", "--detach", tree, commit], checkout);
+    const partial = `${out}.partial-${process.pid}`;
     try {
       run([process.execPath, "install", "--frozen-lockfile"], tree);
-      const partial = `${out}.partial-${process.pid}`;
       run(
         [
           process.execPath,
@@ -84,6 +118,7 @@ const buildReleased = (commit: string, out: string): void => {
       chmodSync(partial, 0o755);
       renameSync(partial, out);
     } finally {
+      rmSync(partial, { force: true });
       run(["git", "worktree", "remove", "--force", tree], checkout);
     }
   } finally {

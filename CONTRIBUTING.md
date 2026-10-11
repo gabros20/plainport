@@ -148,7 +148,7 @@ still bite.
 `test/compat/` holds DESIGN's "Formats and compatibility" to the real released v0.1.1. `binaries.ts` compiles v0.1.1
 from its tag in a temporary `git worktree` (removed afterwards) with the crash matrix's test hook on, and caches it under
 `.tools/compat/` keyed by the tag's commit; the build runs as its own script because the home tripwire forbids a test to
-write the checkout. `bun run test:t1 -t compat` runs the binaries, `bun test test/compat` the T0 checks (DESIGN against
+write the checkout. `PLAINPORT_TEST_TIER=1 bun test test/compat` runs the binaries and the T0 checks; `bun test test/compat` alone the T0 checks (`bun run test:t1 -t compat` trips the home tripwire's temp-folder leak check, because `-t` loads every suite, and is not used) (DESIGN against
 the tests, the schemas against the tag). A test title starts with the ids of the rows it proves, `[store.json.v1]`; a
 row a later task owns is a `test.todo` the task turns on. `PLAINPORT_COMPAT_GATE=1` makes the guard fail while one
 remains; the M2 gate sets it.
