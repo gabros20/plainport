@@ -27,6 +27,7 @@ export const INVENTORY = [
   "store.json.v1",
   "store.json.v2",
   "root.json",
+  "root.claims",
   "store.election",
   "store.upgrade-intent",
   "store.sidecar",
@@ -37,6 +38,7 @@ export const INVENTORY = [
   "managed.toml",
   "journal",
   "journal.held",
+  "journal.bootstrap",
   "plan",
   "claim",
   "claim.boot",
@@ -64,9 +66,12 @@ export const NEW_SCHEMAS: Readonly<Record<string, string>> = {
   "trash-claim-boot": "claim.boot",
   "election-record": "store.election",
   "store-semantics": "store.sidecar",
+  "bootstrap-journal": "journal.bootstrap",
 };
 /** Schemas that exist at v0.1.1 and differ now, with their row. A changed file schema is a compatibility event. */
-export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {};
+export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {
+  "store-identity": "store.json.v2",
+};
 
 export interface Row {
   id: string;

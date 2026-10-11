@@ -20,14 +20,24 @@ import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import type { PlainportPaths } from "../../packages/core/src/paths.ts";
+import { InjectedFault } from "../../packages/core/src/ports/host.ts";
+import {
+  type BootstrapDone,
+  type BootstrapPorts,
+  type BootstrapStore,
+  runBootstrap,
+} from "../../packages/core/src/saga/bootstrap.ts";
+import { makeSandbox } from "../../packages/core/src/testing/sandbox.ts";
 import { TrashClaimBootSchema, TrashClaimSchema } from "../../packages/core/src/trash-claim.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
+import { resticEngine } from "../../packages/engine-restic/src/engine.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
 import { describeT1 } from "../tiers.ts";
 import { currentBinary, released, releasedBinary, toolsCopy } from "./binaries.ts";
-import { type Binaries, envelope, expectOk, type Ran, treeDigest, World } from "./world.ts";
+import { type Binaries, envelope, expectOk, PASSWORD, type Ran, treeDigest, World } from "./world.ts";
 
 const offloadArgs = ["offload", "work:web", "--yes", "--json"];
 const onloadArgs = ["onload", "work:web", "--no-hydrate", "--json"];
@@ -79,6 +89,43 @@ const keptTrash = async (w: World): Promise<{ op: string; trash: string; journal
   const [journal] = journals(w);
   if (trashOp === undefined || journal === undefined) throw new Error("no kept trash");
   return { op: trashOp, trash: join(trashDir(w), trashOp), journal: join(w.box.paths.journalDir, journal) };
+};
+
+/**
+ * Task 8's bootstrap of the world's store, run in this process as v0.2's setup will run it (no command starts it until
+ * Tasks 18 and 19): blob-fs for the catalog and the pinned restic at repos/<attempt>/, with the journal under `paths`
+ * (a device's home). `crashAt` throws at that step or seam, as a crash there would leave it.
+ */
+const bootstrapIn = (w: World, paths: PlainportPaths, crashAt?: string): Promise<unknown> => {
+  const host = testHost();
+  const tmp = join(w.box.home, "tmp");
+  mkdirSync(tmp, { recursive: true });
+  mkdirSync(w.store, { recursive: true });
+  const ports: BootstrapPorts = {
+    io: host,
+    paths,
+    faultAt: (point) => {
+      if (point === crashAt) throw new InjectedFault(point);
+    },
+    clock: () => new Date(),
+    log: () => {},
+    wait: (ms) => Bun.sleep(Math.min(ms, 20)),
+  };
+  const target: BootstrapStore = {
+    blob: fsBlobStore(host, w.store),
+    location: w.store,
+    engineAt: (repo) =>
+      resticEngine({
+        host,
+        restic: join(bins.tools, "restic"),
+        repository: join(w.store, repo),
+        password: PASSWORD,
+        env: { PATH: "/usr/bin:/bin", HOME: w.box.home, TMPDIR: tmp },
+        cacheDir: join(w.box.home, ".cache", "restic"),
+        retryLock: null,
+      }),
+  };
+  return runBootstrap(ports, target, { name: "local", seal: "none" });
 };
 
 /** Polls until `done` holds or `ms` pass; whether it held. */
@@ -527,10 +574,114 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 120_000);
 
+  test("[store.election][journal.bootstrap] v0.1.1 ignores and never deletes bootstrap's repos/<attempt>/ repositories, its store-claims/ candidates and its journal/bootstrap/ journal", async () => {
+    await scenario(async (w) => {
+      // Two v0.2 attempts on a fresh store folder: A crashes right after its candidacy (its journal stays on this
+      // device), B on another device sees A, refuses and stays undecided. Then the owner rolls back to v0.1.1.
+      await expect(bootstrapIn(w, w.box.paths, "bootstrap.candidacy.written")).rejects.toBeInstanceOf(
+        InjectedFault,
+      );
+      const elsewhere = makeSandbox("plainport-compat-");
+      try {
+        const b = (await bootstrapIn(w, elsewhere.paths)) as { ok: boolean; finding?: { code: string } };
+        expect(b.ok ? "" : b.finding?.code).toBe("store.bootstrap-undecided");
+      } finally {
+        elsewhere.cleanup();
+      }
+      const claims = join(w.store, "meta/v1/store-claims");
+      const repos = join(w.store, "repos");
+      const bootstrapJournals = join(w.box.paths.journalDir, "bootstrap");
+      const attempts = readdirSync(repos).sort();
+      expect(attempts).toHaveLength(2);
+      for (const a of attempts)
+        expect(existsSync(join(repos, a, "config")), `repos/${a} is a restic repository`).toBe(true);
+      expect(readdirSync(claims).filter((f) => f.endsWith(".refused"))).toHaveLength(1);
+      expect(readdirSync(bootstrapJournals)).toHaveLength(1);
+      expect(existsSync(join(w.store, "meta/v1/store.json"))).toBe(false);
+
+      expectOk(await w.old(w.initArgs), "old init beside them");
+      const digest = () => [treeDigest(repos), treeDigest(claims), treeDigest(bootstrapJournals)].join(" ");
+      const before = digest();
+      for (const args of [
+        ["ls", "--json"],
+        offloadArgs,
+        ["gc", "--now", "--yes", "--json"],
+        ["recover", "--json"],
+      ]) {
+        const ran = await w.old(args);
+        expect(ran.err, `old ${args[0]}`).not.toContain(SKIPPED);
+        if (args[0] === "recover") {
+          expectOk(ran, "old recover");
+          expect(`${ran.out}${ran.err}`, "old recover reads no bootstrap journal").not.toContain(
+            "journal.pending",
+          );
+        }
+        await settleJournals(w.box.paths);
+        expect(digest(), `old ${args[0]} changed bootstrap's files`).toBe(before);
+      }
+      expectOk(await w.old(onloadArgs), "old onload");
+      expect(sameAsReference(w)).toEqual([]);
+      expect(digest()).toBe(before);
+    });
+  }, 300_000);
+
+  test("[store.json.v2] v0.1.1 refuses the store.json v2 bootstrap writes (the real shape) before it writes anything, and v0.2's M1 paths refuse it too", async () => {
+    await scenario(async (w) => {
+      const done = (await bootstrapIn(w, w.box.paths)) as { ok: boolean; value?: BootstrapDone };
+      expect(done.ok && done.value?.outcome).toBe("published");
+      const id = done.value?.id as string;
+      const published = JSON.parse(readFileSync(join(w.store, "meta/v1/store.json"), "utf8"));
+      expect(published).toEqual({ v: 2, id, repo: `repos/${id}`, catalog: { seal: "none" }, format: 2 });
+      expect(existsSync(join(w.store, "repos", id, "config"))).toBe(true);
+      const before = treeDigest(w.store);
+      for (const args of [w.initArgs, ["ls", "--json"], ["recover", "--json"], ["gc", "--json"]]) {
+        const ran = await w.old(args);
+        if (args[0] === "init") {
+          expect(ran.code, "old init").toBe(1);
+          expect(`${ran.out}${ran.err}`, "old init").toContain("store.failed");
+        }
+        expect(treeDigest(w.store), `old ${args[0]} wrote to the store`).toBe(before);
+        expect(existsSync(join(w.store, "repo")), `old ${args[0]} made repo/`).toBe(false);
+      }
+      const current = await w.current(w.initArgs);
+      expect(current.code, "current init").not.toBe(0);
+      expect(`${current.out}${current.err}`, "current init").toContain("store.unsupported");
+      expect(treeDigest(w.store), "current init wrote to the store").toBe(before);
+    });
+  }, 300_000);
+
+  test("[root.claims][root.json] v0.1.1 reads the root claim v0.2's election publishes, and ignores and keeps its root-claims/ candidates", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      expectOk(await w.current(offloadArgs), "current first offload, which claims the store for the root");
+      await settleJournals(w.box.paths);
+      const claims = join(w.store, "meta/v1/root-claims");
+      const rootJson = readFileSync(join(w.store, "meta/v1/root.json"), "utf8");
+      const root = JSON.parse(rootJson).root as string;
+      expect(readdirSync(claims).sort()).toEqual([`${root}.json`, `${root}.publishing`]);
+      const before = treeDigest(claims);
+      for (const args of [
+        onloadArgs,
+        ["ls", "--json"],
+        offloadArgs,
+        ["gc", "--now", "--yes", "--json"],
+        ["recover", "--json"],
+      ]) {
+        const ran = await w.old(args);
+        expect(ran.err, `old ${args[0]}`).not.toContain(SKIPPED);
+        if (args[0] !== "gc") expectOk(ran, `old ${args.join(" ")}`);
+        await settleJournals(w.box.paths);
+        expect(treeDigest(claims), `old ${args[0]} changed root-claims/`).toBe(before);
+        expect(readFileSync(join(w.store, "meta/v1/root.json"), "utf8")).toBe(rootJson);
+      }
+      expectOk(await w.old(onloadArgs), "old onload");
+      expect(sameAsReference(w)).toEqual([]);
+    });
+  }, 300_000);
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
   test.todo("[store.json.v2] Task 9: a store v0.2 creates is format 2 and v0.1.1 refuses it (the real shape)", () => {});
-  test.todo("[store.election] Task 8: bootstrap's own repos/<attempt>/ layout and candidate prefix, with v0.1.1 ignoring them (stand-in layout tested now)", () => {});
   test.todo("[store.sidecar] Task 9: v0.1.1 ignores stores/<store id>.json and `scripts/install --rollback` still works with one present", () => {});
   test.todo("[store.upgrade-intent] Task 19: the upgrade-intent marker blocks a v0.2 offload and bootstrap, and v0.1.1 ignores it", () => {});
   test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade refuses (store.not-quiescent) while a paused v0.1.1 holds a lease", () => {});

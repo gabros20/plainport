@@ -130,6 +130,37 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.bootstrap-contested": {
+        severity: "block",
+        allowable: false,
+        exitCode: 8,
+        summary: expect.any(String),
+      },
+      "store.bootstrap-lost": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "store.bootstrap-undecided": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "store.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.root-contested": {
+        severity: "block",
+        allowable: false,
+        exitCode: 8,
+        summary: expect.any(String),
+      },
+      "store.root-undecided": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.semantics-unknown": {
         severity: "block",
         allowable: false,

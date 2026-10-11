@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
-import { STORE_IDENTITY_KEY } from "./catalog/identity.ts";
+import { encodeStoreIdentityV2, STORE_IDENTITY_KEY } from "./catalog/identity.ts";
 import type { Store } from "./config/schema.ts";
 import type { Scheduler } from "./deadline.ts";
 import type { StoreOpener } from "./ports/store.ts";
@@ -145,6 +145,24 @@ describe("setUpStore's identity pin (D85)", () => {
     expect(free).toEqual({ ok: true, value: null });
     expect(existsSync(join(box.home, "fresh"))).toBe(false);
     expect(disks.size).toBe(0);
+  });
+});
+
+describe("setUpStore on a format-2 store (a bootstrapped one, Q2)", () => {
+  test("M1's setup path fails closed: no repository at repo/, no identity rewritten, no pin", async () => {
+    const v2 = disk();
+    const id = ulid();
+    const bytes = encodeStoreIdentityV2({ id, repo: `repos/${id}`, seal: "none" });
+    v2.blob.data.set(STORE_IDENTITY_KEY, bytes);
+    disks.set("~/ssd", v2);
+    const refused = await setUp({ kind: "local", path: "~/ssd" });
+    expect(!refused.ok && refused.finding.code).toBe("store.unsupported");
+    expect(!refused.ok && refused.finding.message).toContain("format 2");
+    expect(v2.blob.calls.put).toBe(0);
+    expect(v2.blob.data.get(STORE_IDENTITY_KEY)).toEqual(bytes);
+    expect(v2.engine.repository.initialized).toBe(false);
+    expect(v2.engine.repository.access).toEqual([]);
+    expect(await pinned()).toBeUndefined();
   });
 });
 

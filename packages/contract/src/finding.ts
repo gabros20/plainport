@@ -551,6 +551,27 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "The root has no folder on this device; fix is plainport root bind <root> <path>",
   },
+  "store.bootstrap-contested": {
+    severity: "block",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is the quiesced cleanup it names (stop plainport on every device that uses the store, remove the candidates), then one re-run",
+  },
+  "store.bootstrap-lost": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Another attempt set the store up first and published its repository, which this attempt never touches; the message names the winner, and a re-run with that store's password adopts it",
+  },
+  "store.bootstrap-undecided": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused and keeps its journal, so a later re-run (or plainport recover) ends it lost or contested",
+  },
   "store.failed": {
     severity: "block",
     allowable: false,
@@ -578,6 +599,12 @@ export const FINDINGS = Object.freeze({
     exitCode: 1,
     summary: "A create-only write found the key already there; the existing value is left as it was",
   },
+  "store.locked": {
+    severity: "block",
+    allowable: false,
+    exitCode: 11,
+    summary: "Another plainport process on this device is setting this store up",
+  },
   "store.not-set-up": {
     severity: "block",
     allowable: false,
@@ -585,12 +612,26 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
   },
+  "store.root-contested": {
+    severity: "block",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run",
+  },
   "store.root-mismatch": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
       "The store already holds another root's snapshots; one repository serves one root (ADR-0010, D48), so fix is to give this root its own store",
+  },
+  "store.root-undecided": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later",
   },
   "store.secret-missing": {
     severity: "block",
@@ -625,7 +666,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder)",
+      "This build cannot use the store's kind or format yet: M1 supports local stores (an external disk or a local folder), and its setup, catalog and recover paths read format-1 store.json only",
   },
   "stub.invalid": {
     severity: "block",

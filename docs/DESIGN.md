@@ -225,13 +225,23 @@ Every recursive delete plainport makes goes through one guard (D87), run immedia
 
 ```
 <store root>/
-  repo/                      restic repository (config, data/, index/, keys/, snapshots/)
+  repos/<attempt>/           restic repository of one bootstrap attempt (format 2); store.json names the winner's
+  repo/                      restic repository of an M1 store (format 1), and of one upgraded to format 2
   meta/v1/
-    store.json               the store's identity {v, id}, written once at setup
-    root.json                the root the store serves {v, root}, claimed create-only by its first offload
+    store.json               format 1 {v: 1, id}; format 2 {v: 2, id, repo, catalog: {seal}, format: 2}, published
+                             once by the winner of bootstrap's election ("Bootstrap" below; only the winner's own
+                             recovery completes a copy a crash tore, with the same bytes)
+    store-claims/            bootstrap's candidates: <attempt>.json, <attempt>.publishing, <attempt>.refused (D99)
+    root.json                the root the store serves {v: 1, root}, published once by the root claim's election
+    root-claims/             the root claim's candidates, named by root id, as store-claims/
     events/<ulid>.json       append-only catalog events, never overwritten
     state.json               compacted fold of events (optional, rebuildable; M1 keeps it beside the mirror instead)
 ```
+
+A format-2 store's repository is wherever its `store.json` says, under the store's root; the restic location and the
+metadata location still come from one store definition. A repository left by an attempt that lost, was contested or
+rolled back stays where it is: plainport never deletes a repository, and the delete guard (D87) refuses any tree that
+holds one.
 
 The `Engine` interface keeps other engines possible later: rustic or Kopia, or a single-file `tar + zstd + age` engine for exports you can open with standard tools.
 
@@ -297,6 +307,99 @@ The candidacy and the two decisions are the candidate record (D99): each file ho
 **A stable id, and the way out of undecided.** The caller journals the attempt's id before `elect` writes its candidacy, and recovery or a retry re-runs with that same id: only the same id can refuse or publish for an attempt, so a fresh id would leave the old candidacy undecided for everyone. Re-running an undecided attempt with its id decides it (it sees the others and refuses, or it was sole and publishes). If the attempt will never run again (its device is gone, its journal lost), an operator withdraws it: stop plainport on every device that uses the store and wait until none is running, then write its refusal on its behalf, `<candidates><id>.refused` holding exactly the record it would have written (`{"v":1,"id":<id>,"decision":"refused"}`), and re-run. A refusal wins over a `.publishing`, so the withdrawn attempt never publishes even if its device comes back. On a store whose writes may land late, a withdrawn attempt's cancelled publication can still appear; every attempt reads the published key first, so later attempts then see it as the winner. The undecided outcome's fix names the re-run and this rule; a command for it may come later. Since every device follows the candidate protocol, stores with a conditional create (S3, R2, a local disk) can also be left undecided by a crashed candidacy until a same-id re-run or a withdrawal; that is expected there too, not a fault.
 
 **Testing.** `testing/semantic-blob-store.ts` wraps the memory store with a switch for each weakness: delayed visibility, a listing that omits recent keys, a listing cut short, a torn in-place write (or a temp-then-rename `put` that tears only its own temporary), lost acknowledgements, and late landing after cancellation (a late conditional create keeps its condition). The contract suite is driven by each store's profile: create-only cases run only where conditional create is claimed, and a read or a listing right after a write is asserted at once only where read-after-write or list-after-write is claimed, otherwise after the fixture's settle or by polling within a bound. Its semantic cases probe what a profile claims (`semanticViolations`; whole publication is judged apart from visibility, a write that does not show within the polling bound is inconclusive rather than a violation, an I/O failure is an error and never a counterexample, every batch of probe writes settles before any failure is thrown, and every key the probe wrote is deleted by name, with a failed delete reported once all were tried) and check each predicate against what the backend expects: the local stores pass every one, a strong store without conditional create passes every one through the fallback, and an `acked-unsynced` store passes release only with Q21's proof. A fast-check scheduler runs every interleaving of two and three claimants on both final writes, mixed on one store (devices with and without a proven conditional create), with lost acknowledgements and with late landings: at most one ever wins, and a final `contested` never coexists with a win.
+
+## Bootstrap
+
+Setting a store up is exclusive and recoverable (Q9, Q10; `packages/core/src/saga/bootstrap.ts`). Two devices running
+`restic init` at one location can leave two master keys in one repository, so no two attempts ever share a location,
+and identity, repository location and seal policy are published once, by one winner, through the elected publication
+above.
+
+**The protocol.** Each attempt has a fresh id, a ULID, from which everything else derives: its repository
+`repos/<attempt>/`, its candidacy `meta/v1/store-claims/<attempt>.json`, and the value it publishes, `store.json`
+`{"v":2,"id":<attempt>,"repo":"repos/<attempt>","catalog":{"seal":<policy>},"format":2}` (the id near the start, so
+that even a torn copy names whose it was). The winning attempt's id is the store's id.
+
+1. Journal `bootstrap.begin` with the attempt id, before anything is written to the store.
+2. `restic init` at `repos/<attempt>/` with this device's password; journal `bootstrap.initialised`.
+3. Journal `bootstrap.elect.start`, then stand in the election of `meta/v1/store.json` with candidates under
+   `meta/v1/store-claims/`: write the candidacy, list, and only as the sole candidate
+4. publish `store.json` v2 (a conditional create where this device's profile proves one),
+5. read it back, and journal `bootstrap.published`,
+6. record the id under the store's name in this device's `registry.json` (the D85 pin), and close the journal.
+
+The election's three outcomes (R2-7):
+
+- **Won:** publish, record, `published`.
+- **Lost:** another attempt published first. `store.bootstrap-lost` (exit 6) names the winner. This attempt records
+  nothing and never touches the winner's repository; a re-run with that store's password adopts it (below).
+- **Contested:** no winner, and this attempt refused. *Final* when every visible candidate's refusal is read back,
+  this attempt's included: `store.bootstrap-contested` (exit 8) names the candidates and the quiesced cleanup (stop
+  plainport on every device that uses the store, remove the files it lists, then one re-run), and the journal is
+  closed. *Undecided* while a visible candidate has not refused and may still publish: `store.bootstrap-undecided`
+  (exit 6) names it, offers no cleanup, and the journal stays, so a later re-run decides it with the same id.
+
+A losing or contested attempt writes nothing after its candidacy but, when contested, its own refusal marker (D99).
+Its repository stays where it is.
+
+**Adopting a store.** A store whose `store.json` exists is adopted without an election and without writing to it:
+its published repository (`repos/<id>` for format 2, `repo/` for an M1 store, whose file is never rewritten) must open
+with this device's password (`restic.wrong-password` otherwise, nothing recorded) before the id is recorded; the probe
+takes no restic lock (`--no-lock` once the real engine makes it, Task 18), so adopting writes nothing to the winner's
+repository either. A name
+already pinned to an id only reaches that store (D85): another id, or no `store.json` at all, is
+`store.identity-changed` before anything is written. A v0.1.x process that wrote a format-1 `store.json` while an
+election ran is read as a published winner like any other, so the attempt ends `lost`.
+
+**The journal.** `journal/bootstrap/<attempt>.json` (`BootstrapJournalSchema`, published as
+`schemas/bootstrap-journal.json`) holds the attempt id, the store's name and where the store was when the attempt began
+(its resolved location, never a secret), the repository's location and the seal policy. A resumed or recovered
+attempt whose store name now reaches another location refuses with `store.identity-changed` and writes nothing there
+(its repository was made at the old location, so publishing it elsewhere would name a repository that store lacks);
+pointing the name back lets it finish. It lives apart from the projects' journals: it belongs to no project, and v0.1.x, which reads only
+`journal/<ulid>.json`, never sees it, so it cannot hold back a rolled-back v0.1.x's projects. One attempt per store
+runs at a time on a device (`locks/bootstrap-<the first 32 hex digits of the name's SHA-256>.lock`, `store.locked`, exit 11), since two runs of one attempt id at
+once could both refuse and publish. A re-run of the setup resumes this device's open attempt for the store before
+anything else, never starting a second one beside it (D99).
+
+**Recovery** (`recoverBootstraps`) routes by the exported `BOOTSTRAP_RECOVERY` table:
+
+| Step | Rule | What it does |
+| --- | --- | --- |
+| `bootstrap.begin`, `bootstrap.initialised` | candidacy-check | The world decides, not the journal's last word (D24): a `store.json` naming this attempt is recorded; a candidacy on the store is re-elected; otherwise the attempt rolls back (nothing published; a repository it made is left) |
+| `bootstrap.elect.start` | re-elect | The election runs again with the journaled id: published, lost, contested (final, the journal closed), or pending (undecided, or a store that did not answer) |
+| `bootstrap.published` | record | `store.json` is read back and must name this attempt; the id is recorded and the journal closed |
+
+The after-effect seams (`bootstrap.init.done`, `bootstrap.candidacy.written`, `bootstrap.publishing.written`,
+`bootstrap.refusal.written`, `bootstrap.publication.written`, `bootstrap.recorded`) are the crash points between the
+steps; elect reaches them through its `after` hook. A publication torn in place by a crash (a linkless volume, D41) is
+completed only by its own attempt's recovery, when the torn bytes are a strict prefix of its value that already holds
+its whole id and its `.publishing` record stands; a shorter tear names no attempt and stays pending, with the fix to
+quiesce every device, remove the torn file and run recover. An attempt killed after its candidacy leaves other
+attempts undecided until its own recovery re-runs with its journaled id; on a store with a proven conditional create
+that is expected too.
+
+**The root claim** is the same election: `meta/v1/root.json` `{v: 1, root}` keeps format 1's shape (v0.1.x reads it as
+before, and a claim v0.1.x wrote create-only is a published winner), with candidates under `meta/v1/root-claims/`. The
+attempt's id is the root's ULID, which the offload records in `registry.json` before claiming, so a re-run stands
+again with the same id and the same root claiming from two devices is one attempt publishing one value. Won is the
+claim; lost names the root that holds it (`store.root-mismatch`); contested is `store.root-contested` (exit 8,
+final, the quiesced cleanup) or `store.root-undecided` (exit 6, re-run later).
+
+**Wiring.** The saga runs on the injected ports: the store's blob store, an engine at a location under the store's root
+(`engineAt`), the host's crash seam and a scheduler. Task 18 wires it to the real engine and blob stores, wires
+`recoverBootstraps` into `plainport recover`, and runs the bootstrap crash rows again under a real kill (the subprocess
+variant); Task 19's `store add` and `init` start it. Until then M1's setup path writes format 1 only, and every M1 path
+that reads `store.json` (setup, the catalog, recover) refuses a format-2 store with `store.unsupported` before writing
+anything, since it would bind restic at `repo/` rather than the published `repo`. The crash matrix runs every bootstrap
+row (`BOOTSTRAP_ROWS`, from the exported steps, seams and branches) in-process, on a store with a proven conditional
+create and on one that elects by the sole-candidate rule, plus the rows that settle to `lost` (another attempt publishes
+while this one's election is open).
+
+The root claim's election writes can reach a caller's crash seam through `after` too (D52), which the offload does not
+yet pass. The claim runs before the
+offload's journal opens, after the root's id is recorded in `registry.json`, so a crash there is recovered by running the
+offload again: it stands with the same id, and its earlier decision stands.
 
 ## Machines: moving projects between devices
 
@@ -1261,9 +1364,10 @@ Every file plainport persists, and every closed value it prints, has a row below
 | `event.resolved` | `resolved` event (Q3), written only to format-2 stores | skipping it, as for any unknown type | v0.1.1 cannot reach a format-2 store, so it never meets one | no, it refuses the store first | `resolve` on a format-1 store refuses with `store upgrade` as the fix | todo: Task 12 |
 | `event.sealed` | sealed event envelope (Q10), format-2 stores that opt in | skipping it as not JSON of a known type, but v0.1.1 refuses the store first | a sealed store cannot be rolled back to v0.1.1 | no | an existing plaintext store is never sealed in place | todo: Task 10 |
 | `store.json.v1` | `meta/v1/store.json` `{v: 1, id}` | parsing it (`StoreIdentity`, strict) | everything works | yes, `init` creates it | stays format 1 and v0.2 writes nothing that v0.1.1 cannot read, until `store upgrade` | tested |
-| `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repository, seal, …}` (Q2) | refusing it: `store.failed`, the file left as it is, nothing written before the refusal | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way | no | made by `store upgrade` or by v0.2 for a new store | todo: Task 9 (the refusal is tested now with a stand-in v 2) |
+| `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repo, catalog: {seal}, format: 2}` (Q2), published once by bootstrap's election (Task 8); `schemas/store-identity.json` now accepts either format | refusing it: `store.failed`, the file left as it is, nothing written before the refusal (tested with the real shape bootstrap writes, and v0.2's own format-1 paths refuse it with `store.unsupported`) | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way | no | made by `store upgrade` or by v0.2 for a new store | todo: Task 9 (a store v0.2's `init` creates; bootstrap's shape is tested) |
 | `root.json` | `meta/v1/root.json` `{v: 1, root}` | parsing it; a second root is refused (`store.root-mismatch`) | everything works | yes, a first offload creates it exclusively | read as is | tested |
-| `store.election` | `repos/<attempt ulid>/` repositories and election candidates (Q9), with Task 6's markers `<id>.publishing` and `<id>.refused` beside each candidate (`schemas/election-record.json`) | never read: v0.1.1 lists neither | the extra folders stay and are ignored | no | an M1 store has one repository at its root and is not re-elected | todo: Task 8 |
+| `root.claims` | `meta/v1/root-claims/<root>.json`, `.publishing`, `.refused`: the root claim's election candidates (Task 8, D99), written by v0.2's first offload of a root even on a format-1 store | never read: v0.1.1 reads only `root.json`, which the election publishes in format 1's shape | the files stay and are ignored; v0.1.1 reads the claim v0.2 published | no: v0.1.1 claims create-only without candidates, and v0.2 reads that claim as a published winner | a store claimed by v0.1.1 keeps its `root.json`; v0.2 writes candidates only for a store with no claim | tested |
+| `store.election` | bootstrap's `repos/<attempt ulid>/` restic repositories and its candidates under `meta/v1/store-claims/` (Q9, Task 8), with Task 6's markers `<id>.publishing` and `<id>.refused` beside each (`schemas/election-record.json`) | never read: v0.1.1 lists neither | the extra folders stay and are ignored, and nothing of v0.1.1's deletes them | no | an M1 store has one repository at `repo/` and is adopted, never re-elected | tested |
 | `store.upgrade-intent` | `meta/v1/upgrade-intent.json` marker (Q2) | never read | ignored; `recover` clears a stale one | no | written and removed by `store upgrade` | todo: Task 19 |
 | `store.sidecar` | `~/.local/state/plainport/stores/<store id>.json` (Q4), whose measured semantics profile is `schemas/store-semantics.json` (Task 6) | never read, so `registry.json` stays v1 and `scripts/install --rollback` keeps working | ignored | no | created at first contact; measured facts invalidate on endpoint or version change | todo: Task 9 |
 | `registry.json` | `registry.json` `{v: 1}`, strict | parsing it; a changed shape is `registry.invalid` | everything works | yes | v0.2 keeps it at v 1, so it is shared | tested |
@@ -1271,6 +1375,7 @@ Every file plainport persists, and every closed value it prints, has a row below
 | `config.keys` | `config.toml` keys; new in M2: S3 `accessKeyId`, `secretAccessKey`, `region`, `path` (Q7), `offload.conflictGrace` (Q16), secret providers `keychain:` and `op:` (Q14) | refusing a key it does not know: `config.invalid`, exit 6 | remove the new lines and everything works | no | existing keys keep their meaning | todo: Task 15 (the refusal is tested now) |
 | `managed.toml` | `managed.toml` beside `config.toml`, same keys | the same: `config.invalid`, exit 6 on an unknown key | remove the new lines | yes, `init` writes it | v0.2 writes only keys v0.1.1 knows to an M1 home | tested |
 | `journal` | `journal/<op>.json` `{v: 1}` offload and onload, free-form `step` | parsing it; an unknown step is left pending | v0.1.1's `recover` settles a journal v0.2 left open | yes | read as is | tested |
+| `journal.bootstrap` | `journal/bootstrap/<attempt>.json` (`schemas/bootstrap-journal.json`, Task 8): a store setup's journal, in a folder of its own | never read: v0.1.1 reads only `journal/<ulid>.json`, so it neither settles nor reports it and holds back no project | the file stays; v0.2's recovery settles it after a roll-forward | no | none exists on an M1 home | tested |
 | `journal.held` | an offload journal at step `offload.release.held` (Q2, Q16) | parsing it; the step is unknown, so `recover` leaves it pending and `gc`, `gc --now` and housekeeping never delete its trash | held trash survives a rollback | no | none exists on an M1 home | todo: Task 24 (the unknown-step behaviour is tested now) |
 | `plan` | `plans/<id>.json`: output object, new optional `git` and `nested` | parsing it as an open object; approval compares the fingerprint | plans of either version load | yes | an M1 plan lacks the new keys, which are optional | tested |
 | `claim` | `<root>/.plainport-trash/<op>.claim` (D64), M1 shape | parsing it: a live claim keeps its trash, a dead one is taken over | everything works | yes | read as is | tested |

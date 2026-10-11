@@ -3,6 +3,11 @@
 // stored as links), and a file it cannot read fails the snapshot the way restic's exit 3 does: the incomplete
 // snapshot is kept in the repository and named in the failure (D28). Hooks let a test edit files while the
 // "upload" runs, damage a listing, or fail a call. Used only by *.test.ts files and their helpers.
+//
+// An engine made with a password authenticates as restic does: init keeps the password in the repository, and every
+// later call with another one is restic.wrong-password. Each call is logged on the repository with the password that
+// made it, so a test can show which devices reached it. `duringInit` pauses or delays an init before the repository
+// exists (restic writes its config last), as two initialisers racing on a slow store do.
 
 import {
   chmodSync,
@@ -42,15 +47,20 @@ export interface FakeRepository {
   initialized: boolean;
   password: string | undefined;
   snapshots: FakeSnapshot[];
+  /** Every call that reached the repository, with the password of the engine that made it. */
+  access: { method: string; password: string | undefined }[];
 }
 
 export const fakeRepository = (): FakeRepository => ({
   initialized: false,
   password: undefined,
   snapshots: [],
+  access: [],
 });
 
 export interface FakeEngineHooks {
+  /** Runs inside init before the repository exists: a test pauses or delays it here. */
+  duringInit?(): void | Promise<void>;
   /** Runs while a snapshot "uploads", after the walk started: a test edits files here. `attempt` counts from 1. */
   duringSnapshot?(input: SnapshotInput, attempt: number): void | Promise<void>;
   /** Runs while a listing is read, before its entries are handed out: a test edits files here. */
@@ -162,11 +172,21 @@ const walk = (
 export const fakeEngine = (
   repository: FakeRepository = fakeRepository(),
   hooks: FakeEngineHooks = {},
+  options: { password?: string } = {},
 ): FakeEngine => {
   const calls: SnapshotInput[] = [];
   const restores: RestoreCall[] = [];
   const missing = (): Failure =>
     fail(finding("restic.repo-missing", { message: "the fake repository was never initialised" }));
+  /** Logs the call; restic.wrong-password when this engine's password is not the repository's. */
+  const reach = (method: string): Failure | undefined => {
+    repository.access.push({ method, password: options.password });
+    if (!repository.initialized || options.password === undefined || repository.password === undefined)
+      return undefined;
+    return options.password === repository.password
+      ? undefined
+      : fail(finding("restic.wrong-password", { message: "the password does not open the fake repository" }));
+  };
   const find = (id: string) => repository.snapshots.find((s) => s.info.id === id);
   const notFound = (id: string): Failure =>
     fail(finding("restic.snapshot-not-found", { message: `the fake repository has no snapshot ${id}` }));
@@ -177,15 +197,22 @@ export const fakeEngine = (
     calls,
     restores,
     init: async () => {
+      reach("init");
       const failure = taken(hooks, "init");
       if (failure !== undefined) return failure;
       if (repository.initialized)
         return fail(finding("restic.repo-exists", { message: "the fake repository exists already" }));
+      await hooks.duringInit?.();
+      if (repository.initialized)
+        return fail(finding("restic.repo-exists", { message: "the fake repository exists already" }));
       repository.initialized = true;
+      repository.password = options.password;
       return ok({ id: hex64() });
     },
     snapshot: async (input: SnapshotInput, ctx: RunContext) => {
       calls.push(input);
+      const denied = reach("snapshot");
+      if (denied !== undefined) return denied;
       const failure = taken(hooks, "snapshot");
       if (failure !== undefined) return failure;
       if (!repository.initialized) return missing();
@@ -236,6 +263,8 @@ export const fakeEngine = (
       });
     },
     list: async (filter) => {
+      const denied = reach("list");
+      if (denied !== undefined) return denied;
       const failure = taken(hooks, "list");
       if (failure !== undefined) return failure;
       if (!repository.initialized) return missing();
@@ -245,6 +274,8 @@ export const fakeEngine = (
       );
     },
     entries: async (id, onEntry) => {
+      const denied = reach("entries");
+      if (denied !== undefined) return denied;
       const failure = taken(hooks, "entries");
       if (failure !== undefined) return failure;
       if (!repository.initialized) return missing();
@@ -255,12 +286,14 @@ export const fakeEngine = (
       for (const entry of listed) onEntry({ ...entry });
       return ok({ snapshot: snapshot.info, count: listed.length });
     },
-    restore: async (id, target, _ctx, options = {}) => {
+    restore: async (id, target, _ctx, restoreOptions = {}) => {
+      const denied = reach("restore");
+      if (denied !== undefined) return denied;
       if (!repository.initialized) return missing();
       const snapshot = find(id);
       if (snapshot === undefined) return notFound(id);
       const failure = taken(hooks, "restore");
-      const overwrite = options.overwrite ?? "always";
+      const overwrite = restoreOptions.overwrite ?? "always";
       const existing = (path: string) => {
         try {
           return lstatSync(path);
@@ -324,6 +357,6 @@ export const fakeEngine = (
         bytesSkipped: 0,
       });
     },
-    check: async () => ok({ ok: true, errors: 0, messages: [] }),
+    check: async () => reach("check") ?? ok({ ok: true, errors: 0, messages: [] }),
   };
 };
