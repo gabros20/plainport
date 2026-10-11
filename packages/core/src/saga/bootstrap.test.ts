@@ -2,7 +2,8 @@
 // repos/<attempt>/, stands in the elected publication of meta/v1/store.json v2, and only the winner publishes. These
 // tests run several devices (sandboxed homes, different passwords) against one semantic fake store.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type { Failure, Result } from "@plainport/contract";
 import fc from "fast-check";
 import { STORE_CLAIMS_PREFIX, STORE_IDENTITY_KEY } from "../catalog/identity.ts";
@@ -94,6 +95,25 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     delete: s.scheduleFunction(inner.delete.bind(inner)),
   });
 
+  const ALLOWED = [
+    "published",
+    "store.bootstrap-lost",
+    "store.bootstrap-contested",
+    "store.bootstrap-undecided",
+  ];
+  const reached: Record<string, Set<string>> = {
+    "conditional create": new Set(),
+    "sole candidate": new Set(),
+  };
+  // Not vacuous: across the runs, the race both elects a winner and ends contested on each route.
+  afterAll(() => {
+    if (RUNS < 20) return;
+    for (const [route, outcomes] of Object.entries(reached)) {
+      expect([route, outcomes.has("published")]).toEqual([route, true]);
+      expect([route, outcomes.has("store.bootstrap-contested")]).toEqual([route, true]);
+    }
+  });
+
   for (const [route, options] of [
     ["conditional create", {}],
     ["sole candidate", NO_CREATE],
@@ -143,9 +163,17 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
             const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw));
             for (const d of devices) d.target.blob = meeting();
             const results = await s.waitFor(Promise.all(devices.map((d) => d.run())));
+            // Every schedule ends in an outcome the protocol allows, never an unexpected failure.
+            for (const r of results) {
+              const seen = r.ok ? r.value.outcome : r.finding.code;
+              expect(ALLOWED).toContain(seen);
+              reached[route]?.add(seen);
+            }
             // Whatever was left open is settled by each device's recovery (same attempt id), then nothing more runs.
             for (const d of devices) d.target.blob = w.store;
             for (let round = 0; round < 2; round++) for (const d of devices) await d.recover();
+            // Settled: nothing injects a fault after the race, so every attempt is decided by now.
+            for (const d of devices) expect(await d.journals()).toEqual([]);
 
             const published = publishedStore(w.store);
             const won = results.flatMap((r) => (r.ok && r.value.outcome === "published" ? [r.value.id] : []));
@@ -389,6 +417,32 @@ describe("bootstrap: interrupted attempts", () => {
     ]);
   });
 
+  test("a store changed under a pending attempt is refused (store.identity-changed), and nothing is written to it", async () => {
+    const w = world();
+    const { d, attempt } = await crash(w, "bootstrap.elect.start");
+    d.ports.faultAt = () => {};
+    // The name now points at another store: a different disk or bucket, where repos/<attempt> was never made.
+    const other = world();
+    const original = { blob: d.target.blob, location: d.target.location };
+    d.target.blob = other.store;
+    d.target.location = other.location;
+    const refused = failed(await d.run());
+    expect(refused.finding.code).toBe("store.identity-changed");
+    expect(refused.finding.message).toContain(w.location);
+    expect(other.store.calls.put).toBe(0);
+    expect(await d.journals()).toEqual([attempt]);
+    const pending = await d.recover();
+    expect(pending.ok && pending.value.operations).toMatchObject([
+      { attempt, outcome: "pending", finding: { code: "store.identity-changed" } },
+    ]);
+    expect(other.store.calls.put).toBe(0);
+    // Pointed back at the store it began on, the attempt finishes.
+    d.target.blob = original.blob;
+    d.target.location = original.location;
+    const settled = await d.recover();
+    expect(settled.ok && settled.value.operations).toMatchObject([{ attempt, outcome: "published" }]);
+  });
+
   test("killed after the candidacy on a conditional-create store: another attempt is undecided until the killed attempt's recovery re-runs with its journaled id, which settles it", async () => {
     const w = world();
     const { d: a, attempt } = await crash(w, "bootstrap.candidacy.written");
@@ -446,7 +500,8 @@ describe("bootstrap: one attempt per store at a time, apart from the projects' j
     const w = world();
     const d = w.device("pw");
     await d.ports.io.fs.mkdirp(d.box.paths.locksDir);
-    const lock = `${d.box.paths.locksDir}/bootstrap-${Buffer.from(STORE_NAME).toString("hex")}.lock`;
+    const hash = createHash("sha256").update(STORE_NAME, "utf8").digest("hex").slice(0, 32);
+    const lock = `${d.box.paths.locksDir}/bootstrap-${hash}.lock`;
     const held = await acquireLock(d.ports.io, lock, {
       timeoutMs: 0,
       held: () => {
@@ -485,7 +540,7 @@ describe("bootstrap: one attempt per store at a time, apart from the projects' j
       updatedAt: at,
       pid: 1,
       host: "h",
-      store: { name: STORE_NAME },
+      store: { name: STORE_NAME, location: w.location },
       repo: `repos/${op}`,
       seal: "none",
       history: [],

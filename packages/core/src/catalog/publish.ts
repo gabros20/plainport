@@ -172,8 +172,16 @@ const SUFFIX = { candidate: ".json", publishing: ".publishing", refused: ".refus
 const record = (id: string, decision: ElectionRecord["decision"]): Uint8Array =>
   new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision } satisfies ElectionRecord)}\n`);
 
-/** Whether `bytes` are the record `decision` of attempt `id`. */
-const isRecord = (bytes: Uint8Array, id: string, decision: ElectionRecord["decision"]): boolean => {
+/** The key of attempt `id`'s record `decision` under the candidates prefix `candidates`. */
+export const electionKey = (candidates: string, id: string, decision: ElectionRecord["decision"]): string =>
+  `${candidates}${id}${SUFFIX[decision]}`;
+
+/** Whether `bytes` are the record `decision` of attempt `id` (a record that names another counts for nothing). */
+export const isElectionRecord = (
+  bytes: Uint8Array,
+  id: string,
+  decision: ElectionRecord["decision"],
+): boolean => {
   try {
     const checked = ElectionRecordSchema.safeParse(
       JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
@@ -295,7 +303,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
 
   // The candidate protocol, the same on every device.
   const keyOf = (id: string, decision: ElectionRecord["decision"]): string =>
-    `${e.candidates}${id}${SUFFIX[decision]}`;
+    electionKey(e.candidates, id, decision);
   /**
    * The candidates and their decisions. A candidacy counts by its name alone (more candidates only means more
    * refusals); a decision counts only when its record validates for that attempt, since recovery acts on it.
@@ -319,7 +327,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
         }
         const bytes = await store.get(key);
         if (!bytes.ok) return bytes;
-        if (bytes.value !== null && isRecord(bytes.value, id, decision)) {
+        if (bytes.value !== null && isElectionRecord(bytes.value, id, decision)) {
           (decision === "refused" ? refused : publishing).add(id);
         }
       }
@@ -352,7 +360,8 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
       e.after?.("publishing");
       if (!intent.ok) {
         const there = await store.get(keyOf(e.id, "publishing"));
-        if (!there.ok || there.value === null || !isRecord(there.value, e.id, "publishing")) return intent; // never publish on an intent nobody can see
+        if (!there.ok || there.value === null || !isElectionRecord(there.value, e.id, "publishing"))
+          return intent; // never publish on an intent nobody can see
       }
     }
     // The final write is this device's only route choice: create-only where its profile proves it.
@@ -368,7 +377,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     e.after?.("refusal");
     const back = await store.get(keyOf(e.id, "refused"));
     if (!back.ok) return back;
-    if (back.value === null || !isRecord(back.value, e.id, "refused")) {
+    if (back.value === null || !isElectionRecord(back.value, e.id, "refused")) {
       return refusal.ok ? notSeen(keyOf(e.id, "refused")) : refusal;
     }
   }

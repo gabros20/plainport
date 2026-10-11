@@ -29,10 +29,14 @@
 //                                           (undecided, or the store did not answer)
 //   bootstrap.published                     record: read store.json back, check it names this attempt, record the id
 //
+// A resumed or recovered attempt first checks that its store's name still reaches the location it began on (journaled at
+// bootstrap.begin), and refuses with store.identity-changed otherwise, writing nothing there.
+//
 // The attempt id is the only thing a re-run needs: the repository's location, the candidacy, the value published and
 // the store's id all derive from it. A publication torn in place by a crash (a linkless volume, D41) is completed only by
 // its own attempt's recovery, when the torn bytes already name it and its `.publishing` record stands.
 
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { type Failure, type Finding, fail, failWith, finding, ok, type Result } from "@plainport/contract";
 import {
@@ -45,7 +49,7 @@ import {
   STORE_IDENTITY_KEY,
   type StoreDescriptor,
 } from "../catalog/identity.ts";
-import { ElectionRecordSchema, type ElectionWrite, elect } from "../catalog/publish.ts";
+import { type ElectionWrite, elect, electionKey, isElectionRecord } from "../catalog/publish.ts";
 import { assertSystemError, type LocalIo } from "../io.ts";
 import {
   type BootstrapJournal,
@@ -148,6 +152,13 @@ export interface BootstrapPorts {
 /** The store being set up: its metadata layer, and its restic repository at a location under its root. */
 export interface BootstrapStore {
   blob: BlobStore;
+  /**
+   * Where the store is, as config resolves it (a local path, an sftp: or s3: location), never a secret. It is journaled
+   * at bootstrap.begin, and a resumed or recovered attempt refuses (store.identity-changed) when the name now reaches
+   * another location: its repository was made there, and publishing it anywhere else would name a repository the store
+   * does not have.
+   */
+  location: string;
   /** An engine bound to the repository at `repo` (relative to the store's root) and this device's password. */
   engineAt(repo: string): Engine;
 }
@@ -188,12 +199,17 @@ export interface BootstrapRecoveryReport {
 type Settled =
   | { outcome: "published"; id: string; repo: string }
   | { outcome: "rolled-back" }
-  | { outcome: "lost" | "contested" | "pending"; problem: Failure };
+  | { outcome: "lost"; winner: string; problem: Failure }
+  | { outcome: "contested" | "pending"; problem: Failure };
 /** An election's settlement: it never rolls back, since its candidacy may be on the store. */
 type Elected = Exclude<Settled, { outcome: "rolled-back" }>;
 
+/** `locks/bootstrap-<the first 32 hex digits of the name's SHA-256>.lock`: one length whatever the store's name. */
 const lockFile = (paths: PlainportPaths, name: string): string =>
-  join(paths.locksDir, `bootstrap-${Buffer.from(name, "utf8").toString("hex")}.lock`);
+  join(
+    paths.locksDir,
+    `bootstrap-${createHash("sha256").update(name, "utf8").digest("hex").slice(0, 32)}.lock`,
+  );
 
 /** Runs `body` under this device's lock for setting the store `name` up: one attempt per store at a time here. */
 const withStoreLock = async <T>(
@@ -257,6 +273,8 @@ const adopt = async (
   pinned: string | undefined,
 ): Promise<Result<BootstrapDone>> => {
   if (pinned !== undefined && pinned !== found.id) return pinRefusal(name, pinned, found.id);
+  // A probe that opens the repository with this device's password. Task 18's restic engine must make it without taking
+  // restic's lock (--no-lock, or reading the config), so adopting writes nothing to the winner's repository either.
   const opens = await store.engineAt(found.repo).list({ tags: ["plainport"] });
   if (!opens.ok) {
     if (opens.finding.code === "restic.wrong-password")
@@ -314,7 +332,7 @@ export const runBootstrap = (
       updatedAt: at.toISOString(),
       pid: ports.io.proc.pid,
       host: ports.io.proc.hostname(),
-      store: { name: target.name },
+      store: { name: target.name, location: store.location },
       repo: `repos/${attempt}`,
       seal: target.seal,
       history: [],
@@ -376,21 +394,6 @@ const close = async (ports: BootstrapPorts, journal: BootstrapJournal): Promise<
 const publicationOf = (journal: BootstrapJournal): Uint8Array =>
   encodeStoreIdentityV2({ id: journal.op, repo: journal.repo, seal: journal.seal });
 
-const claimKey = (attempt: string, suffix: ".json" | ".publishing"): string =>
-  `${STORE_CLAIMS_PREFIX}${attempt}${suffix}`;
-
-/** Whether `bytes` hold the election record `decision` of `attempt`. */
-const isRecordOf = (bytes: Uint8Array, attempt: string, decision: "publishing"): boolean => {
-  try {
-    const checked = ElectionRecordSchema.safeParse(
-      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-    );
-    return checked.success && checked.data.id === attempt && checked.data.decision === decision;
-  } catch {
-    return false;
-  }
-};
-
 /**
  * A store.json this attempt's own publication left torn in place (a crash on a linkless volume, D41) is completed with
  * the value it was writing. Only when the torn bytes are a strict prefix of that value that already holds its whole id,
@@ -403,9 +406,10 @@ const completeOwnTorn = async (store: BootstrapStore, journal: BootstrapJournal)
   const torn = got.value;
   const prefix = torn.length < value.length && torn.every((byte, i) => byte === value[i]);
   if (!prefix || !new TextDecoder().decode(torn).includes(`"id":"${journal.op}"`)) return ok(undefined);
-  const intent = await store.blob.get(claimKey(journal.op, ".publishing"));
+  const intent = await store.blob.get(electionKey(STORE_CLAIMS_PREFIX, journal.op, "publishing"));
   if (!intent.ok) return intent;
-  if (intent.value === null || !isRecordOf(intent.value, journal.op, "publishing")) return ok(undefined);
+  if (intent.value === null || !isElectionRecord(intent.value, journal.op, "publishing"))
+    return ok(undefined);
   const completed = await store.blob.put(STORE_IDENTITY_KEY, value);
   return completed.ok ? ok(undefined) : completed;
 };
@@ -421,9 +425,11 @@ const electAndFinish = async (
   if (journal.step !== "bootstrap.elect.start") {
     const started = await step(ports, journal, "bootstrap.elect.start");
     if (!started.ok) return keep(started);
+  } else {
+    // Only a resumed attempt can have torn its own publication; a fresh one has published nothing yet.
+    const completed = await completeOwnTorn(store, journal);
+    if (!completed.ok) return keep(completed);
   }
-  const completed = await completeOwnTorn(store, journal);
-  if (!completed.ok) return keep(completed);
   const elected = await elect(store.blob, {
     key: STORE_IDENTITY_KEY,
     candidates: STORE_CLAIMS_PREFIX,
@@ -456,6 +462,7 @@ const electAndFinish = async (
     await close(ports, journal);
     return {
       outcome: "lost",
+      winner: outcome.winner,
       problem: failWith(
         finding("store.bootstrap-lost", {
           message: `store ${name} was set up by another attempt, ${outcome.winner}, which published it first; this attempt (${journal.op}) stopped after its candidacy, recorded nothing, and left its own repository ${journal.repo} in the store as it is (plainport never deletes a repository)`,
@@ -547,6 +554,14 @@ const settle = async (
         }),
       ),
     };
+  if (journal.store.location !== store.location)
+    return {
+      outcome: "pending",
+      problem: withFix(
+        identityChanged(journal.store.location, store.location, `store named ${journal.store.name}`),
+        `point stores.${journal.store.name} back at ${journal.store.location}, where the setup began (attempt ${journal.op}, its repository ${journal.repo}), then re-run or run plainport recover; nothing was written to ${store.location}`,
+      ),
+    };
   if (rule === "record") return record(ports, store, journal);
   if (rule === "re-elect") return electAndFinish(ports, store, journal);
   // candidacy-check: the world decides, never the journal's last word (D24).
@@ -556,7 +571,7 @@ const settle = async (
     if (!stepped.ok) return { outcome: "pending", problem: stepped };
     return record(ports, store, journal);
   }
-  const candidacy = await store.blob.get(claimKey(journal.op, ".json"));
+  const candidacy = await store.blob.get(electionKey(STORE_CLAIMS_PREFIX, journal.op, "candidate"));
   if (!candidacy.ok) return { outcome: "pending", problem: candidacy };
   if (candidacy.value !== null) return electAndFinish(ports, store, journal);
   await close(ports, journal);
@@ -585,30 +600,35 @@ export const recoverBootstraps = async (
       operations.push({ ...entry, outcome: "pending", finding: store.finding });
       continue;
     }
-    const settled = await withStoreLock(ports, journal.store.name, async () => {
-      // Read again under the lock: a setup re-run may have settled it since.
-      const now = (await readBootstrapJournals(ports.io, ports.paths)).journals.find(
-        (j) => j.op === journal.op,
-      );
-      return ok(now === undefined ? undefined : await settle(ports, store.value, now));
-    });
-    if (settled.ok && settled.value === undefined) continue;
+    const settled = await withStoreLock(
+      ports,
+      journal.store.name,
+      async (): Promise<Result<Settled | undefined>> => {
+        // Read again under the lock: a setup re-run may have settled it since.
+        let again: Awaited<ReturnType<typeof readBootstrapJournals>>;
+        try {
+          again = await readBootstrapJournals(ports.io, ports.paths);
+        } catch (error) {
+          return writeFailed(error, "reading the bootstrap journals", false, ports.paths.journalDir);
+        }
+        const now = again.journals.find((j) => j.op === journal.op);
+        return ok(now === undefined ? undefined : await settle(ports, store.value, now));
+      },
+    );
     if (!settled.ok) {
       operations.push({ ...entry, outcome: "pending", finding: settled.finding });
       continue;
     }
-    const s = settled.value as Settled;
+    const s = settled.value;
+    if (s === undefined) continue;
     operations.push(
       s.outcome === "published"
         ? { ...entry, outcome: "published", id: s.id }
         : s.outcome === "rolled-back"
           ? { ...entry, outcome: "rolled-back" }
-          : {
-              ...entry,
-              outcome: s.outcome,
-              finding: s.problem.finding,
-              ...(s.outcome === "lost" ? { id: (s.problem.data as { winner: string }).winner } : {}),
-            },
+          : s.outcome === "lost"
+            ? { ...entry, outcome: "lost", finding: s.problem.finding, id: s.winner }
+            : { ...entry, outcome: s.outcome, finding: s.problem.finding },
     );
     ports.log(
       s.outcome === "published" || s.outcome === "rolled-back" ? "info" : "warn",

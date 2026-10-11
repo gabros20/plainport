@@ -45,10 +45,15 @@
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [
-        "name"
+        "name",
+        "location"
       ],
       "additionalProperties": false
     },

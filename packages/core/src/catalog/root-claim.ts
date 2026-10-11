@@ -60,20 +60,17 @@ export interface ClaimOptions {
 }
 
 /**
- * Claims the store for `root` when no root has claimed it, and returns the root that holds the claim: `root` itself
- * (created when this run published it), or the other root that holds it (the caller refuses with store.root-mismatch).
- * Nothing is written when the store is already claimed, or while its claim is partial. With no root holding it, this
- * root refuses: store.root-contested when every root that stood refuses, store.root-undecided while one
- * may still publish.
+ * Claims the store for `root` when no root has claimed it, and returns the root that holds the claim: `root` itself,
+ * or the other root that holds it (the caller refuses with store.root-mismatch). Nothing is written when the store is
+ * already claimed, or while its claim is partial. With no root holding it, this root refuses: store.root-contested
+ * when every root that stood refuses, store.root-undecided while one may still publish.
  */
 export const claimStoreRoot = async (
   store: BlobStore,
   root: string,
   options: ClaimOptions = {},
-): Promise<Result<{ root: string; created: boolean }>> => {
+): Promise<Result<{ root: string }>> => {
   const wait = options.wait ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
-  const before = await store.get(ROOT_CLAIM_KEY);
-  if (!before.ok) return before;
   const elected = await elect(store, {
     key: ROOT_CLAIM_KEY,
     candidates: ROOT_CLAIMS_PREFIX,
@@ -85,8 +82,8 @@ export const claimStoreRoot = async (
   });
   if (!elected.ok) return elected;
   const outcome = elected.value;
-  if (outcome.outcome === "won") return ok({ root, created: before.value === null });
-  if (outcome.outcome === "lost") return ok({ root: outcome.winner, created: false });
+  if (outcome.outcome === "won") return ok({ root });
+  if (outcome.outcome === "lost") return ok({ root: outcome.winner });
   const others = outcome.candidates.filter((id) => id !== root);
   return outcome.undecided.length === 0
     ? fail(

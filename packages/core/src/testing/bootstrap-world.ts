@@ -16,6 +16,7 @@ import {
   recoverBootstraps,
   runBootstrap,
 } from "../saga/bootstrap.ts";
+import { ulid } from "../ulid.ts";
 import { type FakeEngineHooks, type FakeRepository, fakeEngine, fakeRepository } from "./fake-engine.ts";
 import { testHost } from "./host.ts";
 import { makeSandbox, type Sandbox } from "./sandbox.ts";
@@ -43,6 +44,8 @@ export interface BootstrapDevice {
 
 export interface BootstrapWorld {
   store: SemanticBlobStore;
+  /** Where the store is, as a bootstrap journals it: unique per world. */
+  location: string;
   /** The fake repositories by location relative to the store's root. */
   repos: Map<string, FakeRepository>;
   /** Hooks every engine of every device shares (a paused or delayed init). */
@@ -59,6 +62,7 @@ export const bootstrapWorld = (options: SemanticFakeOptions = {}): BootstrapWorl
   const repos = new Map<string, FakeRepository>();
   const hooks: FakeEngineHooks = {};
   const boxes: Sandbox[] = [];
+  const location = `memory://bootstrap-world/${ulid()}`;
   const repoAt = (location: string): FakeRepository => {
     let repo = repos.get(location);
     if (repo === undefined) {
@@ -69,6 +73,7 @@ export const bootstrapWorld = (options: SemanticFakeOptions = {}): BootstrapWorl
   };
   return {
     store,
+    location,
     repos,
     hooks,
     device: (password, deviceOptions = {}) => {
@@ -85,6 +90,7 @@ export const bootstrapWorld = (options: SemanticFakeOptions = {}): BootstrapWorl
       };
       const target: BootstrapStore = {
         blob: store,
+        location,
         engineAt: (location) => fakeEngine(repoAt(location), hooks, { password }),
       };
       return {

@@ -156,8 +156,11 @@ export const BootstrapJournalSchema = z
     updatedAt: z.iso.datetime(),
     pid: z.int().positive(),
     host: z.string().min(1),
-    /** The store by its name in config; it has no id until the election publishes one. */
-    store: z.strictObject({ name: z.string().min(1) }),
+    /**
+     * The store by its name in config (it has no id until the election publishes one) and where it was when the attempt
+     * began (no secret): a resumed attempt refuses when the name reaches another location since.
+     */
+    store: z.strictObject({ name: z.string().min(1), location: z.string().min(1) }),
     /** Where this attempt's restic repository lies under the store's root: repos/<op>. */
     repo: z.string().regex(/^repos\/[0-9A-HJKMNP-TV-Z]{26}$/, "repos/<ULID>"),
     /** The catalog's seal policy this attempt publishes when it wins (Q10). */

@@ -344,16 +344,21 @@ Its repository stays where it is.
 
 **Adopting a store.** A store whose `store.json` exists is adopted without an election and without writing to it:
 its published repository (`repos/<id>` for format 2, `repo/` for an M1 store, whose file is never rewritten) must open
-with this device's password (`restic.wrong-password` otherwise, nothing recorded) before the id is recorded. A name
+with this device's password (`restic.wrong-password` otherwise, nothing recorded) before the id is recorded; the probe
+takes no restic lock (`--no-lock` once the real engine makes it, Task 18), so adopting writes nothing to the winner's
+repository either. A name
 already pinned to an id only reaches that store (D85): another id, or no `store.json` at all, is
 `store.identity-changed` before anything is written. A v0.1.x process that wrote a format-1 `store.json` while an
 election ran is read as a published winner like any other, so the attempt ends `lost`.
 
 **The journal.** `journal/bootstrap/<attempt>.json` (`BootstrapJournalSchema`, published as
-`schemas/bootstrap-journal.json`) holds the attempt id, the store's name, the repository's location and the seal
-policy. It lives apart from the projects' journals: it belongs to no project, and v0.1.x, which reads only
+`schemas/bootstrap-journal.json`) holds the attempt id, the store's name and where the store was when the attempt began
+(its resolved location, never a secret), the repository's location and the seal policy. A resumed or recovered
+attempt whose store name now reaches another location refuses with `store.identity-changed` and writes nothing there
+(its repository was made at the old location, so publishing it elsewhere would name a repository that store lacks);
+pointing the name back lets it finish. It lives apart from the projects' journals: it belongs to no project, and v0.1.x, which reads only
 `journal/<ulid>.json`, never sees it, so it cannot hold back a rolled-back v0.1.x's projects. One attempt per store
-runs at a time on a device (`locks/bootstrap-<name>.lock`, `store.locked`, exit 11), since two runs of one attempt id at
+runs at a time on a device (`locks/bootstrap-<the first 32 hex digits of the name's SHA-256>.lock`, `store.locked`, exit 11), since two runs of one attempt id at
 once could both refuse and publish. A re-run of the setup resumes this device's open attempt for the store before
 anything else, never starting a second one beside it (D99).
 
@@ -391,7 +396,8 @@ row (`BOOTSTRAP_ROWS`, from the exported steps, seams and branches) in-process, 
 create and on one that elects by the sole-candidate rule, plus the rows that settle to `lost` (another attempt publishes
 while this one's election is open).
 
-The root claim's election writes reach the caller's crash seam through `after` too (D52). The claim runs before the
+The root claim's election writes can reach a caller's crash seam through `after` too (D52), which the offload does not
+yet pass. The claim runs before the
 offload's journal opens, after the root's id is recorded in `registry.json`, so a crash there is recovered by running the
 offload again: it stands with the same id, and its earlier decision stands.
 

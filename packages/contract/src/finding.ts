@@ -666,7 +666,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "This build cannot use the store's kind yet; M1 supports local stores (an external disk or a local folder)",
+      "This build cannot use the store's kind or format yet: M1 supports local stores (an external disk or a local folder), and its setup, catalog and recover paths read format-1 store.json only",
   },
   "stub.invalid": {
     severity: "block",

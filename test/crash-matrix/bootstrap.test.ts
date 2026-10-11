@@ -83,6 +83,8 @@ describe("crash matrix: bootstrap", () => {
         }
         if (op?.outcome === "rolled-back")
           expect(keysUnder(w.store, `${STORE_CLAIMS_PREFIX}${id}`)).toEqual([]);
+        // plainport never deletes a repository: one made before the crash is still there, whatever the outcome.
+        if (row.point !== "bootstrap.begin") expect(w.repos.get(`repos/${id}`)?.initialized).toBe(true);
         if (op?.outcome === "contested")
           expect(keysUnder(w.store, `${STORE_CLAIMS_PREFIX}${id}`)).toEqual([
             `${STORE_CLAIMS_PREFIX}${id}.json`,

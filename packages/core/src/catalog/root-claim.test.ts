@@ -12,7 +12,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
   test("an unclaimed store is claimed for the root, create-only", async () => {
     const store = memoryBlobStore();
     const root = ulid();
-    expect(await claimStoreRoot(store, root)).toEqual({ ok: true, value: { root, created: true } });
+    expect(await claimStoreRoot(store, root)).toEqual({ ok: true, value: { root } });
     expect(text(store.data.get(ROOT_CLAIM_KEY))).toBe(claimFile(root));
   });
 
@@ -21,7 +21,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     const root = ulid();
     await claimStoreRoot(store, root);
     const puts = store.calls.put;
-    expect(await claimStoreRoot(store, root)).toEqual({ ok: true, value: { root, created: false } });
+    expect(await claimStoreRoot(store, root)).toEqual({ ok: true, value: { root } });
     expect(store.calls.put).toBe(puts);
   });
 
@@ -30,7 +30,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     const other = ulid();
     await claimStoreRoot(store, other);
     const puts = store.calls.put;
-    expect(await claimStoreRoot(store, ulid())).toEqual({ ok: true, value: { root: other, created: false } });
+    expect(await claimStoreRoot(store, ulid())).toEqual({ ok: true, value: { root: other } });
     expect(store.calls.put).toBe(puts);
   });
 
@@ -40,7 +40,6 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     const results = await Promise.all([claimStoreRoot(store, a), claimStoreRoot(store, b)]);
     const roots = results.flatMap((r) => (r.ok ? [r.value.root] : []));
     expect(new Set(roots).size).toBeLessThanOrEqual(1);
-    expect(results.filter((r) => r.ok && r.value.created).length).toBeLessThanOrEqual(1);
     if (roots.length === 0) {
       for (const r of results)
         expect(r.ok ? "" : r.finding.code).toMatch(/^store\.root-(contested|undecided)$/);
@@ -86,7 +85,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     expect(store.data.has(`${ROOT_CLAIMS_PREFIX}${b}.json`)).toBe(true);
     // The same root re-run, once the rival publishes, sees the claim and is refused as before (store.root-mismatch).
     store.data.set(ROOT_CLAIM_KEY, new TextEncoder().encode(claimFile(b)));
-    expect(await claimStoreRoot(store, a)).toEqual({ ok: true, value: { root: b, created: false } });
+    expect(await claimStoreRoot(store, a)).toEqual({ ok: true, value: { root: b } });
   });
 
   test("a claim v0.1.1 made (root.json with no candidates) holds: another root sees it, and nothing is written", async () => {
@@ -94,7 +93,7 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
     const old = ulid();
     store.data.set(ROOT_CLAIM_KEY, new TextEncoder().encode(claimFile(old)));
     const puts = store.calls.put;
-    expect(await claimStoreRoot(store, ulid())).toEqual({ ok: true, value: { root: old, created: false } });
+    expect(await claimStoreRoot(store, ulid())).toEqual({ ok: true, value: { root: old } });
     expect(store.calls.put).toBe(puts);
   });
 
@@ -132,8 +131,8 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
         if (reads === 2) open();
       },
     });
-    expect(result).toEqual({ ok: true, value: { root: b, created: false } });
-    expect(await writing).toEqual({ ok: true, value: { root: b, created: true } });
+    expect(result).toEqual({ ok: true, value: { root: b } });
+    expect(await writing).toEqual({ ok: true, value: { root: b } });
     expect(puts).toEqual([claimFile(b)]);
     expect(text(store.data.get(ROOT_CLAIM_KEY))).toBe(claimFile(b));
   });
