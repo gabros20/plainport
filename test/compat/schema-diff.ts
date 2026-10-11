@@ -109,6 +109,10 @@ export const notAssignable = (neu: Schema, old: Schema, path = "$"): string[] =>
   // A closed object stays closed; a value schema of the open part stays assignable.
   if (old.additionalProperties === false) {
     if (neu.additionalProperties !== false) problems.push(`${path}: was closed to other keys, is open now`);
+    else if (isObject(neu.properties))
+      for (const key of Object.keys(neu.properties))
+        if (!isObject(old.properties) || !(key in old.properties))
+          problems.push(`${path}.${key}: a new key on an object that was closed to other keys`);
   } else if (isObject(old.additionalProperties)) {
     if (!isObject(neu.additionalProperties))
       problems.push(`${path}: the values of other keys are no longer described`);

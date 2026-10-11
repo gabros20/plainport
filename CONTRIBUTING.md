@@ -161,3 +161,42 @@ published files from `test/fixtures/compat-v0.1.1/`, so it needs neither.
 
 A test title starts with the ids of the rows it proves, `[store.json.v1]`; a row a later task owns is a `test.todo`
 the task turns on.
+
+## Definition of Done
+
+A task's review checks every line. A "no" sends it back.
+
+- [ ] The acceptance test was written first, and the report shows its red run and its green run.
+- [ ] Every bug fix has a test that fails without it.
+- [ ] Tests touch only temp directories and the sandboxed home; nothing reaches the real home, real stores or
+      agent folders.
+- [ ] `bun run typecheck`, `bun run lint`, `bun test` and gitleaks pass; CI is green on `main` after the orchestrator's merge.
+- [ ] If a command, output, exit code or finding changed: `bun run contract` was run and the regenerated files
+      are committed, and `docs/machine-contract.md` agrees. A breaking contract change bumps the contract version.
+- [ ] If behaviour changed: `docs/DESIGN.md` is updated in the same change, and a changed decision has a new
+      ADR in `docs/adr/`.
+- [ ] Code copied from plainkeep starts with a provenance comment naming the source path and commit (ADR-0003).
+- [ ] Every child process goes through the one process runner; every side effect goes through a port.
+- [ ] Expected failures return values with exit and finding codes; refusals name the finding code and the exact
+      fix.
+- [ ] No secret value is written to a file, log, config or fixture.
+- [ ] `CHANGELOG.md` has a line under `[Unreleased]` for anything a user would notice.
+
+## Releases
+
+Each milestone gate is a release, and the routine follows plainkeep's (ADR-0020):
+
+1. Merge the milestone branch into `main` and confirm CI is green on `main`.
+2. Commit `release: X.Y.Z`: drop the `-dev` suffix from `VERSION`, and date the `[Unreleased]` section of
+   `CHANGELOG.md` as `[X.Y.Z] — YYYY-MM-DD`.
+3. Tag `vX.Y.Z` and push the commit and the tag.
+4. Commit the next version as `X.Y+1.0-dev` with a fresh `[Unreleased]` section.
+5. Update `docs/HANDOFF.md` and the status table in `docs/ROADMAP.md`.
+
+No signing, notarization, checksum files or package-manager taps. Third-party tool downloads are still checked
+against `tools.lock.json`.
+
+## Updating dependencies
+
+By hand, in a reviewed commit: bump the version in `package.json` or `tools.lock.json` (with the new checksums
+from the project's official release), run the full suite including `test:t1`, and note it in `CHANGELOG.md`.

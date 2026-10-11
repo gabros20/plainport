@@ -7,7 +7,7 @@
 // real v0.1.1 at one of its saga steps (PLAINPORT_TEST_PAUSE_AT) or kills it there (PLAINPORT_TEST_FAULT_AT). The
 // released v0.1.1 carries no hook (D67): this build is the test double of the release, from the same source.
 //
-// Two test processes may ask at once (`bun test test/compat` beside `PLAINPORT_TEST_TIER=1 bun test test/compat`): a lock folder next to
+// Two test processes may ask at once (two runs of `PLAINPORT_TEST_TIER=1 bun test test/compat` at once): a lock folder next to
 // the cache serialises the build, and the binary is moved into place only when complete.
 
 import {
