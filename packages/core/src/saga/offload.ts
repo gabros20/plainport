@@ -81,6 +81,7 @@ import { catalogReader, headCheck, otherRoot, rootMismatch } from "../catalog/he
 import { appendEvent, storeEventLog } from "../catalog/log.ts";
 import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
+import { storedHere, storedKey } from "../catalog/stored.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
@@ -659,10 +660,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       const allow = new Set(req.allow ?? []);
       /** Findings streamed so far: a retry streams only what is new in its plan. */
       const reported = new Set<string>();
-      let previous =
-        base === undefined
-          ? undefined
-          : before.value.projects[projectId]?.snapshots[base]?.stored[store.name];
+      const parent = base === undefined ? undefined : before.value.projects[projectId]?.snapshots[base];
+      let previous = parent === undefined ? undefined : storedHere(parent.stored);
       for (let attempt = 1; ; attempt++) {
         // Preflight, scan, strip set and plan, from scratch on every attempt: nothing of an earlier one is kept.
         const planned = await plan(true);
@@ -733,6 +732,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           saga,
           engine: store.engine,
           events,
+          storedKey: storedKey(store, before.value.format),
           device: device.id,
           clock,
           log: deps.log,
@@ -814,7 +814,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         path: ref.path,
         ...(base === undefined ? {} : { base }),
         snapshot: op,
-        stored: { [store.name]: verified.snapshot },
+        stored: { [storedKey(store, current.value.format)]: verified.snapshot },
         ...(rootMode === undefined ? {} : { rootMode }),
         stats: {
           files: verified.files,

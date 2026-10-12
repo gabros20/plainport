@@ -14,6 +14,7 @@ import {
   journalJsonSchemas,
   stagingJsonSchemas,
   storeSemanticsJsonSchemas,
+  storeStateJsonSchemas,
   trashClaimJsonSchemas,
 } from "@plainport/core";
 import { z } from "zod";
@@ -264,6 +265,7 @@ export const generateFiles = (registry: Registry): Map<string, string> => {
     ...journalJsonSchemas(),
     ...stagingJsonSchemas(),
     ...storeSemanticsJsonSchemas(),
+    ...storeStateJsonSchemas(),
     ...electionJsonSchemas(),
     ...trashClaimJsonSchemas(),
   };

@@ -66,6 +66,7 @@ import {
 } from "../catalog/head.ts";
 import { appendEvent, eventForOp, storeEventLog } from "../catalog/log.ts";
 import { resolveRootId } from "../catalog/roots.ts";
+import { storedHere } from "../catalog/stored.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
@@ -465,12 +466,13 @@ const onloadFlow = async (
         }),
       );
     }
-    const stored = made.stored[store.name];
+    // Located by containment (Q11): the one entry of an event read from this store, whatever its key.
+    const stored = storedHere(made.stored);
     if (stored === undefined) {
       return fail(
         finding("snapshot.not-found", {
-          message: `store ${store.name} holds no copy of snapshot ${snapshot} of ${ref.address}; ${Object.keys(made.stored).join(", ")} ${Object.keys(made.stored).length === 1 ? "does" : "do"}`,
-          fix: `plainport onload ${shellWord(ref.address)} --store ${shellWord(Object.keys(made.stored)[0] ?? "<name>")}`,
+          message: `the catalog of store ${store.name} names no single location of snapshot ${snapshot} of ${ref.address}`,
+          fix: `plainport onload ${shellWord(ref.address)} restores the head (${over})`,
         }),
       );
     }

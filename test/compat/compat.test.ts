@@ -7,11 +7,14 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   appendFileSync,
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -21,6 +24,7 @@ import Ajv2020 from "ajv/dist/2020";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
+import { UNKNOWN_SEMANTICS } from "../../packages/core/src/ports/blob-store.ts";
 import { InjectedFault } from "../../packages/core/src/ports/host.ts";
 import {
   type BootstrapDone,
@@ -28,11 +32,18 @@ import {
   type BootstrapStore,
   runBootstrap,
 } from "../../packages/core/src/saga/bootstrap.ts";
+import {
+  pinSeal,
+  readStoreState,
+  recordMeasured,
+  storeStateFile,
+} from "../../packages/core/src/stores-state.ts";
 import { makeSandbox } from "../../packages/core/src/testing/sandbox.ts";
 import { TrashClaimBootSchema, TrashClaimSchema } from "../../packages/core/src/trash-claim.ts";
 import { ulid } from "../../packages/core/src/ulid.ts";
 import { resticEngine } from "../../packages/engine-restic/src/engine.ts";
 import { testHost } from "../../packages/host-macos/src/testing.ts";
+import { installVersion, layout, removeInstall, rollback } from "../../scripts/install.ts";
 import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
 import { describeT1 } from "../tiers.ts";
@@ -679,10 +690,71 @@ describeT1("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
+  test("[store.sidecar] v0.1.1 ignores stores/<store id>.json and `scripts/install --rollback` still works with one present", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const id = registryOf(w).stores.local as string;
+      // v0.2's record of the store, as store test and the seal pin leave it (Q4).
+      const facts = { endpoint: w.store, access: "local", restic: "0.18.0" };
+      const io = testHost();
+      for (const written of [
+        await pinSeal(io, w.box.paths, id, "none", new Date().toISOString()),
+        await recordMeasured(io, w.box.paths, id, facts, {
+          semantics: UNKNOWN_SEMANTICS,
+          test: { at: new Date().toISOString(), ok: true, delete: "allowed" },
+        }),
+      ])
+        if (!written.ok) throw new Error(written.finding.message);
+      const sidecar = storeStateFile(w.box.paths, id);
+      const recorded = readFileSync(sidecar, "utf8");
+      const registry = readFileSync(w.box.paths.registryFile, "utf8");
+
+      // Installed side by side, then rolled back: the rolled-back v0.1.1 runs with the sidecar present.
+      const prefix = join(w.box.home, "prefix");
+      const stage = (binary: string) => (dir: string) => {
+        copyFileSync(binary, join(dir, "plainport"));
+        for (const tool of ["restic", "rclone"])
+          if (existsSync(join(bins.tools, tool))) copyFileSync(join(bins.tools, tool), join(dir, tool));
+        for (const name of readdirSync(dir)) chmodSync(join(dir, name), 0o755);
+      };
+      // The install tree is read-only: removeInstall takes it apart for the world's cleanup.
+      try {
+        for (const [version, binary] of [
+          ["0.1.1", bins.old],
+          ["0.2.0-dev+20261012000000.compat", bins.current],
+        ] as const) {
+          const installed = await installVersion(prefix, version, stage(binary));
+          if (!installed.ok) throw new Error(installed.message);
+        }
+        expect(rollback(prefix)).toEqual({ ok: true, from: "0.2.0-dev+20261012000000.compat", to: "0.1.1" });
+        const rolledBack = layout(prefix).bin;
+        expect(realpathSync(rolledBack)).toBe(
+          realpathSync(join(layout(prefix).versions, "0.1.1", "plainport")),
+        );
+
+        for (const args of [offloadArgs, ["ls", "--json"], onloadArgs]) {
+          const ran = await w.run(rolledBack, args);
+          expectOk(ran, `rolled-back ${args[0]}`);
+          if (args[0] === "offload") await settleJournals(w.box.paths);
+          expect(ran.err).not.toContain(SKIPPED);
+        }
+        expect(sameAsReference(w)).toEqual([]);
+        // v0.1.1 never reads or rewrites the sidecar, and registry.json stays v1.
+        expect(readFileSync(sidecar, "utf8")).toBe(recorded);
+        expect(registryOf(w).v).toBe(1);
+        expect(Object.keys(registryOf(w).stores)).toEqual(Object.keys(JSON.parse(registry).stores));
+        // v0.2 reads its record back as it wrote it.
+        const back = await readStoreState(io, w.box.paths, id, facts);
+        expect(back.ok && back.value.measured?.test?.delete).toBe("allowed");
+      } finally {
+        removeInstall(prefix);
+      }
+    });
+  }, 300_000);
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
   test.todo("[store.json.v2] Task 9: a store v0.2 creates is format 2 and v0.1.1 refuses it (the real shape)", () => {});
-  test.todo("[store.sidecar] Task 9: v0.1.1 ignores stores/<store id>.json and `scripts/install --rollback` still works with one present", () => {});
   test.todo("[store.upgrade-intent] Task 19: the upgrade-intent marker blocks a v0.2 offload and bootstrap, and v0.1.1 ignores it", () => {});
   test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade refuses (store.not-quiescent) while a paused v0.1.1 holds a lease", () => {});
   test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade with --others-stopped proceeds past a paused lease-less first offload, whose resumed event v0.2 reads", () => {});

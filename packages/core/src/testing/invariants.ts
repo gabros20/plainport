@@ -19,13 +19,19 @@
 // 6. Nothing but prune --yes deletes a snapshot (M1 has no prune: no snapshot the repository held is ever gone), and
 //    nothing discards a snapshot an offloaded or checkpointed event names (D28: discarding is for failed uploads).
 //
+// invariantViolations also asserts the writers' rule for `stored` (Q11) on every event this device wrote to the store:
+// one entry, keyed by the store's id on a format-2 store and by this device's name for it on a format-1 store; and
+// that no event the store holds was skipped as stored-multiple.
+//
 // Used only by tests.
 
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogState, foldCatalog } from "../catalog/fold.ts";
+import { readStoreDescriptor } from "../catalog/identity.ts";
 import { readEvents, storeEventLog } from "../catalog/log.ts";
+import { STORED_MULTIPLE, storedHere, storedKey } from "../catalog/stored.ts";
 import { systemErrorCode } from "../io.ts";
 import { type Journal, JournalSchema, journalFile } from "../journal/index.ts";
 import type { PlainportPaths } from "../paths.ts";
@@ -156,7 +162,7 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
     const event = read.value.events.find(
       (e) => e.type === "offloaded" && e.project === id && e.snapshot === op && e.device === subject.device,
     );
-    const stored = event?.type === "offloaded" ? event.stored[subject.store.name] : undefined;
+    const stored = event?.type === "offloaded" ? storedHere(event.stored) : undefined;
     const listed = await subject.store.engine.list({ tags: ["plainport"] });
     const held = new Set(listed.ok ? listed.value.map((s) => s.id) : []);
     const fork = projectJournals(subject).some(
@@ -238,6 +244,25 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
     left = leftovers(subject, now);
   }
   for (const path of left) problems.push(`invariant 3: ${path} remains from a finished operation`);
+
+  // The writers' rule for `stored` (Q11): what this device appended is keyed as the store's format says.
+  const descriptor = await readStoreDescriptor(subject.store.blob);
+  if (descriptor.ok && descriptor.value !== null) {
+    const key = storedKey({ name: subject.store.name, id: descriptor.value.id }, descriptor.value.format);
+    for (const e of read.value.events)
+      if (
+        e.device === subject.device &&
+        (e.type === "offloaded" || e.type === "checkpointed" || e.type === "snapshot-discarded")
+      ) {
+        const keys = Object.keys(e.stored);
+        if (keys.length !== 1 || keys[0] !== key)
+          problems.push(
+            `stored (Q11): the ${e.type} event ${e.id} is keyed ${JSON.stringify(keys)}, not [${JSON.stringify(key)}] (format ${descriptor.value.format})`,
+          );
+      }
+  }
+  for (const f of read.value.findings)
+    if (f.message.includes(STORED_MULTIPLE)) problems.push(`stored (Q11): ${f.message}`);
   return problems;
 };
 
