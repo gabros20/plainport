@@ -23,8 +23,15 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogProject } from "../catalog/fold.ts";
-import { catalogReader, headUncertain, recordedProject, unfoldedSnapshot } from "../catalog/head.ts";
+import {
+  catalogReader,
+  headUncertain,
+  recordedProject,
+  taintedDiscards,
+  unfoldedSnapshot,
+} from "../catalog/head.ts";
 import { resolveRootId } from "../catalog/roots.ts";
+import { locationBug, storedHere } from "../catalog/stored.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
@@ -199,28 +206,24 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     const found = await unfoldedSnapshot(store.engine, {
       id: id as string,
       snapshot,
-      discarded: project.discarded,
+      discarded: [...project.discarded, ...taintedDiscards(read.value, id as string)],
       address: ref.address,
     });
     if (!found.ok) return found;
     made = { stored: { [store.name]: found.value.id } };
   }
-  const stored = made?.stored[store.name];
-  if (made === undefined || stored === undefined) {
-    const others = made === undefined ? [] : Object.keys(made.stored);
+  if (made === undefined) {
     return fail(
       finding("snapshot.not-found", {
-        message:
-          made === undefined
-            ? `the catalog holds no snapshot ${snapshot} of ${ref.address}${project.discarded.includes(snapshot) ? " (it was discarded: restic could not read every file)" : ""}`
-            : `store ${store.name} holds no copy of snapshot ${snapshot} of ${ref.address}; ${others.join(", ")} ${others.length === 1 ? "does" : "do"}`,
-        fix:
-          made === undefined
-            ? `name one of its snapshots (${Object.keys(project.snapshots).sort().slice(-5).join(", ")}): ${command("<id>")}`
-            : `${command(snapshot)} --store ${shellWord(others[0] ?? "<name>")}`,
+        message: `the catalog holds no snapshot ${snapshot} of ${ref.address}${project.discarded.includes(snapshot) ? " (it was discarded: restic could not read every file)" : ""}`,
+        fix: `name one of its snapshots (${Object.keys(project.snapshots).sort().slice(-5).join(", ")}): ${command("<id>")}`,
       }),
     );
   }
+  // Located by containment (Q11): the one entry of an event read from this store, whatever its key. The reader skips
+  // every event with another count, so none here is a bug.
+  const stored = storedHere(made.stored);
+  if (stored === undefined) return locationBug(store.name, snapshot, ref.address);
   // What is restored, fixed here where it is known to exist.
   const chosen = { snapshot, stored, ...(made.event === undefined ? {} : { event: made.event }) };
   phase("resolve", "end");

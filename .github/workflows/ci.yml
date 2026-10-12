@@ -22,6 +22,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The compatibility suite builds v0.1.1 from its tag (test/compat/binaries.ts): it needs the tag and its history.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           # Pinned to .bun-version, never `latest`, so CI tests the toolchain the code was written against.
@@ -59,6 +62,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version

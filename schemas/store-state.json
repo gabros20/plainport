@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "store": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "title": "Ulid",
+      "description": "A ULID: 26 upper-case Crockford base32 characters"
+    },
+    "seal": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": [
+            "none",
+            "v1"
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        }
+      },
+      "required": [
+        "policy",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "measured": {
+      "type": "object",
+      "properties": {
+        "facts": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "access": {
+              "type": "string",
+              "minLength": 1
+            },
+            "restic": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rclone": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "endpoint",
+            "access",
+            "restic"
+          ],
+          "additionalProperties": false
+        },
+        "semantics": {
+          "type": "object",
+          "properties": {
+            "readAfterWrite": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "listAfterWrite": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "listComplete": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "publication": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "enum": [
+                        "atomic-put",
+                        "temp-then-rename",
+                        "in-place"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "conditionalCreate": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "durability": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "enum": [
+                        "durable",
+                        "acked-unsynced",
+                        "unknown"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "cancellation": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "enum": [
+                        "never-lands-late",
+                        "may-land-late"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "string",
+                      "enum": [
+                        "measured",
+                        "documented",
+                        "asserted"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "readAfterWrite",
+            "listAfterWrite",
+            "listComplete",
+            "publication",
+            "conditionalCreate",
+            "durability",
+            "cancellation"
+          ],
+          "additionalProperties": false,
+          "title": "StoreSemantics",
+          "description": "What a store guarantees, each property with its evidence (Q8)"
+        },
+        "test": {
+          "type": "object",
+          "properties": {
+            "at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "delete": {
+              "type": "string",
+              "enum": [
+                "denied",
+                "allowed",
+                "unreachable"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "ok"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "facts"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "v",
+    "store"
+  ],
+  "additionalProperties": false,
+  "title": "StoreState",
+  "description": "stores/<store id>.json under plainport's state folder: this device's seal pin, measured semantics and last test for one store (Q4)"
+}

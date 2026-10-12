@@ -15,10 +15,18 @@ import type { Engine, RunContext } from "../ports/engine.ts";
 import type { ProjectRegistry } from "../registry.ts";
 import type { Stub } from "../stub.ts";
 import type { CatalogProject, CatalogState } from "./fold.ts";
-import { loadCatalog } from "./log.ts";
+import { loadCatalog, type Tainted } from "./log.ts";
 
-/** A catalog read for writing: the fold, and the events it left out that may change state (D86). */
-export type CatalogRead = CatalogState & { uncertain: readonly string[] };
+/**
+ * A catalog read for writing: the fold, the events it left out that may change state (D86), and the store's format,
+ * which keys the `stored` entry of the events written on top of it (Q11).
+ */
+export type CatalogRead = CatalogState & {
+  uncertain: readonly string[];
+  /** The stored-multiple events left out (Q11): their projects' heads are uncertain whatever this device knows. */
+  tainted: readonly Tainted[];
+  format: 1 | 2;
+};
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
@@ -50,7 +58,12 @@ export const catalogReader =
           finding("store.unreachable", { message: `store ${options.storeName} could not be reached` }),
       );
     for (const f of read.value.findings) options.report(f);
-    return ok({ ...read.value.state, uncertain: read.value.uncertain });
+    return ok({
+      ...read.value.state,
+      uncertain: read.value.uncertain,
+      tainted: read.value.tainted,
+      format: read.value.format ?? 1,
+    });
   };
 
 /** Whether a readable event names `snapshot`: one the project holds, discarded, or named as a base it lacks. */
@@ -73,7 +86,7 @@ export interface HeadDoubt {
  * newest such snapshot.
  */
 export const headUncertain = (
-  read: CatalogState & { uncertain?: readonly string[] },
+  read: CatalogState & { uncertain?: readonly string[]; tainted?: readonly Tainted[] },
   id: string,
   known: readonly (string | undefined)[],
   address: string,
@@ -85,17 +98,38 @@ export const headUncertain = (
   const unnamed = [
     ...new Set(known.filter((s): s is string => s !== undefined && !named(project, s))),
   ].sort();
-  const newest = unnamed.at(-1);
+  // A stored-multiple snapshot of this project (Q11) is known to exist whatever this device knows: its head is not.
+  const hidden = [
+    ...new Set(
+      (read.tainted ?? [])
+        .filter((t) => t.project === id && t.type !== "snapshot-discarded" && !named(project, t.snapshot))
+        .map((t) => t.snapshot),
+    ),
+  ].sort();
+  const newest = [...unnamed, ...hidden].sort().at(-1);
   if (newest === undefined) return undefined;
   const latest = project?.head ?? null;
+  const knows =
+    unnamed.length > 0
+      ? `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names`
+      : `an event the catalog cannot use names snapshot ${hidden.join(" and ")} of ${address} in several stores (stored-multiple)`;
   return {
     newest,
     finding: finding("catalog.head-uncertain", {
-      message: `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
+      message: `${knows}, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
       fix: `${said.instead(newest)}; or upgrade plainport if a newer version wrote ${uncertain.length === 1 ? "that event" : "those events"}`,
     }),
   };
 };
+
+/**
+ * The restic ids a project's skipped stored-multiple discards name (Q11): never restored by tag, as a readable discard
+ * is not.
+ */
+export const taintedDiscards = (read: { tainted?: readonly Tainted[] }, id: string): string[] =>
+  (read.tainted ?? [])
+    .filter((t) => t.project === id && t.type === "snapshot-discarded")
+    .flatMap((t) => t.stored);
 
 /** The restic tag that holds the project folder's own mode (Q5 ii), in octal: `plainport:mode=0755`. */
 export const rootModeTag = (mode: number): string =>

@@ -205,7 +205,7 @@ A generic SDK would copy 30,000 to 300,000 small files one by one, with no dedup
 | [Flystorage](https://github.com/deltic-oss/flystorage) | TypeScript file-storage abstraction by the Flysystem author | None listed | Good API, but no compare-and-swap |
 | [unstorage](https://unstorage.unjs.io/drivers/s3) | unjs key-value layer with many drivers | None | Key-value, not files |
 
-The choice is low-risk because every adapter sits behind the six-method `BlobStore` interface (section below): `node:fs` for local disks and mounts, the peer's own RPC for devices running plainport, and rclone for buckets and SFTP. Swapping in OpenDAL later means writing one adapter.
+The choice is low-risk because every adapter sits behind the small `BlobStore` interface (section below; its semantics profile is in "Remote stores: consistency and publication"): `node:fs` for local disks and mounts, the peer's own RPC for devices running plainport, and rclone for buckets and SFTP. Swapping in OpenDAL later means writing one adapter.
 
 **Store kinds.** One store definition in config produces both the restic repository URL and the metadata location, so both layers always point at the same place.
 
@@ -225,15 +225,181 @@ Every recursive delete plainport makes goes through one guard (D87), run immedia
 
 ```
 <store root>/
-  repo/                      restic repository (config, data/, index/, keys/, snapshots/)
+  repos/<attempt>/           restic repository of one bootstrap attempt (format 2); store.json names the winner's
+  repo/                      restic repository of an M1 store (format 1), and of one upgraded to format 2
   meta/v1/
-    store.json               the store's identity {v, id}, written once at setup
-    root.json                the root the store serves {v, root}, claimed create-only by its first offload
+    store.json               format 1 {v: 1, id}; format 2 {v: 2, id, repo, catalog: {seal}, format: 2}, published
+                             once by the winner of bootstrap's election ("Bootstrap" below; only the winner's own
+                             recovery completes a copy a crash tore, with the same bytes)
+    store-claims/            bootstrap's candidates: <attempt>.json, <attempt>.publishing, <attempt>.refused (D99)
+    root.json                the root the store serves {v: 1, root}, published once by the root claim's election
+    root-claims/             the root claim's candidates, named by root id, as store-claims/
     events/<ulid>.json       append-only catalog events, never overwritten
     state.json               compacted fold of events (optional, rebuildable; M1 keeps it beside the mirror instead)
 ```
 
+A format-2 store's repository is wherever its `store.json` says, under the store's root; the restic location and the
+metadata location still come from one store definition. A repository left by an attempt that lost, was contested or
+rolled back stays where it is: plainport never deletes a repository, and the delete guard (D87) refuses any tree that
+holds one.
+
 The `Engine` interface keeps other engines possible later: rustic or Kopia, or a single-file `tar + zstd + age` engine for exports you can open with standard tools.
+
+## Remote stores: consistency and publication
+
+A local disk shows a write at once, lists every file and renames whole. A bucket or an SFTP server may not, and "S3-compatible" or "eventually consistent" says too little to build on (Q8). So every store states what it guarantees, each operation states what it needs, and an operation the store cannot support refuses, naming the property, while the store stays usable for the others.
+
+**The semantics profile.** `BlobStore.semantics()` returns typed properties (`StoreSemantics` in `packages/core/src/ports/blob-store.ts`). Each is a value with its evidence, `measured` (by `store test` on that store), `documented` (by the backend) or `asserted` (by the owner, or by plainport for its local stores), or it is `unknown`:
+
+| Property | Values | What it says |
+| --- | --- | --- |
+| `readAfterWrite` | yes, no | A get right after an acknowledged put sees it |
+| `listAfterWrite` | yes, no | A listing right after an acknowledged put names it |
+| `listComplete` | yes, no | A listing returns every key under the prefix, across every page |
+| `publication` | `atomic-put`, `temp-then-rename`, `in-place` | How `put` makes a value visible: the backend shows an object only when complete; or the adapter uploads to its own temporary and moves it onto the key (D98); or the bytes are written in place and a reader may see a torn prefix |
+| `conditionalCreate` | yes, no | `put(…, { ifNotExists })` is atomic: of racing writers exactly one creates the key |
+| `durability` | `durable`, `acked-unsynced`, `unknown` | Whether an acknowledged write survives the server's crash or power loss |
+| `cancellation` | `never-lands-late`, `may-land-late` | Whether a put that failed or was cancelled can still land afterwards |
+
+The profile's JSON Schema is published as `schemas/store-semantics.json`. `capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store kind whose properties are not yet measured reports `unknown` (rclone until Task 17).
+
+**Eligibility per operation.** One exported predicate each (`canRead`, `canAppend`, `canElect`, `canCommit`, `canRelease`):
+
+| Operation | Needs |
+| --- | --- |
+| `read` (catalog, `ls`) | a listing that works, which the call itself shows |
+| `append` | `publication ≠ in-place`, `readAfterWrite` |
+| `elect` | `conditionalCreate`, or `readAfterWrite ∧ listAfterWrite ∧ listComplete` |
+| `commit` | `append` and `elect` |
+| `release` (delete a local folder) | `commit` and `durability = durable`, or `durability = acked-unsynced` with Q21's post-grace proof |
+
+`unknown` fails every predicate that names the property. A missing or unknown `conditionalCreate` alone only routes elections to the sole-candidate fallback, so it is never what an election refuses on. An operation whose predicate fails refuses before writing with `store.semantics-unknown`, naming each property it lacks and its state; the fix names the properties a store must provide (a measuring command joins it when `store test` lands).
+
+**Q21's post-grace proof** (what admits an `acked-unsynced` store, such as SFTP, to release). The fault it covers is a server that acknowledged a write before syncing it and then lost it in a crash or power cut shortly after. Before release's checked delete of the trash (Q16), and no earlier than the conflict grace period after the commit:
+
+1. re-read the commit's catalog event from the store, fresh (not from the mirror), and check it is whole and is this operation's event;
+2. check that restic still lists the snapshot the event names, in the store's repository;
+3. only when both hold, delete. If either is missing, keep the trash and report `store.lost-write`; the folder is never deleted on the strength of a write that may not have reached the disk (D24).
+
+The same proof runs on every remote store, whatever its durability. The fault boundary: a server that loses acknowledged data later than the grace period is out of scope, as for any single store, since no later read could tell; Q21 accepts that residual, and only replication (M3) narrows it.
+
+**Publication rules** (`packages/core/src/catalog/publish.ts`).
+
+- An event is published whole, through `put` alone. The port's `put` is a whole, replacing write on every store that passes `append` (D98): an `atomic-put` backend shows an object only when complete, and a `temp-then-rename` adapter (rclone on SFTP) uploads to its own nonce-named temporary under a reserved prefix and moves it onto the key inside `put`, so a torn key is never visible under `meta/v1/events/`. The port has no rename and core never sees a temporary; core uses `put` and conditional create only.
+- **Unique writer.** An event key is a fresh ULID from its one writer; nobody else ever writes it.
+- **Idempotent retry.** A publish first reads the key and compares what is there with what it intends through an injected `SameEvent(existing, intended)` (R2-8): the same event is a no-op, another one is `store.key-exists`. So a lost acknowledgement (the write landed, the call failed) followed by a retry gives one event, not two. The plaintext catalog compares bytes; the codec compares opened events (Task 11). `SameEvent` returns a result: a failure (the existing object does not open) is returned as that failure, never as `store.key-exists`. A failed put whose read-back finds another event is `store.key-exists` and cannot land over it.
+- **A failed put is read back.** If the event is there, it was published. If it is absent on a store that never lands a put late (and shows writes at once), it never will be. Otherwise, and always on `may-land-late` (or `unknown`) stores, the failure carries `mayLand: true`: a cancelled put counts as possibly landed, and the caller must not act as if the event will never appear.
+- **Temporaries** belong to the adapter that made them: a `temp-then-rename` adapter's leftovers (a `put` that died between upload and move) are swept by age by `gc`, never by another write (D98).
+
+**The elected publication** (`elect` in `publish.ts`; Q9, D99) is the one rule bootstrap's `store.json` and the root claim use (Q9). An election names a published key, a candidates prefix (ending in "/", not containing the key), the attempt's id (letters, digits, "_" and "-") and the value to publish, which must name that id; anything else is a caller's bug and throws. It refuses exactly where `canElect` does, and its waits come from the caller's scheduler (no timer in core).
+
+**One protocol on every device.** Devices may hold different profiles of one store (each measures it into its own sidecar, Q4, and an unmeasured rclone store is `unknown`), so the route can never depend on the device: a device with a proven conditional create that skipped the candidates would not see a fallback device's candidacy, and both could win. Every attempt therefore follows the same steps, and only the final write follows the device's own profile. The invariant this rests on: each device's profile is true of the store (a property it does not know is `unknown`, never wrongly claimed).
+
+1. Read the published key. If it names a winner, the attempt has `won` (it names this attempt) or `lost` (it names another); a re-run of the same attempt is therefore safe.
+2. Write the candidacy `<candidates><id>.json` and list the candidates. A device without list-after-write (electing on its conditional create alone) counts its own candidacy even when the listing does not show it yet.
+   - As the sole candidate, write `<id>.publishing`, publish the value (a conditional create where this device's profile proves one, a plain put otherwise), and read it back. With strong visibility, of two candidates the later lister always sees the earlier one, so at most one is ever sole; where conditional create is proven it also bounds the winners to one should listings mislead.
+   - Seeing another candidate, write `<id>.refused` and read it back: this attempt never publishes, now or when re-run. If the refusal cannot be written or read back, the run ends with that error, never `contested`. Then re-read: a winner that turns up is `lost`; otherwise `contested`.
+
+The candidacy and the two decisions are the candidate record (D99): each file holds `{"v":1,"id":<attempt>,"decision":"candidate"|"publishing"|"refused"}` (`ElectionRecordSchema`, published as `schemas/election-record.json`). A decision counts only when its record validates and names the attempt and decision its file name says; a candidacy counts by its name alone, since an extra candidate only makes others refuse.
+
+`contested` has two forms (D99). It means no winner is published and this attempt refuses; it lists the visible candidates and the `undecided` ones, those without a refusal read back from the store, this attempt included. While any is undecided the outcome is not final: an undecided candidate may be a sole candidate that paused (a laptop asleep) between its listing and its publication, so the attempt says "re-run later", and its re-run ends `lost` if that candidate publishes. With none undecided, every visible candidate (this attempt's own refusal read back after its write) refuses (R2-7) and the outcome is final, provided this device's profile proves list-after-write and complete listings, because a candidate written after this attempt's listing lists after this candidacy was acknowledged, sees it and refuses. A device electing on its conditional create alone cannot make that argument (a lagging lister may still be sole, and win by its conditional create, which still bounds the winners to one), so its contested is never final: `undecided` keeps its own id and the fix says why; nothing is published, and the store needs the quiesced manual cleanup. No finite run of reads can make the undecided case final without a conditional write (a sole candidate can always pause between its last check and its write), so the markers make "every visible candidate refuses" something the store itself shows. A decision stands across re-runs: an attempt whose `.refused` is visible never publishes, and one whose `.publishing` was acknowledged (and has not refused) publishes even if others appeared since; a `.publishing` that failed is never acted on, so a refusal wins over it. Removing candidates by hand is safe only after stopping plainport on every device that uses the store, because files removed under a running election can let two attempts each be sole; the final contested outcome's fix says so and names the files. An attempt whose candidacy write failed and may still land stops; if it appears later it is undecided to others until that attempt's recovery re-runs and refuses.
+
+**A stable id, and the way out of undecided.** The caller journals the attempt's id before `elect` writes its candidacy, and recovery or a retry re-runs with that same id: only the same id can refuse or publish for an attempt, so a fresh id would leave the old candidacy undecided for everyone. Re-running an undecided attempt with its id decides it (it sees the others and refuses, or it was sole and publishes). If the attempt will never run again (its device is gone, its journal lost), an operator withdraws it: stop plainport on every device that uses the store and wait until none is running, then write its refusal on its behalf, `<candidates><id>.refused` holding exactly the record it would have written (`{"v":1,"id":<id>,"decision":"refused"}`), and re-run. A refusal wins over a `.publishing`, so the withdrawn attempt never publishes even if its device comes back. On a store whose writes may land late, a withdrawn attempt's cancelled publication can still appear; every attempt reads the published key first, so later attempts then see it as the winner. The undecided outcome's fix names the re-run and this rule; a command for it may come later. Since every device follows the candidate protocol, stores with a conditional create (S3, R2, a local disk) can also be left undecided by a crashed candidacy until a same-id re-run or a withdrawal; that is expected there too, not a fault.
+
+**Testing.** `testing/semantic-blob-store.ts` wraps the memory store with a switch for each weakness: delayed visibility, a listing that omits recent keys, a listing cut short, a torn in-place write (or a temp-then-rename `put` that tears only its own temporary), lost acknowledgements, and late landing after cancellation (a late conditional create keeps its condition). The contract suite is driven by each store's profile: create-only cases run only where conditional create is claimed, and a read or a listing right after a write is asserted at once only where read-after-write or list-after-write is claimed, otherwise after the fixture's settle or by polling within a bound. Its semantic cases probe what a profile claims (`semanticViolations`; whole publication is judged apart from visibility, a write that does not show within the polling bound is inconclusive rather than a violation, an I/O failure is an error and never a counterexample, every batch of probe writes settles before any failure is thrown, and every key the probe wrote is deleted by name, with a failed delete reported once all were tried) and check each predicate against what the backend expects: the local stores pass every one, a strong store without conditional create passes every one through the fallback, and an `acked-unsynced` store passes release only with Q21's proof. A fast-check scheduler runs every interleaving of two and three claimants on both final writes, mixed on one store (devices with and without a proven conditional create), with lost acknowledgements and with late landings: at most one ever wins, and a final `contested` never coexists with a win.
+
+## Bootstrap
+
+Setting a store up is exclusive and recoverable (Q9, Q10; `packages/core/src/saga/bootstrap.ts`). Two devices running
+`restic init` at one location can leave two master keys in one repository, so no two attempts ever share a location,
+and identity, repository location and seal policy are published once, by one winner, through the elected publication
+above.
+
+**The protocol.** Each attempt has a fresh id, a ULID, from which everything else derives: its repository
+`repos/<attempt>/`, its candidacy `meta/v1/store-claims/<attempt>.json`, and the value it publishes, `store.json`
+`{"v":2,"id":<attempt>,"repo":"repos/<attempt>","catalog":{"seal":<policy>},"format":2}` (the id near the start, so
+that even a torn copy names whose it was). The winning attempt's id is the store's id.
+
+1. Journal `bootstrap.begin` with the attempt id, before anything is written to the store.
+2. `restic init` at `repos/<attempt>/` with this device's password; journal `bootstrap.initialised`.
+3. Journal `bootstrap.elect.start`, then stand in the election of `meta/v1/store.json` with candidates under
+   `meta/v1/store-claims/`: write the candidacy, list, and only as the sole candidate
+4. publish `store.json` v2 (a conditional create where this device's profile proves one),
+5. read it back, and journal `bootstrap.published`,
+6. record the id under the store's name in this device's `registry.json` (the D85 pin), and close the journal.
+
+The election's three outcomes (R2-7):
+
+- **Won:** publish, record, `published`.
+- **Lost:** another attempt published first. `store.bootstrap-lost` (exit 6) names the winner. This attempt records
+  nothing and never touches the winner's repository; a re-run with that store's password adopts it (below).
+- **Contested:** no winner, and this attempt refused. *Final* when every visible candidate's refusal is read back,
+  this attempt's included: `store.bootstrap-contested` (exit 8) names the candidates and the quiesced cleanup (stop
+  plainport on every device that uses the store, remove the files it lists, then one re-run), and the journal is
+  closed. *Undecided* while a visible candidate has not refused and may still publish: `store.bootstrap-undecided`
+  (exit 6) names it, offers no cleanup, and the journal stays, so a later re-run decides it with the same id.
+
+A losing or contested attempt writes nothing after its candidacy but, when contested, its own refusal marker (D99).
+Its repository stays where it is.
+
+**Adopting a store.** A store whose `store.json` exists is adopted without an election and without writing to it:
+its published repository (`repos/<id>` for format 2, `repo/` for an M1 store, whose file is never rewritten) must open
+with this device's password (`restic.wrong-password` otherwise, nothing recorded) before the id is recorded; the probe
+takes no restic lock (`--no-lock` once the real engine makes it, Task 18), so adopting writes nothing to the winner's
+repository either. A name
+already pinned to an id only reaches that store (D85): another id, or no `store.json` at all, is
+`store.identity-changed` before anything is written. A v0.1.x process that wrote a format-1 `store.json` while an
+election ran is read as a published winner like any other, so the attempt ends `lost`.
+
+**The journal.** `journal/bootstrap/<attempt>.json` (`BootstrapJournalSchema`, published as
+`schemas/bootstrap-journal.json`) holds the attempt id, the store's name and where the store was when the attempt began
+(its resolved location, never a secret), the repository's location and the seal policy. A resumed or recovered
+attempt whose store name now reaches another location refuses with `store.identity-changed` and writes nothing there
+(its repository was made at the old location, so publishing it elsewhere would name a repository that store lacks);
+pointing the name back lets it finish. It lives apart from the projects' journals: it belongs to no project, and v0.1.x, which reads only
+`journal/<ulid>.json`, never sees it, so it cannot hold back a rolled-back v0.1.x's projects. One attempt per store
+runs at a time on a device (`locks/bootstrap-<the first 32 hex digits of the name's SHA-256>.lock`, `store.locked`, exit 11), since two runs of one attempt id at
+once could both refuse and publish. A re-run of the setup resumes this device's open attempt for the store before
+anything else, never starting a second one beside it (D99).
+
+**Recovery** (`recoverBootstraps`) routes by the exported `BOOTSTRAP_RECOVERY` table:
+
+| Step | Rule | What it does |
+| --- | --- | --- |
+| `bootstrap.begin`, `bootstrap.initialised` | candidacy-check | The world decides, not the journal's last word (D24): a `store.json` naming this attempt is recorded; a candidacy on the store is re-elected; otherwise the attempt rolls back (nothing published; a repository it made is left) |
+| `bootstrap.elect.start` | re-elect | The election runs again with the journaled id: published, lost, contested (final, the journal closed), or pending (undecided, or a store that did not answer) |
+| `bootstrap.published` | record | `store.json` is read back and must name this attempt; the id is recorded and the journal closed |
+
+The after-effect seams (`bootstrap.init.done`, `bootstrap.candidacy.written`, `bootstrap.publishing.written`,
+`bootstrap.refusal.written`, `bootstrap.publication.written`, `bootstrap.recorded`) are the crash points between the
+steps; elect reaches them through its `after` hook. A publication torn in place by a crash (a linkless volume, D41) is
+completed only by its own attempt's recovery, when the torn bytes are a strict prefix of its value that already holds
+its whole id and its `.publishing` record stands; a shorter tear names no attempt and stays pending, with the fix to
+quiesce every device, remove the torn file and run recover. An attempt killed after its candidacy leaves other
+attempts undecided until its own recovery re-runs with its journaled id; on a store with a proven conditional create
+that is expected too.
+
+**The root claim** is the same election: `meta/v1/root.json` `{v: 1, root}` keeps format 1's shape (v0.1.x reads it as
+before, and a claim v0.1.x wrote create-only is a published winner), with candidates under `meta/v1/root-claims/`. The
+attempt's id is the root's ULID, which the offload records in `registry.json` before claiming, so a re-run stands
+again with the same id and the same root claiming from two devices is one attempt publishing one value. Won is the
+claim; lost names the root that holds it (`store.root-mismatch`); contested is `store.root-contested` (exit 8,
+final, the quiesced cleanup) or `store.root-undecided` (exit 6, re-run later).
+
+**Wiring.** The saga runs on the injected ports: the store's blob store, an engine at a location under the store's root
+(`engineAt`), the host's crash seam and a scheduler. Task 18 wires it to the real engine and blob stores, wires
+`recoverBootstraps` into `plainport recover`, and runs the bootstrap crash rows again under a real kill (the subprocess
+variant); Task 19's `store add` and `init` start it. Until then M1's setup path writes format 1 only, and every M1 path
+that reads `store.json` (setup, the catalog, recover) refuses a format-2 store with `store.unsupported` before writing
+anything, since it would bind restic at `repo/` rather than the published `repo`. The crash matrix runs every bootstrap
+row (`BOOTSTRAP_ROWS`, from the exported steps, seams and branches) in-process, on a store with a proven conditional
+create and on one that elects by the sole-candidate rule, plus the rows that settle to `lost` (another attempt publishes
+while this one's election is open).
+
+The root claim's election writes can reach a caller's crash seam through `after` too (D52), which the offload does not
+yet pass. The claim runs before the
+offload's journal opens, after the root's id is recorded in `registry.json`, so a crash there is recovered by running the
+offload again: it stands with the same id, and its earlier decision stands.
 
 ## Machines: moving projects between devices
 
@@ -509,6 +675,7 @@ Project events: `registered`, `offloaded`, `onloaded`, `checkpointed`, `snapshot
 - **Status** is the latest `offloaded` or `onloaded` along the chain of `base` references. Clocks are for display only, so skew between machines can't reorder history.
 - **Head** is the snapshot of the newest `offloaded` or `checkpointed` event: the one tip of the `base` chain, a snapshot nothing kept was made from. A discarded snapshot is never a head. There is no head while the project is conflicted, or while an event names a snapshot the catalog does not hold (a partial mirror): a base, or the head an `onloaded` event was written over, which proves a newer snapshot exists. The head is then incomplete, onload refuses until the events are synced, and an older snapshot never becomes the head by default.
 - **Snapshot IDs are plainport ULIDs.** For an offload, the snapshot ID is the operation's ULID. `restic copy` gives a snapshot a new restic ID in every repository, so `stored` maps each store to its own restic ID.
+- **A snapshot's location is the store its event was read from** (Q11, location by containment). Until M3's replication, a snapshot event (`offloaded`, `checkpointed`, `snapshot-discarded`) has exactly one `stored` entry, and that entry describes the store whose catalog holds the event: a reader takes the restic ID from the one entry and never interprets the key, so neither its shape nor this device's name for the store matters. Two devices calling one store `archive` and `nas`, one device with two names for it, the same store reached as `local` or `sftp` (D68), and an M1 name shaped like a ULID all resolve to the store that was read. An event with zero or several entries is skipped as unsupported (`catalog.event-skipped`, reason `stored-multiple`) until M3 defines multi-store locations, and taints its project: a skipped `offloaded` or `checkpointed` makes the project's head uncertain whatever this device knows, so head-dependent defaults (offload's head check, onload and restore without `--snapshot`) refuse with `catalog.head-uncertain`, whose fix names that snapshot; a skipped `snapshot-discarded` still keeps the restic snapshots it names from being restored by tag. Writers keep the rule: one entry, keyed by the store's id on a format-2 store and by this device's name for the store on a format-1 store (v0.1.1 looks up `stored[<its name>]`); `appendEvent` refuses any other count. The example above shows the shape M3's replication will read.
 - **Conflict:** a kept snapshot with two or more kept children, `offloaded` or `checkpointed` alike, means two copies diverged; two `offloaded` events with the same `base` are the common case, and two first offloads (no base) count too. A checkpoint on one side never hides the fork. Both snapshots stay; the project is `conflicted` until a `resolved` event picks one or keeps both under two names.
 - **Lease:** an `onloaded` event with no later `offloaded` or `lease-broken` for that device. An `onloaded` event records the head it was written over (`over`), and counts as later than that head and earlier than anything made from it; so onloading an older snapshot (`onload --snapshot`) holds the lease like any onload, and the copy's next offload is made from `over`, a step forward rather than a fork. If several devices have such an event, the one furthest along the chain holds the lease, then the smallest event id, so a project has at most one.
 - **Address** is root plus relative path (`work:clients/acme/web`), unique within its root. The ULID stays fixed across renames, re-filing and moves; a move changes the landing path, never the address.
@@ -527,6 +694,7 @@ Event files are written create-only where the store can do it (exclusive create 
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
 | `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
 | `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID, and store name → store id |
+| `~/.local/state/plainport/stores/<store id>.json` | This device's record of one store (Q4), keyed by its id so every name for the store shares it: the catalog's seal policy as first seen (the pin, Q10), and what was measured (the semantics profile with each property's evidence, Q8, and the last `store test`) with the facts it was measured against (endpoint, access kind, restic and rclone versions). A measurement under facts that differ in any way no longer holds and is left out; the pin stays. Written atomically under a lock (`stores/<store id>.json.lock`); a damaged file is `store.state-invalid` and never overwritten. v0.1 never reads it |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |
@@ -1049,7 +1217,9 @@ export interface Engine {
 export interface BlobStore {
   // Every call returns a Result, as the Engine's do: an unmounted disk is store.unreachable, a create-only put on
   // an existing key is store.key-exists. A catalog is small, so list returns the whole listing, sorted by key.
-  capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean };
+  // put is a whole, replacing write; a temp-then-rename adapter does its temporary and move inside it (D98).
+  semantics(): StoreSemantics;                           // see "Remote stores: consistency and publication"
+  capabilities(): { createIfAbsent: boolean; replaceIfMatch: boolean }; // derived from semantics()
   get(key: string): Promise<Result<Uint8Array | null>>;
   put(key: string, data: Uint8Array, opts?: { ifNotExists?: boolean; ifMatch?: string }): Promise<Result<{ etag?: string }>>;
   list(prefix: string): Promise<Result<{ key: string; size: number; etag?: string }[]>>;
@@ -1174,6 +1344,60 @@ Encrypt once, client-side, with restic, and don't wrap the package again. Add ex
 - `plainport init` prints the recovery key once and doesn't finish until you confirm it's stored.
 - Project hooks and `hydrate.command` run only after `plainport trust`, pinned to the file's hash; `--ignore-scripts` passes through for untrusted projects.
 - Stubs contain no secrets, and logs redact environment values and any URL carrying credentials.
+
+## Formats and compatibility
+
+Every file plainport persists, and every closed value it prints, has a row below saying what the released reader (v0.1.1) does with it. The rows are executable: `test/compat/` builds v0.1.1 from its tag in a temporary `git worktree`, caches the binary under `.tools/compat/`, and runs the real binary against what v0.2 writes (`PLAINPORT_TEST_TIER=1 bun test test/compat`; the T0 half, DESIGN against the tests and the schemas against the tag, is `bun test test/compat`). A task that adds or changes a persisted format, a closed value or a schema adds its row and its test in the same change; `matrix.test.ts` fails when DESIGN and the tests disagree, and `bun run test:compat-gate` (`PLAINPORT_COMPAT_GATE=1`) fails while a `test.todo` or skipped test remains; the M2 gate runs it.
+
+**The policy (ADR-0023 Q1, Q2, Q3, Q11).** The catalog event schemas are strict objects. On `v: 1`, an added field or a new event type is therefore *invisible* to v0.1.x, not compatible with it: the event is skipped with `catalog.event-skipped`, and D86 makes the fold uncertain where the skipped event mattered. Compatibility between versions is never obtained by additivity. It is enforced by the store: a format-2 `meta/v1/store.json` stops every v0.1.x process that starts later, and an M1 store stays format 1, writable by both versions, until `plainport store upgrade`. A v0.1.1 process that started before an upgrade can still append and release; the upgrade is quiescent and constrained (no open journal, lease or foreign event inside the quiet window, an `upgrade-intent` marker, `--others-stopped`), and what remains is the accepted residual: a lease-less first offload outlasting the window releases as M1 did, without the conflict grace, with an M1-shaped event v0.2 reads (a reader takes a snapshot's location from the store it read the event from, never from the key). A rollback never deletes held trash: it is journaled at `offload.release.held`, a step v0.1.1 leaves pending.
+
+**The columns.** *v0.1.1 reads it by*: parses it, skips it with a finding, or refuses. *Rollback leaves*: what still works after returning to v0.1.1. *A v0.1.1 writer reaches it*: whether v0.1.1 can create or change the format, and what stops it. *M1 adoption*: how an existing M1 store or home is taken over. *Test*: `tested`, or `todo: Task N` for a row a later task owns.
+
+| Row | Format | v0.1.1 reads it by | Rollback leaves | A v0.1.1 writer reaches it | M1 adoption | Test |
+| --- | --- | --- | --- | --- | --- | --- |
+| `event.registered` | `registered` event, `v: 1`, strict | parsing it | everything works | yes, it writes the same shape | read as is, nothing to convert | tested |
+| `event.offloaded` | `offloaded` event: `stored`, `stats.stripped`, `rootMode`, `move` | parsing it; a snapshot's location comes from the store the event was read from (Q11) | everything works, including events a paused v0.1.1 appends after v0.2 acted | yes; a v0.1.1 offload paused across an upgrade appends an M1-shaped event | read as is; writers use the store id on format 2 and the M1 alias on format 1 | tested |
+| `event.onloaded` | `onloaded` event with `over` | parsing it | everything works | yes | read as is | tested |
+| `event.checkpointed` | `checkpointed` event | parsing it | everything works | no M1 command writes it | read as is | tested |
+| `event.snapshot-discarded` | `snapshot-discarded` event | parsing it | everything works | yes, on restic exit 3 | read as is | tested |
+| `event.root-created` | `root-created` event | parsing it | everything works | yes, on a root's first offload | read as is | tested |
+| `event.root-bound` | `root-bound` event | parsing it | everything works | yes, from `root bind` | read as is | tested |
+| `event.unknown` | any event with a field or type v0.1.1 does not know, on `v: 1` | skipping it with `catalog.event-skipped` (D17); head-dependent defaults refuse under D86 | the store reads, minus those events | not applicable: v0.1.1 never writes one | never written to a format-1 store | tested |
+| `event.resolved` | `resolved` event (Q3), written only to format-2 stores | skipping it, as for any unknown type | v0.1.1 cannot reach a format-2 store, so it never meets one | no, it refuses the store first | `resolve` on a format-1 store refuses with `store upgrade` as the fix | todo: Task 12 |
+| `event.sealed` | sealed event envelope (Q10), format-2 stores that opt in | skipping it as not JSON of a known type, but v0.1.1 refuses the store first | a sealed store cannot be rolled back to v0.1.1 | no | an existing plaintext store is never sealed in place | todo: Task 10 |
+| `store.json.v1` | `meta/v1/store.json` `{v: 1, id}` | parsing it (`StoreIdentity`, strict) | everything works | yes, `init` creates it | stays format 1 and v0.2 writes nothing that v0.1.1 cannot read, until `store upgrade` | tested |
+| `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repo, catalog: {seal}, format: 2}` (Q2), published once by bootstrap's election (Task 8); `schemas/store-identity.json` now accepts either format | refusing it: `store.failed`, the file left as it is, nothing written before the refusal (tested with the real shape bootstrap writes, and v0.2's own format-1 paths refuse it with `store.unsupported`) | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way | no | made by `store upgrade` or by v0.2 for a new store | todo: Task 9 (a store v0.2's `init` creates; bootstrap's shape is tested) |
+| `root.json` | `meta/v1/root.json` `{v: 1, root}` | parsing it; a second root is refused (`store.root-mismatch`) | everything works | yes, a first offload creates it exclusively | read as is | tested |
+| `root.claims` | `meta/v1/root-claims/<root>.json`, `.publishing`, `.refused`: the root claim's election candidates (Task 8, D99), written by v0.2's first offload of a root even on a format-1 store | never read: v0.1.1 reads only `root.json`, which the election publishes in format 1's shape | the files stay and are ignored; v0.1.1 reads the claim v0.2 published | no: v0.1.1 claims create-only without candidates, and v0.2 reads that claim as a published winner | a store claimed by v0.1.1 keeps its `root.json`; v0.2 writes candidates only for a store with no claim | tested |
+| `store.election` | bootstrap's `repos/<attempt ulid>/` restic repositories and its candidates under `meta/v1/store-claims/` (Q9, Task 8), with Task 6's markers `<id>.publishing` and `<id>.refused` beside each (`schemas/election-record.json`) | never read: v0.1.1 lists neither | the extra folders stay and are ignored, and nothing of v0.1.1's deletes them | no | an M1 store has one repository at `repo/` and is adopted, never re-elected | tested |
+| `store.upgrade-intent` | `meta/v1/upgrade-intent.json` marker (Q2) | never read | ignored; `recover` clears a stale one | no | written and removed by `store upgrade` | todo: Task 19 |
+| `store.sidecar` | `~/.local/state/plainport/stores/<store id>.json` (Q4), `schemas/store-state.json`, whose measured semantics profile is `schemas/store-semantics.json` (Task 6) | never read, so `registry.json` stays v1 and `scripts/install --rollback` keeps working | ignored | no | created at first contact; measured facts invalidate on endpoint, access kind or tool version change | tested (a rolled-back v0.1.1 offloads, lists and onloads with one present) |
+| `registry.json` | `registry.json` `{v: 1}`, strict | parsing it; a changed shape is `registry.invalid` | everything works | yes | v0.2 keeps it at v 1, so it is shared | tested |
+| `device.json` | `device.json` `{v: 1, id, name}` | parsing it | everything works | yes | read as is | tested |
+| `config.keys` | `config.toml` keys; new in M2: S3 `accessKeyId`, `secretAccessKey`, `region`, `path` (Q7), `offload.conflictGrace` (Q16), secret providers `keychain:` and `op:` (Q14) | refusing a key it does not know: `config.invalid`, exit 6 | remove the new lines and everything works | no | existing keys keep their meaning | todo: Task 15 (the refusal is tested now) |
+| `managed.toml` | `managed.toml` beside `config.toml`, same keys | the same: `config.invalid`, exit 6 on an unknown key | remove the new lines | yes, `init` writes it | v0.2 writes only keys v0.1.1 knows to an M1 home | tested |
+| `journal` | `journal/<op>.json` `{v: 1}` offload and onload, free-form `step` | parsing it; an unknown step is left pending | v0.1.1's `recover` settles a journal v0.2 left open | yes | read as is | tested |
+| `journal.bootstrap` | `journal/bootstrap/<attempt>.json` (`schemas/bootstrap-journal.json`, Task 8): a store setup's journal, in a folder of its own | never read: v0.1.1 reads only `journal/<ulid>.json`, so it neither settles nor reports it and holds back no project | the file stays; v0.2's recovery settles it after a roll-forward | no | none exists on an M1 home | tested |
+| `journal.held` | an offload journal at step `offload.release.held` (Q2, Q16) | parsing it; the step is unknown, so `recover` leaves it pending and `gc`, `gc --now` and housekeeping never delete its trash | held trash survives a rollback | no | none exists on an M1 home | todo: Task 24 (the unknown-step behaviour is tested now) |
+| `plan` | `plans/<id>.json`: output object, new optional `git` and `nested` | parsing it as an open object; approval compares the fingerprint | plans of either version load | yes | an M1 plan lacks the new keys, which are optional | tested |
+| `claim` | `<root>/.plainport-trash/<op>.claim` (D64), M1 shape | parsing it: a live claim keeps its trash, a dead one is taken over | everything works | yes | read as is | tested |
+| `claim.boot` | `<op>.claim.boot` (Q5 i), a sibling of the claim | never read, so the claim parses as before | ignored; removed with the trash | no | none exists on an M1 home | tested |
+| `stub` | `<project>.plainport` `{v: 1}` | parsing it | everything works | yes | read as is | tested |
+| `restic.tags` | `plainport:project`, `path`, `op`, `kind` (percent-encoded, D26) and `mode=<octal>` (Q5 ii) | filtering by the tags it knows; extra tags are ignored | snapshots stay restorable | yes, without the mode tag | an M1 snapshot lacks `mode` and the event's `rootMode` is used | tested |
+| `mirror` | `event-mirror.json` and `state.json` under the state folder, keyed by store id | parsing them; a mismatch rebuilds the mirror | the mirror is rebuilt on first use | yes | v0.2 and v0.1.1 share one home and read each other's | tested |
+| `value.exit-codes` | exit codes 0 to 11 and 130 | not applicable | unchanged: a code keeps its meaning, a retired finding code is never reused | not applicable | not applicable | tested |
+| `value.project-state` | `ProjectState`, a closed set; conditions are an open list (D17) | not applicable | unchanged: M2 adds no value | not applicable | not applicable | tested |
+| `value.offload-kind` | offload's exit-8 `kind`: `fork` or `diverged-after-commit` (Q6) | not applicable | a fork after the commit keeps `kind: fork` and adds an optional `detail` | not applicable | not applicable | todo: Task 23 |
+| `value.plan-fp` | the plan's `fp`, `2` (Q5 iii defers fingerprint v3 to M5) | not applicable | unchanged | not applicable | not applicable | tested |
+| `value.phases` | `Phase`, a closed set | not applicable | unchanged | not applicable | not applicable | tested |
+| `output.additive` | printed output: envelope, event lines, each command's `data` (D16, D17) | not applicable: consumers keyed on the published v0.1.1 schemas still validate v0.2's output | unchanged | not applicable | not applicable | tested |
+| `output.plan-git` | optional `Plan.git` (D96) | not applicable: v0.1.1 plans are open objects and v0.1.1 runs a plan carrying it | a v0.2 plan loads in v0.1.1 | not applicable | an M1 plan lacks it | tested (runtime and schema) |
+| `output.plan-nested` | optional `Plan.nested` (D96) | not applicable, as for `Plan.git` | unchanged | not applicable | an M1 plan lacks it | tested (schema only: the output schema is assignable to v0.1.1's) |
+| `output.onload-plan` | `commands[onload].plan` and `onload --dry-run`'s output, including `pending` and `restored: restore or reuse` (D96) | not applicable: v0.1.1's `onload` has no dry-run, so no consumer keys on it | unchanged | not applicable | not applicable | tested (a real preview, and the schema) |
+| `output.git-unpushed-tags` | `git.unpushed` `paths` listing tags no remote has (D96, D69) | not applicable: an existing finding code, a longer list | unchanged | not applicable | not applicable | tested (schema only: findings keep severity and exit code) |
+| `output.untrusted-known` | the hydrate plan's `untrustedKnown`, always `false` (D96) | not applicable: a new optional key | unchanged | not applicable | not applicable | tested (a real preview) |
+| `output.hydrate-via` | a hydrate step's optional `via: "corepack"` (Phase 1) | not applicable: a new optional key | unchanged | not applicable | not applicable | tested (schema only) |
+| `finding.case-unknown` | the new warn finding `fs.case-unknown` (D97) | not applicable: a new code is additive, and no existing code changed | unchanged | not applicable | not applicable | tested |
 
 ## Testing and fault injection
 

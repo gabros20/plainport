@@ -21,6 +21,8 @@ export interface SnapshotRequest {
   clock(): Date;
   log(level: "warn", message: string): void;
   excludes: readonly string[];
+  /** The key of the snapshot-discarded event's one `stored` entry: storedKey of the store (Q11). */
+  storedKey: string;
   /** The restic id of the snapshot this one follows. */
   parent?: string;
   /** The project folder's own mode, tagged so an onload whose event cannot be read still has it (Q5 ii). */
@@ -33,7 +35,7 @@ export interface SnapshotRequest {
 /** Takes the snapshot; its restic id, or the failure (kept for recover when restic wrote one anyway). */
 export const takeSnapshot = async (req: SnapshotRequest): Promise<Result<string>> => {
   const { saga } = req;
-  const { op, project, store } = saga.journal;
+  const { op, project } = saga.journal;
   const starting = await saga.step("offload.snapshot.start");
   if (!starting.ok) return starting;
   const made = await req.engine.snapshot(
@@ -80,7 +82,7 @@ export const takeSnapshot = async (req: SnapshotRequest): Promise<Result<string>
         root: project.rootId,
         path: project.path,
         snapshot: op,
-        stored: { [store.name]: discarded.snapshot },
+        stored: { [req.storedKey]: discarded.snapshot },
       });
       // Unwritten, it stays journaled for recover to write.
       if (!written.ok) {

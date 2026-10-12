@@ -89,6 +89,8 @@ Three final whole-branch rounds ran after the last task. Rounds 1 and 2 used Fab
 
 ## Next: milestone M2, remote stores
 
+**Progress (12 October 2026):** M2 runs from `docs/plans/M2-remote-stores.md` (approved 10 October) on branch `m2-remote-stores`. Phase 1 (Tasks 1–5) and phase 2 (Tasks 6–9: publication and election protocol, the format and compatibility matrix against v0.1.1, the bootstrap protocol and store.json v2, stable store identity) are on `main`. Phase 3 (Tasks 10–14) is building. Run decisions D89–D104 are in `.orchestrate/decisions.md`; D93 (restic floor 0.18.0) and D96–D104 are flagged for owner review. From phase 3 on, tasks build first and are reviewed once per phase (D102).
+
 Scope, from `docs/ROADMAP.md`: SFTP and S3 stores through the rclone blob store; catalog events over stores; Keychain secrets; leases, head check, conflicts and `plainport resolve`. Gate: the two-Mac race ends in `conflicted`, never in lost work.
 
 M2 starts with:
@@ -114,7 +116,7 @@ M2 phase 1 (Tasks 1–5, merged to `main` on 10 October 2026) closed the core-sa
 
 **Contract**
 
-- **Compatibility matrix row (D96):** Task 7 adds the row for `onload --dry-run`'s optional fields (`Plan.git`, `Plan.nested`, `git.unpushed.paths` for tags, `commands[onload].plan`, `pending`, `untrustedKnown` as a constant `false`).
+- **Format 2 end to end (D104):** the `[store.json.v2]` compatibility row and the format-2 writer path are tested at the catalog layer only until Tasks 18 and 19 lift the format-1-only refusal.
 
 **Secrets (for Tasks 15 and 19)**
 

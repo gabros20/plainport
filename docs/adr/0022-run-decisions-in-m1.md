@@ -179,7 +179,8 @@ owner (D73).
   **Amended 2026-10-10 (ADR-0023, Q1):** the catalog event schemas are strict objects, so an added field or
   event type makes a v0.1.x reader skip the event (`catalog.event-skipped`); it is invisible to v0.1.x, not
   compatible with it. Changes go through new types on format-2 stores or a version bump, and compatibility
-  between versions is enforced by the store's format, never by additivity.
+  between versions is enforced by the store's format, never by additivity. The per-format rows, tested against the
+  real v0.1.1, are DESIGN's "Formats and compatibility".
 - **D86 (flagged).** A skipped (unreadable or unsupported) state-changing event makes the fold uncertain.
   Head-dependent defaults (onload, offload's fork rule, `gc`'s keep decisions) refuse with
   `catalog.head-uncertain` when the stub's or registry's known snapshot is not named by any readable event. Only

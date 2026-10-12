@@ -1,6 +1,7 @@
 // An in-memory BlobStore for core's tests: the catalog runs against it without a disk. It passes the same contract
 // suite as blob-fs (testing/blob-store-contract.ts). `failNext` makes the next call of one method fail, to test how
-// callers handle a store that drops out.
+// callers handle a store that drops out. Its semantics are the strongest a store can have; testing/
+// semantic-blob-store.ts wraps it with switches for each weakness.
 
 import { type Failure, fail, finding, ok } from "@plainport/contract";
 import {
@@ -8,8 +9,21 @@ import {
   assertBlobPrefix,
   type BlobEntry,
   type BlobStore,
+  capabilitiesOf,
   type PutOptions,
+  type StoreSemantics,
 } from "../ports/blob-store.ts";
+
+/** Everything holds in memory: a put is whole and seen at once, a listing is complete, nothing lands late. */
+export const MEMORY_SEMANTICS: StoreSemantics = Object.freeze<StoreSemantics>({
+  readAfterWrite: { value: true, evidence: "asserted" },
+  listAfterWrite: { value: true, evidence: "asserted" },
+  listComplete: { value: true, evidence: "asserted" },
+  publication: { value: "atomic-put", evidence: "asserted" },
+  conditionalCreate: { value: true, evidence: "asserted" },
+  durability: { value: "durable", evidence: "asserted" },
+  cancellation: { value: "never-lands-late", evidence: "asserted" },
+});
 
 export interface MemoryBlobStore extends BlobStore {
   /** The stored bytes by key, for assertions. */
@@ -31,6 +45,10 @@ export const memoryBlobStore = (
   const data = new Map<string, Uint8Array>();
   const failing = new Map<string, "store.unreachable" | "store.failed">();
   const calls: Record<Method, number> = { get: 0, put: 0, list: 0, stat: 0, delete: 0 };
+  const semantics: StoreSemantics =
+    options.createIfAbsent === false
+      ? { ...MEMORY_SEMANTICS, conditionalCreate: { value: false, evidence: "asserted" } }
+      : MEMORY_SEMANTICS;
   const unreachable = (method: Method): Failure | undefined => {
     calls[method]++;
     const code = failing.get(method);
@@ -44,7 +62,8 @@ export const memoryBlobStore = (
     failNext: (method, code = "store.unreachable") => {
       failing.set(method, code);
     },
-    capabilities: () => ({ createIfAbsent: options.createIfAbsent ?? true, replaceIfMatch: false }),
+    semantics: () => semantics,
+    capabilities: () => capabilitiesOf(semantics),
     get: (key) => {
       assertBlobKey(key);
       return Promise.resolve(

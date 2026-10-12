@@ -87,7 +87,7 @@ export type CatalogState = z.infer<typeof CatalogStateSchema>;
  * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
  * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
  */
-export const FOLD_VERSION = 3;
+export const FOLD_VERSION = 4;
 
 export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 

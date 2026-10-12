@@ -15,6 +15,15 @@ import {
   type RecoveryOutcome,
 } from "../../packages/core/src/recover/recover.ts";
 import {
+  BOOTSTRAP_AFTER_EFFECT,
+  BOOTSTRAP_BRANCHES,
+  BOOTSTRAP_RECOVERY,
+  BOOTSTRAP_RULE_OUTCOMES,
+  BOOTSTRAP_STEPS,
+  type BootstrapRecoveryOutcome,
+  type BootstrapStep,
+} from "../../packages/core/src/saga/bootstrap.ts";
+import {
   OFFLOAD_AFTER_EFFECT,
   OFFLOAD_BRANCHES,
   OFFLOAD_STEPS,
@@ -179,3 +188,53 @@ export const plainRowAt = (point: string): Row => {
   if (row === undefined) throw new Error(`no plain row at ${point}`);
   return row;
 };
+
+/**
+ * Bootstrap's rows (DESIGN.md "Bootstrap"), from its own exports the same way: every step and after-effect seam is a
+ * point, an exclusive branch's points are crashed only under its setup. A bootstrap has no project folder, so its rows
+ * are their own type and their own variant (bootstrap.test.ts); each runs on a store with a proven conditional create
+ * and on one that elects by the sole-candidate rule.
+ */
+export const BOOTSTRAP_BRANCH_KINDS = {
+  rival: "exclusive",
+} as const satisfies Record<keyof typeof BOOTSTRAP_BRANCHES, BranchKind>;
+
+export interface BootstrapRow {
+  scenario: "plain" | keyof typeof BOOTSTRAP_BRANCHES;
+  point: string;
+  step: BootstrapStep;
+  rule: string;
+  outcomes: readonly BootstrapRecoveryOutcome[];
+  name: string;
+}
+
+export const BOOTSTRAP_ROWS: readonly BootstrapRow[] = (() => {
+  const seams: Readonly<Record<string, BootstrapStep>> = BOOTSTRAP_AFTER_EFFECT;
+  const points = [...BOOTSTRAP_STEPS, ...Object.keys(seams)];
+  const exclusive = new Set(
+    Object.entries(BOOTSTRAP_BRANCHES)
+      .filter(([name]) => BOOTSTRAP_BRANCH_KINDS[name as keyof typeof BOOTSTRAP_BRANCHES] === "exclusive")
+      .flatMap(([, b]) => b.reaches as readonly string[]),
+  );
+  const row = (scenario: BootstrapRow["scenario"], point: string): BootstrapRow => {
+    const step = (Object.hasOwn(seams, point) ? seams[point] : point) as BootstrapStep;
+    if (!BOOTSTRAP_STEPS.includes(step)) throw new Error(`${point}: ${step} is not a bootstrap step`);
+    const rule = BOOTSTRAP_RECOVERY[step];
+    return {
+      scenario,
+      point,
+      step,
+      rule,
+      outcomes: BOOTSTRAP_RULE_OUTCOMES[rule],
+      name: `${point} · ${scenario}`,
+    };
+  };
+  const rows = points.filter((p) => !exclusive.has(p)).map((p) => row("plain", p));
+  for (const [name, branch] of Object.entries(BOOTSTRAP_BRANCHES))
+    for (const point of branch.reaches) {
+      if (!points.includes(point))
+        throw new Error(`branch ${name} reaches ${point}, which is no step or seam`);
+      rows.push(row(name as keyof typeof BOOTSTRAP_BRANCHES, point));
+    }
+  return rows;
+})();

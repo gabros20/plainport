@@ -11,8 +11,10 @@ export * from "./fold.ts";
 export * from "./head.ts";
 export * from "./identity.ts";
 export * from "./log.ts";
+export * from "./publish.ts";
 export * from "./root-claim.ts";
 export * from "./roots.ts";
+export * from "./stored.ts";
 
 /** JSON Schemas for the catalog's persisted files, published in schemas/ by `bun run contract`. */
 export const catalogJsonSchemas = (): Record<

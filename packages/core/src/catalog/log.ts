@@ -7,7 +7,8 @@
 //
 // An event file is one line of JSON. Appending the same event twice is a no-op, so a step that is retried after a
 // crash (D24) does not fail on its own earlier write. Reading skips what it cannot use, with catalog.event-skipped,
-// and never changes or deletes an event file.
+// and never changes or deletes an event file. A snapshot event names its location by containment (Q11, stored.ts):
+// one `stored` entry, so one with zero or several is skipped as unsupported (stored-multiple) and a writer refuses it.
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -27,7 +28,8 @@ import type { BlobEntry, BlobStore } from "../ports/blob-store.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
 import { CATALOG_EVENT_TYPES, type CatalogEvent, CatalogEventSchema } from "./events.ts";
 import { type CatalogState, CatalogStateSchema, compare, FOLD_VERSION, foldCatalog } from "./fold.ts";
-import { identityChanged, readStoreIdentity } from "./identity.ts";
+import { identityChanged, readUsableStore } from "./identity.ts";
+import { STORED_MULTIPLE } from "./stored.ts";
 
 /** Where events live on a store, and in a local mirror. */
 export const STORE_EVENTS_PREFIX = "meta/v1/events/";
@@ -63,6 +65,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 export const encodeEvent = (event: CatalogEvent): Uint8Array => encoder.encode(`${JSON.stringify(event)}\n`);
 
+/** How many `stored` entries a snapshot event has, or undefined for an event that names no location. */
+const storedCount = (event: CatalogEvent): number | undefined =>
+  event.type === "offloaded" || event.type === "checkpointed" || event.type === "snapshot-discarded"
+    ? Object.keys(event.stored).length
+    : undefined;
+
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -82,6 +90,15 @@ export const appendEvent = async (log: EventLog, event: CatalogEvent): Promise<R
       finding("contract.invalid", {
         message:
           "a new onloaded event must name the head it was written over (over, D43); nothing was written",
+        fix: "this is a bug in the command that wrote the event; report it with the message above",
+      }),
+    );
+  }
+  const entries = storedCount(checked.data);
+  if (entries !== undefined && entries !== 1) {
+    return fail(
+      finding("contract.invalid", {
+        message: `a new ${checked.data.type} event must name its snapshot's location in exactly one store, the one it is appended to (Q11), not ${entries}; nothing was written`,
         fix: "this is a bug in the command that wrote the event; report it with the message above",
       }),
     );
@@ -123,6 +140,22 @@ const skipped = (key: string, reason: string): Finding =>
 interface Skipped {
   finding: Finding;
   bytes: boolean;
+  /** A stored-multiple event: it parsed, so its project and snapshot are known (Q11). */
+  taint?: Tainted;
+}
+
+/**
+ * A snapshot event skipped as stored-multiple (Q11). It parsed, so what it says is known: a producer (offloaded,
+ * checkpointed) makes its project's head uncertain whatever this device knows (head.ts), and a discard's restic ids
+ * are still never restored by tag.
+ */
+export interface Tainted {
+  event: string;
+  type: "offloaded" | "checkpointed" | "snapshot-discarded";
+  project: string;
+  snapshot: string;
+  /** The restic ids its entries name. */
+  stored: string[];
 }
 
 const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | Skipped => {
@@ -149,6 +182,24 @@ const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | 
   if (checked.data.id !== id) {
     return {
       finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`),
+      bytes: false,
+    };
+  }
+  const entries = storedCount(checked.data);
+  if (entries !== undefined && entries !== 1) {
+    const event = checked.data as Extract<CatalogEvent, { type: Tainted["type"] }>;
+    return {
+      taint: {
+        event: event.id,
+        type: event.type,
+        project: event.project,
+        snapshot: event.snapshot,
+        stored: Object.values(event.stored),
+      },
+      finding: skipped(
+        key,
+        `unsupported (${STORED_MULTIPLE}): it names its snapshot's location in ${entries} stores, and this version reads one, the store that holds the event (Q11)`,
+      ),
       bytes: false,
     };
   }
@@ -214,11 +265,14 @@ export interface EventsRead {
   events: CatalogEvent[];
   /** One catalog.event-skipped per file left out, sorted by key. */
   findings: Finding[];
+  /** The stored-multiple events among them (Q11). */
+  tainted: Tainted[];
 }
 
 const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsRead>> => {
   const events: CatalogEvent[] = [];
   const findings: Finding[] = [];
+  const tainted: Tainted[] = [];
   for (const { key } of listed.entries) {
     const id = listed.ids.get(key);
     if (id === undefined) {
@@ -229,11 +283,13 @@ const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsR
     if (!bytes.ok) return bytes;
     if (bytes.value === null) continue; // removed since the listing (a store's own cleanup); nothing to fold
     const parsed = parseEvent(key, id, bytes.value);
-    if ("finding" in parsed) findings.push(parsed.finding);
-    else events.push(parsed);
+    if ("finding" in parsed) {
+      findings.push(parsed.finding);
+      if (parsed.taint !== undefined) tainted.push(parsed.taint);
+    } else events.push(parsed);
   }
   events.sort((a, b) => compare(a.id, b.id));
-  return ok({ events, findings });
+  return ok({ events, findings, tainted });
 };
 
 /** Every event in the log. A store that cannot be listed or read is a failure, never an empty catalog. */
@@ -334,6 +390,8 @@ export interface LoadedCatalog {
   findings: Finding[];
   /** uncertainEvents(findings): events left out that may change state (D86). */
   uncertain: string[];
+  /** The stored-multiple events left out, read from the store just now (Q11); none from the mirror alone. */
+  tainted: Tainted[];
   /** Whether a cached fold was reused. */
   cached: boolean;
   /** True when the store could not be reached: the state is the mirror's, as of syncedAt. */
@@ -345,6 +403,8 @@ export interface LoadedCatalog {
   copied: number;
   /** Why the state is stale: the store's store.unreachable finding. */
   unreachable?: Finding;
+  /** The store's format (its meta/v1/store.json), when the store answered: what a writer keys `stored` by (Q11). */
+  format?: 1 | 2;
   /** Why the mirror was not used although the store was reachable; the state was read from the store directly. */
   mirrorFailure?: Finding;
 }
@@ -427,7 +487,9 @@ const syncDown = async (
   mirror: EventLog,
   storeId: string,
   now: Date,
-): Promise<{ ok: true; value: { listed: Listed; copied: number; findings: Finding[] } } | Fault> => {
+): Promise<
+  { ok: true; value: { listed: Listed; copied: number; findings: Finding[]; tainted: Tainted[] } } | Fault
+> => {
   const theirs = await listEvents(remote);
   if (!theirs.ok) return storeFault(theirs);
   const recorded = await readJson(mirror.store, MIRROR_FILE_KEY, MirrorFileSchema);
@@ -441,6 +503,7 @@ const syncDown = async (
   const mirrorSizes = sizesById(mine.value);
   const skippedNow: MirrorFile["skipped"] = {};
   const findings: Finding[] = [];
+  const tainted: Tainted[] = [];
   let copied = 0;
   for (const [id, size] of [...sizesById(theirs.value)].sort(([a], [b]) => compare(a, b))) {
     if (mirrorSizes.get(id) === size) continue;
@@ -459,6 +522,7 @@ const syncDown = async (
     } else {
       if (result.value.bytes) skippedNow[id] = { size, finding: result.value.finding };
       findings.push(result.value.finding);
+      if (result.value.taint !== undefined) tainted.push(result.value.taint);
     }
   }
   const file: MirrorFile = {
@@ -478,7 +542,7 @@ const syncDown = async (
     ids.set(key, id);
   }
   const listed = { entries: [...entries.values()].sort((a, b) => compare(a.key, b.key)), ids };
-  return ok({ listed, copied, findings });
+  return ok({ listed, copied, findings, tainted });
 };
 
 /** The mirror alone, while the store is unreachable: its state as of its last sync, marked stale. */
@@ -502,6 +566,7 @@ const readOffline = async (
     ...folded.value,
     findings,
     uncertain: uncertainEvents(findings),
+    tainted: [],
     stale: true,
     source: "mirror",
     ...(recorded.value && { syncedAt: recorded.value.lastSyncedAt }),
@@ -533,9 +598,12 @@ export const loadCatalog = async (options: {
       ? readOffline(mirror, options.storeId, failure.finding)
       : failure;
 
-  const identity = await readStoreIdentity(options.store);
+  const identity = await readUsableStore(options.store);
   if (!identity.ok) return offline(identity);
-  if (identity.value !== options.storeId) return identityChanged(options.storeId, identity.value, "store");
+  const found = identity.value?.id ?? null;
+  if (identity.value === null || found !== options.storeId)
+    return identityChanged(options.storeId, found, "store");
+  const { format } = identity.value;
 
   const synced = await syncDown(remote, mirror, options.storeId, options.now);
   let mirrorFailure: Finding | undefined;
@@ -547,7 +615,9 @@ export const loadCatalog = async (options: {
         ...folded.value,
         findings,
         uncertain: uncertainEvents(findings),
+        tainted: synced.value.tainted,
         stale: false,
+        format,
         source: "store",
         syncedAt: options.now.toISOString(),
         copied: synced.value.copied,
@@ -566,8 +636,10 @@ export const loadCatalog = async (options: {
     state: foldCatalog(direct.value.events),
     findings: direct.value.findings,
     uncertain: uncertainEvents(direct.value.findings),
+    tainted: direct.value.tainted,
     cached: false,
     stale: false,
+    format,
     source: "store",
     syncedAt: options.now.toISOString(),
     copied: 0,
