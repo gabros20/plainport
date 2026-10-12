@@ -172,6 +172,9 @@ export const recordedProject = (options: {
     conflicts: [],
     missing: [],
     discarded: [],
+    resolutions: [],
+    rejected: [],
+    invalid: [],
     snapshots: {},
   };
 };

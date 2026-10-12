@@ -14,13 +14,25 @@
 //   comes after the head, not behind it. An `over` the catalog holds but that is not the restored snapshot or made
 //   from it (older, on another fork, discarded) is ignored and the onload is ordered by what it restored.
 // - Status is the event furthest along the chain: offloaded → shelved, onloaded → local; local when there is none.
-// - A fork makes the project conflicted until a resolved event (M2) picks a side (D41): a kept snapshot with two or
+// - A fork makes the project conflicted until a resolved event picks a side (D41): a kept snapshot with two or
 //   more kept children, offloaded or checkpointed alike. Two first offloads (no base) are a fork too. DESIGN's "two
 //   offloaded events with the same base" is the special case; a checkpoint on one side must not hide the other.
-// - Heads are the tips: kept snapshots nothing kept was made from. `head` is the one tip, and only when the chain is
-//   whole: it is null when the project is conflicted, when a base, an onloaded snapshot or an onload's `over` is
-//   missing from the events (`missing`: a partial mirror, D41; an older snapshot never becomes the head by default,
-//   and an `over` proves a newer snapshot exists), or when bases loop.
+// - Resolutions (Q18, Task 12) use the event set alone. A resolved event is invalid, and skipped, when `over` is empty,
+//   `keep` is in `over`, a reference names another project's snapshot or resolution or the wrong kind (keep and over
+//   name snapshots, supersedes names resolved events), it supersedes itself, or it lies on a cycle of supersedes. One
+//   that names a snapshot or resolution the catalog does not hold yet is incomplete, and leaves the head incomplete
+//   like a missing base. Active resolutions are the valid, complete ones no valid resolution supersedes. Rejected
+//   snapshots are those named in the `over` of any valid, complete resolution (a superseded one's too, so superseding
+//   never brings back what was rejected), minus what an active resolution keeps (so competing resolutions leave both
+//   sides live, and a later read can resolve them). Two active resolutions are incompatible when one keeps what the
+//   other rejects: the project stays conflicted until a resolution supersedes both.
+// - Heads are the live tips: kept snapshots nothing kept was made from, minus the rejected ones. A tip made from a
+//   rejected snapshot is live, so late work conflicts again and never vanishes. A fork counts only between lines that
+//   lead to a live tip, and status and the lease ignore events on lines that lead to none. With no resolutions this
+//   is M1's rule. `head` is the one live tip, and only when the chain is whole: it is null when the project is
+//   conflicted, when a base, an onloaded snapshot, an onload's `over` or a resolution's reference is missing from the
+//   events (`missing`: a partial mirror, D41; an older snapshot never becomes the head by default, and an `over`
+//   proves a newer snapshot exists), or when bases loop.
 // - The lease: an onloaded event with no offloaded event from the same device further along the chain. Of several
 //   such, the one furthest along wins, then the smallest event id, so there is at most one (invariant 5).
 //
@@ -60,9 +72,18 @@ export const CatalogProjectSchema = z.strictObject({
   lease: LeaseSchema.nullable(),
   /** Each fork: the kept snapshots made from one base, sorted. */
   conflicts: z.array(z.array(UlidSchema)),
-  /** Snapshots that events name as a base but the catalog does not hold; while any is listed there is no head. */
+  /**
+   * Snapshots that events name as a base, and snapshots or resolutions a resolution names, that the catalog does not
+   * hold; while any is listed there is no head.
+   */
   missing: z.array(UlidSchema),
   discarded: z.array(UlidSchema),
+  /** The active resolutions: resolved events that are valid, complete and superseded by no valid one, sorted. */
+  resolutions: z.array(UlidSchema),
+  /** The snapshots resolutions reject, sorted: never a head. */
+  rejected: z.array(UlidSchema),
+  /** Resolved events skipped as invalid (catalog.event-skipped, resolution-invalid), sorted: they taint the read. */
+  invalid: z.array(UlidSchema),
   snapshots: z.record(UlidSchema, SnapshotSchema),
 });
 export type CatalogProject = z.infer<typeof CatalogProjectSchema>;
@@ -87,7 +108,7 @@ export type CatalogState = z.infer<typeof CatalogStateSchema>;
  * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
  * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
  */
-export const FOLD_VERSION = 3;
+export const FOLD_VERSION = 4;
 
 export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -103,8 +124,92 @@ const canonical = (events: readonly CatalogEvent[]): CatalogEvent[] => {
 };
 
 type Producer = Extract<ProjectEvent, { type: "offloaded" | "checkpointed" }>;
+type Resolved = Extract<ProjectEvent, { type: "resolved" }>;
 
-const foldProject = (events: ProjectEvent[]): CatalogProject => {
+/** What an id names across the whole catalog, to judge a resolution's references (Q18). */
+interface Index {
+  /** Snapshot → the project it belongs to. */
+  snapshots: Map<string, string>;
+  events: Map<string, CatalogEvent>;
+}
+
+const indexOf = (sorted: readonly CatalogEvent[]): Index => {
+  const snapshots = new Map<string, string>();
+  const events = new Map<string, CatalogEvent>();
+  for (const e of sorted) {
+    events.set(e.id, e);
+    if (
+      (e.type === "offloaded" || e.type === "checkpointed" || e.type === "snapshot-discarded") &&
+      !snapshots.has(e.snapshot)
+    )
+      snapshots.set(e.snapshot, e.project);
+  }
+  return { snapshots, events };
+};
+
+/** The resolutions of one project, judged (Q18): which are invalid, which active, what they reject. */
+const judge = (resolutions: Resolved[], index: Index) => {
+  const invalid = new Set<string>();
+  const absent = new Map<string, string[]>();
+  for (const r of resolutions) {
+    const unknown: string[] = [];
+    const snapshot = (id: string): boolean => {
+      const owner = index.snapshots.get(id);
+      if (owner !== undefined) return owner === r.project;
+      if (index.events.has(id)) return false; // an event, not a snapshot
+      unknown.push(id);
+      return true;
+    };
+    const resolution = (id: string): boolean => {
+      const e = index.events.get(id);
+      if (e !== undefined) return e.type === "resolved" && e.project === r.project;
+      if (index.snapshots.has(id)) return false; // a snapshot, not a resolution
+      unknown.push(id);
+      return true;
+    };
+    const wellFormed =
+      r.over.length > 0 &&
+      !r.over.includes(r.keep) &&
+      !r.supersedes.includes(r.id) &&
+      [r.keep, ...r.over].every(snapshot) &&
+      r.supersedes.every(resolution);
+    if (!wellFormed) invalid.add(r.id);
+    else if (unknown.length > 0) absent.set(r.id, unknown);
+  }
+  // A writer supersedes only what it read, so a cycle means a broken or forged writer: every resolution on it is
+  // invalid. Edges are the supersedes references to this project's resolutions.
+  const byId = new Map(resolutions.map((r) => [r.id, r]));
+  for (const r of resolutions) {
+    const seen = new Set<string>();
+    const stack = [...r.supersedes];
+    while (stack.length > 0) {
+      const at = stack.pop() as string;
+      if (at === r.id) {
+        invalid.add(r.id);
+        break;
+      }
+      if (seen.has(at)) continue;
+      seen.add(at);
+      stack.push(...(byId.get(at)?.supersedes ?? []));
+    }
+  }
+  const valid = resolutions.filter((r) => !invalid.has(r.id));
+  const complete = valid.filter((r) => !absent.has(r.id));
+  const superseded = new Set(valid.flatMap((r) => r.supersedes));
+  const active = complete.filter((r) => !superseded.has(r.id));
+  const kept = new Set(active.map((r) => r.keep));
+  const rejected = new Set(complete.flatMap((r) => r.over).filter((s) => !kept.has(s)));
+  const incompatible = active.some((a) => active.some((b) => b.over.includes(a.keep)));
+  return {
+    invalid: [...invalid].sort(compare),
+    missing: [...absent.values()].flat(),
+    active: active.map((r) => r.id).sort(compare),
+    rejected,
+    incompatible,
+  };
+};
+
+const foldProject = (events: ProjectEvent[], index: Index): CatalogProject => {
   const discarded = new Set<string>();
   for (const e of events) if (e.type === "snapshot-discarded") discarded.add(e.snapshot);
 
@@ -202,9 +307,23 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   const offloads = producers.filter((e) => e.type === "offloaded");
   const onloads = events.filter((e) => e.type === "onloaded");
 
-  // Status: the event furthest along the chain; the smallest id among equals.
+  const parents = new Set(
+    producers.flatMap((e) => (e.base === undefined || e.base === e.snapshot ? [] : [e.base])),
+  );
+  const tips = [...made.keys()].filter((s) => !parents.has(s) && made.get(s)?.base !== s);
+  const judged = judge(
+    events.filter((e): e is Resolved => e.type === "resolved"),
+    index,
+  );
+  const heads = tips.filter((s) => !judged.rejected.has(s)).sort(compare);
+  /** A snapshot only on rejected lines: no live tip was made from it. Never one while nothing is rejected (M1). */
+  const dead = (snapshot: string): boolean =>
+    judged.rejected.size > 0 && !heads.some((tip) => descends(tip, snapshot));
+
+  // Status: the event furthest along a live line; the smallest id among equals.
   let tip: ProjectEvent | undefined;
   for (const e of [...offloads, ...onloads]) {
+    if (dead(e.type === "onloaded" ? anchorOf(e) : e.snapshot)) continue;
     if (tip === undefined || position(e) > position(tip) || (position(e) === position(tip) && e.id < tip.id))
       tip = e;
   }
@@ -215,26 +334,24 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     byBase.set(key, (byBase.get(key) ?? new Set()).add(e.snapshot));
   }
   const conflicts = [...byBase.values()]
-    .filter((snaps) => snaps.size > 1)
-    .map((snaps) => [...snaps].sort(compare))
+    .map((snaps) => [...snaps].filter((s) => !dead(s)).sort(compare))
+    .filter((snaps) => snaps.length > 1)
     .sort((a, b) => compare(a.join(), b.join()));
 
-  const parents = new Set(
-    producers.flatMap((e) => (e.base === undefined || e.base === e.snapshot ? [] : [e.base])),
-  );
-  const heads = [...made.keys()].filter((s) => !parents.has(s) && made.get(s)?.base !== s).sort(compare);
   const held = (snapshot: string | undefined): boolean => snapshot === undefined || made.has(snapshot);
   const missing = [
-    ...new Set(
-      [...producers, ...onloads].flatMap((e) => [
+    ...new Set([
+      ...[...producers, ...onloads].flatMap((e) => [
         ...(held(e.base) ? [] : [e.base as string]),
         // An onload's `over` proves that a snapshot newer than `base` exists (D43): one the catalog does not hold
         // leaves the head incomplete (D41, m9), even though it is ignored for ordering above.
         ...(e.type === "onloaded" && !held(e.over) ? [e.over as string] : []),
       ]),
-    ),
+      ...judged.missing,
+    ]),
   ].sort(compare);
-  const whole = conflicts.length === 0 && missing.length === 0 && !cyclic;
+  const conflicted = conflicts.length > 0 || judged.incompatible;
+  const whole = !conflicted && missing.length === 0 && !cyclic;
 
   // Each device's offload furthest along the chain closes every onload of that device before it.
   const furthestOffload = new Map<string, number>();
@@ -242,6 +359,7 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     furthestOffload.set(e.device, Math.max(furthestOffload.get(e.device) ?? -1, position(e)));
   let lease: (typeof onloads)[number] | undefined;
   for (const o of onloads) {
+    if (dead(anchorOf(o))) continue;
     const closed = (furthestOffload.get(o.device) ?? -1) > position(o);
     if (closed) continue;
     if (
@@ -267,7 +385,7 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
   return {
     root: address.root,
     path: address.path,
-    status: conflicts.length > 0 ? "conflicted" : tip?.type === "offloaded" ? "shelved" : "local",
+    status: conflicted ? "conflicted" : tip?.type === "offloaded" ? "shelved" : "local",
     head: whole && heads.length === 1 ? (heads[0] as string) : null,
     heads,
     lease:
@@ -275,6 +393,9 @@ const foldProject = (events: ProjectEvent[]): CatalogProject => {
     conflicts,
     missing,
     discarded: [...discarded].sort(compare),
+    resolutions: judged.active,
+    rejected: [...judged.rejected].sort(compare),
+    invalid: judged.invalid,
     snapshots,
   };
 };
@@ -302,6 +423,7 @@ const foldRoots = (events: RootEvent[]): CatalogState["roots"] => {
 /** Folds a set of catalog events into the state of every project and root. Pure; the order of `events` is irrelevant. */
 export const foldCatalog = (events: readonly CatalogEvent[]): CatalogState => {
   const sorted = canonical(events);
+  const index = indexOf(sorted);
   const byProject = new Map<string, ProjectEvent[]>();
   const rootEvents: RootEvent[] = [];
   for (const e of sorted) {
@@ -311,7 +433,7 @@ export const foldCatalog = (events: readonly CatalogEvent[]): CatalogState => {
   }
   const projects: CatalogState["projects"] = {};
   for (const id of [...byProject.keys()].sort(compare))
-    projects[id] = foldProject(byProject.get(id) as ProjectEvent[]);
+    projects[id] = foldProject(byProject.get(id) as ProjectEvent[], index);
   return { projects, roots: foldRoots(rootEvents) };
 };
 
@@ -321,3 +443,29 @@ export const rootIdsForKey = (state: CatalogState, key: string): string[] =>
     .filter(([, root]) => root.key === key && root.created !== null)
     .sort(([, a], [, b]) => compare(a.created as string, b.created as string))
     .map(([id]) => id);
+
+/** A resolution's fields, as `resolve` writes them (Q18). */
+export interface Resolution {
+  keep: string;
+  over: string[];
+  supersedes: string[];
+}
+
+/**
+ * The production rule (Q18, Task 25): the only resolution a writer may append, from its fresh read of the project.
+ * `keep` must be a live tip; `over` is the other live tips; `supersedes` is every active resolution it read. The fold
+ * judges what this returns valid. Refused when the read is incomplete (a reference is missing: what it lacks could
+ * change the live tips), when `keep` is not a live tip, and when no other live tip is left to resolve.
+ */
+export const resolutionFor = (
+  project: CatalogProject,
+  keep: string,
+):
+  | { ok: true; value: Resolution }
+  | { ok: false; reason: "incomplete" | "not-a-live-tip" | "nothing-to-resolve" } => {
+  if (project.missing.length > 0) return { ok: false, reason: "incomplete" };
+  if (!project.heads.includes(keep)) return { ok: false, reason: "not-a-live-tip" };
+  const over = project.heads.filter((s) => s !== keep);
+  if (over.length === 0) return { ok: false, reason: "nothing-to-resolve" };
+  return { ok: true, value: { keep, over, supersedes: [...project.resolutions] } };
+};

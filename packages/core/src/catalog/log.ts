@@ -116,6 +116,21 @@ const skipped = (key: string, reason: string): Finding =>
   });
 
 /**
+ * The resolved events the fold skipped as invalid (Q18): left out like any event this version cannot use, so they
+ * taint the read (uncertainEvents) where they could have mattered.
+ */
+const invalidResolutions = (log: EventLog, state: CatalogState): Finding[] =>
+  Object.values(state.projects)
+    .flatMap((project) => project.invalid)
+    .sort(compare)
+    .map((id) =>
+      skipped(
+        keyOf(log, id),
+        "resolution-invalid: a resolved event with an empty over, a keep in its over, a reference to another project or to the wrong kind of event, or a supersedes that loops",
+      ),
+    );
+
+/**
  * A file left out of the fold. `bytes` says whether the bytes themselves are no event (torn, not JSON): only such a
  * file is remembered as skipped by the mirror (I7). JSON that this version cannot use (a type or a schema it does not
  * know, a name that disagrees with the id) is read again on every sync, since a newer plainport may accept it.
@@ -365,9 +380,10 @@ const foldMirror = async (
   const read = await readListed(mirror, listed);
   if (!read.ok) return read;
   const state = foldCatalog(read.value.events);
-  const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings: read.value.findings };
+  const findings = [...read.value.findings, ...invalidResolutions(mirror, state)];
+  const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings };
   await mirror.store.put(MIRROR_STATE_KEY, encoder.encode(`${JSON.stringify(next)}\n`));
-  return ok({ state, findings: read.value.findings, cached: false });
+  return ok({ state, findings, cached: false });
 };
 
 /** Which side failed: a store failure decides the outcome, a mirror failure only sends the read to the store. */
@@ -562,10 +578,12 @@ export const loadCatalog = async (options: {
   // The mirror is only a cache: read the store directly.
   const direct = await readEvents(remote);
   if (!direct.ok) return offline(direct);
+  const state = foldCatalog(direct.value.events);
+  const findings = [...direct.value.findings, ...invalidResolutions(remote, state)];
   return ok({
-    state: foldCatalog(direct.value.events),
-    findings: direct.value.findings,
-    uncertain: uncertainEvents(direct.value.findings),
+    state,
+    findings,
+    uncertain: uncertainEvents(findings),
     cached: false,
     stale: false,
     source: "store",
