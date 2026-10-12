@@ -137,6 +137,9 @@ export const ONLOAD_AFTER_EFFECT = {
 } as const satisfies Record<string, OnloadStep>;
 export type OnloadAfterEffect = keyof typeof ONLOAD_AFTER_EFFECT;
 
+/** Pause seams for the race schedules (see OFFLOAD_PAUSE_SEAMS): right after the run's lease check let it go on. */
+export const ONLOAD_PAUSE_SEAMS = ["onload.lease-checked"] as const;
+
 /** The branches a plain run does not take, and what makes a run take each (see OFFLOAD_BRANCHES). */
 export const ONLOAD_BRANCHES = {
   reuse: {
@@ -575,6 +578,7 @@ const onloadFlow = async (
         if (stopped !== undefined) return stopped;
       } else if (!collect) report(lease);
     }
+    if (!collect) host.faultAt("onload.lease-checked");
 
     const occupied = await occupiedBy(project, over);
     if (occupied !== undefined) {
