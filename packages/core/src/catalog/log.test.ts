@@ -623,6 +623,33 @@ describe("catalog: a fold that left out events is uncertain (D86)", () => {
     });
   }
 
+  test("a resolution the fold judges invalid is skipped with resolution-invalid and taints the read (Q18)", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    await appendEvent(storeEventLog(store), offloaded(1));
+    const { snapshot: _, stored: __, stats: ___, ...common } = offloaded(2);
+    // Schema-valid, but `over` is empty: only the fold can judge it.
+    const bad: CatalogEvent = {
+      ...common,
+      type: "resolved",
+      keep: offloaded(1).snapshot,
+      over: [],
+      supersedes: [],
+    };
+    expect((await appendEvent(storeEventLog(store), bad)).ok).toBe(true);
+    for (const read of [await load(store, mirror), await load(store, mirror)]) {
+      expect(read.findings).toEqual([
+        expect.objectContaining({
+          code: "catalog.event-skipped",
+          message: expect.stringContaining("resolution-invalid"),
+          paths: [`events/${ids(2)}.json`],
+        }),
+      ]);
+      expect(read.uncertain).toEqual([ids(2)]);
+      expect(read.state.projects[PROJECT]?.invalid).toEqual([ids(2)]);
+    }
+  });
+
   test("a known snapshot a readable event names, or a file not named as an event, leaves the head certain", async () => {
     const store = await initStore();
     const mirror = memoryBlobStore();

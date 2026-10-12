@@ -1,8 +1,9 @@
 // Catalog events (DESIGN.md "Catalog and data model", ADR-0009): small immutable JSON files, one per event, named
 // by the event's ULID under `meta/v1/events/` on each store. They are persisted public data, so each carries `v` and
 // the schemas are strict (run decision D16): a newer writer bumps `v` rather than adding a field an older reader
-// would refuse. These are the types M1 writes; the rest of DESIGN's list (renamed, resolved, lease-broken, …) arrives
-// with the milestones that write them, and until then a reader skips them (catalog.event-skipped).
+// would refuse. These are the types M1 writes, and M2's `resolved` (Q3); the rest of DESIGN's list (renamed,
+// lease-broken, …) arrives with the milestones that write them, and until then a reader skips them
+// (catalog.event-skipped).
 //
 // `snapshot-discarded` (run decision D28) names a snapshot restic wrote although the offload failed (exit 3): it
 // stays in an append-only repository, so the catalog records that it is never a head.
@@ -107,6 +108,22 @@ export const SnapshotDiscardedEventSchema = z.strictObject({
   stored,
 });
 
+/**
+ * A resolution of a conflict (Q3, Q18): keep one live tip over the others. Written only to format-2 stores (Q2), so a
+ * new type at `v: 1` never reaches v0.1.x. The fold judges it (fold.ts); `resolutionFor` is the only way to make one.
+ */
+export const ResolvedEventSchema = z.strictObject({
+  ...common,
+  type: z.literal("resolved"),
+  ...project,
+  /** The snapshot kept. */
+  keep: UlidSchema,
+  /** The snapshots rejected: the live tips the writer read, minus `keep`. Empty is invalid, judged by the fold. */
+  over: z.array(UlidSchema),
+  /** The resolved events this one replaces: every active resolution the writer read. May be empty. */
+  supersedes: z.array(UlidSchema),
+});
+
 export const RootCreatedEventSchema = z.strictObject({
   ...common,
   type: z.literal("root-created"),
@@ -130,6 +147,7 @@ export const CatalogEventSchema = z
     OnloadedEventSchema,
     CheckpointedEventSchema,
     SnapshotDiscardedEventSchema,
+    ResolvedEventSchema,
     RootCreatedEventSchema,
     RootBoundEventSchema,
   ])
@@ -143,6 +161,7 @@ export const CATALOG_EVENT_TYPES: readonly CatalogEventType[] = Object.freeze([
   "onloaded",
   "checkpointed",
   "snapshot-discarded",
+  "resolved",
   "root-created",
   "root-bound",
 ]);
