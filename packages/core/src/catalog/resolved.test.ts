@@ -142,6 +142,11 @@ const rows: Row[] = [
     expect: settledOn(S(2)),
   },
   {
+    name: "a reversal: R2 keeps the snapshot R1 rejected and supersedes R1 (D103)",
+    events: [...fork, resolved(E(20), S(1), [S(2)]), resolved(E(21), S(2), [S(1)], [E(20)])],
+    expect: settledOn(S(2)),
+  },
+  {
     name: "two resolutions agreeing on keep with different over sets: combined",
     events: [...fork3, resolved(E(20), S(1), [S(2)]), resolved(E(21), S(1), [S(3)])],
     expect: settledOn(S(1)),
@@ -319,6 +324,23 @@ describe("resolved: the causal resolution model, one row per history", () => {
       expect(p.missing).toEqual(row.missing ?? []);
     });
   }
+
+  test("with no resolutions every row folds by M1's rule: heads are all tips, nothing rejected", () => {
+    for (const row of rows) {
+      const plain = row.events.filter((e) => e.type !== "resolved");
+      const p = project(plain);
+      const snapshots = plain.filter((e) => e.type === "offloaded" || e.type === "checkpointed");
+      const bases = new Set(snapshots.flatMap((e) => ("base" in e && e.base !== undefined ? [e.base] : [])));
+      const tips = snapshots
+        .filter((e) => e.project === PROJECT)
+        .map((e) => (e as { snapshot: string }).snapshot)
+        .filter((snapshot) => !bases.has(snapshot))
+        .sort();
+      expect(p.heads).toEqual(tips);
+      expect(p.status === "conflicted").toBe(p.conflicts.length > 0);
+      expect([p.resolutions, p.rejected, p.invalid]).toEqual([[], [], []]);
+    }
+  });
 
   test("incompleteness keeps the head null even when the rest would settle", () => {
     const p = project([...fork, resolved(E(20), S(1), [S(2)]), resolved(E(21), S(1), [S(2)], [E(30)])]);
