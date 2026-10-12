@@ -200,6 +200,21 @@ const m1Only = (found: StoreDescriptor): Result<string> =>
         }),
       );
 
+/**
+ * What a usable store's identity file says, null when it has none, or a failure as readStoreIdentity's: the catalog's
+ * read path takes the store's format from it, which is what a writer keys `stored` by (Q11).
+ */
+export const readUsableStore = async (store: BlobStore): Promise<Result<StoreDescriptor | null>> => {
+  const found = await inspect(store);
+  if (!found.ok) return found;
+  if (found.value.kind === "absent") return ok(null);
+  if (found.value.kind === "id") {
+    const usable = m1Only(found.value.descriptor);
+    return usable.ok ? ok(found.value.descriptor) : usable;
+  }
+  return refuse(found.value);
+};
+
 /** What the store's identity file says (either format), null when it has none, or a failure as readStoreIdentity's. */
 export const readStoreDescriptor = async (store: BlobStore): Promise<Result<StoreDescriptor | null>> => {
   const found = await inspect(store);

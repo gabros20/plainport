@@ -7,7 +7,8 @@
 //
 // An event file is one line of JSON. Appending the same event twice is a no-op, so a step that is retried after a
 // crash (D24) does not fail on its own earlier write. Reading skips what it cannot use, with catalog.event-skipped,
-// and never changes or deletes an event file.
+// and never changes or deletes an event file. A snapshot event names its location by containment (Q11, stored.ts):
+// one `stored` entry, so one with zero or several is skipped as unsupported (stored-multiple) and a writer refuses it.
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -27,7 +28,8 @@ import type { BlobEntry, BlobStore } from "../ports/blob-store.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
 import { CATALOG_EVENT_TYPES, type CatalogEvent, CatalogEventSchema } from "./events.ts";
 import { type CatalogState, CatalogStateSchema, compare, FOLD_VERSION, foldCatalog } from "./fold.ts";
-import { identityChanged, readStoreIdentity } from "./identity.ts";
+import { identityChanged, readUsableStore } from "./identity.ts";
+import { STORED_MULTIPLE } from "./stored.ts";
 
 /** Where events live on a store, and in a local mirror. */
 export const STORE_EVENTS_PREFIX = "meta/v1/events/";
@@ -63,6 +65,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 export const encodeEvent = (event: CatalogEvent): Uint8Array => encoder.encode(`${JSON.stringify(event)}\n`);
 
+/** How many `stored` entries a snapshot event has, or undefined for an event that names no location. */
+const storedCount = (event: CatalogEvent): number | undefined =>
+  event.type === "offloaded" || event.type === "checkpointed" || event.type === "snapshot-discarded"
+    ? Object.keys(event.stored).length
+    : undefined;
+
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -82,6 +90,15 @@ export const appendEvent = async (log: EventLog, event: CatalogEvent): Promise<R
       finding("contract.invalid", {
         message:
           "a new onloaded event must name the head it was written over (over, D43); nothing was written",
+        fix: "this is a bug in the command that wrote the event; report it with the message above",
+      }),
+    );
+  }
+  const entries = storedCount(checked.data);
+  if (entries !== undefined && entries !== 1) {
+    return fail(
+      finding("contract.invalid", {
+        message: `a new ${checked.data.type} event must name its snapshot's location in exactly one store, the one it is appended to (Q11), not ${entries}; nothing was written`,
         fix: "this is a bug in the command that wrote the event; report it with the message above",
       }),
     );
@@ -149,6 +166,16 @@ const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | 
   if (checked.data.id !== id) {
     return {
       finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`),
+      bytes: false,
+    };
+  }
+  const entries = storedCount(checked.data);
+  if (entries !== undefined && entries !== 1) {
+    return {
+      finding: skipped(
+        key,
+        `unsupported (${STORED_MULTIPLE}): it names its snapshot's location in ${entries} stores, and this version reads one, the store that holds the event (Q11)`,
+      ),
       bytes: false,
     };
   }
@@ -345,6 +372,8 @@ export interface LoadedCatalog {
   copied: number;
   /** Why the state is stale: the store's store.unreachable finding. */
   unreachable?: Finding;
+  /** The store's format (its meta/v1/store.json), when the store answered: what a writer keys `stored` by (Q11). */
+  format?: 1 | 2;
   /** Why the mirror was not used although the store was reachable; the state was read from the store directly. */
   mirrorFailure?: Finding;
 }
@@ -533,9 +562,12 @@ export const loadCatalog = async (options: {
       ? readOffline(mirror, options.storeId, failure.finding)
       : failure;
 
-  const identity = await readStoreIdentity(options.store);
+  const identity = await readUsableStore(options.store);
   if (!identity.ok) return offline(identity);
-  if (identity.value !== options.storeId) return identityChanged(options.storeId, identity.value, "store");
+  const found = identity.value?.id ?? null;
+  if (identity.value === null || found !== options.storeId)
+    return identityChanged(options.storeId, found, "store");
+  const { format } = identity.value;
 
   const synced = await syncDown(remote, mirror, options.storeId, options.now);
   let mirrorFailure: Finding | undefined;
@@ -548,6 +580,7 @@ export const loadCatalog = async (options: {
         findings,
         uncertain: uncertainEvents(findings),
         stale: false,
+        format,
         source: "store",
         syncedAt: options.now.toISOString(),
         copied: synced.value.copied,
@@ -568,6 +601,7 @@ export const loadCatalog = async (options: {
     uncertain: uncertainEvents(direct.value.findings),
     cached: false,
     stale: false,
+    format,
     source: "store",
     syncedAt: options.now.toISOString(),
     copied: 0,

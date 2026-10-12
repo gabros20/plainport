@@ -43,7 +43,7 @@ import {
 import { TEMP_SUFFIX } from "../atomic.ts";
 import { type CatalogEvent, OffloadedEventSchema } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
-import { identityChanged, readStoreIdentity } from "../catalog/identity.ts";
+import { identityChanged, readUsableStore } from "../catalog/identity.ts";
 import {
   appendEvent,
   eventForOp,
@@ -52,6 +52,7 @@ import {
   STORE_EVENTS_PREFIX,
   storeEventLog,
 } from "../catalog/log.ts";
+import { storedHere, storedKey } from "../catalog/stored.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import { deleteGuard } from "../delete-guard.ts";
 import type { Device } from "../device.ts";
@@ -434,8 +435,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     };
   }
 
-  /** The store the journal names, as this device set it up: the very store, by its identity (D45). */
-  async function storeOf(journal: Journal): Promise<Result<ConfiguredStore>> {
+  /**
+   * The store the journal names, as this device set it up: the very store, by its identity (D45), with its format,
+   * which keys the `stored` entry of an event recover writes there (Q11).
+   */
+  async function storeOf(journal: Journal): Promise<Result<ConfiguredStore & { format: 1 | 2 }>> {
     const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
     if (!loaded.ok) return loaded;
     const opened = await openStore(io, {
@@ -448,12 +452,13 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     if (!opened.ok) return opened;
     // The store itself says who it is (meta/v1/store.json), not this device's record of it: a disk swapped or a path
     // changed since is another store, which recover never writes to or reads a commit from.
-    const identity = await readStoreIdentity(opened.value.blob);
+    const identity = await readUsableStore(opened.value.blob);
     if (!identity.ok) return identity;
-    if (opened.value.id !== journal.store.id || identity.value !== journal.store.id) {
+    const found = identity.value?.id ?? null;
+    if (opened.value.id !== journal.store.id || identity.value === null || found !== journal.store.id) {
       const changed = identityChanged(
         journal.store.id,
-        identity.value === journal.store.id ? opened.value.id : identity.value,
+        found === journal.store.id ? opened.value.id : found,
         "store",
       );
       return withFix(
@@ -461,7 +466,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         `connect the store the ${journal.kind} ${journal.op} wrote to (stores.${journal.store.name}), then run plainport recover`,
       );
     }
-    return opened;
+    return ok({ ...opened.value, format: identity.value.format });
   }
 
   async function eventState(store: BlobStore, id: string, ours: (event: CatalogEvent) => boolean) {
@@ -570,7 +575,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       case "search-store": {
         const store = await storeOf(journal);
         if (!store.ok) return pending(journal, store);
-        if (rule === "discard") return discard(journal, store.value.blob);
+        if (rule === "discard")
+          return discard(journal, store.value.blob, storedKey(journal.store, store.value.format));
         if (rule === "fork") return keepFork(journal, store.value);
         if (rule === "commit-check") return commitCheck(journal, store.value.blob, lock);
         return searchStore(journal, store.value.blob, lock);
@@ -583,7 +589,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /** offload.snapshot.discarded: the snapshot-discarded event the store lacks is written (D28), then roll back. */
-  async function discard(journal: OffloadJournal, blob: BlobStore): Promise<Settled> {
+  async function discard(journal: OffloadJournal, blob: BlobStore, key: string): Promise<Settled> {
     const discarded = journal.discarded;
     if (discarded !== undefined) {
       const there = await eventState(
@@ -615,7 +621,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
           root: journal.project.rootId,
           path: journal.project.path,
           snapshot: journal.op,
-          stored: { [journal.store.name]: discarded.snapshot },
+          stored: { [key]: discarded.snapshot },
         });
         if (!written.ok) return pending(journal, written);
       }
@@ -636,7 +642,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
               e.op === journal.op &&
               e.snapshot === journal.op &&
               e.project === journal.project.id &&
-              (journal.verified === undefined || e.stored[journal.store.name] === journal.verified),
+              (journal.verified === undefined || storedHere(e.stored) === journal.verified),
           );
     if (!there.ok) return pending(journal, there);
     // Never appended: nothing was committed, and the folder was never touched (D24).
@@ -655,7 +661,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         e.type === "offloaded" &&
         e.op === journal.op &&
         e.project === journal.project.id &&
-        journal.attempts.includes(e.stored[journal.store.name] ?? ""),
+        journal.attempts.includes(storedHere(e.stored) ?? ""),
     );
     if (made === undefined) return rollBack(journal);
     const folded = foldCatalog(events.value.events).projects[journal.project.id];
@@ -669,7 +675,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     // nor a fork can be told yet, so the journal stays until the catalog is whole.
     if (folded === undefined || folded.head === null) return pending(journal, headUnknown(journal, folded));
     // The head is this snapshot, or one made from it since: committed.
-    return committed(journal, lock, { event: made.id, verified: made.stored[journal.store.name] as string });
+    return committed(journal, lock, { event: made.id, verified: storedHere(made.stored) as string });
   }
 
   function headUnknown(journal: OffloadJournal, folded: CatalogProject | undefined): Failure {
@@ -787,7 +793,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /** offload.diverged: the fork event the store lacks is appended, the folder stays, the journal goes. */
-  async function keepFork(journal: OffloadJournal, store: ConfiguredStore): Promise<Settled> {
+  async function keepFork(
+    journal: OffloadJournal,
+    store: ConfiguredStore & { format: 1 | 2 },
+  ): Promise<Settled> {
     const id = journal.event;
     const verified = journal.verified;
     if (id !== undefined && verified !== undefined) {
@@ -843,7 +852,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
           path: journal.project.path,
           ...(journal.base === undefined ? {} : { base: journal.base }),
           snapshot: journal.op,
-          stored: { [journal.store.name]: verified },
+          stored: { [storedKey(journal.store, store.format)]: verified },
           ...(rootMode === undefined ? {} : { rootMode }),
           stats: { files, bytes, strippedBytes: 0, ecosystems: [] },
         });

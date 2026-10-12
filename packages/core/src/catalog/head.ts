@@ -17,8 +17,11 @@ import type { Stub } from "../stub.ts";
 import type { CatalogProject, CatalogState } from "./fold.ts";
 import { loadCatalog } from "./log.ts";
 
-/** A catalog read for writing: the fold, and the events it left out that may change state (D86). */
-export type CatalogRead = CatalogState & { uncertain: readonly string[] };
+/**
+ * A catalog read for writing: the fold, the events it left out that may change state (D86), and the store's format,
+ * which keys the `stored` entry of the events written on top of it (Q11).
+ */
+export type CatalogRead = CatalogState & { uncertain: readonly string[]; format: 1 | 2 };
 
 const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? "" : "s"}`;
 
@@ -50,7 +53,7 @@ export const catalogReader =
           finding("store.unreachable", { message: `store ${options.storeName} could not be reached` }),
       );
     for (const f of read.value.findings) options.report(f);
-    return ok({ ...read.value.state, uncertain: read.value.uncertain });
+    return ok({ ...read.value.state, uncertain: read.value.uncertain, format: read.value.format ?? 1 });
   };
 
 /** Whether a readable event names `snapshot`: one the project holds, discarded, or named as a base it lacks. */
