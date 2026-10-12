@@ -41,6 +41,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import { TEMP_SUFFIX } from "../atomic.ts";
+import { UNOPENED_CODES } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
@@ -96,6 +97,7 @@ import { claimedReason, removeTrash } from "./trash.ts";
  * released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (the finding
  * says why); its journal stays for the next recover.
  */
+
 export const RECOVERY_OUTCOMES = [
   "rolled-back",
   "finished",
@@ -470,8 +472,20 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     return ok({ ...opened.value, format: identity.value.format });
   }
 
-  async function eventState(log: EventLog, id: string, ours: (event: CatalogEvent) => boolean) {
-    return eventForOp(log, id, ours);
+  /**
+   * eventForOp, except that an event this policy cannot open (catalog.seal-failed, catalog.unsealed-event) is a
+   * failure, so the step stays pending: it may be this operation's own event, and is never taken for an absent,
+   * torn or foreign one (review r1 I2), which would roll back a commit or write it twice.
+   */
+  async function eventState(
+    log: EventLog,
+    id: string,
+    ours: (event: CatalogEvent) => boolean,
+  ): Promise<Result<"absent" | "ours" | Finding>> {
+    const there = await eventForOp(log, id, ours);
+    if (there.ok && typeof there.value === "object" && UNOPENED_CODES.includes(there.value.code))
+      return fail(there.value);
+    return there;
   }
 
   /**
@@ -664,7 +678,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         e.project === journal.project.id &&
         journal.attempts.includes(storedHere(e.stored) ?? ""),
     );
-    if (made === undefined) return rollBack(journal);
+    if (made === undefined) {
+      // An event that does not open may be the one searched for: wait, never roll back (review r1 I2).
+      const unopened = events.value.findings.find((f) => UNOPENED_CODES.includes(f.code));
+      return unopened === undefined ? rollBack(journal) : pending(journal, fail(unopened));
+    }
     const folded = foldCatalog(events.value.events).projects[journal.project.id];
     // Forked only when the fold's conflicts name this snapshot (D61): the event keeps it as a fork, as
     // offload.diverged does, and the folder stays.

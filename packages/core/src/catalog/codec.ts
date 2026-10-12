@@ -244,3 +244,9 @@ export const SKIP_CODES: readonly string[] = [
   "catalog.unsealed-event",
   "catalog.seal-failed",
 ];
+
+/**
+ * The finding codes of an event this policy cannot open: what it says is unknown, so it may be the very event a step
+ * looks for. A step that relies on its own event waits on one, never takes it for an absent, torn or foreign event.
+ */
+export const UNOPENED_CODES: readonly string[] = ["catalog.seal-failed", "catalog.unsealed-event"];

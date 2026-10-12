@@ -19,6 +19,8 @@ import {
 import { basename, dirname, join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
+import { encode } from "../catalog/codec.ts";
+import { parseStoreIdentity } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
@@ -2972,5 +2974,70 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
     const view = await web({ opener: watching, env: {} });
     expect(view.stale).toBe(false);
     expect(seen).toEqual([""]);
+  });
+});
+
+describe("review r1 I2: a sealed event that does not open is never an absent or uncommitted one", () => {
+  // Sealed stores are format 2, which recover reads only from Task 18 on; today a sealed event reaches recover as one
+  // its policy cannot open (here, sealed on a plain store): catalog.seal-failed, the same finding a wrong key gives.
+  const KEY = new Uint8Array(32).fill(7);
+  const storeId = (): string => {
+    const parsed = parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array);
+    if (parsed === undefined) throw new Error("no store identity");
+    return parsed.id;
+  };
+  /** Seals every event on the store in place, and returns how to put the plain bytes back. */
+  const sealEvents = async (): Promise<() => void> => {
+    const policy = { seal: "sealed" as const, storeId: storeId(), key: KEY };
+    const plain = new Map<string, Uint8Array>();
+    for (const event of await storeEvents()) {
+      const key = `meta/v1/events/${event.id}.json`;
+      plain.set(key, store.data.get(key) as Uint8Array);
+      store.data.set(key, value(encode(event, policy)));
+    }
+    return () => {
+      for (const [key, bytes] of plain) store.data.set(key, bytes);
+    };
+  };
+  const expectPendingThenFinished = async (unseal: () => void) => {
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.finding?.code]).toEqual(["pending", "catalog.seal-failed"]);
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect(await journals()).toHaveLength(1);
+    unseal();
+    const [done] = reportOf(await recover(recoverDeps())).operations;
+    expect([done?.outcome, done?.state]).toEqual(["finished", "shelved"]);
+    await expectShelved();
+  };
+
+  test("commit.start, the event appended but not opening: pending, never rolled back", async () => {
+    await crashOffloadAt("offload.commit.appended");
+    await expectPendingThenFinished(await sealEvents());
+  });
+
+  test("an onloaded event that does not open is never written a second time under a new id", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    const host = testHost({ faults: { at: "onload.commit.appended" } });
+    await expect(
+      runOnload(onloadDeps(host), { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const unseal = await sealEvents();
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.finding?.code]).toEqual(["pending", "catalog.seal-failed"]);
+    expect(await journals()).toHaveLength(1);
+    unseal();
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+    const [done] = reportOf(await recover(recoverDeps())).operations;
+    expect(done?.outcome).toBe("finished");
+    expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
+  });
+
+  test("verified, commit.start lost, the event not opening: the store search waits, never rolls back", async () => {
+    await crashOffloadAt("offload.commit.appended");
+    const journal = onlyJournal<OffloadJournal>();
+    const { event: _e, ...rest } = journal;
+    await rewrite({ ...rest, step: "offload.verified" });
+    await expectPendingThenFinished(await sealEvents());
   });
 });

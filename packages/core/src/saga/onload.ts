@@ -56,6 +56,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogPolicy } from "../catalog/codec.ts";
+import { UNOPENED_CODES } from "../catalog/codec.ts";
 import type { CatalogProject } from "../catalog/fold.ts";
 import {
   type CatalogRead,
@@ -1504,6 +1505,12 @@ export const finishOnload = async (
     return withFix(
       held,
       `the files are in ${target}; run plainport recover once the store answers, to record the onload`,
+    );
+  // An event the store's policy cannot open may be this onload's own: it is never written a second time (review r1 I2).
+  if (typeof held.value === "object" && UNOPENED_CODES.includes(held.value.code))
+    return withFix(
+      fail(held.value),
+      `the files are in ${target}; check the store's catalog key, then run plainport recover to record the onload`,
     );
   if (typeof held.value === "object") {
     ctx.log("warn", `${held.value.message}; the onloaded event is written again under a new id`);
