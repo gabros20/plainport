@@ -48,7 +48,7 @@ import {
 import { ONLOAD_AFTER_EFFECT, ONLOAD_STEPS, type OnloadDeps, runOnload } from "../saga/onload.ts";
 import { releaseOffload } from "../saga/release.ts";
 import { runRestore } from "../saga/restore.ts";
-import { projectViews, type ViewDeps } from "../status/projects.ts";
+import { type ProjectCondition, projectViews, type ViewDeps } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
@@ -1191,7 +1191,11 @@ describe("status and ls views: every end state the sagas leave", () => {
     value(await offloadNow());
     await web();
     const stale = await web({ opener: unreachableOpener });
-    expect([stale.state, stale.stale, stale.conditions]).toEqual(["shelved", true, ["stale"]]);
+    expect([stale.state, stale.stale, stale.conditions]).toEqual([
+      "shelved",
+      true,
+      ["stale", "store-unreachable"],
+    ]);
     expect(stale.syncedAt).toBeDefined();
     expect(stale.head).not.toBeNull();
     // A device that never reached the store: an empty mirror.
@@ -1204,7 +1208,7 @@ describe("status and ls views: every end state the sagas leave", () => {
       "shelved",
       true,
       undefined,
-      ["never-synced"],
+      ["never-synced", "store-unreachable"],
     ]);
   });
 
@@ -2877,5 +2881,96 @@ describe("round 3 minors: a refused detached delete is said, and keeps its deadl
     const [after] = (await journals()) as OffloadJournal[];
     expect([after?.op, after?.step, after?.keepUntil]).toEqual([op, "offload.release.delete", keepUntil]);
     expect(existsSync(join(trash, "web/src/main.ts"))).toBe(true);
+  });
+});
+
+describe("views read the mirror first and never resolve a secret (Task 13)", () => {
+  const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
+    io: testHost(),
+    paths: box.paths,
+    env: env(),
+    device,
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: async () => ({ ok: true, value: mirror }),
+    providerDeadlineMs: 50,
+    ...over,
+  });
+  const web = async (over: Partial<ViewDeps> = {}) => {
+    const views = value(await projectViews(viewDeps(over)));
+    const view = views.projects.find((p) => p.address === "work:web");
+    if (view === undefined) throw new Error(`no view of work:web in ${JSON.stringify(views)}`);
+    return view;
+  };
+  const closed = (code: "store.unreachable" | "store.secret-missing" | "store.seal-key-unavailable") => {
+    const failure = fail(finding(code, { message: `${code} for the test`, fix: "fix it" }));
+    return { failure, opener: { open: async () => failure } as StoreOpener };
+  };
+  const gone: StoreOpener = {
+    open: async () => {
+      const failure = fail(finding("store.unreachable", { message: "the network is down" }));
+      return {
+        ok: true,
+        value: {
+          blob: { ...store, get: async () => failure, stat: async () => failure, list: async () => failure },
+          engine,
+        },
+      };
+    },
+  };
+  const hanging: StoreOpener = { open: () => new Promise(() => {}) };
+
+  const cases: [string, StoreOpener, ProjectCondition][] = [
+    ["network loss", gone, "store-unreachable"],
+    ["a missing op", closed("store.secret-missing").opener, "secret-unavailable"],
+    ["a signed-out op", closed("store.secret-missing").opener, "secret-unavailable"],
+    ["a denied Keychain read", closed("store.secret-missing").opener, "secret-unavailable"],
+    ["a missing password", closed("store.secret-missing").opener, "secret-unavailable"],
+    ["a provider that never answers", hanging, "secret-unavailable"],
+    ["a key derivation failure", closed("store.seal-key-unavailable").opener, "seal-key-unavailable"],
+  ];
+
+  for (const [name, failing, condition] of cases) {
+    test(`${name}: the mirror's project with ${condition}, and a write command refuses`, async () => {
+      value(await offloadNow());
+      await web();
+      const view = await web({ opener: failing });
+      expect([view.state, view.stale, view.conditions]).toEqual(["shelved", true, ["stale", condition]]);
+      expect(view.head).not.toBeNull();
+      const detail = view.conditionDetails.find((d) => d.condition === condition);
+      expect(detail?.finding?.code).toBeDefined();
+      // The write path never reads the mirror in place of the store.
+      if (failing === hanging) return;
+      const refused = await runOffload(
+        { ...offloadDeps(testHost()), opener: failing },
+        { project: await ref() },
+      );
+      expect(refused.ok).toBe(false);
+    });
+  }
+
+  test("a never-synced store: an empty mirror, never-synced beside the cause", async () => {
+    value(await offloadNow());
+    const empty = memoryBlobStore({ createIfAbsent: true });
+    const view = await web({ opener: gone, openMirror: async () => ({ ok: true, value: empty }) });
+    expect([view.stale, view.syncedAt, view.conditions]).toEqual([
+      true,
+      undefined,
+      ["never-synced", "store-unreachable"],
+    ]);
+  });
+
+  test("no secret is asked for: the opener gets no password", async () => {
+    value(await offloadNow());
+    const seen: string[] = [];
+    const watching: StoreOpener = {
+      open: async (n, s, password) => {
+        seen.push(password);
+        return opener.open(n, s, password);
+      },
+    };
+    const view = await web({ opener: watching, env: {} });
+    expect(view.stale).toBe(false);
+    expect(seen).toEqual([""]);
   });
 });

@@ -30,8 +30,16 @@ import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok, shellWord } from "@plainport/contract";
 import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
-import { eventAt, loadCatalog, mirrorEventLog } from "../catalog/log.ts";
+import {
+  eventAt,
+  type LoadedCatalog,
+  loadCatalog,
+  mirrorEventLog,
+  OFFLINE_CODES,
+  readMirrorCatalog,
+} from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
+import { realScheduler, type Scheduler, withinDeadline } from "../deadline.ts";
 import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, type OffloadJournal, readJournals } from "../journal/index.ts";
@@ -41,15 +49,17 @@ import { type BlobStore, capabilitiesOf, UNKNOWN_SEMANTICS } from "../ports/blob
 import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
-import type { StoreOpener } from "../ports/store.ts";
+import type { OpenedStore, StoreOpener } from "../ports/store.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
-import { resolveSecret, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
+
+/** How long opening a store or reading its catalog may take before the mirror stands in for it (Q14). */
+export const PROVIDER_DEADLINE_MS = 30_000;
 
 export interface ViewDeps {
   /** The host's files and processes, and its boot session, which says whether a trash's claim is live (Q5 i). */
@@ -63,6 +73,9 @@ export interface ViewDeps {
   /** This device's event mirror for the store with this id (blob-fs's openEventMirror). */
   openMirror(storeId: string): Promise<Result<BlobStore>>;
   now?: () => Date;
+  /** Bounds opening a store and reading its catalog (Q14): 30 seconds unless a test says otherwise. */
+  providerDeadlineMs?: number;
+  scheduler?: Scheduler;
   /** The ecosystem plugins: their dependency folders are never walked when a folder is sized. */
   plugins?: readonly EcosystemPlugin[];
   /** For a view's local details (`detail`): the offload's read-only planning runs on this host. */
@@ -79,6 +92,9 @@ export const PROJECT_CONDITIONS = [
   "folder-missing",
   "stale",
   "never-synced",
+  "secret-unavailable",
+  "store-unreachable",
+  "seal-key-unavailable",
   "catalog-unreadable",
   "journal-unreadable",
 ] as const;
@@ -226,6 +242,22 @@ const failingStore = (failure: Failure): BlobStore => ({
   delete: async () => failure,
 });
 
+/** What kept a store from being asked, by the finding that says so: the condition beside stale or never-synced. */
+const CAUSES: Record<string, { condition: ProjectCondition; message: (store: string) => string }> = {
+  "store.secret-missing": {
+    condition: "secret-unavailable",
+    message: (store) => `store ${store}'s secret could not be read (missing, signed out, denied or too slow)`,
+  },
+  "store.unreachable": {
+    condition: "store-unreachable",
+    message: (store) => `store ${store} cannot be reached`,
+  },
+  "store.seal-key-unavailable": {
+    condition: "seal-key-unavailable",
+    message: (store) => `store ${store}'s seal key could not be derived`,
+  },
+};
+
 /** Every project this device knows, read once; each one's view is built when asked for (see the file comment). */
 export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> => {
   const { io, paths, device } = deps;
@@ -262,22 +294,55 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
   for (const [name, id] of Object.entries(registry.value.stores ?? {})) {
     const store = config.stores[name];
     if (store === undefined) continue;
-    // The catalog needs no password; the engine, which does, is never used here.
-    const password = await resolveSecret(io, deps.env, paths.home, name, secretRefOf(store));
-    const opened = await deps.opener.open(name, store, password.ok ? password.value : "");
-    if (!opened.ok) {
-      stores.push({ name, id, stale: true, finding: opened.finding });
-      continue;
-    }
-    // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45).
+    // The mirror first, by the pinned store id (Task 13): no secret is resolved, no engine opened, no seal key derived
+    // to read it. The catalog needs no password, so none is asked for; a provider the store's own credentials need
+    // answers inside the opener, bounded by Q14's deadline.
     const mirror = await deps.openMirror(id);
-    const read = await loadCatalog({
-      store: opened.value.blob,
-      mirror: mirror.ok ? mirror.value : failingStore(mirror),
-      storeId: id,
-      now,
-      ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
-    });
+    const mirrorBlob = mirror.ok ? mirror.value : failingStore(mirror);
+    const deadline = deps.providerDeadlineMs ?? PROVIDER_DEADLINE_MS;
+    const scheduler = deps.scheduler ?? realScheduler;
+    const timedOut = (
+      seconds: number,
+      code: "store.secret-missing" | "store.unreachable",
+      what: string,
+    ): Failure =>
+      fail(
+        finding(code, {
+          message: `${what} did not answer within ${seconds} seconds`,
+          fix: `check the store ${name}, then re-run`,
+        }),
+      );
+    const opening = await withinDeadline(deps.opener.open(name, store, ""), deadline, scheduler);
+    const opened: Result<OpenedStore> = opening.timedOut
+      ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
+      : opening.value;
+    let read: Result<LoadedCatalog>;
+    if (!opened.ok) {
+      // A store that cannot be asked is read from the mirror, stale, with the reason beside it.
+      read = OFFLINE_CODES.includes(opened.finding.code)
+        ? await readMirrorCatalog({ mirror: mirrorBlob, storeId: id, reason: opened.finding })
+        : opened;
+    } else {
+      // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45).
+      const loading = await withinDeadline(
+        loadCatalog({
+          store: opened.value.blob,
+          mirror: mirrorBlob,
+          storeId: id,
+          now,
+          ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
+        }),
+        deadline,
+        scheduler,
+      );
+      read = loading.timedOut
+        ? await readMirrorCatalog({
+            mirror: mirrorBlob,
+            storeId: id,
+            reason: timedOut(loading.seconds, "store.unreachable", `store ${name}`).finding,
+          })
+        : loading.value;
+    }
     if (!read.ok) {
       stores.push({ name, id, stale: true, finding: read.finding });
       continue;
@@ -436,6 +501,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       if (read.syncedAt === undefined)
         note("never-synced", `store ${read.store} did not answer and was never synced`, why);
       else note("stale", `store ${read.store} did not answer; the catalog is as of ${read.syncedAt}`, why);
+      const cause = CAUSES[why?.code ?? ""];
+      if (cause !== undefined) note(cause.condition, cause.message(read.store), why);
     }
     // Its store's catalog could not be read at all, from the store or the mirror: nothing here is current.
     const unreadStore = read === undefined ? storeOfRoot(entry) : undefined;

@@ -274,6 +274,12 @@ describe("findings", () => {
         exitCode: 6,
         summary: expect.any(String),
       },
+      "store.seal-key-unavailable": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.secret-missing": {
         severity: "block",
         allowable: false,

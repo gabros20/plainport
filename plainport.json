@@ -584,7 +584,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
                 },
                 "dir": {
                   "description": "Its folder on this device",
@@ -869,7 +869,7 @@
                     "properties": {
                       "condition": {
                         "type": "string",
-                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable; an open set"
                       },
                       "message": {
                         "type": "string"
@@ -1115,7 +1115,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project)"
           },
           "dir": {
             "description": "Its folder on this device",
@@ -1400,7 +1400,7 @@
               "properties": {
                 "condition": {
                   "type": "string",
-                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, catalog-unreadable, journal-unreadable; an open set"
+                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable; an open set"
                 },
                 "message": {
                   "type": "string"
@@ -5205,6 +5205,13 @@
       "allowable": false,
       "exitCode": 6,
       "summary": "The store's repository password could not be read from its secret reference (env: or file: in M1)"
+    },
+    {
+      "code": "store.seal-key-unavailable",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The store's seal key could not be derived (its secret is unreadable or the derivation failed); views then read the device's mirror and say so, and commands that write refuse"
     },
     {
       "code": "store.semantics-unknown",
