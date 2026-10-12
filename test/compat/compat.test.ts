@@ -3,6 +3,9 @@
 // Both binaries are compiled with the crash matrix's test hook (test/compat/binaries.ts), run against one sandboxed
 // home in turn, and the restic is the pinned one. A test title starts with the ids of the matrix rows it proves,
 // "[store.json.v1] ...", which matrix.test.ts checks against DESIGN; a `test.todo` is a row a later task owns.
+//
+// macOS only: v0.1.1 is a macOS release, and both binaries' offload checks placeholders with BSD find's -flags, so on
+// Linux every offload refuses at resolve with fs.dataless (exit 6) before it writes anything.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
@@ -46,7 +49,7 @@ import { testHost } from "../../packages/host-macos/src/testing.ts";
 import { installVersion, layout, removeInstall, rollback } from "../../scripts/install.ts";
 import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
-import { describeT1 } from "../tiers.ts";
+import { describeT1Mac } from "../tiers.ts";
 import { currentBinary, released, releasedBinary, toolsCopy } from "./binaries.ts";
 import { type Binaries, envelope, expectOk, PASSWORD, type Ran, treeDigest, World } from "./world.ts";
 
@@ -155,7 +158,7 @@ const goneAfter = async (trash: string, ms = 15_000): Promise<number | undefined
   return (await waitUntil(() => !existsSync(trash), ms)) ? Date.now() - start : undefined;
 };
 
-describeT1("compat: v0.2 and the released v0.1.1", () => {
+describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
   beforeAll(() => {
     scratch = mkdtempSync(join(tmpdir(), "plainport-compat-"));
     bins = {

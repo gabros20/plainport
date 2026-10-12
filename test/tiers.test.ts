@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
-import { environmentGate, resticUnderTest, testenvDir, tierEnabled } from "./tiers.ts";
+import { environmentGate, resticUnderTest, t1MacEnabled, testenvDir, tierEnabled } from "./tiers.ts";
 
 const checkout = join(import.meta.dir, "..");
 
@@ -14,6 +14,16 @@ test("T1 suites are skipped unless PLAINPORT_TEST_TIER is 1 or higher", () => {
   expect(tierEnabled(1, { PLAINPORT_TEST_TIER: "2" })).toBe(true);
   expect(tierEnabled(2, { PLAINPORT_TEST_TIER: "1" })).toBe(false);
   expect(tierEnabled(1, { PLAINPORT_TEST_TIER: "yes" })).toBe(false);
+});
+
+// The suites against the released v0.1.1 run plainport's offload, whose placeholder check is BSD find's -flags: on
+// Linux both binaries refuse at resolve with fs.dataless, so such a suite is macOS-only as well as T1.
+test("macOS-only T1 suites run at tier 1 on darwin only", () => {
+  const t1 = { PLAINPORT_TEST_TIER: "1" };
+  expect(t1MacEnabled(t1, "darwin")).toBe(true);
+  expect(t1MacEnabled(t1, "linux")).toBe(false);
+  expect(t1MacEnabled({}, "darwin")).toBe(false);
+  expect(t1MacEnabled({ PLAINPORT_TEST_TIER: "2" }, "darwin")).toBe(true);
 });
 
 describe("tiers: T2 and T3 gating", () => {

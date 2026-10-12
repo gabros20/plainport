@@ -1,6 +1,8 @@
 // The matrix against DESIGN.md and the test sources (T0), and the guard that fails the M2 gate while a todo remains.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { compatSources, INVENTORY, matrixRows, readDesign, remainingTodos, testsIn } from "./matrix.ts";
 
 describe("compat matrix: DESIGN.md's Formats and compatibility", () => {
@@ -34,6 +36,15 @@ describe("compat matrix: DESIGN.md's Formats and compatibility", () => {
       const says = /^todo: Task \d+/.test(row.cells[5] as string);
       expect(says, `${row.id}: the Test column and the test.todo entries disagree`).toBe(todoIds.has(row.id));
     }
+  });
+});
+
+describe("compat matrix: where the suite runs", () => {
+  // v0.1.1 is a macOS release: its offload (and v0.2's, until a Linux host lands) checks placeholders with BSD find's
+  // -flags, which GNU find lacks, so on Linux every offload refuses with fs.dataless before it writes anything.
+  test("the suite against the real v0.1.1 is macOS-only", () => {
+    const source = readFileSync(join(import.meta.dir, "compat.test.ts"), "utf8");
+    expect(source).toContain('describeT1Mac("compat: v0.2 and the released v0.1.1"');
   });
 });
 
