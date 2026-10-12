@@ -66,6 +66,7 @@ export const NEW_SCHEMAS: Readonly<Record<string, string>> = {
   "trash-claim-boot": "claim.boot",
   "election-record": "store.election",
   "store-semantics": "store.sidecar",
+  "store-state": "store.sidecar",
   "bootstrap-journal": "journal.bootstrap",
 };
 /** Schemas that exist at v0.1.1 and differ now, with their row. A changed file schema is a compatibility event. */

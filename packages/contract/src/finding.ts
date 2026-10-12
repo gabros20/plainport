@@ -45,7 +45,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "A catalog event file is not JSON, does not match its schema, is named for another id, or has a type this version does not know; it is left out of the fold and never changed",
+      "A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, or names its snapshot's location in zero or several stores (stored-multiple, Q11); it is left out of the fold and never changed",
   },
   "catalog.head-uncertain": {
     severity: "block",
@@ -603,7 +603,8 @@ export const FINDINGS = Object.freeze({
     severity: "block",
     allowable: false,
     exitCode: 11,
-    summary: "Another plainport process on this device is setting this store up",
+    summary:
+      "Another plainport process on this device is setting this store up, or changing this device's record of it (stores/<store id>.json)",
   },
   "store.not-set-up": {
     severity: "block",
@@ -653,6 +654,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable",
+  },
+  "store.state-invalid": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "This device's record of a store (stores/<store id>.json under the state folder: its seal pin, measured semantics and last test) cannot be read or is not valid; plainport never overwrites it",
   },
   "store.unreachable": {
     severity: "block",
