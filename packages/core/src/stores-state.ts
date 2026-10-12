@@ -88,7 +88,7 @@ const invalid = (path: string, reason: string) =>
   fail(
     finding("store.state-invalid", {
       message: `${path}, this device's record of a store, ${reason}; it was left as it is`,
-      fix: `restore ${path} from a backup, or move it aside: the store's seal policy is then pinned again at the next contact and its semantics measured again`,
+      fix: `restore ${path} from a backup. Moving it aside instead re-pins whatever seal policy the store shows at the next contact, so a store whose policy was weakened meanwhile would be trusted: do that only once you have checked the store's meta/v1/store.json says the seal policy you set it up with`,
       paths: [path],
     }),
   );
@@ -115,20 +115,31 @@ const readFile = async (io: LocalIo, path: string, storeId: string): Promise<Res
 };
 
 /**
- * What this device keeps about the store (an empty record when nothing yet). Given the facts the caller reaches the
- * store with now, a measurement made under other facts is left out: it no longer holds.
+ * What this device keeps about the store (an empty record when nothing yet), as it holds for the facts the caller
+ * reaches the store with now: a measurement made under other facts is left out. The facts are required, so no reader
+ * can trust a measurement without them; readStoreSeal reads the pin alone.
  */
 export const readStoreState = async (
   io: LocalIo,
   paths: PlainportPaths,
   storeId: string,
-  facts?: StoreFacts,
+  facts: StoreFacts,
 ): Promise<Result<StoreState>> => {
   const read = await readFile(io, storeStateFile(paths, storeId), storeId);
-  if (!read.ok || facts === undefined || read.value.measured === undefined) return read;
+  if (!read.ok || read.value.measured === undefined) return read;
   if (sameFacts(read.value.measured.facts, facts)) return read;
   const { measured: _stale, ...rest } = read.value;
   return ok(rest);
+};
+
+/** The seal policy pinned for the store, undefined before the first contact; needs no facts (the pin never expires). */
+export const readStoreSeal = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+  storeId: string,
+): Promise<Result<{ policy: SealPolicy; at: string } | undefined>> => {
+  const read = await readFile(io, storeStateFile(paths, storeId), storeId);
+  return read.ok ? ok(read.value.seal) : read;
 };
 
 /** Applies `change` to the store's record under its lock, atomically; returns what was written. */

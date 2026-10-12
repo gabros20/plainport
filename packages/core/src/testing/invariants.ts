@@ -48,7 +48,8 @@ export interface InvariantSubject {
   project: { id: string | undefined; dir: string };
   /** The folders whose .plainport-trash and .plainport-staging are checked: the project's root. */
   roots: readonly string[];
-  store: { name: string; blob: BlobStore; engine: Engine };
+  /** `aliases`: this device's other names for the same store, whose events key `stored` by them (Q11, format 1). */
+  store: { name: string; aliases?: readonly string[]; blob: BlobStore; engine: Engine };
   /** The folder as it stood when release began (captureTree at offload.release.trash). Required once it is gone. */
   released?: TreeCapture;
   /** Paths left out of the snapshot on purpose (the strip set), relative to the folder. */
@@ -248,16 +249,19 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
   // The writers' rule for `stored` (Q11): what this device appended is keyed as the store's format says.
   const descriptor = await readStoreDescriptor(subject.store.blob);
   if (descriptor.ok && descriptor.value !== null) {
-    const key = storedKey({ name: subject.store.name, id: descriptor.value.id }, descriptor.value.format);
+    const { id, format } = descriptor.value;
+    const keys = new Set(
+      [subject.store.name, ...(subject.store.aliases ?? [])].map((name) => storedKey({ name, id }, format)),
+    );
     for (const e of read.value.events)
       if (
         e.device === subject.device &&
         (e.type === "offloaded" || e.type === "checkpointed" || e.type === "snapshot-discarded")
       ) {
-        const keys = Object.keys(e.stored);
-        if (keys.length !== 1 || keys[0] !== key)
+        const named = Object.keys(e.stored);
+        if (named.length !== 1 || !keys.has(named[0] as string))
           problems.push(
-            `stored (Q11): the ${e.type} event ${e.id} is keyed ${JSON.stringify(keys)}, not [${JSON.stringify(key)}] (format ${descriptor.value.format})`,
+            `stored (Q11): the ${e.type} event ${e.id} is keyed ${JSON.stringify(named)}, not one of ${JSON.stringify([...keys])} (format ${format})`,
           );
       }
   }
