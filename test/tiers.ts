@@ -96,6 +96,19 @@ export const describeT1 = (name: string, fn: () => void): void => {
   describe.skipIf(!tierEnabled(1))(`[t1] ${name}`, fn);
 };
 
+/** Whether a macOS-only T1 suite runs: at tier 1 or higher, on darwin. */
+export const t1MacEnabled = (env: Env = process.env, platform: string = process.platform): boolean =>
+  tierEnabled(1, env) && platform === "darwin";
+
+/**
+ * A T1 suite that needs macOS as well as real binaries: one running plainport's offload end to end, whose placeholder
+ * check is BSD find's -flags (host-macos), so that off darwin every offload refuses with fs.dataless. Skipped elsewhere,
+ * as below its tier; its name starts with "[t1] [macOS]". On a Mac it always runs, so a skip never passes for one.
+ */
+export const describeT1Mac = (name: string, fn: () => void): void => {
+  describe.skipIf(!t1MacEnabled())(`[t1] [macOS] ${name}`, fn);
+};
+
 /** A suite that needs the T2 containers (`scripts/testenv up`). Its name starts with "[t2]". */
 export const describeT2 = (name: string, fn: () => void): void => describeGated(2, name, fn);
 

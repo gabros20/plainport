@@ -152,7 +152,9 @@ write the checkout, and it needs the tag and its history (`fetch-depth: 0` in CI
 published files from `test/fixtures/compat-v0.1.1/`, so it needs neither.
 
 - `PLAINPORT_TEST_TIER=1 bun test test/compat` runs the binaries and the T0 checks (DESIGN against the tests, the
-  schemas against the vendored tag files).
+  schemas against the vendored tag files). The binaries' half runs on macOS only (`describeT1Mac`): v0.1.1 is a macOS
+  release, and both versions' offload checks placeholders with BSD find's `-flags`, so on Linux (CI's `linux` job)
+  every offload refuses with `fs.dataless` and the suite is skipped; the T0 checks run everywhere.
 - `bun test test/compat` runs the T0 checks alone.
 - `bun run test:t1 -t compat` is not used: `-t` loads every suite, and the home tripwire's temp-folder leak check then
   fails on suites that never ran.
