@@ -29,9 +29,8 @@
 import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok, shellWord } from "@plainport/contract";
-import { OffloadedEventSchema } from "../catalog/events.ts";
 import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
-import { loadCatalog, MIRROR_EVENTS_PREFIX } from "../catalog/log.ts";
+import { eventAt, loadCatalog, mirrorEventLog } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
@@ -277,6 +276,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       mirror: mirror.ok ? mirror.value : failingStore(mirror),
       storeId: id,
       now,
+      ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
     });
     if (!read.ok) {
       stores.push({ name, id, stale: true, finding: read.finding });
@@ -457,17 +457,11 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     let strippedBytes: number | undefined;
     const made = head === null ? undefined : catalog?.snapshots[head];
     if (made !== undefined && read?.mirror !== undefined) {
-      const got = await read.mirror.get(`${MIRROR_EVENTS_PREFIX}${made.event}.json`);
-      if (got.ok && got.value !== null) {
-        try {
-          const parsed = OffloadedEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
-          if (parsed.success) {
-            bytes = parsed.data.stats.bytes;
-            strippedBytes = parsed.data.stats.strippedBytes;
-          }
-        } catch {
-          // Not an event: no size.
-        }
+      const got = await eventAt(mirrorEventLog(read.mirror), made.event);
+      // Not an event: no size.
+      if (got.ok && got.value !== null && "event" in got.value && got.value.event.type === "offloaded") {
+        bytes = got.value.event.stats.bytes;
+        strippedBytes = got.value.event.stats.strippedBytes;
       }
     }
     // Never offloaded, here: the folder's own size now, without its dependency folders, when sizes are shown.

@@ -230,6 +230,12 @@ describe("findings", () => {
         exitCode: 6,
         summary: expect.any(String),
       },
+      "catalog.unsealed-event": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "catalog.head-uncertain": {
         severity: "block",
         allowable: false,

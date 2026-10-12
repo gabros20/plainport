@@ -4570,6 +4570,13 @@
       "summary": "A sealed catalog event cannot be sealed or opened: its envelope or key derivation is a version this build does not know, its key id is not this store's, or it fails authentication (changed, or moved to another event key or store). Nothing is guessed and no key is substituted; the event is left unread (Catalog seal v1)"
     },
     {
+      "code": "catalog.unsealed-event",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "A plaintext catalog event sits on a store whose catalog is sealed. It is never read, since anyone who can write to the store could have put it there; it is left out of the fold and never changed, and the fold is not known to be whole (D86)"
+    },
+    {
       "code": "catalog.incomplete",
       "severity": "block",
       "allowable": false,

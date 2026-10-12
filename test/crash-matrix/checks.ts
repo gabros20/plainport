@@ -11,6 +11,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import type { CatalogPolicy } from "../../packages/core/src/catalog/codec.ts";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
@@ -35,7 +36,7 @@ export interface World {
   dir: string;
   /** The root's folder on this device. */
   root: string;
-  store: { name: string; blob: BlobStore; engine: Engine };
+  store: { name: string; blob: BlobStore; engine: Engine; catalog?: CatalogPolicy };
   /** Where to restore the head to compare it: on the project's own volume (a case pair needs a case-sensitive one). */
   scratch?: string;
 }
@@ -198,7 +199,7 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
   );
 
   // Invariants 4–6.
-  const read = await readEvents(storeEventLog(world.store.blob));
+  const read = await readEvents(storeEventLog(world.store.blob, world.store.catalog));
   if (!read.ok) return [...problems, `the store's events cannot be read: ${read.finding.message}`];
   const events = read.value.events;
   problems.push(
@@ -274,7 +275,7 @@ export const laterHeadProblems = async (
   orphan: "none" | "kept" = "none",
 ): Promise<string[]> => {
   const problems: string[] = [];
-  const read = await readEvents(storeEventLog(world.store.blob));
+  const read = await readEvents(storeEventLog(world.store.blob, world.store.catalog));
   if (!read.ok) return [`the store's events cannot be read: ${read.finding.message}`];
   const events = read.value.events;
   for (const e of events)

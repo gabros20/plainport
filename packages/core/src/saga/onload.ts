@@ -55,6 +55,7 @@ import {
   type StreamEvent,
   shellWord,
 } from "@plainport/contract";
+import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { CatalogProject } from "../catalog/fold.ts";
 import {
   type CatalogRead,
@@ -359,6 +360,7 @@ const onloadFlow = async (
     storeId: store.id,
     storeName: store.name,
     now: clock,
+    ...(store.catalog === undefined ? {} : { policy: store.catalog }),
     report,
   });
 
@@ -617,7 +619,8 @@ const onloadFlow = async (
     };
     if (reuse !== undefined) {
       // Renamed back, not listed: the totals are the snapshot's, as its event recorded them.
-      const produced = made.event === undefined ? undefined : await producedBy(store.blob, made.event);
+      const produced =
+        made.event === undefined ? undefined : await producedBy(store.blob, made.event, store.catalog);
       out.files = produced?.stats.files ?? 0;
       out.bytes = produced?.stats.bytes ?? 0;
       if (collect) {
@@ -643,6 +646,7 @@ const onloadFlow = async (
       io,
       engine: store.engine,
       store: store.blob,
+      ...(store.catalog === undefined ? {} : { catalog: store.catalog }),
       stored,
       ...(made.event === undefined ? {} : { event: made.event }),
       ctx: how.collect ? { op, ...(signal === undefined ? {} : { signal }), emit: () => {} } : how.ctx,
@@ -1251,6 +1255,7 @@ const onloadFlow = async (
       env: deps.env,
       saga,
       store: store.blob,
+      ...(store.catalog === undefined ? {} : { catalog: store.catalog }),
       device: device.id,
       clock,
       log: deps.log,
@@ -1389,8 +1394,9 @@ export interface FinishContext {
   env: Env;
   /** The onload's saga, past its swap: its journal says what is left to do. */
   saga: Saga<OnloadJournal, OnloadStep>;
-  /** The store's catalog events. */
+  /** The store's catalog events, under its policy (plain when absent). */
   store: BlobStore;
+  catalog?: CatalogPolicy;
   /** This device's id, for the onloaded event. */
   device: string;
   clock(): Date;
@@ -1493,7 +1499,7 @@ export const finishOnload = async (
     if (!starting.ok) return starting;
   }
   const held = await eventForOp(
-    storeEventLog(ctx.store),
+    storeEventLog(ctx.store, ctx.catalog),
     eventId,
     (e) => e.type === "onloaded" && e.op === journal.op && e.project === journal.project.id,
   );
@@ -1509,7 +1515,7 @@ export const finishOnload = async (
     if (!again.ok) return again;
   }
   if (held.value !== "ours") {
-    const appended = await appendEvent(storeEventLog(ctx.store), {
+    const appended = await appendEvent(storeEventLog(ctx.store, ctx.catalog), {
       v: 1,
       id: eventId,
       type: "onloaded",

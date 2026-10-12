@@ -23,6 +23,7 @@
 
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
+import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogState, foldCatalog } from "../catalog/fold.ts";
 import { readEvents, storeEventLog } from "../catalog/log.ts";
@@ -42,7 +43,7 @@ export interface InvariantSubject {
   project: { id: string | undefined; dir: string };
   /** The folders whose .plainport-trash and .plainport-staging are checked: the project's root. */
   roots: readonly string[];
-  store: { name: string; blob: BlobStore; engine: Engine };
+  store: { name: string; blob: BlobStore; engine: Engine; catalog?: CatalogPolicy };
   /** The folder as it stood when release began (captureTree at offload.release.trash). Required once it is gone. */
   released?: TreeCapture;
   /** Paths left out of the snapshot on purpose (the strip set), relative to the folder. */
@@ -145,7 +146,7 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
   const problems: string[] = [];
   const { dir, id } = subject.project;
   const gone = !present(dir);
-  const read = await readEvents(storeEventLog(subject.store.blob));
+  const read = await readEvents(storeEventLog(subject.store.blob, subject.store.catalog));
   if (!read.ok) return [`the store's events could not be read: ${read.finding.message}`];
   const state = foldCatalog(read.value.events);
   const project = id === undefined ? undefined : state.projects[id];
