@@ -3137,6 +3137,47 @@ describe("review r1 I2: a sealed event that does not open is never an absent or 
     expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
   });
 
+  // Review r1 I3: a torn sealed envelope never opens, so it cannot be completed in place; like a torn plain event it
+  // is no record, and the onloaded event is written again under a new id, journaled first (DESIGN, Recover).
+  test("a torn sealed onloaded event is written again under a new id, never retried in place", async () => {
+    const policy = { seal: "sealed" as const, storeId: storeId(), key: KEY };
+    const sealedOpener: StoreOpener = {
+      open: async () => ({ ok: true, value: { blob: store, engine, catalog: policy } }),
+    };
+    const host = testHost({ faults: { onStep: capture } });
+    value(await runOffload({ ...offloadDeps(host), opener: sealedOpener }, { project: await ref() }));
+    await waitJournalsGone();
+    const crash = testHost({ faults: { at: "onload.commit.start" } });
+    await expect(
+      runOnload({ ...onloadDeps(crash), opener: sealedOpener }, { project: await ref(), hydrate: false }),
+    ).rejects.toBeInstanceOf(InjectedFault);
+    const journal = onlyJournal<OnloadJournal>();
+    const whole = value(
+      encode(
+        {
+          v: 1,
+          id: journal.event as string,
+          type: "onloaded",
+          device: device.id,
+          at: "2026-10-12T00:00:00.000Z",
+          op: journal.op,
+          project: journal.project.id,
+          root: journal.project.rootId,
+          path: journal.project.path,
+          base: journal.snapshot,
+          ...(journal.over === undefined ? {} : { over: journal.over }),
+        } as CatalogEvent,
+        policy,
+      ),
+    );
+    store.data.set(`meta/v1/events/${journal.event}.json`, whole.subarray(0, whole.length - 20));
+    const [op] = reportOf(await recover(recoverDeps({ opener: sealedOpener }))).operations;
+    expect(op?.outcome).toBe("finished");
+    const read = value(await readEvents(storeEventLog(store, policy)));
+    expect(read.events.filter((e) => e.type === "onloaded").map((e) => e.id)).not.toContain(journal.event);
+    expect(read.events.filter((e) => e.type === "onloaded")).toHaveLength(1);
+  });
+
   test("an onloaded event that does not open is never written a second time under a new id", async () => {
     value(await offloadNow());
     await waitJournalsGone();
