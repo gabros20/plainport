@@ -115,6 +115,11 @@ export const ALL_ELIGIBLE: Readonly<Record<StoreOperation, Expected>> = Object.f
 export interface ContractOptions extends SemanticProbeOptions {
   /** Per operation, what this backend's profile gives. */
   eligibility: Readonly<Record<StoreOperation, Expected>>;
+  /**
+   * How long the semantic probe test is given (milliseconds; default bun's 5 s). Its hundreds of synced writes take
+   * seconds on a slow volume, such as the exFAT disk image on a CI runner.
+   */
+  probeTimeout?: number;
 }
 
 const PUBLICATION_PROBE_BYTES = 256 * 1024;
@@ -372,9 +377,13 @@ export const blobStoreContract = (
       expect(store.capabilities()).toEqual(capabilitiesOf(semantics));
     });
 
-    test("semantics: what the profile claims holds when probed", async () => {
-      expect(await semanticViolations(store, { settle: fixture.settle }, options)).toEqual([]);
-    });
+    test(
+      "semantics: what the profile claims holds when probed",
+      async () => {
+        expect(await semanticViolations(store, { settle: fixture.settle }, options)).toEqual([]);
+      },
+      options.probeTimeout,
+    );
 
     test("semantics: each operation's predicate gives what this backend expects", () => {
       const semantics = store.semantics();

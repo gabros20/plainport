@@ -51,8 +51,10 @@ if (process.platform === "darwin") {
           cleanup: () => rmSync(dir, { recursive: true, force: true }),
         };
       },
-      // The 8 MB image holds about 950 small files: the listing probe stays well under that.
-      { eligibility: ALL_ELIGIBLE, listProbeKeys: 200 },
+      // The 8 MB image holds about 950 small files: the listing probe stays well under that. Every put syncs the file
+      // and its folder, and exFAT on a disk image is slow at that: the probe's 400-odd writes and deletes take 0.6 to
+      // 1.7 s on a laptop and passed bun's 5 s default on a CI runner, so it gets a minute.
+      { eligibility: ALL_ELIGIBLE, listProbeKeys: 200, probeTimeout: 60_000 },
     );
   });
 }
