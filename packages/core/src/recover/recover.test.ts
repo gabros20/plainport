@@ -20,6 +20,7 @@ import { basename, dirname, join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { encode } from "../catalog/codec.ts";
+import { catalogReader } from "../catalog/head.ts";
 import { parseStoreIdentity } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
@@ -34,6 +35,7 @@ import {
   writeJournal,
 } from "../journal/index.ts";
 import { acquireLock } from "../lock.ts";
+import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
@@ -2922,17 +2924,32 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
   };
   const hanging: StoreOpener = { open: () => new Promise(() => {}) };
 
-  const cases: [string, StoreOpener, ProjectCondition][] = [
-    ["network loss", gone, "store-unreachable"],
-    ["a missing op", closed("store.secret-missing").opener, "secret-unavailable"],
-    ["a signed-out op", closed("store.secret-missing").opener, "secret-unavailable"],
-    ["a denied Keychain read", closed("store.secret-missing").opener, "secret-unavailable"],
-    ["a missing password", closed("store.secret-missing").opener, "secret-unavailable"],
-    ["a provider that never answers", hanging, "secret-unavailable"],
-    ["a key derivation failure", closed("store.seal-key-unavailable").opener, "seal-key-unavailable"],
+  const cases: [string, StoreOpener, ProjectCondition, string][] = [
+    ["network loss", gone, "store-unreachable", "store.unreachable"],
+    ["a missing op", closed("store.secret-missing").opener, "secret-unavailable", "store.secret-missing"],
+    ["a signed-out op", closed("store.secret-missing").opener, "secret-unavailable", "store.secret-missing"],
+    [
+      "a denied Keychain read",
+      closed("store.secret-missing").opener,
+      "secret-unavailable",
+      "store.secret-missing",
+    ],
+    [
+      "a missing password",
+      closed("store.secret-missing").opener,
+      "secret-unavailable",
+      "store.secret-missing",
+    ],
+    ["a provider that never answers", hanging, "secret-unavailable", ""],
+    [
+      "a key derivation failure",
+      closed("store.seal-key-unavailable").opener,
+      "seal-key-unavailable",
+      "store.seal-key-unavailable",
+    ],
   ];
 
-  for (const [name, failing, condition] of cases) {
+  for (const [name, failing, condition, cause] of cases) {
     test(`${name}: the mirror's project with ${condition}, and a write command refuses`, async () => {
       value(await offloadNow());
       await web();
@@ -2941,13 +2958,47 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
       expect(view.head).not.toBeNull();
       const detail = view.conditionDetails.find((d) => d.condition === condition);
       expect(detail?.finding?.code).toBeDefined();
-      // The write path never reads the mirror in place of the store.
+      // Write commands have no provider deadline yet (Q14 bounds views only).
       if (failing === hanging) return;
-      const refused = await runOffload(
+      // The write path never reads the mirror in place of the store: an onload of the shelved project, then an offload
+      // of the local one, each refuse with the store's own cause, never a project-state refusal.
+      await waitJournalsGone();
+      const onload = await runOnload(
+        { ...onloadDeps(testHost()), opener: failing },
+        { project: await ref(), hydrate: false },
+      );
+      expect(onload.ok ? "onloaded" : onload.finding.code).toBe(cause);
+      value(await runOnload(onloadDeps(testHost()), { project: await ref(), hydrate: false }));
+      const offload = await runOffload(
         { ...offloadDeps(testHost()), opener: failing },
         { project: await ref() },
       );
-      expect(refused.ok).toBe(false);
+      expect(offload.ok ? "offloaded" : offload.finding.code).toBe(cause);
+      expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    });
+  }
+
+  for (const code of ["store.unreachable", "store.secret-missing", "store.seal-key-unavailable"] as const) {
+    test(`a catalog read for writing refuses a stale read whatever kept the store away (${code})`, async () => {
+      value(await offloadNow());
+      await web();
+      const unreachable = fail(finding(code, { message: `${code} for the test` }));
+      const failing: BlobStore = {
+        ...store,
+        get: async () => unreachable,
+        stat: async () => unreachable,
+        list: async () => unreachable,
+      };
+      const storeId = parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array)?.id as string;
+      const read = await catalogReader({
+        store: failing,
+        mirror,
+        storeId,
+        storeName: "ssd",
+        now: () => new Date(),
+        report: () => {},
+      })();
+      expect(read.ok ? "read" : read.finding.code).toBe(code);
     });
   }
 
