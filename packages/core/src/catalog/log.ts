@@ -34,6 +34,7 @@ import {
   encode,
   encodePlain,
   PLAIN_CATALOG,
+  policyFits,
   SKIP_CODES,
   type Skip,
   STORE_EVENTS_PREFIX,
@@ -627,6 +628,8 @@ export const loadCatalog = async (options: {
   if (identity.value === null || found !== options.storeId)
     return identityChanged(options.storeId, found, "store");
   const { format } = identity.value;
+  const fits = policyFits(options.policy ?? PLAIN_CATALOG, identity.value);
+  if (!fits.ok) return fits;
 
   const synced = await syncDown(remote, mirror, options.storeId, options.now);
   let mirrorFailure: Finding | undefined;

@@ -28,6 +28,30 @@ export type CatalogPolicy = { seal: "plain" } | { seal: "sealed"; storeId: strin
 
 export const PLAIN_CATALOG: CatalogPolicy = Object.freeze({ seal: "plain" });
 
+/**
+ * Whether `policy` is the store's own (review r1 I4): a sealed policy names the store's pinned id, and on a format-2
+ * store its kind is the one the store publishes (`catalog.seal`). A writer with another policy would append events
+ * every correctly keyed device skips. A format-1 store publishes none; until format 2 is read (Task 18) only the id is
+ * checked there.
+ */
+export const policyFits = (
+  policy: CatalogPolicy,
+  store: { format: 1 | 2; id: string; seal: "none" | "v1" },
+): Result<void> => {
+  const refuse = (why: string) =>
+    fail(
+      finding("catalog.seal-failed", {
+        message: `the catalog policy this device opened store ${store.id} with ${why}; nothing was read or written`,
+        fix: "check the store's configuration on this device (its id and its seal key), then re-run",
+      }),
+    );
+  if (policy.seal === "sealed" && policy.storeId !== store.id)
+    return refuse(`is for store ${policy.storeId}`);
+  if (store.format === 2 && (policy.seal === "sealed") !== (store.seal === "v1"))
+    return refuse(`is ${policy.seal}, and the store publishes seal ${store.seal}`);
+  return ok(undefined);
+};
+
 /** Why a file is no usable event. */
 export type SkipReason =
   | "torn"

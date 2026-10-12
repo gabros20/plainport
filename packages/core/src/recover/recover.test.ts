@@ -3123,6 +3123,20 @@ describe("review r1 I2: a sealed event that does not open is never an absent or 
     await expectPendingThenFinished(await sealEvents());
   });
 
+  test("a sealed policy for another store is refused before recover reads or writes the catalog (review r1 I4)", async () => {
+    await crashOffloadAt("offload.commit.appended");
+    const elsewhere: StoreOpener = {
+      open: async () => ({
+        ok: true,
+        value: { blob: store, engine, catalog: { seal: "sealed", storeId: ulid(), key: KEY } },
+      }),
+    };
+    const [op] = reportOf(await recover(recoverDeps({ opener: elsewhere }))).operations;
+    expect([op?.outcome, op?.finding?.code]).toEqual(["pending", "catalog.seal-failed"]);
+    expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
+  });
+
   test("an onloaded event that does not open is never written a second time under a new id", async () => {
     value(await offloadNow());
     await waitJournalsGone();

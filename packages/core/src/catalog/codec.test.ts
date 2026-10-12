@@ -10,6 +10,7 @@ import {
   encode,
   encodePlain,
   PLAIN_CATALOG,
+  policyFits,
   type SkipReason,
   sameEvent,
   storeEventKey,
@@ -204,6 +205,35 @@ describe("codec: the same event, opened (R2-8)", () => {
     const retry = await publishEvent(store, { key, data: sealed(event), sameEvent: sameEvent(key, SEALED) });
     expect(retry).toEqual({ ok: true, value: { written: false } });
     expect([...store.data.keys()].filter((k) => k.startsWith("meta/v1/events/"))).toEqual([key]);
+  });
+});
+
+describe("codec: a policy bound to its store (review r1 I4)", () => {
+  const v2 = (seal: "none" | "v1") => ({ format: 2 as const, id: STORE_ID, seal });
+  test("a sealed policy for another store, or a policy kind other than the store's, is refused", () => {
+    const code = (r: { ok: boolean; finding?: { code: string } }) => (r.ok ? "ok" : r.finding?.code);
+    expect(code(policyFits(SEALED, v2("v1")))).toBe("ok");
+    expect(code(policyFits(PLAIN_CATALOG, v2("none")))).toBe("ok");
+    expect(code(policyFits({ ...SEALED, storeId: idAt(901) }, v2("v1")))).toBe("catalog.seal-failed");
+    expect(code(policyFits(PLAIN_CATALOG, v2("v1")))).toBe("catalog.seal-failed");
+    expect(code(policyFits(SEALED, v2("none")))).toBe("catalog.seal-failed");
+  });
+
+  test("loadCatalog refuses a sealed policy whose store id is not the pinned one, before reading an event", async () => {
+    const store = memoryBlobStore();
+    const id = await ensureStoreIdentity(store, () => STORE_ID);
+    if (!id.ok) throw new Error(id.finding.message);
+    await appendEvent(storeEventLog(store, SEALED), offloaded(1));
+    const mirror = memoryBlobStore();
+    const read = await loadCatalog({
+      store,
+      mirror,
+      storeId: STORE_ID,
+      now: NOW,
+      policy: { ...SEALED, storeId: idAt(901) },
+    });
+    expect(read.ok ? "read" : read.finding.code).toBe("catalog.seal-failed");
+    expect([...mirror.data.keys()]).toEqual([]);
   });
 });
 

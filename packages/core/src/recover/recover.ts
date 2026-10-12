@@ -41,7 +41,7 @@ import {
   shellWord,
 } from "@plainport/contract";
 import { TEMP_SUFFIX } from "../atomic.ts";
-import { UNOPENED_CODES } from "../catalog/codec.ts";
+import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
@@ -469,6 +469,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         `connect the store the ${journal.kind} ${journal.op} wrote to (stores.${journal.store.name}), then run plainport recover`,
       );
     }
+    const fits = policyFits(opened.value.catalog ?? PLAIN_CATALOG, identity.value);
+    if (!fits.ok) return fits;
     return ok({ ...opened.value, format: identity.value.format });
   }
 
