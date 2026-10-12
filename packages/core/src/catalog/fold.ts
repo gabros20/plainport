@@ -82,6 +82,8 @@ export const CatalogProjectSchema = z.strictObject({
   resolutions: z.array(UlidSchema),
   /** The snapshots resolutions reject, sorted: never a head. */
   rejected: z.array(UlidSchema),
+  /** The snapshots the active resolutions keep, sorted: a new resolution's `over` takes them too (D105). */
+  kept: z.array(UlidSchema),
   /** Resolved events skipped as invalid (catalog.event-skipped, resolution-invalid), sorted: they taint the read. */
   invalid: z.array(UlidSchema),
   snapshots: z.record(UlidSchema, SnapshotSchema),
@@ -108,7 +110,7 @@ export type CatalogState = z.infer<typeof CatalogStateSchema>;
  * The version of these rules and of CatalogStateSchema. A cached fold (state.json) records it and is rebuilt when it
  * differs, so bump it whenever the fold, the event types it reads or the state's shape change (D43).
  */
-export const FOLD_VERSION = 5;
+export const FOLD_VERSION = 6;
 
 export const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -204,6 +206,7 @@ const judge = (resolutions: Resolved[], index: Index) => {
     invalid: [...invalid].sort(compare),
     missing: [...absent.values()].flat(),
     active: active.map((r) => r.id).sort(compare),
+    kept: [...kept].sort(compare),
     rejected,
     incompatible,
   };
@@ -395,6 +398,7 @@ const foldProject = (events: ProjectEvent[], index: Index): CatalogProject => {
     discarded: [...discarded].sort(compare),
     resolutions: judged.active,
     rejected: [...judged.rejected].sort(compare),
+    kept: judged.kept,
     invalid: judged.invalid,
     snapshots,
   };
@@ -453,9 +457,11 @@ export interface Resolution {
 
 /**
  * The production rule (Q18, Task 25): the only resolution a writer may append, from its fresh read of the project.
- * `keep` must be a live tip; `over` is the other live tips; `supersedes` is every active resolution it read. The fold
- * judges what this returns valid. Refused when the read is incomplete (a reference is missing: what it lacks could
- * change the live tips), when `keep` is not a live tip, and when no other live tip is left to resolve.
+ * `keep` must be a live tip; `over` is the live tips and the active resolutions' keeps, minus `keep` (D105), so two
+ * concurrent resolutions that leave one live tip in an incompatible pair can still be superseded; `supersedes` is every
+ * active resolution it read. The fold judges what this returns valid. Refused when the read is incomplete (a reference
+ * is missing, or a resolution was skipped as invalid: what it lacks could change the live tips), when `keep` is not a
+ * live tip, and when the project is not conflicted and no other live tip is left to resolve.
  */
 export const resolutionFor = (
   project: CatalogProject,
@@ -463,9 +469,11 @@ export const resolutionFor = (
 ):
   | { ok: true; value: Resolution }
   | { ok: false; reason: "incomplete" | "not-a-live-tip" | "nothing-to-resolve" } => {
-  if (project.missing.length > 0) return { ok: false, reason: "incomplete" };
+  if (project.missing.length > 0 || project.invalid.length > 0) return { ok: false, reason: "incomplete" };
   if (!project.heads.includes(keep)) return { ok: false, reason: "not-a-live-tip" };
-  const over = project.heads.filter((s) => s !== keep);
+  if (project.status !== "conflicted" && project.heads.length === 1)
+    return { ok: false, reason: "nothing-to-resolve" };
+  const over = [...new Set([...project.heads, ...project.kept])].filter((s) => s !== keep).sort(compare);
   if (over.length === 0) return { ok: false, reason: "nothing-to-resolve" };
   return { ok: true, value: { keep, over, supersedes: [...project.resolutions] } };
 };

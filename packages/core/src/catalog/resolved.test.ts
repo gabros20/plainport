@@ -425,6 +425,44 @@ describe("resolved: the production rule (resolutionFor)", () => {
     });
   });
 
+  // D105 (Q18 rule 7 amended): over is the live tips and the active keeps, minus keep. Writer 1 read {S1, S2} and kept
+  // S1; writer 2 read {S11, S2} (S11 made from S1) and kept S2 over S11. The pair is incompatible with one live tip
+  // left, S2: the old rule (over = the other live tips) had nothing to write, and the project stayed conflicted.
+  test("two concurrent resolutions that leave one live tip, incompatible, can still be resolved (D105)", () => {
+    const events = [
+      ...fork,
+      checkpointed(E(6), S(11), S(1)),
+      resolved(E(20), S(1), [S(2)]),
+      resolved(E(21), S(2), [S(11)]),
+    ];
+    expect(outcome(project(events))).toEqual({
+      status: "conflicted",
+      head: null,
+      heads: [S(2)],
+      conflicts: [],
+    });
+    expect(resolutionFor(project(events), S(2))).toEqual({
+      ok: true,
+      value: { keep: S(2), over: [S(1)], supersedes: [E(20), E(21)] } satisfies Resolution,
+    });
+    const settled = project(write(events, S(2), E(22)));
+    expect(settled.invalid).toEqual([]);
+    expect(settled.resolutions).toEqual([E(22)]);
+    expect(outcome(settled)).toEqual(settledOn(S(2)));
+  });
+
+  test("refuses on a read with a resolution skipped as invalid: what it said is unknown", () => {
+    const tainted = [...fork, resolved(E(20), S(1), [S(1)])];
+    expect(project(tainted).invalid).toEqual([E(20)]);
+    expect(resolutionFor(project(tainted), S(1))).toEqual({ ok: false, reason: "incomplete" });
+  });
+
+  test("an active keep that is no longer a tip never makes a settled project resolvable (D105)", () => {
+    const continued = [...fork, resolved(E(20), S(1), [S(2)]), checkpointed(E(21), S(6), S(1))];
+    expect(project(continued).status).not.toBe("conflicted");
+    expect(resolutionFor(project(continued), S(6))).toEqual({ ok: false, reason: "nothing-to-resolve" });
+  });
+
   test("refuses a keep that is not a live tip, a settled project and an incomplete read", () => {
     const resolvedFork = [...fork, resolved(E(20), S(1), [S(2)])];
     expect(resolutionFor(project(fork), S(0))).toEqual({ ok: false, reason: "not-a-live-tip" });

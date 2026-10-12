@@ -164,6 +164,15 @@
                   "description": "A ULID: 26 upper-case Crockford base32 characters"
                 }
               },
+              "kept": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
               "invalid": {
                 "type": "array",
                 "items": {
@@ -247,6 +256,7 @@
               "discarded",
               "resolutions",
               "rejected",
+              "kept",
               "invalid",
               "snapshots"
             ],

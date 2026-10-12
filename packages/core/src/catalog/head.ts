@@ -212,6 +212,7 @@ export const recordedProject = (options: {
     discarded: [],
     resolutions: [],
     rejected: [],
+    kept: [],
     invalid: [],
     snapshots: {},
   };

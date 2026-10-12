@@ -72,7 +72,7 @@ export const NEW_SCHEMAS: Readonly<Record<string, string>> = {
 /** Schemas that exist at v0.1.1 and differ now, with their row. A changed file schema is a compatibility event. */
 export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {
   "catalog-event": "event.resolved",
-  // state.json's cached fold gains the resolution fields at FOLD_VERSION 5: another version's cache is rebuilt.
+  // state.json's cached fold gains the resolution fields at FOLD_VERSION 6: another version's cache is rebuilt.
   "catalog-state": "mirror",
   "store-identity": "store.json.v2",
   "event-mirror": "mirror",
