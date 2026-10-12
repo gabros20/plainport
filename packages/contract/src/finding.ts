@@ -54,6 +54,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)",
   },
+  "catalog.seal-failed": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "A sealed catalog event cannot be sealed or opened: its envelope or key derivation is a version this build does not know, its key id is not this store's, or it fails authentication (changed, or moved to another event key or store). Nothing is guessed and no key is substituted; the event is left unread (Catalog seal v1)",
+  },
   "catalog.incomplete": {
     severity: "block",
     allowable: false,

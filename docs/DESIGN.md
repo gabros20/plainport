@@ -1337,6 +1337,25 @@ Encrypt once, client-side, with restic, and don't wrap the package again. Add ex
 
 **Agent transcripts and git credentials.** Agent session files are treated like `.env`: they travel in the secrets envelope and reach a worker only after `plainport secrets grant`. Git credentials never travel at all; plainport doesn't lend tokens, and each device brings its own.
 
+### Catalog seal v1
+
+Events on bucket and VPS stores are sealed before they are written; `packages/core/src/catalog/seal.ts` is the whole
+spec (pure, no I/O) and `fixtures/seal/v1.json` holds its test vectors.
+
+- **Input keying material.** 64 bytes, `encrypt (32) ‖ mac.k (16) ‖ mac.r (16)`, base64-decoded from the JSON of
+  `restic cat masterkey`. The order is fixed; any other length or shape is refused.
+- **Key.** HKDF-SHA256 with salt = the UTF-8 store id, info = `plainport catalog seal v1`, 32 bytes of output.
+- **Key id.** The first 8 bytes of HMAC-SHA256(key, `plainport kid v1`), in hex.
+- **Envelope.** One JSON line, strict: `{"pp_seal":1,"alg":"xchacha20poly1305","kdf":"hkdf-sha256-restic-master-v1","kid","nonce","ct"}`,
+  with base64url (unpadded, canonical) fields. The nonce is 24 random bytes.
+- **Associated data.** `pp_seal\0v1\0<store id>\0<event key>`, so an event moved to another key or store fails.
+- **Versioning.** `pp_seal` versions the envelope and the KDF apart from the event's `v`. An unknown `pp_seal`, `kdf` or
+  `alg` is `catalog.seal-failed`, as is any failed authentication or `kid` mismatch.
+- **Rotation.** A password change leaves the master key, and so the catalog key, unchanged. Removing a password does not
+  revoke a master key someone already read (a stated limit). Replacing a compromised master key means a new repository
+  and re-sealed events (M3 and M5 work); M2 only fails closed on a `kid` mismatch.
+- **No fallback.** A random-key fallback is never chosen silently (Q10).
+
 **Other safeguards:**
 
 - `plainport init` prints the recovery key once and doesn't finish until you confirm it's stored.
