@@ -4,6 +4,7 @@
 // stores follow); tests pass a fake engine.
 
 import type { Result } from "@plainport/contract";
+import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { Store } from "../config/schema.ts";
 import type { BlobStore } from "./blob-store.ts";
 import type { Engine } from "./engine.ts";
@@ -11,6 +12,8 @@ import type { Engine } from "./engine.ts";
 export interface OpenedStore {
   blob: BlobStore;
   engine: Engine;
+  /** How the store's catalog events are encoded (codec.ts); plain when absent. Sealed stores arrive with Task 20. */
+  catalog?: CatalogPolicy;
 }
 
 export interface StoreOpener {

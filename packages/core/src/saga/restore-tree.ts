@@ -15,8 +15,8 @@ import {
   type Result,
   shellWord,
 } from "@plainport/contract";
-import { CatalogEventSchema } from "../catalog/events.ts";
-import { STORE_EVENTS_PREFIX } from "../catalog/log.ts";
+import type { CatalogPolicy } from "../catalog/codec.ts";
+import { eventAt, storeEventLog } from "../catalog/log.ts";
 import { makeInHolder } from "../holder.ts";
 import { assertSystemError, type LocalIo, systemErrorCode } from "../io.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
@@ -46,18 +46,12 @@ export const unreadable = (path: string, error: unknown, what: string): Failure 
   );
 
 /** The event that made a snapshot (offloaded or checkpointed), read from the store; undefined when unreadable. */
-export const producedBy = async (store: BlobStore, event: string) => {
-  const got = await store.get(`${STORE_EVENTS_PREFIX}${event}.json`);
-  if (!got.ok || got.value === null) return undefined;
-  try {
-    const parsed = CatalogEventSchema.safeParse(JSON.parse(new TextDecoder().decode(got.value)));
-    // Unreadable here, as the fold would skip it: nothing is counted.
-    return parsed.success && (parsed.data.type === "offloaded" || parsed.data.type === "checkpointed")
-      ? parsed.data
-      : undefined;
-  } catch {
-    return undefined;
-  }
+export const producedBy = async (store: BlobStore, event: string, policy?: CatalogPolicy) => {
+  const got = await eventAt(storeEventLog(store, policy), event);
+  // Unreadable here, as the fold would skip it: nothing is counted.
+  if (!got.ok || got.value === null || !("event" in got.value)) return undefined;
+  const made = got.value.event;
+  return made.type === "offloaded" || made.type === "checkpointed" ? made : undefined;
 };
 
 /**
@@ -142,6 +136,8 @@ export const checkSnapshot = async (options: {
   io: LocalIo;
   engine: Engine;
   store: BlobStore;
+  /** The store's catalog policy; plain when absent. */
+  catalog?: CatalogPolicy;
   /** This store's restic id for the snapshot, and the event that made it (absent when it cannot be read, D86). */
   stored: string;
   event?: string;
@@ -221,7 +217,8 @@ export const checkSnapshot = async (options: {
     }
   }
   // The dependencies the install puts back, as the offload recorded them (DESIGN step 2), and the folder's mode.
-  const made = options.event === undefined ? undefined : await producedBy(options.store, options.event);
+  const made =
+    options.event === undefined ? undefined : await producedBy(options.store, options.event, options.catalog);
   const stripped = options.dependencies === false ? 0 : (made?.stats.strippedBytes ?? 0);
   const rootMode = made?.type === "offloaded" ? made.rootMode : undefined;
   // Logical sizes, plus half a 4 KiB block per file for what the volume rounds up, plus 10%. A resumed restore

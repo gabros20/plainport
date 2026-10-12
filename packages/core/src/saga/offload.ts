@@ -509,6 +509,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       storeId: store.id,
       storeName: store.name,
       now: clock,
+      ...(store.catalog === undefined ? {} : { policy: store.catalog }),
       report,
     });
     const before = await catalog();
@@ -570,7 +571,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       { io, paths, faultAt: (point) => host.faultAt(point), clock, log: deps.log },
       journal,
     );
-    const events = storeEventLog(store.blob);
+    const events = storeEventLog(store.blob, store.catalog);
 
     /** Plans the offload, phase by phase, journaling each boundary as it is crossed. */
     const plan = async (journalSteps: boolean): Promise<Result<PreparedOffload>> => {

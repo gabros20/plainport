@@ -72,6 +72,7 @@ export const NEW_SCHEMAS: Readonly<Record<string, string>> = {
 /** Schemas that exist at v0.1.1 and differ now, with their row. A changed file schema is a compatibility event. */
 export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {
   "store-identity": "store.json.v2",
+  "event-mirror": "mirror",
 };
 
 export interface Row {
