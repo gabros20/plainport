@@ -343,7 +343,7 @@ export interface LoadedCatalog {
   syncedAt?: string;
   /** Events this read copied from the store into the mirror. */
   copied: number;
-  /** Why the state is stale: the store's store.unreachable finding. */
+  /** Why the state is stale: the finding that kept the store from being asked (one of OFFLINE_CODES). */
   unreachable?: Finding;
   /** Why the mirror was not used although the store was reachable; the state was read from the store directly. */
   mirrorFailure?: Finding;
@@ -481,7 +481,14 @@ const syncDown = async (
   return ok({ listed, copied, findings });
 };
 
-/** The mirror alone, while the store is unreachable: its state as of its last sync, marked stale. */
+/** Why a store could not be asked at all, as a finding code: the mirror then stands in for it (Task 13). */
+export const OFFLINE_CODES: readonly string[] = [
+  "store.unreachable",
+  "store.secret-missing",
+  "store.seal-key-unavailable",
+];
+
+/** The mirror alone, while the store cannot be asked (`unreachable` says why): its state as of its last sync, marked stale. */
 const readOffline = async (
   mirror: EventLog,
   storeId: string,
@@ -511,6 +518,17 @@ const readOffline = async (
 };
 
 /**
+ * The mirror alone, without asking the store: for a view whose store could not be opened (a secret, the seal key or the
+ * network failed). Opens by the pinned store id first (Task 13): a mirror recorded for another store is refused.
+ */
+export const readMirrorCatalog = (options: {
+  mirror: BlobStore;
+  storeId: string;
+  reason: Finding;
+}): Promise<Result<LoadedCatalog>> =>
+  readOffline(mirrorEventLog(options.mirror), options.storeId, options.reason);
+
+/**
  * The catalog, the one way to read it (D43, D45). It checks the store's identity against `storeId` (what this device
  * recorded for the store: store.identity-changed when it differs), brings this device's mirror up to the store
  * (download only: a read never writes to a store), and folds the mirror's events through the cache beside them.
@@ -529,7 +547,7 @@ export const loadCatalog = async (options: {
   const remote = storeEventLog(options.store);
   const mirror = mirrorEventLog(options.mirror);
   const offline = (failure: Failure): Promise<Result<LoadedCatalog>> | Failure =>
-    failure.finding.code === "store.unreachable"
+    OFFLINE_CODES.includes(failure.finding.code)
       ? readOffline(mirror, options.storeId, failure.finding)
       : failure;
 

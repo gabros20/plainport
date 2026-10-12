@@ -640,6 +640,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store's repository password could not be read from its secret reference (env: or file: in M1)",
   },
+  "store.seal-key-unavailable": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's seal key could not be derived (its secret is unreadable or the derivation failed); views then read the device's mirror and say so, and commands that write refuse",
+  },
   "store.semantics-unknown": {
     severity: "block",
     allowable: false,
