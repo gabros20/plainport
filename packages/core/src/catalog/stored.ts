@@ -8,12 +8,26 @@
 // Writers keep the rule: one entry, keyed by the store's id on a format-2 store and by this device's alias on a
 // format-1 store, since v0.1.1 looks up `stored[<its alias>]`. appendEvent refuses any other count.
 
+import { type Failure, fail, finding } from "@plainport/contract";
+
 /** The reason a snapshot event with zero or several `stored` entries is skipped (catalog.event-skipped). */
 export const STORED_MULTIPLE = "stored-multiple";
 
 /** The key of the one `stored` entry a writer gives an event it appends to this store (Q11). */
 export const storedKey = (store: { name: string; id: string }, format: 1 | 2): string =>
   format === 2 ? store.id : store.name;
+
+/**
+ * contract.invalid for a folded snapshot with no single location: the reader skips every such event, so reaching this
+ * is a bug in the fold or its cache, never a reason to restore something else.
+ */
+export const locationBug = (store: string, snapshot: string, address: string): Failure =>
+  fail(
+    finding("contract.invalid", {
+      message: `the catalog of store ${store} folded snapshot ${snapshot} of ${address} without a single location, which its reader never allows; nothing was restored`,
+      fix: "this is a bug in plainport's catalog read; report it with the message above",
+    }),
+  );
 
 /** The event's location on the store it was read from: the restic id of its one entry, undefined unless exactly one. */
 export const storedHere = (stored: Readonly<Record<string, string>>): string | undefined => {

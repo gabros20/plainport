@@ -1432,6 +1432,10 @@ and `stores.test`, and the regenerated contract files.
 - `init` re-pointing an unreachable path refuses and writes nothing.
 - T2: `add` and `test` on SeaweedFS (D94) and SFTP.
 
+- Carried from Task 9 (D104): the ULID-shaped alias test after `store upgrade` (read on its device, after the upgrade,
+  then from another device with another alias), and the invariants' writer rule on a format-2 store through offload,
+  the snapshot-discarded path and recover's fork (`stored` keyed by the store id).
+
 ### Verification
 `bun test packages/cli -t "store|init" && bun run contract && git diff --exit-code plainport.json schemas/ && bun run
 test:t2 -t "store add"`

@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { UNKNOWN_SEMANTICS } from "./ports/blob-store.ts";
 import {
   pinSeal,
+  readStoreSeal,
   readStoreState,
   recordMeasured,
   type StoreFacts,
@@ -36,7 +37,8 @@ describe("stores-state: this device's record of a store (Q4)", () => {
   test("[stores-state] lives at stores/<store id>.json under the state folder, empty until written", async () => {
     expect(storeStateFile(box.paths, STORE)).toBe(`${box.paths.stateDir}/stores/${STORE}.json`);
     expect(() => storeStateFile(box.paths, "archive")).toThrow(RangeError);
-    expect(value(await readStoreState(io, box.paths, STORE))).toEqual({ v: 1, store: STORE });
+    expect(value(await readStoreState(io, box.paths, STORE, facts))).toEqual({ v: 1, store: STORE });
+    expect(value(await readStoreSeal(io, box.paths, STORE))).toBeUndefined();
     expect(existsSync(storeStateFile(box.paths, STORE))).toBe(false);
   });
 
@@ -77,6 +79,7 @@ describe("stores-state: this device's record of a store (Q4)", () => {
     const changed = value(await readStoreState(io, box.paths, STORE, { ...facts, access: "s3" }));
     expect(changed.seal).toEqual({ policy: "v1", at: AT });
     expect(changed.measured).toBeUndefined();
+    expect(value(await readStoreSeal(io, box.paths, STORE))).toEqual({ policy: "v1", at: AT });
   });
 
   test("[stores-state] writes are atomic under a lock: a held lock refuses (store.locked) and nothing is written", async () => {
@@ -122,8 +125,10 @@ describe("stores-state: this device's record of a store (Q4)", () => {
       JSON.stringify({ v: 2, store: STORE }),
     ]) {
       writeFileSync(file, text);
-      const read = await readStoreState(io, box.paths, STORE);
+      const read = await readStoreSeal(io, box.paths, STORE);
       expect(read.ok ? "ok" : read.finding.code).toBe("store.state-invalid");
+      // Moving it aside re-pins whatever the store shows: the fix says so.
+      expect(read.ok ? "" : read.finding.fix).toContain("re-pins");
       const written = await updateStoreState(io, box.paths, STORE, (current) => ({
         ok: true,
         value: current,

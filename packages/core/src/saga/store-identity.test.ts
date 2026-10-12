@@ -207,7 +207,7 @@ const expectInvariants = async (home: Home, alias = home.aliases[0] as string) =
       device: home.device.id,
       project: { id: await projectIdOf(home), dir: join(home.box.home, "work/web") },
       roots: [join(home.box.home, "work")],
-      store: { name: alias, blob: store, engine },
+      store: { name: alias, aliases: home.aliases, blob: store, engine },
       ...(released.has(home) ? { released: released.get(home) as TreeCapture } : {}),
     }),
   ).toEqual([]);
@@ -261,13 +261,17 @@ describe("store identity: a snapshot is located on the store its event was read 
     expect(registry.stores?.archive).toBe(registry.stores?.nas as string);
     project(mbp, "two names");
     await offload(mbp, "archive");
+    await expectInvariants(mbp);
     value(await onload(mbp, { store: "nas" }));
     expect(mainOf(mbp)).toContain("two names");
     mbp.box.file("work/web/src/main.ts", 'export const main = "again";\n');
     const again = await offload(mbp, "nas");
     expect(Object.keys((await offloadedOf(again.snapshot)).stored)).toEqual(["nas"]);
+    // Events this device keyed under either of its names keep the writers' rule.
+    await expectInvariants(mbp);
     value(await onload(mbp, { store: "archive" }));
     expect(mainOf(mbp)).toContain("again");
+    await expectInvariants(mbp);
   });
 
   test("[stored] a legacy M1 event keyed by another device's alias, read from S, resolves to S", async () => {
@@ -311,6 +315,81 @@ describe("store identity: a snapshot is located on the store its event was read 
     const refused = await onload(mbp);
     expect(refused.ok ? "ok" : refused.finding.code).toBe("catalog.head-uncertain");
     expect(existsSync(join(mbp.box.home, "work/web"))).toBe(false);
+  });
+
+  test("[stored] a stored-multiple head taints its project: an offload from the visible head and a default onload elsewhere refuse", async () => {
+    const mbp = await makeHome("mbp", ["archive"]);
+    const mini = await makeHome("mini", ["nas"]);
+    const air = await makeHome("air", ["disk"]);
+    project(mbp, "first");
+    const first = await offload(mbp);
+    value(await onload(mini));
+    // A newer snapshot made from the visible head, written by a later writer with two locations (M3's shape).
+    const event = await offloadedOf(first.snapshot);
+    const hidden = ulid();
+    const id = ulid();
+    rewrite({
+      ...event,
+      id,
+      op: hidden,
+      snapshot: hidden,
+      base: first.snapshot,
+      stored: { archive: "a".repeat(64), b2: "b".repeat(64) },
+    });
+    // mini's copy came from the visible head, which a readable event names: the taint alone refuses its offload.
+    mini.box.file("work/web/src/main.ts", 'export const main = "edited on mini";\n');
+    const refused = await runOffload(
+      { ...common(mini), checks: quietChecks, plugins: [nodePlugin] },
+      { project: await ref(mini) },
+    );
+    expect(refused.ok ? "ok" : refused.finding.code).toBe("catalog.head-uncertain");
+    expect(refused.ok ? "" : refused.finding.message).toContain(hidden);
+    expect(mainOf(mini)).toContain("edited on mini");
+    expect((await events()).filter((e) => e.type === "offloaded").map((e) => e.id)).toEqual([event.id]);
+    // A third device knows nothing of the project: a default onload would hand back the older head, so it refuses.
+    const elsewhere = await onload(air);
+    expect(elsewhere.ok ? "ok" : elsewhere.finding.code).toBe("catalog.head-uncertain");
+    expect(elsewhere.ok ? "" : (elsewhere.finding.fix ?? "")).toContain(`--snapshot ${hidden}`);
+    expect(existsSync(join(air.box.home, "work/web"))).toBe(false);
+  });
+
+  test("[stored] a stored-multiple discard still keeps its restic snapshot from being restored by tag", async () => {
+    const mbp = await makeHome("mbp", ["ssd"]);
+    project(mbp, "kept");
+    const done = await offload(mbp);
+    const event = await offloadedOf(done.snapshot);
+    // A second restic snapshot tagged with the same op (an attempt restic could not finish), named by a discard that
+    // has two locations; and the offloaded event itself unreadable (two locations), so the onload goes by tag.
+    const other = mbp.box.dir("other");
+    mbp.box.file("other/src/main.ts", 'export const main = "incomplete attempt";\n');
+    const tags = [
+      "plainport",
+      `plainport:project=${event.project}`,
+      `plainport:root=${event.root}`,
+      `plainport:path=${event.path}`,
+      `plainport:op=${done.snapshot}`,
+      "plainport:kind=offload",
+    ];
+    const attempt = value(await engine.snapshot({ dir: other, excludes: [], tags }, { op: ulid() }));
+    const discard = ulid();
+    rewrite({
+      v: 1,
+      id: discard,
+      op: done.snapshot,
+      type: "snapshot-discarded",
+      device: event.device,
+      at: event.at,
+      project: event.project,
+      root: event.root,
+      path: event.path,
+      snapshot: done.snapshot,
+      stored: { ssd: attempt.id, b2: "c".repeat(64) },
+    });
+    rewrite({ ...event, stored: { ssd: event.stored.ssd as string, b2: "d".repeat(64) } });
+    const doubted = await onload(mbp);
+    expect(doubted.ok ? "ok" : doubted.finding.code).toBe("catalog.head-uncertain");
+    value(await onload(mbp, { snapshot: done.snapshot }));
+    expect(mainOf(mbp)).toContain("kept");
   });
 
   test("[stored] the store's own records: appendEvent refuses an event with zero or two stored entries", async () => {
