@@ -55,6 +55,7 @@ import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
+import { resolveSecret, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
 
@@ -242,6 +243,25 @@ const failingStore = (failure: Failure): BlobStore => ({
   delete: async () => failure,
 });
 
+/** The mirror, whose writes fail once `abandoned` says its refresh was given up at the deadline. */
+const untilAbandoned = (mirror: BlobStore, abandoned: () => boolean, store: string): BlobStore => {
+  const refused = () =>
+    fail(
+      finding("store.unreachable", {
+        message: `the refresh of store ${store}'s mirror was given up at the deadline; nothing more is written to it`,
+      }),
+    );
+  return {
+    semantics: () => mirror.semantics(),
+    capabilities: () => mirror.capabilities(),
+    get: (key) => mirror.get(key),
+    list: (prefix) => mirror.list(prefix),
+    stat: (key) => mirror.stat(key),
+    put: async (key, data, options) => (abandoned() ? refused() : mirror.put(key, data, options)),
+    delete: async (key) => (abandoned() ? refused() : mirror.delete(key)),
+  };
+};
+
 /** What kept a store from being asked, by the finding that says so: the condition beside stale or never-synced. */
 const CAUSES: Record<string, { condition: ProjectCondition; message: (store: string) => string }> = {
   "store.secret-missing": {
@@ -295,8 +315,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     const store = config.stores[name];
     if (store === undefined) continue;
     // The mirror first, by the pinned store id (Task 13): no secret is resolved, no engine opened, no seal key derived
-    // to read it. The catalog needs no password, so none is asked for; a provider the store's own credentials need
-    // answers inside the opener, bounded by Q14's deadline.
+    // to read it. Refreshing it from the store resolves the store's secret through its provider (D105); the provider
+    // and the opener each answer within Q14's deadline, and a secret that does not come is secret-unavailable.
     const mirror = await deps.openMirror(id);
     const mirrorBlob = mirror.ok ? mirror.value : failingStore(mirror);
     const deadline = deps.providerDeadlineMs ?? PROVIDER_DEADLINE_MS;
@@ -312,7 +332,17 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
           fix: `check the store ${name}, then re-run`,
         }),
       );
-    const opening = await withinDeadline(deps.opener.open(name, store, ""), deadline, scheduler);
+    const secret = await withinDeadline(
+      resolveSecret(io, deps.env, paths.home, name, secretRefOf(store)),
+      deadline,
+      scheduler,
+    );
+    const password: Result<string> = secret.timedOut
+      ? timedOut(secret.seconds, "store.secret-missing", `the secret provider of store ${name}`)
+      : secret.value;
+    const opening = password.ok
+      ? await withinDeadline(deps.opener.open(name, store, password.value), deadline, scheduler)
+      : { timedOut: false as const, value: password };
     const opened: Result<OpenedStore> = opening.timedOut
       ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
       : opening.value;
@@ -323,11 +353,13 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         ? await readMirrorCatalog({ mirror: mirrorBlob, storeId: id, reason: opened.finding })
         : opened;
     } else {
-      // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45).
+      // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45). A refresh
+      // abandoned at the deadline writes nothing to the mirror afterwards, while its stale state is read.
+      let abandoned = false;
       const loading = await withinDeadline(
         loadCatalog({
           store: opened.value.blob,
-          mirror: mirrorBlob,
+          mirror: untilAbandoned(mirrorBlob, () => abandoned, name),
           storeId: id,
           now,
           ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
@@ -335,6 +367,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         deadline,
         scheduler,
       );
+      abandoned = loading.timedOut;
       read = loading.timedOut
         ? await readMirrorCatalog({
             mirror: mirrorBlob,

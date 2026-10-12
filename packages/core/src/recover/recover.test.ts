@@ -3013,7 +3013,8 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
     ]);
   });
 
-  test("no secret is asked for: the opener gets no password", async () => {
+  // D105: a refresh from the store resolves the secret through its provider, under Q14's deadline.
+  test("a refresh resolves the store's secret through its provider, and the opener gets it", async () => {
     value(await offloadNow());
     const seen: string[] = [];
     const watching: StoreOpener = {
@@ -3022,9 +3023,65 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
         return opener.open(n, s, password);
       },
     };
-    const view = await web({ opener: watching, env: {} });
+    const view = await web({ opener: watching });
     expect(view.stale).toBe(false);
-    expect(seen).toEqual([""]);
+    expect(seen).toEqual(["pw"]);
+  });
+
+  test("a secret the provider does not give: the mirror's state, secret-unavailable, the store never opened", async () => {
+    value(await offloadNow());
+    await web();
+    const seen: string[] = [];
+    const watching: StoreOpener = {
+      open: async (n, s, password) => {
+        seen.push(password);
+        return opener.open(n, s, password);
+      },
+    };
+    const view = await web({ opener: watching, env: { HOME: box.home, PATH } });
+    expect([view.state, view.stale, view.conditions]).toEqual([
+      "shelved",
+      true,
+      ["stale", "secret-unavailable"],
+    ]);
+    expect(seen).toEqual([]);
+  });
+
+  test("a refresh that times out never writes the mirror afterwards", async () => {
+    value(await offloadNow());
+    await web();
+    // A new event on the store, which a refresh would copy into the mirror.
+    const first = (await storeEvents()).find((e) => e.type === "offloaded");
+    const late = ulid();
+    value(
+      await appendEvent(storeEventLog(store), {
+        ...(first as Extract<CatalogEvent, { type: "offloaded" }>),
+        id: late,
+        op: late,
+        snapshot: late,
+        base: (first as Extract<CatalogEvent, { type: "offloaded" }>).snapshot,
+      }),
+    );
+    const slow: StoreOpener = {
+      open: async () => ({
+        ok: true,
+        value: {
+          blob: {
+            ...store,
+            list: async (prefix: string) => {
+              await Bun.sleep(150);
+              return store.list(prefix);
+            },
+          },
+          engine,
+        },
+      }),
+    };
+    const before = new Map([...mirror.data].map(([k, v]) => [k, Buffer.from(v).toString("hex")]));
+    const view = await web({ opener: slow });
+    expect(view.stale).toBe(true);
+    await Bun.sleep(400);
+    expect(new Map([...mirror.data].map(([k, v]) => [k, Buffer.from(v).toString("hex")]))).toEqual(before);
   });
 });
 
