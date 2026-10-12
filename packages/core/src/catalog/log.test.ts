@@ -339,6 +339,19 @@ describe("catalog: loadCatalog, the one read path (D43, D45)", () => {
     expect(third.state.projects[PROJECT]?.snapshots[torn.snapshot]).toBeDefined();
   });
 
+  test("a plain store's mirror.json keeps v0.1.1's shape: no transport sizes where the copies are the store's bytes", async () => {
+    const store = await initStore();
+    const mirror = memoryBlobStore();
+    store.data.set(`meta/v1/events/${offloaded(1).id}.json`, encode(offloaded(1)));
+    await load(store, mirror);
+    const recorded = JSON.parse(decode(mirror.data.get(MIRROR_FILE_KEY)) as string);
+    // v0.1.1's MirrorFileSchema is strict: any other key makes it read the file as absent (never-synced offline).
+    expect(Object.keys(recorded).sort()).toEqual(["fold", "lastSyncedAt", "skipped", "store", "v"]);
+    store.calls.get = 0;
+    expect((await load(store, mirror)).copied).toBe(0);
+    expect(store.calls.get).toBe(1); // the identity file only: the copy's size stands in
+  });
+
   test("I7: a valid event of a type this version does not know is read again on every sync, never remembered as skipped", async () => {
     const store = await initStore();
     const mirror = memoryBlobStore();

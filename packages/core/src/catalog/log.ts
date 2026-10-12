@@ -287,8 +287,8 @@ export const MirrorFileSchema = z
     skipped: z.record(z.string(), z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema })),
     /** The size of the store file each mirrored event was opened from, by event id: the mirror holds opened bytes,
      * so a sealed store's files differ in size from their copies. A file is fetched again when its size on the store
-     * is not this one, and the fold cache's digest is taken over these sizes. Absent from an M1 mirror, whose copies
-     * are the store's own bytes: there the copy's size stands in. */
+     * is not this one, and the fold cache's digest is taken over these sizes. Recorded only where it differs from the
+     * copy's size, and absent when none does (an M1 or plain store's mirror): there the copy's size stands in. */
     transport: z.record(z.string(), z.int().nonnegative()).optional(),
   })
   .meta({ title: "EventMirror", description: "mirror.json beside a store's local event mirror" });
@@ -450,7 +450,7 @@ const download = async (
   }
   if (mine !== null && sameBytes(mine, opened)) return ok(sizes);
   return ok({
-    reason: "wrong-id",
+    reason: "mirror-clash",
     finding: skipped(
       key,
       `the mirror holds other bytes under its name (${target}); both are kept as they are`,
@@ -503,7 +503,7 @@ const syncDown = async (
   for (const [id, size] of [...sizesById(theirs.value)].sort(([a], [b]) => compare(a, b))) {
     // Held, and opened from a store file of this size (an M1 mirror records none: its copy's size is the file's).
     if (mirrorSizes.has(id) && (transportBefore[id] ?? mirrorSizes.get(id)) === size) {
-      transport[id] = size;
+      if (size !== mirrorSizes.get(id)) transport[id] = size;
       continue;
     }
     const before = known[id];
@@ -517,7 +517,7 @@ const syncDown = async (
     if (result.value === undefined) continue;
     if ("transport" in result.value) {
       mirrorSizes.set(id, result.value.opened);
-      transport[id] = result.value.transport;
+      if (result.value.transport !== result.value.opened) transport[id] = result.value.transport;
       copied++;
     } else {
       if (result.value.bytes) skippedNow[id] = { size, finding: result.value.finding };
@@ -531,7 +531,8 @@ const syncDown = async (
     fold: FOLD_VERSION,
     lastSyncedAt: now.toISOString(),
     skipped: skippedNow,
-    transport,
+    // Only sizes that differ from the copy's (a sealed store's): a plain store's file keeps v0.1.1's strict shape.
+    ...(Object.keys(transport).length === 0 ? {} : { transport }),
   };
   const written = await mirror.store.put(MIRROR_FILE_KEY, encoder.encode(`${JSON.stringify(file)}\n`));
   if (!written.ok) return mirrorFault(written);

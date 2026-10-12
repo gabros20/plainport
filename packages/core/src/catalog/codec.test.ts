@@ -295,6 +295,10 @@ describe("codec: no module outside the codec parses event bytes", () => {
       /\.get\(\s*`events\//.test(source);
     if (readsEventKey && /JSON\.parse\s*\(/.test(source))
       found.push("reads an event file and parses JSON itself");
+    // 3. An event schema (a value import, not a type) in a module that reads a store: the split form of rule 1, a
+    // parse and a check in separate statements, or a key built elsewhere (review r1 M9).
+    if (/import\s*\{[^}]*\b(?<!type\s)\w*EventSchema\b[^}]*\}\s*from/.test(source) && /\.get\(/.test(source))
+      found.push("imports an event schema and reads a store");
     return found;
   };
 
@@ -315,6 +319,16 @@ describe("codec: no module outside the codec parses event bytes", () => {
     // Written with "$(" for a template's "${", so the samples stay plain strings.
     for (const sample of m1) expect(offences(sample.replaceAll("$(", "${")).length).toBeGreaterThan(0);
     expect(offences("const read = await eventAt(storeEventLog(blob, policy), id);")).toEqual([]);
+    const split = [
+      'import { OffloadedEventSchema } from "../catalog/events.ts";',
+      "const got = await store.get(key);",
+      "const data = JSON.parse(text);",
+      "const checked = OffloadedEventSchema.safeParse(data);",
+    ].join("\n");
+    expect(offences(split)).toEqual(["imports an event schema and reads a store"]);
+    expect(
+      offences('import { type CatalogEvent } from "./events.ts";\nconst v = await store.get(key);'),
+    ).toEqual([]);
   });
 
   test("every source file outside codec.ts obeys them", () => {
@@ -322,7 +336,10 @@ describe("codec: no module outside the codec parses event bytes", () => {
     for (const root of ROOTS)
       for (const file of sources(root)) {
         if (file === CODEC) continue;
-        for (const why of offences(readFileSync(file, "utf8")))
+        // log.ts validates an event before it encodes it (appendEvent), and reads through the codec: rule 3 only.
+        const allowed =
+          file === join(import.meta.dir, "log.ts") ? ["imports an event schema and reads a store"] : [];
+        for (const why of offences(readFileSync(file, "utf8")).filter((w) => !allowed.includes(w)))
           bad.push(`${relative(join(import.meta.dir, "../../../.."), file)}: ${why}`);
       }
     expect(bad).toEqual([]);

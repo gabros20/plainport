@@ -37,7 +37,9 @@ export type SkipReason =
   | "unknown-type"
   | "unsealed-event"
   | "seal-failed"
-  | typeof STORED_MULTIPLE;
+  | typeof STORED_MULTIPLE
+  /** Not the codec's: the mirror holds other bytes under the event's name (log.ts, download). */
+  | "mirror-clash";
 
 /**
  * A snapshot event skipped as stored-multiple (Q11). It parsed, so what it says is known: a producer (offloaded,
