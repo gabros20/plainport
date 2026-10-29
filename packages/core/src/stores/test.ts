@@ -45,14 +45,14 @@ const REPOS_PREFIX = "repos/";
 
 export type DeleteVerdict = NonNullable<StoreTest["delete"]>;
 
-export interface Leftover {
+export type Leftover = {
   /** The bootstrap attempt's id. */
   attempt: string;
   /** The keys it left in the store. */
   keys: string[];
-}
+};
 
-export interface StoreTestReport {
+export type StoreTestReport = {
   name: string;
   location: string;
   /** What the store's meta/v1/store.json says, when it has one. */
@@ -79,7 +79,7 @@ export interface StoreTestReport {
   recorded: boolean;
   ok: boolean;
   findings: Finding[];
-}
+};
 
 export interface TestStoreOptions {
   paths: PlainportPaths;

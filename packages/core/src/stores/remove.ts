@@ -17,13 +17,13 @@ import { updateRegistry } from "../registry.ts";
 import { configLayers } from "./list.ts";
 import { notConfigured } from "./reach.ts";
 
-export interface StoreRemoved {
+export type StoreRemoved = {
   name: string;
   /** The id the name was pinned to here, now forgotten; absent when this device never set it up. */
   id?: string;
   /** managed.toml no longer defines it. */
   removed: boolean;
-}
+};
 
 /** What on this device still uses the store `name`, one phrase each; empty when nothing does. */
 export const storeUsers = async (

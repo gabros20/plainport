@@ -8,7 +8,9 @@ import type { Store } from "../config/schema.ts";
 import { type ProbeOptions, probeDeadline } from "../deadline.ts";
 import type { LocalIo } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
+import type { Engine } from "../ports/engine.ts";
 import type { OpenedStore, StoreOpener } from "../ports/store.ts";
+import type { BootstrapStore } from "../saga/bootstrap.ts";
 import { resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 
 export interface ReachOptions {
@@ -35,6 +37,21 @@ export const reachStore = async (io: LocalIo, options: ReachOptions): Promise<Re
   );
   if (!password.ok) return password;
   return options.opener.open(options.name, options.store, password.value);
+};
+
+/**
+ * The store as bootstrap reaches it (DESIGN.md "Bootstrap"): its metadata layer, where it is, and an engine at any
+ * repository location under its root, from what the opener gave (OpenedStore's location and engineAt, Task 18).
+ * Undefined from an opener that cannot set stores up.
+ */
+export const bootstrapStoreOf = (opened: OpenedStore): BootstrapStore | undefined => {
+  const { location, engineAt } = opened as OpenedStore & {
+    location?: string;
+    engineAt?: (repo: string) => Engine;
+  };
+  return location === undefined || engineAt === undefined
+    ? undefined
+    : { blob: opened.blob, location, engineAt: (repo) => engineAt(repo) };
 };
 
 /** What a probe found: the store answered, with its identity file (or none), or it did not, with why. */

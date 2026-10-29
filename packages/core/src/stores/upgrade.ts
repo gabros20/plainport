@@ -82,6 +82,8 @@ export interface UpgradePorts {
   wait(ms: number): Promise<void>;
   /** The host's crash seam, reached after each write (UPGRADE_SEAMS). */
   faultAt(point: string): void;
+  /** Ctrl-C: a stop during the window abandons the upgrade and removes its marker. */
+  signal?: AbortSignal;
 }
 
 export interface UpgradeOptions {
@@ -96,7 +98,7 @@ export interface UpgradeOptions {
   mint: () => string;
 }
 
-export interface UpgradeDone {
+export type UpgradeDone = {
   name: string;
   id: string;
   /** The format found; 2 when there was nothing to upgrade. */
@@ -106,7 +108,7 @@ export interface UpgradeDone {
   upgraded: boolean;
   /** This run found this device's own marker from an earlier run and finished or cleared it. */
   resumed: boolean;
-}
+};
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -362,6 +364,16 @@ const upgradeLocked = async (
     ports.faultAt("upgrade.intent.written");
   }
   await ports.wait(windowMs);
+  if (ports.signal?.aborted) {
+    const removed = await blob.delete(UPGRADE_INTENT_KEY);
+    return fail(
+      finding("operation.cancelled", {
+        message: `the upgrade of store ${name} was cancelled during the quiet window; store.json was not changed${removed.ok ? " and the marker was removed" : `, and the marker could not be removed (${removed.finding.message}): plainport recover removes it`}`,
+        fix: `re-run plainport store upgrade ${name} --others-stopped --yes`,
+        paths: [UPGRADE_INTENT_KEY],
+      }),
+    );
+  }
   const again = await readEvents(log);
   const seen = new Set(first.value.events.map((e) => e.id));
   const fresh = again.ok ? again.value.events.filter((e) => e.device !== device && !seen.has(e.id)) : [];
@@ -403,12 +415,12 @@ const upgradeLocked = async (
   return ok(done(1, true, resumed));
 };
 
-export interface RecoveredUpgrade {
+export type RecoveredUpgrade = {
   store: string;
   /** cleared: this device's marker was removed (store.json was format 1 or 2); kept: not this device's, or unreadable. */
   outcome: "cleared" | "kept";
   format?: 1 | 2;
-}
+};
 
 /**
  * `recover`'s part (Q2): clears this device's upgrade marker on a store when no upgrade of it runs here. Whatever

@@ -26,11 +26,12 @@ import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry } from "../registry.ts";
 import { type BootstrapPorts, runBootstrap } from "../saga/bootstrap.ts";
 import { withFix } from "../saga/journaled.ts";
-import { prepareLocalStore, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { prepareLocalStore, secretRefOf } from "../store.ts";
 import { storeLocation } from "./location.ts";
+import { bootstrapStoreOf, reachStore } from "./reach.ts";
 import { refuseWhileUpgrading } from "./upgrade.ts";
 
-export interface StoreAdded {
+export type StoreAdded = {
   name: string;
   /** The store's id: this attempt's when it won, the published one when adopted. */
   id: string;
@@ -43,7 +44,7 @@ export interface StoreAdded {
   configChanged: boolean;
   /** This run saved the password to the Keychain (--secret-stdin). */
   secretSaved: boolean;
-}
+};
 
 export interface AddStoreOptions {
   paths: PlainportPaths;
@@ -143,28 +144,20 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   }
 
   // 4. The store, reached: its identity against this device's pin, and no upgrade under way.
-  const password = await resolveSecret(
-    io,
-    env,
-    paths.home,
-    name,
-    secretRefOf(store),
-    secretProvidersOf(options.opener),
-  );
-  if (!password.ok) return password;
-  if (options.opener.bootstrap === undefined)
+  const opened = await reachStore(io, { paths, env, name, store, opener: options.opener });
+  if (!opened.ok) return opened;
+  const reached = bootstrapStoreOf(opened.value);
+  if (reached === undefined)
     return fail(
       finding("store.unsupported", {
         message: `this build cannot set store ${name} up (${describe(store, paths.home)}); nothing was written`,
         fix: "use a plainport build that sets stores up (v0.2 or later)",
       }),
     );
-  const target = await options.opener.bootstrap(name, store, password.value);
-  if (!target.ok) return target;
   const registry = await readRegistry(io, paths);
   if (!registry.ok) return registry;
   const pinned = registry.value.stores?.[name];
-  const found = await readStoreDescriptor(target.value.blob);
+  const found = await readStoreDescriptor(reached.blob);
   if (!found.ok) return found;
   if (pinned !== undefined && found.value?.id !== pinned)
     return withFix(
@@ -172,7 +165,7 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
       `point the name back at the store this device set up as ${name} (${pinned}); a different store needs a new name: plainport store add <new-name> …; nothing was written`,
     );
   if (found.value !== null) {
-    const quiet = await refuseWhileUpgrading(target.value.blob, name, "store add");
+    const quiet = await refuseWhileUpgrading(reached.blob, name, "store add");
     if (!quiet.ok) return quiet;
   }
 
@@ -198,7 +191,7 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   if (!written.ok) return written;
 
   // 6. Bootstrap: adopt, resume or stand.
-  const done = await runBootstrap({ ...options.ports, io, paths }, target.value, {
+  const done = await runBootstrap({ ...options.ports, io, paths }, reached, {
     name,
     seal: options.seal ?? "none",
   });

@@ -6,7 +6,6 @@
 import type { Result } from "@plainport/contract";
 import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { Store } from "../config/schema.ts";
-import type { BootstrapStore } from "../saga/bootstrap.ts";
 import type { BlobStore } from "./blob-store.ts";
 import type { Engine } from "./engine.ts";
 import type { SecretProviders } from "./secrets.ts";
@@ -24,10 +23,4 @@ export interface StoreOpener {
   /** The store's two layers; the engine is bound to its repository and this password. store.unsupported for a
    * kind this build cannot use. Opening reaches nothing: the first call on either layer does. */
   open(name: string, store: Store, password: string): Promise<Result<OpenedStore>>;
-  /**
-   * The store as bootstrap reaches it (Task 8, DESIGN.md "Bootstrap"): its metadata layer, where it is (never a secret),
-   * and an engine at any repository location under its root, with this password. `store add` and `init` set a store up
-   * through it; without it, they can only adopt nothing and refuse with store.unsupported.
-   */
-  bootstrap?(name: string, store: Store, password: string): Promise<Result<BootstrapStore>>;
 }

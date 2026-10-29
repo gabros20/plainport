@@ -14,7 +14,7 @@ import { readStoreState, type StoreTest } from "../stores-state.ts";
 import { storeFacts, storeLocation, type ToolVersions } from "./location.ts";
 import type { Probe } from "./reach.ts";
 
-export interface StoreListing {
+export type StoreListing = {
   name: string;
   kind: Store["kind"];
   /** Where the store is, never a secret. */
@@ -33,7 +33,7 @@ export interface StoreListing {
   probe?:
     | { reachable: true; format?: 1 | 2; id?: string; pinned: boolean }
     | { reachable: false; finding: Finding };
-}
+};
 
 /** The two files' tables as written; a file that is missing or broken reads as empty here (the loader reports it). */
 export const configLayers = async (

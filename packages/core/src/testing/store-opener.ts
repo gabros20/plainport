@@ -65,15 +65,9 @@ export const storeWorld = (options: SemanticFakeOptions = {}): StoreWorld => {
           const { location, blob } = reach(store);
           const found = await readStoreDescriptor(blob);
           const repo = found.ok && found.value !== null ? found.value.repo : "repo";
-          return ok({ blob, engine: fakeEngine(repoAt(location, repo), {}, { password }) });
-        },
-        bootstrap: async (_name, store, password) => {
-          const { location, blob } = reach(store);
-          return ok({
-            blob,
-            location,
-            engineAt: (repo: string) => fakeEngine(repoAt(location, repo), {}, { password }),
-          });
+          const engineAt = (at: string) => fakeEngine(repoAt(location, at), {}, { password });
+          // location and engineAt: what bootstrap needs (Task 18's OpenedStore), given whatever the port declares.
+          return ok({ blob, engine: engineAt(repo), ...{ location, engineAt } });
         },
       };
     },

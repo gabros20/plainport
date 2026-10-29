@@ -27,6 +27,19 @@ const unexpected = (where: string, error: unknown): Failure =>
     }),
   );
 
+/** A timer that ends early when `signal` aborts: the default wait of a command (Ports.sleep). */
+const sleepUnlessAborted = (ms: number, signal: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+
 /** --json as typed, before `--`; used only when the gate itself threw and parsed nothing. */
 const wantsJson = (argv: readonly string[]): boolean => {
   const end = argv.indexOf("--");
@@ -57,6 +70,7 @@ export const run = async (
     verb = command.name;
     verbose = globals.verbose;
     const out = new Output(io, globals, command.name);
+    const signal = ports.cancellation?.signal ?? new AbortController().signal;
     output = out;
     options.onOutput?.(out);
     const ctx: CommandContext = {
@@ -81,7 +95,9 @@ export const run = async (
       checks: ports.checks,
       plugins: ports.plugins,
       stores: ports.stores,
-      signal: ports.cancellation?.signal ?? new AbortController().signal,
+      stdin: ports.stdin,
+      sleep: (ms) => (ports.sleep ?? sleepUnlessAborted)(ms, signal),
+      signal,
       holdSignal: () => ports.cancellation?.hold() ?? (() => {}),
       paths: () => resolvePaths(ports.env, { configFlag: globals.config, cwd: ports.cwd }),
     };
@@ -175,6 +191,7 @@ const realPorts = async (host: MacosHost, cancellation: Cancellation): Promise<P
     checks: createMacosChecks(host),
     plugins: [nodePlugin],
     stores: localStores(host, process.env),
+    stdin: () => Bun.stdin.text(),
     cancellation,
   };
 };
