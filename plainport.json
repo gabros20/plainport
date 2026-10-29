@@ -3079,7 +3079,7 @@
             "work:clients/acme/api",
             "--no-hydrate"
           ],
-          "summary": "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_* or any variable an env: secret in the config names, so no store password reaches them"
+          "summary": "Files only, exactly as stored. Without --no-hydrate, the install (e.g. npm ci) usually needs the network; if it fails the files stay restored, the project is restored-unhydrated, onload exits 10 (hydrate.failed) and plainport hydrate <project> retries. The install runs package scripts without PLAINPORT_*, RESTIC_*, RCLONE_*, AWS_*, OP_* or any variable an env: secret in the config names, so no store password or key reaches them"
         },
         {
           "argv": [
@@ -5204,7 +5204,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 6,
-      "summary": "The store's repository password could not be read from its secret reference (env: or file: in M1)"
+      "summary": "A store's secret (its repository password, or an S3 key) could not be read from its reference: not found, empty, a garbled reference, a denied or unanswered Keychain prompt, a signed-out 1Password CLI, or no answer within 30 seconds (Q14); se: and bw: are refused until their milestones"
     },
     {
       "code": "store.seal-key-unavailable",

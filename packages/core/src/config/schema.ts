@@ -78,11 +78,22 @@ const SftpStore = z.strictObject({
   secret: SecretRefSchema,
   ...storeShared,
 });
+/**
+ * An S3 bucket (Q7): three separate references, the restic repository's password and the key pair, plus an optional
+ * region and a prefix inside the bucket. Temporary session credentials (AWS_SESSION_TOKEN) are not supported in M2.
+ */
 const S3Store = z.strictObject({
   kind: z.literal("s3"),
   endpoint: z.url(),
   bucket: Name,
   secret: SecretRefSchema,
+  accessKeyId: SecretRefSchema,
+  secretAccessKey: SecretRefSchema,
+  region: Name.optional(),
+  path: z
+    .string()
+    .regex(/^[^/](.*[^/])?$/, "a prefix inside the bucket, without a leading or trailing /")
+    .optional(),
   ...storeShared,
 });
 const PeerStore = z.strictObject({
@@ -103,6 +114,9 @@ const StoreLayerSchema = z
     endpoint: z.url(),
     bucket: Name,
     secret: SecretRefSchema,
+    accessKeyId: SecretRefSchema,
+    secretAccessKey: SecretRefSchema,
+    region: Name,
     device: Name,
     ...storeShared,
   })

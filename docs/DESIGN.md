@@ -899,10 +899,14 @@ path   = "/volume1/plainport"
 secret = "keychain:plainport/nas"    # restic password; SSH uses your ssh config
 
 [stores.b2]
-kind     = "s3"
-endpoint = "https://s3.eu-central-003.backblazeb2.com"
-bucket   = "tamas-plainport"
-secret   = "keychain:plainport/b2"    # restic password + access keys
+kind            = "s3"
+endpoint        = "https://s3.eu-central-003.backblazeb2.com"
+bucket          = "tamas-plainport"
+region          = "eu-central-003"                 # optional
+path            = "plainport"                      # optional: a prefix inside the bucket
+secret          = "keychain:plainport/b2"          # restic password
+accessKeyId     = "keychain:plainport/b2-key-id"
+secretAccessKey = "op://Private/plainport-b2/secret-access-key"
 
 [offload]
 verify        = "manifest"   # manifest | full (full arrives in M5; refused until then)
@@ -977,7 +981,19 @@ delay = "7d"                    # forget requests wait this long; prune --yes ru
 pruneKey = "op://Private/plainport-prune/b2-key"   # delete-capable; fetched only for prune
 ```
 
-The `secret`, `recovery` and SSH settings are references, never values. In M1 a local store's `secret` is optional: without one, its restic repository password is read from `env:PLAINPORT_STORE_PASSWORD`, and `plainport init --store-secret <ref>` records another reference; only `env:` and `file:` are read until M2. Each one resolves through a secret provider: `keychain:`, `se:` (Secure Enclave), `op:` (1Password), `bw:` (Bitwarden), `file:` or `env:`.
+The `secret`, `accessKeyId`, `secretAccessKey`, `recovery`, `pruneKey` and SSH settings are references, never values. A local store's `secret` is optional: without one, its restic repository password is read from `env:PLAINPORT_STORE_PASSWORD`, and `plainport init --store-secret <ref>` records another reference. An `s3` store needs three references (Q7): `secret` (the restic password) and the key pair `accessKeyId` and `secretAccessKey`; `region` and `path` (a prefix inside the bucket, no leading or trailing `/`) are optional. Temporary session credentials are not supported: `AWS_SESSION_TOKEN` is never read. v0.1.x refuses a config with these keys (`config.invalid`), so a rollback means removing the store's lines.
+
+Each reference resolves through a secret provider, within 30 seconds (Q14); whatever goes wrong (not found, empty, a garbled reference, a denied or unanswered prompt, a signed-out CLI, no answer in time) is `store.secret-missing`, naming the store and the fix:
+
+| Reference | Read by | Notes |
+| --- | --- | --- |
+| `env:<VARIABLE>` | plainport, from its environment | The variable is dropped from every install's environment (D79) |
+| `file:<path>` | plainport, from the file | `~` is the home folder; one trailing newline is cut |
+| `keychain:<service>/<account>` | `/usr/bin/security find-generic-password -s <service> -a <account> -w` | Split at the first `/`. Written only by `store add --secret-stdin`, through `security -i` with the command on stdin and the value as hex, never in argv. Missing: the fix is `security add-generic-password -s <service> -a <account> -w`, which prompts. A value outside printable ASCII is refused on write, since `security` would read it back as hex |
+| `op://<vault>/<item>[/<section>]/<field>` | `op read --no-newline <reference>`, the 1Password CLI on your `PATH`, with your `OP_*` variables | Signed out, a dismissed approval and an unknown item are told apart |
+| `se:`, `bw:` | refused | `se:` (Secure Enclave) arrives with the secrets envelope in M3; `bw:` (Bitwarden) has no milestone yet |
+
+A provider's child runs in the runner's sensitive mode: its output reaches no log, finding or error, and the value is held only in memory. Every install's environment also drops `PLAINPORT_*`, `RESTIC_*`, `RCLONE_*`, `AWS_*` and `OP_*` (D79).
 
 ## CLI design
 
@@ -1259,8 +1275,9 @@ export interface EcosystemPlugin {
 }
 
 export interface SecretProvider {
-  get(ref: string): Promise<string>;                     // "keychain:plainport/nas"
-  set?(ref: string, value: string): Promise<void>;
+  // Results, as everywhere: store.secret-missing for every expected failure, process.cancelled when ctx.signal stops it.
+  get(ref: string, ctx?: SecretContext): Promise<Result<string>>; // "keychain:plainport/nas"; ctx: signal, deadline
+  set?(ref: string, value: string, ctx?: SecretContext): Promise<Result<void>>;
 }
 
 export interface Transport {
@@ -1415,7 +1432,7 @@ Every file plainport persists, and every closed value it prints, has a row below
 | `store.sidecar` | `~/.local/state/plainport/stores/<store id>.json` (Q4), `schemas/store-state.json`, whose measured semantics profile is `schemas/store-semantics.json` (Task 6) | never read, so `registry.json` stays v1 and `scripts/install --rollback` keeps working | ignored | no | created at first contact; measured facts invalidate on endpoint, access kind or tool version change | tested (a rolled-back v0.1.1 offloads, lists and onloads with one present) |
 | `registry.json` | `registry.json` `{v: 1}`, strict | parsing it; a changed shape is `registry.invalid` | everything works | yes | v0.2 keeps it at v 1, so it is shared | tested |
 | `device.json` | `device.json` `{v: 1, id, name}` | parsing it | everything works | yes | read as is | tested |
-| `config.keys` | `config.toml` keys; new in M2: S3 `accessKeyId`, `secretAccessKey`, `region`, `path` (Q7), `offload.conflictGrace` (Q16), secret providers `keychain:` and `op:` (Q14) | refusing a key it does not know: `config.invalid`, exit 6 | remove the new lines and everything works | no | existing keys keep their meaning | todo: Task 15 (the refusal is tested now) |
+| `config.keys` | `config.toml` keys; new in M2: S3 `accessKeyId`, `secretAccessKey`, `region`, `path` (Q7), `offload.conflictGrace` (Q16), secret providers `keychain:` and `op:` (Q14) | refusing a key it does not know: `config.invalid`, exit 6 | remove the new lines and everything works | no | existing keys keep their meaning | todo: Task 24 (`offload.conflictGrace`; the refusal, and v0.2 reading the S3 keys and the `keychain:` and `op:` references, are tested) |
 | `managed.toml` | `managed.toml` beside `config.toml`, same keys | the same: `config.invalid`, exit 6 on an unknown key | remove the new lines | yes, `init` writes it | v0.2 writes only keys v0.1.1 knows to an M1 home | tested |
 | `journal` | `journal/<op>.json` `{v: 1}` offload and onload, free-form `step` | parsing it; an unknown step is left pending | v0.1.1's `recover` settles a journal v0.2 left open | yes | read as is | tested |
 | `journal.bootstrap` | `journal/bootstrap/<attempt>.json` (`schemas/bootstrap-journal.json`, Task 8): a store setup's journal, in a folder of its own | never read: v0.1.1 reads only `journal/<ulid>.json`, so it neither settles nor reports it and holds back no project | the file stays; v0.2's recovery settles it after a roll-forward | no | none exists on an M1 home | tested |

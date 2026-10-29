@@ -653,7 +653,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The store's repository password could not be read from its secret reference (env: or file: in M1)",
+      "A store's secret (its repository password, or an S3 key) could not be read from its reference: not found, empty, a garbled reference, a denied or unanswered Keychain prompt, a signed-out 1Password CLI, or no answer within 30 seconds (Q14); se: and bw: are refused until their milestones",
   },
   "store.seal-key-unavailable": {
     severity: "block",

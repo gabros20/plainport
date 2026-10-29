@@ -38,6 +38,7 @@ import { acquireLock } from "../lock.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
+import type { SecretProvider } from "../ports/secrets.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
@@ -3026,6 +3027,68 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
     const view = await web({ opener: watching });
     expect(view.stale).toBe(false);
     expect(seen).toEqual(["pw"]);
+  });
+
+  // Task 15: keychain: and op: references resolve through the providers the opener carries, under the same deadline.
+  const keychainConfig = () =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "local"',
+        'path = "~/ssd"',
+        'secret = "keychain:plainport/ssd"',
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+
+  test("a keychain: secret resolves through the opener's provider, within the views' deadline", async () => {
+    value(await offloadNow());
+    keychainConfig();
+    const asked: [string, number | undefined][] = [];
+    const seen: string[] = [];
+    const keychain: SecretProvider = {
+      get: async (ref, ctx) => {
+        asked.push([ref, ctx?.deadlineMs]);
+        return ok("from-keychain");
+      },
+    };
+    const watching: StoreOpener = {
+      secrets: { keychain },
+      open: async (n, s, password) => {
+        seen.push(password);
+        return opener.open(n, s, password);
+      },
+    };
+    const view = await web({ opener: watching });
+    expect(view.stale).toBe(false);
+    expect(asked).toEqual([["keychain:plainport/ssd", 50]]);
+    expect(seen).toEqual(["from-keychain"]);
+  });
+
+  test("a keychain: provider that never answers: secret-unavailable at the deadline, the store never opened", async () => {
+    value(await offloadNow());
+    await web();
+    keychainConfig();
+    const seen: string[] = [];
+    const watching: StoreOpener = {
+      secrets: { keychain: { get: () => new Promise(() => {}) } },
+      open: async (n, s, password) => {
+        seen.push(password);
+        return opener.open(n, s, password);
+      },
+    };
+    const view = await web({ opener: watching });
+    expect([view.state, view.stale, view.conditions]).toEqual([
+      "shelved",
+      true,
+      ["stale", "secret-unavailable"],
+    ]);
+    expect(seen).toEqual([]);
   });
 
   test("a secret the provider does not give: the mirror's state, secret-unavailable, the store never opened", async () => {
