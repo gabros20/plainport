@@ -1431,14 +1431,16 @@ Every file plainport persists, and every closed value it prints, has a row below
 
 plainport is judged by one property, never losing a project, so the test suite is built around six invariants and a crash matrix rather than line coverage.
 
-**Invariants, asserted after every test:**
+**Invariants, asserted after every test** and, in the race schedules, on every device (M2; `packages/core/src/testing/invariants.ts` checks them without reading the implementation's own judgement):
 
-1. A project folder is deleted only if its snapshot was verified and committed.
-2. A stub exists if and only if the project is shelved on that machine.
+1. A deleted folder's snapshot is verified, committed and in the store. On a remote store a released folder is deleted only after a catalog read, taken at least the conflict grace after its commit, showed no fork naming its snapshot (Q16); a fork appended after that read is the residual the owner signed, and even then the snapshot is kept.
+2. **Per device:** a stub exists if and only if this device's own last completed operation shelved the project, and it names that operation's snapshot. It does not follow the catalog's status, which another device's later fork changes to conflicted.
 3. After `plainport recover`, no staging or trash folder remains from a finished operation.
 4. Folding the same events in any order yields the same state.
-5. At most one device holds a project's lease at any moment.
-6. Nothing but prune --yes deletes or rewrites a snapshot, and no key stored on a laptop or worker can.
+5. **Leases are advisory (Q17):** the fold names at most one holder, and no device that observed a holder under `onload.leases = "strict"` onloads. Two strict onloads at the same moment can both succeed; that race ends, at offload, in a fork, never in a lost update.
+6. Nothing but prune --yes deletes or rewrites a snapshot, and no key stored on a laptop or worker can. In M2's scope nothing forgets, prunes or deletes a snapshot or an event: a recorder of the run's restic calls and store deletes shows none, and no event or snapshot the store held is gone or rewritten.
+
+**Race schedules** (`test/support/schedules.ts`, M2 Task 14): two or three sandboxed devices on one store, paused at named seams (`offload.head-checked`, `offload.committed`, `offload.release.reread`, `onload.lease-checked`, `trash.delete.checked`; test builds only, D67), each schedule stating the outcome every device must observe. A schedule whose feature is not built yet is a `todo` naming the task that turns it on, and the M2 gate fails while any remains (`bun run test:m2-gate`, which sets `PLAINPORT_M2_GATE=1`).
 
 | Layer | What it proves | How |
 | --- | --- | --- |

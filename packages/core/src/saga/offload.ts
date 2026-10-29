@@ -162,6 +162,19 @@ export const OFFLOAD_AFTER_EFFECT = {
 export type OffloadAfterEffect = keyof typeof OFFLOAD_AFTER_EFFECT;
 
 /**
+ * Pause seams for the race schedules (M2 Task 14, test/support/schedules.ts): points where a test stops one device
+ * while another acts. They write no journal and are no crash rows; in a release build nothing pauses there (D67).
+ * offload.head-checked is right after a head check that passed, before the event is appended; offload.committed is
+ * the journal step; offload.release.reread is the last point before the folder's final check and its rename, where
+ * the catalog is read again before release (Q16).
+ */
+export const OFFLOAD_PAUSE_SEAMS = [
+  "offload.head-checked",
+  "offload.committed",
+  "offload.release.reread",
+] as const;
+
+/**
  * The branches a plain run does not take, and what makes a run take each, so the crash matrix can show it covered
  * every row: the steps and seams only a branch reaches, and the retry that reaches the preparation twice.
  */
@@ -844,6 +857,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         };
         return failWith(head.finding, conflict, 8);
       }
+      host.faultAt("offload.head-checked");
       // lock.ts's known limit: a run that lost its lock to a breaker never commits.
       if (!(await lock.stillHeld()))
         return fail(

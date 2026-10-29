@@ -178,6 +178,25 @@ describe("the boot session beside the claim (Q5 i)", () => {
     ]);
   });
 
+  test("the race schedules' pause seam trash.delete.checked: the claim is live and the trash still there", async () => {
+    const seen: [boolean, boolean][] = [];
+    const host: HostPorts = {
+      ...testHost({
+        faults: {
+          onStep: (step) => {
+            if (step === "trash.delete.checked")
+              seen.push([existsSync(trash), existsSync(trashClaimFile(trash))]);
+          },
+        },
+      }),
+      bootSession: async () => "S",
+    };
+    const payload = trashDeletePayload(trash, journal, DEVICE, box.paths, { HOME: box.home });
+    expect(await runTrashDelete(host, payload)).toBe(0);
+    expect(seen).toEqual([[true, true]]);
+    expect(existsSync(trash)).toBe(false);
+  });
+
   test("the compatibility row: v0.1.1's claim reader parses a claim this version writes", async () => {
     const real = testHost();
     let text: string | undefined;
