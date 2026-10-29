@@ -7,10 +7,14 @@
 // once it is complete. Elsewhere (SFTP, local) rclone's rcat can write in place, so a put uploads to its own
 // temporary, `meta/v1/tmp/<op>-<ulid>`, and `moveto`s it onto the key: a reader of the key sees nothing or every
 // byte. A put that dies between the two leaves that temporary, which sweepTemporaries removes once it is old enough
-// (gc's job); nothing else ever writes, lists or deletes under that prefix. Whether the move is atomic on a given
-// server, and whether it replaces a key that is there, is what Task 17 measures: until then semantics() reports every
-// property unknown, so only reading is eligible, and a profile passed in may never claim more than this adapter does
-// (no conditional create, and only the publication its route gives).
+// (gc's job); nothing else ever writes, lists or deletes under that prefix. On OpenSSH the move is one
+// posix-rename@openssh.com, which replaces a key that is there whole (measured in Task 17).
+//
+// semantics() is every property unknown unless the caller passes the store's profile (profiles.ts holds the measured
+// ones), and a profile may never claim more than this adapter does: only the publication its route gives, and
+// conditional create only on the S3 route, where a create-only put is the same direct upload with
+// `If-None-Match: *` (rclone 1.75.1 forwards it through --header-upload; a store that refuses with 412 answers
+// store.key-exists). A temp-then-rename put has no conditional form: its rename replaces.
 //
 // The remote is defined by environment variables only (RCLONE_CONFIG_PLAINPORT_<OPTION>), with RCLONE_CONFIG naming
 // a file under plainport's cache that must not exist, so no rclone.conf and none of this process's own rclone settings
@@ -20,6 +24,11 @@
 //
 // Exit codes: on get, stat, list and delete, 3 (directory not found) and 4 (file not found) mean the key is not
 // there. 5 (a temporary error) and connection failures are store.unreachable; anything else is store.failed.
+//
+// SFTP through the system's OpenSSH (rclone's `ssh` option, DESIGN "Machines → SSH policy"): rclone keeps nothing of
+// what ssh says, so a refused host key and a lost link both read as "server unexpectedly closed connection". Each run
+// therefore has ssh log to its own file (`-E`, under plainport's cache), which is read into what rclone said and
+// removed after the run: ssh's own words tell an unreachable server from a refused host key or login.
 
 import { join } from "node:path";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
@@ -82,7 +91,7 @@ export interface RcloneBlobStoreOptions {
   env: Env;
   /** How a put publishes. Default: atomic-put on S3, temp-then-rename elsewhere. */
   publication?: RclonePublication;
-  /** The store's profile, as measured (Task 17). Default: every property unknown. */
+  /** The store's profile, as measured (Task 17, profiles.ts). Default: every property unknown. */
   semantics?: StoreSemantics;
   /** Names this command's temporaries (`<op>-<ulid>`). Default "put". */
   op?: string;
@@ -106,13 +115,21 @@ export interface RcloneBlobStore extends BlobStore {
 export type RcloneExit = "ok" | "missing" | "unreachable" | "failed";
 
 /**
- * What rclone and Go print when a connection cannot be made or breaks. Not rclone's "couldn't connect SSH" alone: it
- * also prefixes a refused host key or login, which are failures to fix, not an unreachable store.
+ * What rclone and Go print when a connection cannot be made or breaks: the S3 SDK's "StatusCode: 0 … request send
+ * failed" (no answer at all), the SFTP client's "connection lost", and the system ssh's own words. Not rclone's
+ * "couldn't connect SSH" alone: it also prefixes a refused host key or login, which are failures to fix, not an
+ * unreachable store.
  */
 const CONNECTION =
-  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|TLS handshake timeout/i;
-/** An SSH handshake that failed on the host key or the login: never unreachable, whatever else the line says. */
-const REFUSED_HANDSHAKE = /ssh: handshake failed: (knownhosts|ssh: unable to authenticate|host key)/i;
+  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|TLS handshake timeout|StatusCode: 0,|request send failed|connection lost|ssh: connection closed by|ssh: kex_exchange_identification|ssh: connect to host|ssh: could not resolve hostname|ssh: broken pipe|ssh: connection to .* closed/i;
+/**
+ * An SSH handshake that failed on the host key or the login: never unreachable, whatever else the line says. rclone's
+ * own SSH says it one way; the system's ssh (its log, as `ssh: <line>`) another.
+ */
+const REFUSED_HANDSHAKE =
+  /ssh: handshake failed: (knownhosts|ssh: unable to authenticate|host key)|ssh: host key verification failed|ssh: .*permission denied \(|ssh: too many authentication failures|ssh: no \S+ host key is known/i;
+/** What a store says when an `If-None-Match: *` put finds the key there. */
+const PRECONDITION_FAILED = /StatusCode: 412|PreconditionFailed/;
 
 export const classifyExit = (exitCode: number | null, stderr: string): RcloneExit => {
   if (exitCode === 0) return "ok";
@@ -141,10 +158,17 @@ const PASSED_ENV = [
   "no_proxy",
 ];
 
+/** lsjson without the modification time and MIME type, which cost one HeadObject per key on S3 (Task 17, T2). */
+const NO_METADATA = ["--no-modtime", "--no-mimetype"];
+
 const OPTION_NAME = /^[A-Za-z0-9_]+$/;
 const OP_NAME = /^[A-Za-z0-9_-]+$/;
 const TEMP_NAME = /^.+-([0-7][0-9A-HJKMNP-TV-Z]{25})(?:\..*)?$/;
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** rclone's SpaceSepList quoting: an argument with a space or a quote is double-quoted. */
+const rcloneQuote = (value: string): string =>
+  /[\s"]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
 
 /** The milliseconds a ULID's first ten characters hold. */
 const ulidTime = (id: string): number => {
@@ -191,6 +215,9 @@ const redactor =
     return out;
   };
 
+/** rclone's notice, every run, that the rclone.conf plainport points it at is missing (as it must be). */
+const MISSING_CONFIG = /^Config file ".*" not found - using defaults$/;
+
 /** The last few things rclone said, without its timestamps and levels. */
 const rcloneSaid = (stderr: string): string => {
   const said = stderr
@@ -201,8 +228,8 @@ const rcloneSaid = (stderr: string): string => {
         .replace(/^(ERROR|CRITICAL|NOTICE|INFO|DEBUG) ?: ?/, "")
         .trim(),
     )
-    .filter((line) => line !== "")
-    .slice(-3)
+    .filter((line) => line !== "" && !MISSING_CONFIG.test(line))
+    .slice(-4)
     .join("; ");
   return said.length > 600 ? `${said.slice(0, 600)}…` : said;
 };
@@ -223,11 +250,15 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   const publication: RclonePublication =
     options.publication ?? (remote.type === "s3" ? "atomic-put" : "temp-then-rename");
   const semantics = options.semantics ?? UNKNOWN_SEMANTICS;
-  if (semanticValue(semantics.conditionalCreate) === true)
-    throw new RangeError("rclone cannot create a key only if it is absent: its profile may not claim it");
   const claimed = semanticValue(semantics.publication);
   if (claimed !== "unknown" && claimed !== publication)
     throw new RangeError(`this rclone store publishes ${publication}: its profile may not claim ${claimed}`);
+  const conditional = semanticValue(semantics.conditionalCreate) === true;
+  if (conditional && !(remote.type === "s3" && publication === "atomic-put"))
+    throw new RangeError(
+      "only rclone's S3 route can create a key only if it is absent: this store's profile may not claim it",
+    );
+  const externalSsh = remote.type === "sftp" ? remote.options?.ssh : undefined;
   const op = options.op ?? "put";
   if (!OP_NAME.test(op)) throw new RangeError(`not a valid op for a temporary's name: ${JSON.stringify(op)}`);
 
@@ -253,8 +284,10 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     childEnv[`RCLONE_CONFIG_${RCLONE_REMOTE}_${name.toUpperCase()}`] = value;
   }
 
+  // NOTICE, rclone's default level: a failed lsjson says why only at NOTICE. Nothing above it is ever printed.
   const global = [
-    "-q",
+    "--log-level",
+    "NOTICE",
     "--ask-password=false",
     "--contimeout",
     options.connectTimeout ?? "15s",
@@ -262,6 +295,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     options.ioTimeout ?? "60s",
     "--retries",
     "1",
+    "--low-level-retries",
+    "3",
     "--cache-dir",
     cacheDir,
     ...(options.bwlimit === undefined ? [] : ["--bwlimit", options.bwlimit]),
@@ -324,6 +359,40 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     );
   };
 
+  /** Where this run's ssh logs, when SFTP goes through the system's ssh. */
+  const sshLog = async (): Promise<Result<string | undefined>> => {
+    if (externalSsh === undefined) return ok(undefined);
+    const dir = join(cacheDir, "ssh");
+    try {
+      await host.fs.mkdirp(dir);
+    } catch (error) {
+      return failed(`rclone could not be run: ${dir} could not be made`, systemErrorCode(error));
+    }
+    return ok(join(dir, `${ulid(host.clock.now().getTime())}.log`));
+  };
+
+  /** What ssh logged during the run, as lines rclone's words are followed by; the log is removed. */
+  const readSshLog = async (path: string): Promise<string> => {
+    let text = "";
+    try {
+      text = await host.fs.readText(path);
+    } catch {
+      return ""; // ssh logged nothing
+    }
+    try {
+      await host.fs.unlink(path);
+    } catch {
+      // left in plainport's cache: harmless, and the next run uses another name
+    }
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .slice(-5)
+      .map((line) => `ssh: ${line}\n`)
+      .join("");
+  };
+
   const run = async (
     command: string,
     args: readonly string[],
@@ -331,22 +400,34 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   ): Promise<Result<RunOutcome>> => {
     const refused = await checkNoConfig();
     if (refused !== undefined) return refused;
+    const log = await sshLog();
+    if (!log.ok) return log;
+    const env =
+      log.value === undefined
+        ? childEnv
+        : {
+            ...childEnv,
+            [`RCLONE_CONFIG_${RCLONE_REMOTE}_SSH`]: `${externalSsh} -E ${rcloneQuote(log.value)}`,
+          };
     const spec: RunSpec = {
       command: options.rclone,
       args: [...global, command, ...args],
       cwd: "/",
-      env: childEnv,
+      env,
       idleTimeoutMs: options.idleTimeoutMs ?? 120_000,
       timeoutMs: options.timeoutMs ?? 600_000,
       ...(how.stdin === undefined ? {} : { stdin: how.stdin }),
       ...(how.capture ? { capture: { maxBytes: 1024 ** 3 } } : {}),
     };
     const ran = await host.run(spec);
-    return ran.ok ? ran : redactFailure(ran);
+    const said = log.value === undefined ? "" : await readSshLog(log.value);
+    if (!ran.ok) return redactFailure(ran);
+    if (said === "" || ran.value.exitCode === 0) return ran;
+    return ok({ ...ran.value, stderr: { ...ran.value.stderr, text: `${ran.value.stderr.text}${said}` } });
   };
 
   const stat = async (key: string): Promise<Result<{ size: number } | null>> => {
-    const ran = await run("lsjson", ["--stat", remotePath(key)], { capture: true });
+    const ran = await run("lsjson", ["--stat", ...NO_METADATA, remotePath(key)], { capture: true });
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
     if (exit === "missing") return ok(null);
@@ -356,28 +437,38 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     return ok(parsed.data.IsDir ? null : { size: parsed.data.Size });
   };
 
+  /** How often get reads a key again that was written between its read and its stat. */
+  const GET_TRIES = 3;
+
   const get = async (key: string): Promise<Result<Uint8Array | null>> => {
     const { dir, name } = splitKey(key);
-    // A name rclone's raw file list cannot hold is read by its path; elsewhere the list makes cat read that one file,
-    // never a folder of the same name (whose files cat would join).
-    const ran = /[\r\n]/.test(name)
-      ? await run("cat", [remotePath(key)], { capture: true })
-      : await run("cat", ["--files-from-raw", "-", remotePath(dir)], { capture: true, stdin: `${name}\n` });
-    if (!ran.ok) return ran;
-    const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
-    if (exit === "missing") return ok(null);
-    if (exit !== "ok") return exitFailure(ran.value, "cat", `${key} could not be read`);
-    const bytes = ran.value.captured ?? new Uint8Array();
-    if (bytes.length > 0) return ok(bytes);
-    // Nothing printed: an empty file, or no such file. stat tells which.
-    const found = await stat(key);
-    if (!found.ok) return found;
-    return ok(found.value === null ? null : new Uint8Array());
+    for (let tries = 0; tries < GET_TRIES; tries++) {
+      // A name rclone's raw file list cannot hold is read by its path; elsewhere the list makes cat read that one
+      // file, never a folder of the same name (whose files cat would join).
+      const ran = /[\r\n]/.test(name)
+        ? await run("cat", [remotePath(key)], { capture: true })
+        : await run("cat", ["--files-from-raw", "-", remotePath(dir)], { capture: true, stdin: `${name}\n` });
+      if (!ran.ok) return ran;
+      const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
+      if (exit === "missing") return ok(null);
+      if (exit !== "ok") return exitFailure(ran.value, "cat", `${key} could not be read`);
+      const bytes = ran.value.captured ?? new Uint8Array();
+      if (bytes.length > 0) return ok(bytes);
+      // Nothing printed: an empty file, or no such file. stat tells which, unless the key was written in between
+      // (it now has bytes the read did not see): then it is read again.
+      const found = await stat(key);
+      if (!found.ok) return found;
+      if (found.value === null) return ok(null);
+      if (found.value.size === 0) return ok(new Uint8Array());
+    }
+    return failed(`${key} could not be read`, `it changed under each of ${GET_TRIES} reads`, "re-run");
   };
 
   /** Every file under a folder ("" is the root), as keys; a folder that is not there is empty. */
   const listUnder = async (dir: string): Promise<Result<BlobEntry[]>> => {
-    const ran = await run("lsjson", ["-R", "--files-only", remotePath(dir)], { capture: true });
+    const ran = await run("lsjson", ["-R", "--files-only", ...NO_METADATA, remotePath(dir)], {
+      capture: true,
+    });
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
     if (exit === "missing") return ok([]);
@@ -417,11 +508,19 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
    * One upload, ok only when rclone exited 0: rcat from stdin, or for an empty value (rcat refuses an empty stdin)
    * copyto from an empty file under rclone's cache folder.
    */
-  const upload = async (target: string, key: string, data: Uint8Array): Promise<Result<void>> => {
+  const upload = async (
+    target: string,
+    key: string,
+    data: Uint8Array,
+    ifNotExists = false,
+  ): Promise<Result<void>> => {
     let command = "rcat";
     let ran: Result<RunOutcome>;
+    const condition = ifNotExists ? ["--header-upload", "If-None-Match: *"] : [];
     if (data.length > 0) {
-      ran = await run(command, ["--size", String(data.length), remotePath(target)], { stdin: data });
+      ran = await run(command, [...condition, "--size", String(data.length), remotePath(target)], {
+        stdin: data,
+      });
     } else {
       command = "copyto";
       const empty = join(cacheDir, "empty");
@@ -431,16 +530,27 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       } catch (error) {
         return failed(`${key} could not be written: ${empty} could not be made`, systemErrorCode(error));
       }
-      ran = await run(command, ["--ignore-times", empty, remotePath(target)]);
+      ran = await run(command, [...condition, "--ignore-times", empty, remotePath(target)]);
     }
     if (!ran.ok) return ran;
     if (ran.value.exitCode === 0) return ok(undefined);
+    if (ifNotExists && PRECONDITION_FAILED.test(ran.value.stderr.text))
+      return fail(
+        finding("store.key-exists", {
+          message: `${key} already exists in the store ${where}; it was left as it was`,
+          paths: [key],
+        }),
+      );
     return exitFailure(ran.value, command, `${key} could not be written`);
   };
 
-  const put = async (key: string, data: Uint8Array): Promise<Result<{ etag?: string }>> => {
+  const put = async (
+    key: string,
+    data: Uint8Array,
+    ifNotExists: boolean,
+  ): Promise<Result<{ etag?: string }>> => {
     if (publication === "atomic-put") {
-      const written = await upload(key, key, data);
+      const written = await upload(key, key, data, ifNotExists);
       return written.ok ? ok({}) : written;
     }
     const temp = `${TEMP_PREFIX}${op}-${ulid(host.clock.now().getTime())}`;
@@ -552,9 +662,13 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     },
     put: (key, data, opts: PutOptions = {}) => {
       assertCallerKey(key);
-      if (opts.ifNotExists || opts.ifMatch !== undefined)
-        throw new Error("blob-rclone offers no conditional writes; check capabilities() first");
-      return put(key, data);
+      if (opts.ifMatch !== undefined)
+        throw new Error("blob-rclone offers no replace-if-match; check capabilities() first");
+      if (opts.ifNotExists && !conditional)
+        throw new Error(
+          "this rclone store's profile does not claim conditional create; check capabilities() first",
+        );
+      return put(key, data, opts.ifNotExists === true);
     },
     list: (prefix) => {
       assertBlobPrefix(prefix);

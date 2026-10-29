@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fail, finding, type Result } from "@plainport/contract";
 import {
@@ -75,6 +75,18 @@ const scripted = (script: Script, options: Partial<RcloneBlobStoreOptions> = {})
   return { store, specs };
 };
 
+const S3_REMOTE = {
+  type: "s3",
+  root: "bucket/store",
+  options: { provider: "Other", endpoint: "http://127.0.0.1:9" },
+} as const;
+
+/** A profile that claims conditional create, as SeaweedFS's measured one does. */
+const CONDITIONAL: StoreSemantics = {
+  ...UNKNOWN_SEMANTICS,
+  conditionalCreate: { value: true, evidence: "measured" },
+};
+
 /** The rclone command of a spec (the first argument that is not a flag or a flag's value). */
 const commandOf = (spec: RunSpec): string => {
   const args = spec.args ?? [];
@@ -85,7 +97,17 @@ const commandOf = (spec: RunSpec): string => {
   }
   throw new Error("no command");
 };
-const VALUED = new Set(["--contimeout", "--timeout", "--retries", "--cache-dir", "--size", "--bwlimit"]);
+const VALUED = new Set([
+  "--contimeout",
+  "--timeout",
+  "--retries",
+  "--low-level-retries",
+  "--cache-dir",
+  "--size",
+  "--bwlimit",
+  "--header-upload",
+  "--log-level",
+]);
 
 describe("exit codes, on recorded stderr", () => {
   for (const fixture of recorded.fixtures) {
@@ -131,13 +153,16 @@ describe("exit codes, on recorded stderr", () => {
 
   test("anything else is store.failed, naming the key and what rclone said", async () => {
     const denied = recorded.fixtures.find((f) => f.name === "permission denied");
-    const { store } = scripted(() => outcome(1, { stderr: denied?.stderr ?? "" }));
+    // At NOTICE rclone also says, every run, that the missing rclone.conf is missing: never part of the finding.
+    const missingConf = `2026/10/29 17:30:53 NOTICE: Config file "${sandbox.paths.cacheDir}/rclone/absent/rclone.conf" not found - using defaults\n`;
+    const { store } = scripted(() => outcome(1, { stderr: `${missingConf}${denied?.stderr ?? ""}` }));
     const put = await store.put("meta/v1/events/a.json", new Uint8Array([1]));
     expect(put).toMatchObject({ ok: false, finding: { code: "store.failed" } });
     if (put.ok) throw new Error("unreachable");
     expect(put.finding.message).toContain("meta/v1/events/a.json");
     expect(put.finding.message).toContain("permission denied");
     expect(put.finding.message).not.toContain("2026/10/29");
+    expect(put.finding.message).not.toContain("Config file");
   });
 
   test("a run the runner itself failed keeps its finding", async () => {
@@ -145,6 +170,71 @@ describe("exit codes, on recorded stderr", () => {
       fail(finding("process.timeout", { message: "rclone did not finish within 300 seconds" })),
     );
     expect(await store.get("k")).toMatchObject({ ok: false, finding: { code: "process.timeout" } });
+  });
+});
+
+describe("SFTP through the system's ssh (rclone's ssh option)", () => {
+  const SSH = "/usr/bin/ssh -F /sandbox/ssh/config -o BatchMode=yes nas";
+  /** rclone runs whose ssh "wrote" `log` to the file its -E names, as OpenSSH does. */
+  const withSshLog = (log: string, exitCode = 1) => {
+    const logs: string[] = [];
+    const run = scripted(
+      (spec) => {
+        const ssh = spec.env[`RCLONE_CONFIG_${RCLONE_REMOTE}_SSH`] ?? "";
+        const path = /^(.*) -E (\S+)$/.exec(ssh)?.[2];
+        if (path === undefined) throw new Error(`no -E in ${ssh}`);
+        logs.push(path);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, log);
+        return outcome(exitCode, { stderr: EXTERNAL_EOF });
+      },
+      { remote: { type: "sftp", root: "/data", options: { ssh: SSH, shell_type: "none" } } },
+    );
+    return { ...run, logs };
+  };
+  const EXTERNAL_EOF = (recorded.fixtures.find((f) => f.name === "sftp external ssh closed")?.stderr ??
+    "") as string;
+
+  test("every run logs ssh to its own file under plainport's cache, read and removed after the run", async () => {
+    const { store, specs, logs } = withSshLog("Connection closed by 127.0.0.1 port 22\r\n");
+    await store.list("");
+    await store.get("k");
+    expect(logs).toHaveLength(specs.length);
+    expect(new Set(logs).size).toBe(logs.length);
+    for (const log of logs) {
+      expect(log).toStartWith(join(sandbox.paths.cacheDir, "rclone", "ssh"));
+      expect(existsSync(log)).toBe(false);
+    }
+    expect(specs[0]?.env[`RCLONE_CONFIG_${RCLONE_REMOTE}_SSH`]).toStartWith(`${SSH} -E `);
+  });
+
+  test("a link ssh lost is store.unreachable; a refused host key or login is store.failed", async () => {
+    for (const [log, code] of [
+      ["Connection closed by 127.0.0.1 port 30423\r\n", "store.unreachable"],
+      ["kex_exchange_identification: read: Connection reset by peer\r\n", "store.unreachable"],
+      ["ssh: connect to host nas port 22: Operation timed out\r\n", "store.unreachable"],
+      [
+        "Host key for [127.0.0.1]:30422 has changed and you have requested strict checking.\r\nHost key verification failed.\r\n",
+        "store.failed",
+      ],
+      ["plainport@127.0.0.1: Permission denied (publickey).\r\n", "store.failed"],
+      // rclone alone cannot tell which: without ssh's word it is a failure to look at, not a retry.
+      ["", "store.failed"],
+    ] as const) {
+      const { store } = withSshLog(log);
+      const listed = await store.list("");
+      expect({ log, listed }).toMatchObject({ log, listed: { ok: false, finding: { code } } });
+      if (!listed.ok && log !== "")
+        expect(listed.finding.message).toContain(log.split("\r\n").at(-2) as string);
+    }
+  });
+
+  test("an ssh option is used as given when the remote is not SFTP", async () => {
+    const { store, specs } = scripted(() => outcome(0, { stdout: "[]" }), {
+      remote: { type: "local", root: "/data", options: { ssh: SSH } },
+    });
+    value(await store.list(""));
+    expect(specs[0]?.env[`RCLONE_CONFIG_${RCLONE_REMOTE}_SSH`]).toBe(SSH);
   });
 });
 
@@ -175,6 +265,23 @@ describe("the child's environment and flags", () => {
       expect(name === "RCLONE_CONFIG" || name.startsWith(`RCLONE_CONFIG_${RCLONE_REMOTE}_`)).toBe(true);
   });
 
+  test("listings read no per-object metadata, and rclone says why it failed (NOTICE, not -q)", async () => {
+    // Found on T2 (Task 17): lsjson on S3 sends one HeadObject per key for its ModTime and MimeType, and lsjson's own
+    // failure is a NOTICE, which -q drops.
+    const { store, specs } = scripted((spec) =>
+      commandOf(spec) === "lsjson"
+        ? outcome(0, { stdout: (spec.args ?? []).includes("--stat") ? "{}" : "[]" })
+        : outcome(0),
+    );
+    value(await store.list(""));
+    await store.stat("k");
+    for (const spec of specs) {
+      expect(spec.args).toEqual(expect.arrayContaining(["--no-modtime", "--no-mimetype"]));
+      expect(spec.args).not.toContain("-q");
+      expect(spec.args?.[(spec.args ?? []).indexOf("--log-level") + 1]).toBe("NOTICE");
+    }
+  });
+
   test("network calls are bounded on top of the runner's deadlines", async () => {
     const { store, specs } = scripted(() => outcome(0, { stdout: "[]" }));
     value(await store.list(""));
@@ -182,6 +289,9 @@ describe("the child's environment and flags", () => {
     const args = spec.args ?? [];
     for (const flag of ["--contimeout", "--timeout", "--retries"]) expect(args).toContain(flag);
     expect(args[args.indexOf("--retries") + 1]).toBe("1");
+    // rclone's default of 10 low-level retries, each with the S3 SDK's backoff, keeps a cut link busy for many
+    // minutes (Task 17, on T2): three give up within a minute.
+    expect(args[args.indexOf("--low-level-retries") + 1]).toBe("3");
     expect(args[args.indexOf("--cache-dir") + 1]).toStartWith(sandbox.paths.cacheDir);
     expect(spec.idleTimeoutMs).toBeGreaterThan(0);
     expect(spec.timeoutMs).toBeGreaterThan(0);
@@ -317,16 +427,63 @@ describe("semantics", () => {
   });
 
   test("a profile claiming more than the adapter does is a bug", () => {
-    const claims = (patch: Partial<StoreSemantics>) => () =>
-      scripted(() => outcome(0), { semantics: { ...UNKNOWN_SEMANTICS, ...patch } });
+    const claims =
+      (patch: Partial<StoreSemantics>, options: Partial<RcloneBlobStoreOptions> = {}) =>
+      () =>
+        scripted(() => outcome(0), { semantics: { ...UNKNOWN_SEMANTICS, ...patch }, ...options });
     expect(claims({ conditionalCreate: { value: true, evidence: "measured" } })).toThrow(RangeError);
     expect(claims({ publication: { value: "atomic-put", evidence: "measured" } })).toThrow(RangeError);
     expect(claims({ publication: { value: "temp-then-rename", evidence: "measured" } })).not.toThrow();
+    // Only the S3 route's direct put can carry If-None-Match (Task 17): a temp-then-rename put cannot.
+    expect(
+      claims({ conditionalCreate: { value: true, evidence: "measured" } }, { remote: S3_REMOTE }),
+    ).not.toThrow();
+    expect(
+      claims(
+        { conditionalCreate: { value: true, evidence: "measured" } },
+        { remote: S3_REMOTE, publication: "temp-then-rename" },
+      ),
+    ).toThrow(RangeError);
   });
 
-  test("create-only writes are not offered: asking for one is a bug", () => {
+  test("create-only writes are not offered unless the profile claims them: asking for one is a bug", () => {
     const { store } = scripted(() => outcome(0));
     expect(() => store.put("k", new Uint8Array(), { ifNotExists: true })).toThrow();
+    const s3 = scripted(() => outcome(0), { remote: S3_REMOTE });
+    expect(() => s3.store.put("k", new Uint8Array(), { ifNotExists: true })).toThrow();
+    const claimed = scripted(() => outcome(0), { remote: S3_REMOTE, semantics: CONDITIONAL });
+    expect(() => claimed.store.put("k", new Uint8Array(), { ifMatch: "etag" })).toThrow();
+  });
+});
+
+describe("conditional create on S3 (If-None-Match, Task 17)", () => {
+  test("a create-only put sends If-None-Match: * on the direct upload; a plain put does not", async () => {
+    const { store, specs } = scripted(() => outcome(0), { remote: S3_REMOTE, semantics: CONDITIONAL });
+    expect(store.capabilities().createIfAbsent).toBe(true);
+    value(await store.put("meta/v1/store.json", new TextEncoder().encode("x"), { ifNotExists: true }));
+    value(await store.put("meta/v1/state.json", new TextEncoder().encode("y")));
+    value(await store.put("meta/v1/empty", new Uint8Array(), { ifNotExists: true }));
+    expect(specs.map(commandOf)).toEqual(["rcat", "rcat", "copyto"]);
+    const header = ["--header-upload", "If-None-Match: *"];
+    expect(specs[0]?.args).toEqual(expect.arrayContaining(header));
+    expect((specs[0]?.args ?? []).at(-1)).toBe(`${RCLONE_REMOTE}:bucket/store/meta/v1/store.json`);
+    expect(specs[1]?.args).not.toContain("--header-upload");
+    expect(specs[2]?.args).toEqual(expect.arrayContaining(header));
+  });
+
+  test("a refused precondition (412) is store.key-exists; another failure stays what it is", async () => {
+    const { store } = scripted(
+      () =>
+        outcome(1, {
+          stderr: recorded.fixtures.find((f) => f.name === "s3 precondition failed")?.stderr ?? "",
+        }),
+      { remote: S3_REMOTE, semantics: CONDITIONAL },
+    );
+    const refused = await store.put("meta/v1/store.json", new Uint8Array([1]), { ifNotExists: true });
+    expect(refused).toMatchObject({ ok: false, finding: { code: "store.key-exists" } });
+    // Without the condition a 412 is not a refusal of create-only: it is the store failing.
+    const plain = await store.put("meta/v1/store.json", new Uint8Array([1]));
+    expect(plain).toMatchObject({ ok: false, finding: { code: "store.failed" } });
   });
 });
 
@@ -351,6 +508,26 @@ describe("reads", () => {
         : outcome(0, { stdout: JSON.stringify({ Path: "e", Name: "e", Size: 0, IsDir: false }) }),
     );
     expect(value(await store.get("e"))).toEqual(new Uint8Array());
+  });
+
+  test("a key that appears between the empty read and the stat is read again, never taken for empty", async () => {
+    // Found on T2 (Task 17): an observer's cat ran before a slow upload landed and printed nothing, its stat ran after.
+    let cats = 0;
+    const { store } = scripted((spec) => {
+      if (commandOf(spec) === "cat") return outcome(0, { stdout: cats++ === 0 ? "" : "whole" });
+      return outcome(0, { stdout: JSON.stringify({ Path: "k", Name: "k", Size: 5, IsDir: false }) });
+    });
+    expect(new TextDecoder().decode(value(await store.get("k")) ?? new Uint8Array())).toBe("whole");
+    expect(cats).toBe(2);
+  });
+
+  test("a key that keeps changing under the read is store.failed, never a wrong value", async () => {
+    const { store } = scripted((spec) =>
+      commandOf(spec) === "cat"
+        ? outcome(0, { stdout: "" })
+        : outcome(0, { stdout: JSON.stringify({ Path: "k", Name: "k", Size: 5, IsDir: false }) }),
+    );
+    expect(await store.get("k")).toMatchObject({ ok: false, finding: { code: "store.failed" } });
   });
 
   test("list maps paths under the listed folder to keys, filters by the prefix and sorts", async () => {

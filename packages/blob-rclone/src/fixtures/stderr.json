@@ -1,5 +1,5 @@
 {
-  "comment": "stderr the pinned rclone 1.75.1 printed (with -q), recorded on macOS against unreachable endpoints, the T2 SFTP server with a mismatched host key, a missing key and a read-only folder; paths shortened. `expect` is how the adapter classifies the exit: a refused host key is a failure to fix, never an unreachable store.",
+  "comment": "stderr the pinned rclone 1.75.1 printed (with -q), recorded on macOS against unreachable endpoints, the T2 SFTP server with a mismatched host key, a missing key and a read-only folder, and (Task 17) SeaweedFS refusing If-None-Match and the system ssh closing under rclone's ssh option; paths shortened. `expect` is how the adapter classifies the exit: a refused host key is a failure to fix, never an unreachable store.",
   "fixtures": [
     {
       "name": "sftp connection refused",
@@ -70,6 +70,41 @@
       "exitCode": 1,
       "stderr": "2026/10/29 17:30:53 ERROR : x: Post request rcat error: open /tmp/x/ro/x: permission denied\n",
       "expect": "failed"
+    },
+    {
+      "name": "s3 precondition failed",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:59:36 ERROR : x: Post request put error: operation error S3: PutObject, https response error StatusCode: 412, RequestID: 18E30EA4A655CC033E24B712, HostID: , api error PreconditionFailed: At least one of the pre-conditions you specified did not hold\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 cut while listing",
+      "command": "lsjson",
+      "exitCode": 5,
+      "stderr": "2026/10/29 18:08:37 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 3, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:30401/plainport-t2?delimiter=%2F&max-keys=1000&prefix=\": EOF\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp external ssh closed",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:10:02 CRITICAL: Failed to create file system for \"P:/data\": NewFs: couldn't initialise SFTP: error receiving version packet from server: server unexpectedly closed connection: unexpected EOF\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 cut mid-listing (lsjson's NOTICE)",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:34:17 NOTICE: Failed to lsjson: error in ListJSON: operation error S3: ListObjects, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:30401/plainport-t2?delimiter=%2F&max-keys=50&prefix=cut600%2Ftree%2F\": EOF\nfailed to get rate limit token, retry quota exceeded, 0 available, 5 requested\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp cut mid-listing",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:30:02 NOTICE: Failed to lsjson: error in ListJSON: error listing: error listing \"\": connection lost\n",
+      "expect": "unreachable"
     }
   ]
 }
