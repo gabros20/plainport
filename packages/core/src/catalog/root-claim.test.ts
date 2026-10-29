@@ -204,7 +204,8 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
 
   test("a crash right after a root's refusal, then a re-run: the refusal stands, and it never claims", async () => {
     const store = memoryBlobStore();
-    const [a, b] = [ulid(), ulid()];
+    // The rival has the lower id, so this root refuses (D109; with the higher one it would wait instead).
+    const [b, a] = [ulid(), ulid()].sort() as [string, string];
     store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
     const crashed = claimStoreRoot(store, a, {
       wait: async () => {},
