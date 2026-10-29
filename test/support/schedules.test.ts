@@ -54,6 +54,7 @@ describeT1("schedules: devices racing on one local store", () => {
   for (const schedule of SCHEDULES) {
     const name = `${schedule.id} ${schedule.title}`;
     const { run } = schedule;
+    if (schedule.runInProcess !== undefined) continue;
     if (run === undefined) test.todo(`${name} (Task ${schedule.owner})`, () => {});
     else
       test.skipIf(!onMac)(
@@ -67,18 +68,25 @@ describeT1("schedules: devices racing on one local store", () => {
   }
 });
 
+// The schedules a binary on a local store cannot stage, in process on the semantic fake (T0: no binary, no restic).
+describe("schedules: devices racing in process on a fake store", () => {
+  for (const schedule of SCHEDULES) {
+    const { runInProcess } = schedule;
+    if (runInProcess !== undefined) test(`${schedule.id} ${schedule.title}`, runInProcess, 60_000);
+  }
+});
+
 describe("schedules: the gate", () => {
   test("every schedule names its devices' outcomes, and each todo its owning task", () => {
     for (const s of SCHEDULES) {
       expect(Object.keys(s.outcomes).sort()).toEqual([...s.devices].sort());
-      expect(s.run === undefined).toBe(s.owner !== undefined);
+      expect(s.run === undefined && s.runInProcess === undefined).toBe(s.owner !== undefined);
     }
     expect(todoSchedules().map((s) => [s.id, s.owner])).toEqual([
       ["S2", 23],
       ["S3", 23],
       ["S4", 22],
       ["S5", 23],
-      ["S6", 21],
       ["S7", 25],
       ["S8", 24],
     ]);
