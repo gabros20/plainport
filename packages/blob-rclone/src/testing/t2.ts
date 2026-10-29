@@ -158,3 +158,26 @@ export const seedFrom = (world: T2World, remote: RcloneRemote, local: string, un
 export const emptyStore = async (store: RcloneBlobStore): Promise<void> => {
   for (const { key } of value(await store.list(""))) value(await store.delete(key));
 };
+
+/**
+ * Removes everything under `remote`'s root in one rclone run, for tests that seeded many keys (the adapter deletes one
+ * key per run). Test-only: it builds the remote's environment the way the adapter does.
+ */
+export const purgeRoot = (world: T2World, remote: RcloneRemote): void => {
+  const env: Record<string, string> = {
+    HOME: world.sandbox.home,
+    PATH: `${world.shim.dir}:/usr/bin:/bin`,
+    RCLONE_CONFIG: join(world.sandbox.home, "absent", "rclone.conf"),
+    RCLONE_CONFIG_SEED_TYPE: remote.type,
+  };
+  for (const [name, option] of Object.entries({ ...remote.options, ...remote.secrets }))
+    env[`RCLONE_CONFIG_SEED_${name.toUpperCase()}`] = option;
+  const ran = Bun.spawnSync([world.rclone, "-q", "purge", `SEED:${remote.root}`], {
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 300_000,
+  });
+  if (ran.exitCode !== 0)
+    throw new Error(`rclone purge ${remote.root}: ${ran.exitCode} ${ran.stderr.toString()}`);
+};
