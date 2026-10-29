@@ -600,6 +600,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
   },
+  "store.in-use": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "store remove refuses while something on this device still uses the store: a root names it (or takes it as the default store), or an open journal or setup attempt names it; the message lists them, and nothing is changed",
+  },
   "store.inside-project": {
     severity: "block",
     allowable: false,
@@ -619,6 +626,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 11,
     summary:
       "Another plainport process on this device is setting this store up, or changing this device's record of it (stores/<store id>.json)",
+  },
+  "store.not-quiescent": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)",
   },
   "store.not-set-up": {
     severity: "block",

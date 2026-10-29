@@ -66,6 +66,7 @@ export * from "./scan/index.ts";
 export { posixDeleteTrash, posixSpawner } from "./spawner.ts";
 export * from "./status/projects.ts";
 export * from "./store.ts";
+export * from "./stores/index.ts";
 export * from "./stores-state.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";
