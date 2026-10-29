@@ -105,6 +105,13 @@
       "exitCode": 1,
       "stderr": "2026/10/29 18:30:02 NOTICE: Failed to lsjson: error in ListJSON: error listing: error listing \"\": connection lost\n",
       "expect": "unreachable"
+    },
+    {
+      "name": "sftp mkdir race on move",
+      "command": "moveto",
+      "exitCode": 1,
+      "stderr": "2026/10/29 19:31:05 NOTICE: PLAINPORT{5rUnC}: No host key validation is being performed. Set known_hosts_file (to \"none\" to silence this notice) or use --sftp-pin-host-key to enable it. See: https://rclone.org/sftp/#host-key-validation\n2026/10/29 19:31:05 ERROR : put-01M64J3867BDP2T5XSQZG57GVA: Couldn't move: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n2026/10/29 19:31:05 ERROR : Attempt 1/1 failed with 1 errors and: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n2026/10/29 19:31:05 NOTICE: Failed to moveto: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n",
+      "expect": "failed"
     }
   ]
 }

@@ -383,6 +383,46 @@ describe("publication", () => {
     expect((specs[2]?.args ?? []).at(-1)).toBe((specs[0]?.args ?? []).at(-1) as string);
   });
 
+  test("a folder another writer made at the same moment is no failure: the write is tried once more", async () => {
+    // Found on T2 (Task 17): two devices' first writes under one new folder; rclone's mkdir of the parent lost the
+    // race and the SFTP server answered a bare SSH_FX_FAILURE.
+    const race = recorded.fixtures.find((f) => f.name === "sftp mkdir race on move")?.stderr ?? "";
+    for (const failing of ["rcat", "moveto"]) {
+      let failed = false;
+      const { store, specs } = scripted((spec) => {
+        if (commandOf(spec) === failing && !failed) {
+          failed = true;
+          return outcome(1, { stderr: race });
+        }
+        return outcome(0);
+      });
+      value(await store.put("elect/002/candidates/a.json", new Uint8Array([1])));
+      expect(specs.map(commandOf)).toEqual(
+        failing === "rcat" ? ["rcat", "rcat", "moveto"] : ["rcat", "moveto", "moveto"],
+      );
+    }
+    // Only once: a folder that cannot be made is the failure it is.
+    const { store, specs } = scripted((spec) =>
+      commandOf(spec) === "moveto" ? outcome(1, { stderr: race }) : outcome(0),
+    );
+    expect(await store.put("k/a", new Uint8Array([1]))).toMatchObject({
+      ok: false,
+      finding: { code: "store.failed" },
+    });
+    expect(specs.map(commandOf)).toEqual(["rcat", "moveto", "moveto", "deletefile"]);
+  });
+
+  test("through the system's ssh, rclone's notice that it validates no host key is left out: ssh does", async () => {
+    const race = recorded.fixtures.find((f) => f.name === "sftp mkdir race on move")?.stderr ?? "";
+    const { store } = scripted(() => outcome(1, { stderr: race }), {
+      remote: { type: "sftp", root: "/data", options: { ssh: "/usr/bin/ssh nas", shell_type: "none" } },
+    });
+    const put = await store.put("k/a", new Uint8Array([1]));
+    if (put.ok) throw new Error("the put should fail");
+    expect(put.finding.message).not.toContain("No host key validation");
+    expect(put.finding.message).toContain("SSH_FX_FAILURE");
+  });
+
   test("on S3 a put is rcat straight to the key", async () => {
     const { store, specs } = scripted(() => outcome(0), {
       remote: { type: "s3", root: "bucket/store", options: { provider: "Other" } },

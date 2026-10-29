@@ -217,9 +217,17 @@ const redactor =
 
 /** rclone's notice, every run, that the rclone.conf plainport points it at is missing (as it must be). */
 const MISSING_CONFIG = /^Config file ".*" not found - using defaults$/;
+/** rclone's notice that it checks no host key, untrue when the system's ssh connects (it checks them). */
+const NO_HOST_KEY_CHECK = /No host key validation is being performed/;
+
+/**
+ * A parent folder rclone could not make because another writer made it at the same moment: OpenSSH's sftp-server
+ * answers that mkdir with a bare SSH_FX_FAILURE (found on T2 by Task 17's two-process election).
+ */
+const MKDIR_RACE = /mkdir "[^"]*" failed: sftp: "Failure" \(SSH_FX_FAILURE\)/;
 
 /** The last few things rclone said, without its timestamps and levels. */
-const rcloneSaid = (stderr: string): string => {
+const rcloneSaid = (stderr: string, systemSsh = false): string => {
   const said = stderr
     .split("\n")
     .map((line) =>
@@ -228,7 +236,9 @@ const rcloneSaid = (stderr: string): string => {
         .replace(/^(ERROR|CRITICAL|NOTICE|INFO|DEBUG) ?: ?/, "")
         .trim(),
     )
-    .filter((line) => line !== "" && !MISSING_CONFIG.test(line))
+    .filter(
+      (line) => line !== "" && !MISSING_CONFIG.test(line) && !(systemSsh && NO_HOST_KEY_CHECK.test(line)),
+    )
     .slice(-4)
     .join("; ");
   return said.length > 600 ? `${said.slice(0, 600)}…` : said;
@@ -335,7 +345,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
 
   /** The failure for an rclone exit that was not ok (or not missing, where that is fine). */
   const exitFailure = (outcome: RunOutcome, command: string, what: string): Failure => {
-    const said = redact(rcloneSaid(outcome.stderr.text));
+    const said = redact(rcloneSaid(outcome.stderr.text, externalSsh !== undefined));
     if (outcome.exitCode === null)
       return failed(`${what}: rclone ${command} was ended by ${outcome.signal}`, said);
     if (classifyExit(outcome.exitCode, outcome.stderr.text) === "unreachable")
@@ -424,6 +434,17 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     if (!ran.ok) return redactFailure(ran);
     if (said === "" || ran.value.exitCode === 0) return ran;
     return ok({ ...ran.value, stderr: { ...ran.value.stderr, text: `${ran.value.stderr.text}${said}` } });
+  };
+
+  /** A write run, tried once more when its parent folder was made by another writer at the same moment. */
+  const runWrite = async (
+    command: string,
+    args: readonly string[],
+    how: { stdin?: string | Uint8Array } = {},
+  ): Promise<Result<RunOutcome>> => {
+    const ran = await run(command, args, how);
+    if (!ran.ok || ran.value.exitCode === 0 || !MKDIR_RACE.test(ran.value.stderr.text)) return ran;
+    return run(command, args, how);
   };
 
   const stat = async (key: string): Promise<Result<{ size: number } | null>> => {
@@ -518,7 +539,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     let ran: Result<RunOutcome>;
     const condition = ifNotExists ? ["--header-upload", "If-None-Match: *"] : [];
     if (data.length > 0) {
-      ran = await run(command, [...condition, "--size", String(data.length), remotePath(target)], {
+      ran = await runWrite(command, [...condition, "--size", String(data.length), remotePath(target)], {
         stdin: data,
       });
     } else {
@@ -530,7 +551,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       } catch (error) {
         return failed(`${key} could not be written: ${empty} could not be made`, systemErrorCode(error));
       }
-      ran = await run(command, [...condition, "--ignore-times", empty, remotePath(target)]);
+      ran = await runWrite(command, [...condition, "--ignore-times", empty, remotePath(target)]);
     }
     if (!ran.ok) return ran;
     if (ran.value.exitCode === 0) return ok(undefined);
@@ -562,7 +583,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     host.faultAt("rclone.put.uploaded");
     // --no-check-dest: the move is the backend's rename onto the key, with no look at the key first (which would
     // delete a key that is there before moving, leaving a moment with no key at all).
-    const moved = await run("moveto", ["--no-check-dest", remotePath(temp), remotePath(key)]);
+    const moved = await runWrite("moveto", ["--no-check-dest", remotePath(temp), remotePath(key)]);
     const failure = !moved.ok
       ? moved
       : moved.value.exitCode === 0
