@@ -142,7 +142,11 @@ describe("config: precedence", () => {
         'kind     = "s3"',
         'endpoint = "https://s3.eu-central-003.backblazeb2.com"',
         'bucket   = "tamas-plainport"',
-        'secret   = "keychain:plainport/b2"',
+        'region          = "eu-central-003"',
+        'path            = "plainport"',
+        'secret          = "keychain:plainport/b2"',
+        'accessKeyId     = "keychain:plainport/b2-key-id"',
+        'secretAccessKey = "op://Private/plainport-b2/secret-access-key"',
         'access   = "read-only"',
         "[stores.mini]",
         'kind        = "peer"',
@@ -252,13 +256,26 @@ describe("config: precedence", () => {
   });
 
   test("secrets are references: a bare value is refused", async () => {
+    const refs = { secret: "env:PW", accessKeyId: "env:KEY", secretAccessKey: "env:SECRET" };
+    for (const bare of ["secret", "accessKeyId", "secretAccessKey"]) {
+      const keys = Object.entries({ ...refs, [bare]: "hunter2" }).map(([k, v]) => `${k} = "${v}"`);
+      write(
+        paths.configFile,
+        ['[stores.b2]\nkind = "s3"\nendpoint = "https://e"\nbucket = "b"', ...keys, ""].join("\n"),
+      );
+      const result = await new ConfigLoader(io, paths).load({ env: {} });
+      expect(result.ok ? "ok" : result.finding.message, bare).toContain(`stores.b2.${bare}`);
+    }
     write(
       paths.configFile,
-      '[stores.b2]\nkind = "s3"\nendpoint = "https://e"\nbucket = "b"\nsecret = "hunter2"\n',
+      [
+        '[stores.b2]\nkind = "s3"\nendpoint = "https://e"\nbucket = "b"',
+        ...Object.entries(refs).map(([k, v]) => `${k} = "${v}"`),
+        "",
+      ].join("\n"),
     );
     const result = await new ConfigLoader(io, paths).load({ env: {} });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.finding.code).toBe("config.invalid");
+    expect(result.ok).toBe(true);
   });
 
   test("--config or PLAINPORT_CONFIG naming a missing file is not found (exit 4); a missing default is fine", async () => {

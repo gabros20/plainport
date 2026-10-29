@@ -308,7 +308,7 @@ export const init = defineCommand({
           message: "--store-secret is recorded with --store-path; pass the store's path too",
           fix: [
             "plainport init",
-            `--store-path ${existing !== undefined && "path" in existing ? word(existing.path) : "<path>"}`,
+            `--store-path ${existing?.kind === "local" ? word(existing.path) : "<path>"}`,
             ...(ctx.store === undefined ? [] : [`--store ${word(ctx.store)}`]),
             `--store-secret ${word(secret)}`,
             "--yes",

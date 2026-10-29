@@ -13,6 +13,7 @@
     "@plainport/eco-node": "workspace:*",
     "@plainport/engine-restic": "workspace:*",
     "@plainport/host-macos": "workspace:*",
+    "@plainport/secrets": "workspace:*",
     "zod": "4.6.5"
   }
 }

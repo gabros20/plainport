@@ -49,14 +49,15 @@ describe("crash matrix: bootstrap", () => {
       test(`bootstrap · ${row.name} · ${route}`, async () => {
         const w = bootstrapWorld(options);
         worlds.push(w);
-        if (row.scenario === "rival") {
-          // Another device's attempt stood and refused: this attempt sees it, refuses, and the outcome is final.
-          const rival = ulid();
+        // Another device's attempt stands with a lower id: this attempt sees it and refuses (D109). That device then
+        // refuses too (it saw this attempt's candidacy before it could publish), so recovery's outcome is final.
+        const rival = "00000000000000000000000000";
+        if (row.scenario === "rival")
           await w.store.put(`${STORE_CLAIMS_PREFIX}${rival}.json`, record(rival, "candidate"));
-          await w.store.put(`${STORE_CLAIMS_PREFIX}${rival}.refused`, record(rival, "refused"));
-        }
         const device = w.device("pw", { faults: { at: row.point } });
         await expect(device.run()).rejects.toBeInstanceOf(InjectedFault);
+        if (row.scenario === "rival")
+          await w.store.put(`${STORE_CLAIMS_PREFIX}${rival}.refused`, record(rival, "refused"));
         const [attempt] = await device.journals();
         expect(attempt).toBeDefined();
         const id = attempt as string;

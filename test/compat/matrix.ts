@@ -76,6 +76,8 @@ export const CHANGED_SCHEMAS: Readonly<Record<string, string>> = {
   "catalog-state": "mirror",
   "store-identity": "store.json.v2",
   "event-mirror": "mirror",
+  // An s3 store's key pair, region and prefix (Q7): v0.1.1 refuses a config that uses them.
+  config: "config.keys",
 };
 
 export interface Row {

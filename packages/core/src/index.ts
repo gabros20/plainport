@@ -48,6 +48,7 @@ export {
   type HostPorts,
   InjectedFault,
 } from "./ports/host.ts";
+export * from "./ports/secrets.ts";
 export type * from "./ports/store.ts";
 export * from "./preflight/index.ts";
 export * from "./recover/recover.ts";

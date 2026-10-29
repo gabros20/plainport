@@ -7,11 +7,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ok } from "@plainport/contract";
 import { encodeStoreIdentityV2, STORE_IDENTITY_KEY } from "./catalog/identity.ts";
-import type { Store } from "./config/schema.ts";
+import { DEFAULTS, type Store } from "./config/schema.ts";
 import type { Scheduler } from "./deadline.ts";
 import type { StoreOpener } from "./ports/store.ts";
 import { readRegistry, updateRegistry } from "./registry.ts";
-import { checkStorePin, setUpStore } from "./store.ts";
+import { checkStorePin, openStore, setUpStore } from "./store.ts";
 import { type FakeEngine, fakeEngine } from "./testing/fake-engine.ts";
 import { testHost } from "./testing/host.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "./testing/memory-blob-store.ts";
@@ -26,7 +26,7 @@ const disk = () => ({ blob: memoryBlobStore({ createIfAbsent: true }), engine: f
 
 const opener: StoreOpener = {
   open: async (_name, store) => {
-    const path = "path" in store ? store.path : "";
+    const path = ("path" in store ? store.path : undefined) ?? "";
     let found = disks.get(path);
     if (found === undefined) {
       found = disk();
@@ -296,6 +296,61 @@ describe("setUpStore on a disk that fails I/O (rule 7)", () => {
       "store.unreachable",
       expect.stringContaining("could not be made (EROFS)"),
     ]);
+    expect(await pinned()).toBeUndefined();
+  });
+});
+
+describe("store secrets through the opener's providers (Task 15)", () => {
+  test("setUpStore and openStore read a keychain: secret through the provider the opener carries", async () => {
+    const asked: string[] = [];
+    const passwords: string[] = [];
+    const withKeychain: StoreOpener = {
+      secrets: {
+        keychain: {
+          get: async (ref) => {
+            asked.push(ref);
+            return ok("from-keychain");
+          },
+        },
+      },
+      open: async (name, store, password) => {
+        passwords.push(password);
+        return opener.open(name, store, password);
+      },
+    };
+    const store: Store = { kind: "local", path: "~/ssd", secret: "keychain:plainport/ssd" };
+    const set = await setUpStore(testHost(), {
+      paths: box.paths,
+      env: {},
+      name: "ssd",
+      store,
+      opener: withKeychain,
+      mint: () => ulid(),
+    });
+    expect(set.ok).toBe(true);
+    const opened = await openStore(testHost(), {
+      paths: box.paths,
+      env: {},
+      name: "ssd",
+      config: { ...DEFAULTS, stores: { ssd: store } },
+      opener: withKeychain,
+    });
+    expect(opened.ok).toBe(true);
+    expect(asked.every((ref) => ref === "keychain:plainport/ssd")).toBe(true);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(new Set(passwords)).toEqual(new Set(["from-keychain"]));
+  });
+
+  test("an opener without the provider: store.secret-missing, nothing set up", async () => {
+    const set = await setUpStore(testHost(), {
+      paths: box.paths,
+      env: {},
+      name: "ssd",
+      store: { kind: "local", path: "~/ssd", secret: "op://Private/ssd/password" },
+      opener,
+      mint: () => ulid(),
+    });
+    expect(set.ok ? "" : set.finding.code).toBe("store.secret-missing");
     expect(await pinned()).toBeUndefined();
   });
 });

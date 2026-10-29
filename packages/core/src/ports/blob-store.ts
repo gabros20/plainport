@@ -238,7 +238,28 @@ export interface BlobStore {
   stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
   /** Removes the key; a key that is not there is not an error. */
   delete(key: string): Promise<Result<void>>;
+  /**
+   * Internal and optional: the bytes of many keys in one batch, for a store where every call is a round trip
+   * (blob-rclone: one `copy`). A key that is not there is left out of the map. Callers use getMany() below, which
+   * falls back to one get per key.
+   */
+  getMany?(keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>>;
 }
+
+/** The keys' bytes, in one batch where the store offers one; a key that is not there is left out of the map. */
+export const getMany = async (
+  store: BlobStore,
+  keys: readonly string[],
+): Promise<Result<Map<string, Uint8Array>>> => {
+  if (store.getMany !== undefined) return store.getMany(keys);
+  const got = new Map<string, Uint8Array>();
+  for (const key of new Set(keys)) {
+    const one = await store.get(key);
+    if (!one.ok) return one;
+    if (one.value !== null) got.set(key, one.value);
+  }
+  return ok(got);
+};
 
 const KEY_PATTERN = /^(?!\.\.?(?:\/|$))[^/\0]+(?:\/(?!\.\.?(?:\/|$))[^/\0]+)*$/;
 

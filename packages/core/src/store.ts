@@ -1,10 +1,11 @@
 // Stores from config (DESIGN.md "Storage → Store kinds", "Configuration"): reading a store's repository password from
 // its secret reference, setting a store up once (init), and opening a set-up store for an operation.
 //
-// Secrets stay references (AGENTS.md rule 9): config names where the password is, never the password. M1 reads two
-// providers, `env:NAME` and `file:PATH`; Keychain, 1Password and the rest arrive with M2. A local store that names
-// no secret reads DEFAULT_LOCAL_SECRET. The password goes to the engine only, which hands it to restic in the
-// child's environment and cuts it out of every message.
+// Secrets stay references (AGENTS.md rule 9): config names where the password is, never the password. Core reads
+// `env:NAME` and `file:PATH` itself; `keychain:` and `op:` go through the providers the store opener carries
+// (ports/secrets.ts, @plainport/secrets), every one within Q14's deadline. A local store that names no secret reads
+// DEFAULT_LOCAL_SECRET. The password goes to the engine only, which hands it to restic in the child's environment and
+// cuts it out of every message.
 //
 // Setting a store up (D45): its folder is made if only that folder is missing (never a missing disk's mount point),
 // its identity file meta/v1/store.json is created once, its restic repository is created when it has none, and this
@@ -20,17 +21,25 @@ import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
-import { type ProbeOptions, probeDeadline } from "./deadline.ts";
+import { type ProbeOptions, probeDeadline, type Scheduler, withinDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
+import {
+  parseSecretRef,
+  SECRET_DEADLINE_MS,
+  SECRET_REF_FORMS,
+  type SecretContext,
+  type SecretProviders,
+  secretSchemeOf,
+} from "./ports/secrets.ts";
 import type { OpenedStore, StoreOpener } from "./ports/store.ts";
 import { readRegistry, updateRegistry } from "./registry.ts";
 import { registeredFolders } from "./saga/project-gate.ts";
 import { storeOverlap } from "./store-overlap.ts";
 
-const secretMissing = (name: string, message: string, fix: string) =>
-  fail(finding("store.secret-missing", { message: `store ${name}'s password: ${message}`, fix }));
+const secretMissing = (name: string, what: string, message: string, fix: string) =>
+  fail(finding("store.secret-missing", { message: `store ${name}'s ${what}: ${message}`, fix }));
 
 /** The store's secret reference: its own, or DEFAULT_LOCAL_SECRET for a local store that names none. */
 export const secretRefOf = (store: Store): string | undefined =>
@@ -42,61 +51,268 @@ export const secretRefOf = (store: Store): string | undefined =>
 
 /**
  * The environment variables that hold a secret by the configuration's references: every store's `env:` password
- * (DEFAULT_LOCAL_SECRET included) and the recovery secret's. Code plainport does not trust never sees them (D79).
+ * (DEFAULT_LOCAL_SECRET included), an S3 store's key pair, the recovery secret's and the prune key's. Code plainport
+ * does not trust never sees them (D79).
  */
 export const secretVariables = (config: ResolvedConfig): string[] => {
-  const refs = [...Object.values(config.stores).map(secretRefOf), config.secrets?.recovery];
+  const refs = [
+    ...Object.values(config.stores).flatMap((store) => [
+      secretRefOf(store),
+      ...(store.kind === "s3" ? [store.accessKeyId, store.secretAccessKey] : []),
+    ]),
+    config.secrets?.recovery,
+    config.deletion?.pruneKey,
+  ];
   const names = refs.flatMap((ref) => (ref?.startsWith("env:") ? [ref.slice("env:".length)] : []));
   return [...new Set(names)].sort();
 };
 
-/** Reads a secret reference: `env:NAME` from the environment, `file:PATH` from a file (one trailing newline cut). */
+export interface SecretOptions {
+  /** The providers that run a child (keychain:, op:); without one, its references are store.secret-missing. */
+  providers?: SecretProviders;
+  /** Stops the read: operation.cancelled (process.cancelled from a provider's child). */
+  signal?: AbortSignal;
+  /** SECRET_DEADLINE_MS (Q14) unless a test says otherwise. */
+  deadlineMs?: number;
+  scheduler?: Scheduler;
+  /** What the secret is for, in messages: "password" (the restic repository's) by default. */
+  what?: string;
+  /** The store's configuration key that holds the reference, in messages: "secret" by default. */
+  field?: string;
+}
+
+/** Why `se:` and `bw:` are not read, naming when they arrive. */
+const NOT_YET: Readonly<Record<"se" | "bw", string>> = {
+  se: "the se: provider (Secure Enclave) arrives with the secrets envelope in M3",
+  bw: "the bw: provider (Bitwarden) is not in this build; it has no milestone yet",
+};
+
+/** `env:NAME` from the environment. */
+const fromEnv = (env: Env, variable: string, name: string, what: string, ref: string): Result<string> => {
+  const value = env[variable];
+  if (value !== undefined && value !== "") return ok(value);
+  return secretMissing(
+    name,
+    what,
+    `${variable} is ${value === undefined ? "not set" : "empty"} (secret = "${ref}")`,
+    `export ${variable} with the secret from your password manager, then re-run`,
+  );
+};
+
+/** `file:PATH` from a file, one trailing newline cut. */
+const fromFile = async (
+  io: LocalIo,
+  home: string,
+  target: string,
+  name: string,
+  what: string,
+): Promise<Result<string>> => {
+  const path = expandHome(target, home, home);
+  let text: string;
+  try {
+    text = await io.fs.readText(path);
+  } catch (error) {
+    return secretMissing(
+      name,
+      what,
+      `${path} could not be read (${systemErrorCode(error)})`,
+      `put the secret in ${path}, readable only by you (chmod 600), then re-run`,
+    );
+  }
+  const value = text.replace(/\r?\n$/, "");
+  if (value !== "") return ok(value);
+  return secretMissing(name, what, `${path} is empty`, `put the secret in ${path}, then re-run`);
+};
+
+const cancelled = (name: string, what: string): Result<never> =>
+  fail(
+    finding("operation.cancelled", {
+      message: `reading store ${name}'s ${what} was cancelled`,
+      fix: "re-run the command",
+    }),
+  );
+
+/** `work` until the deadline or the signal, whichever comes first. */
+const untilDeadline = async (
+  work: Promise<Result<string>>,
+  name: string,
+  what: string,
+  provider: string,
+  deadlineMs: number,
+  options: SecretOptions,
+): Promise<Result<string>> => {
+  const { signal } = options;
+  if (signal?.aborted) return cancelled(name, what);
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<"cancelled">((resolve) => {
+    onAbort = () => resolve("cancelled");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const outcome = await Promise.race([withinDeadline(work, deadlineMs, options.scheduler), stopped]);
+    if (outcome === "cancelled") return cancelled(name, what);
+    if (outcome.timedOut)
+      return secretMissing(
+        name,
+        what,
+        `the ${provider} provider did not answer within ${outcome.seconds} seconds`,
+        provider === "keychain"
+          ? "answer the Keychain prompt (or unlock the keychain), then re-run"
+          : "check that the provider is reachable and signed in, then re-run",
+      );
+    return outcome.value;
+  } finally {
+    if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+  }
+};
+
+/**
+ * Reads a secret reference (DESIGN.md "Configuration"): `env:` and `file:` here, `keychain:` and `op:` through
+ * options.providers, each within Q14's deadline. Every expected failure is store.secret-missing naming the store and
+ * what the secret is for; a garbled reference never reaches a provider; `se:` and `bw:` are refused. The value is only
+ * ever in the ok result.
+ */
 export const resolveSecret = async (
   io: LocalIo,
   env: Env,
   home: string,
   name: string,
   ref: string | undefined,
+  options: SecretOptions = {},
 ): Promise<Result<string>> => {
+  const what = options.what ?? "password";
   if (ref === undefined)
     return secretMissing(
       name,
+      what,
       "config names no secret",
-      `set stores.${name}.secret to an env: or file: reference`,
+      `set stores.${name}.secret to a reference: ${Object.values(SECRET_REF_FORMS).slice(0, 4).join(", ")}`,
     );
-  const at = ref.indexOf(":");
-  const provider = ref.slice(0, at);
-  const target = ref.slice(at + 1);
-  if (provider === "env") {
-    const value = env[target];
-    if (value !== undefined && value !== "") return ok(value);
+  const parsed = parseSecretRef(ref);
+  if (parsed === undefined) {
+    const scheme = secretSchemeOf(ref);
+    // Never echoed (D109): a garbled reference may be the secret itself, pasted where its reference belongs.
     return secretMissing(
       name,
-      `${target} is not set (secret = "${ref}")`,
-      `export ${target} with the repository password from your password manager, then re-run`,
+      what,
+      `stores.${name}.${options.field ?? "secret"} is not a secret reference plainport can read (its value is not shown: it may be a secret pasted in place of a reference)`,
+      scheme === undefined
+        ? `use one of ${Object.values(SECRET_REF_FORMS).slice(0, 4).join(", ")}`
+        : `write it as ${SECRET_REF_FORMS[scheme]}`,
     );
   }
-  if (provider === "file") {
-    const path = expandHome(target, home, home);
-    let text: string;
-    try {
-      text = await io.fs.readText(path);
-    } catch (error) {
+  const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
+  switch (parsed.scheme) {
+    case "env":
+      return untilDeadline(
+        Promise.resolve(fromEnv(env, parsed.name, name, what, ref)),
+        name,
+        what,
+        "env",
+        deadlineMs,
+        options,
+      );
+    case "file":
+      return untilDeadline(
+        fromFile(io, home, parsed.path, name, what),
+        name,
+        what,
+        "file",
+        deadlineMs,
+        options,
+      );
+    case "se":
+    case "bw":
       return secretMissing(
         name,
-        `${path} could not be read (${systemErrorCode(error)})`,
-        `put the repository password in ${path}, readable only by you (chmod 600), then re-run`,
+        what,
+        NOT_YET[parsed.scheme],
+        `use a keychain:, op:, env: or file: reference for stores.${name}`,
+      );
+    default: {
+      const provider = options.providers?.[parsed.scheme];
+      if (provider === undefined)
+        return secretMissing(
+          name,
+          what,
+          `this build was given no ${parsed.scheme}: provider`,
+          "use an env: or file: reference, or run the plainport binary, which reads keychain: and op:",
+        );
+      const ctx: SecretContext = {
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        deadlineMs,
+      };
+      const got = await untilDeadline(provider.get(ref, ctx), name, what, parsed.scheme, deadlineMs, options);
+      if (got.ok || got.finding.code !== "store.secret-missing") return got;
+      return fail({ ...got.finding, message: `store ${name}'s ${what}: ${got.finding.message}` });
+    }
+  }
+};
+
+/** The opener's secret providers, as resolveSecret takes them. */
+export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
+  opener.secrets === undefined ? {} : { providers: opener.secrets };
+
+/**
+ * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
+ * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
+ * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ */
+export const resolveS3Credentials = async (
+  io: LocalIo,
+  env: Env,
+  home: string,
+  name: string,
+  store: Extract<Store, { kind: "s3" }>,
+  options: Omit<SecretOptions, "what" | "field"> = {},
+): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
+  const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
+  // The budget's end stops the read in flight (a provider's child) as a cancel would.
+  const stop = new AbortController();
+  const onAbort = () => stop.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) stop.abort();
+  const reads = [
+    { what: "password", field: "secret", ref: store.secret },
+    { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
+    { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
+  ] as const;
+  let reading: (typeof reads)[number] = reads[0];
+  const all = async (): Promise<Result<string[]>> => {
+    const values: string[] = [];
+    for (const read of reads) {
+      reading = read;
+      const got = await resolveSecret(io, env, home, name, read.ref, {
+        ...options,
+        signal: stop.signal,
+        what: read.what,
+        field: read.field,
+      });
+      if (!got.ok) return got;
+      values.push(got.value);
+    }
+    return ok(values);
+  };
+  try {
+    const outcome = await withinDeadline(all(), deadlineMs, options.scheduler);
+    if (outcome.timedOut) {
+      stop.abort();
+      const provider = secretSchemeOf(reading.ref) ?? "secret";
+      return secretMissing(
+        name,
+        reading.what,
+        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's three secrets share`,
+        provider === "keychain"
+          ? "answer the Keychain prompt (or unlock the keychain), then re-run"
+          : "check that the provider is reachable and signed in, then re-run",
       );
     }
-    const value = text.replace(/\r?\n$/, "");
-    if (value !== "") return ok(value);
-    return secretMissing(name, `${path} is empty`, `put the repository password in ${path}, then re-run`);
+    if (!outcome.value.ok) return outcome.value;
+    const [password, accessKeyId, secretAccessKey] = outcome.value.value as [string, string, string];
+    return ok({ password, accessKeyId, secretAccessKey });
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
   }
-  return secretMissing(
-    name,
-    `the ${provider}: provider arrives in M2; this build reads env: and file: references`,
-    `set stores.${name}.secret to "env:<VARIABLE>" or "file:<path>"`,
-  );
 };
 
 /** The folder a local store lives in, absolute. */
@@ -212,6 +428,7 @@ const openWithSecret = async (io: LocalIo, options: SetUpOptions): Promise<Resul
     options.paths.home,
     options.name,
     secretRefOf(options.store),
+    secretProvidersOf(options.opener),
   );
   if (!password.ok) return password;
   return options.opener.open(options.name, options.store, password.value);
@@ -369,7 +586,14 @@ export const openStore = async (
       }),
     );
   }
-  const password = await resolveSecret(io, options.env, paths.home, name, secretRefOf(store));
+  const password = await resolveSecret(
+    io,
+    options.env,
+    paths.home,
+    name,
+    secretRefOf(store),
+    secretProvidersOf(options.opener),
+  );
   if (!password.ok) return password;
   const opened = await options.opener.open(name, store, password.value);
   if (!opened.ok) return opened;

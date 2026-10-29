@@ -1677,6 +1677,9 @@ Rules around the table:
 - Deletion after a rejection, and the rejected snapshot restorable with `restore --snapshot`.
 - Crash rows at `trash.delete.checked` and at each transition.
 - S3 extended and S8, green.
+- **Carry-over from Task 17 (review phase 4 M7):** on a store whose profile is forced to `durability: unknown`, the
+  offload commits, keeps the trash and reports why `release` was refused. Task 17 tested only the eligibility
+  refusal; this half (the offload's end to end behaviour) is Task 24's, since it owns what happens to the trash.
 
 ### Verification
 `bun test packages/core -t "trash|gc|recover" && bun test test/crash-matrix && bun run test:t1 -t schedules`

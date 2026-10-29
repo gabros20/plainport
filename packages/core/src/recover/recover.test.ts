@@ -38,6 +38,7 @@ import { acquireLock } from "../lock.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
+import type { SecretProvider } from "../ports/secrets.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
@@ -3025,6 +3026,60 @@ describe("views read the mirror first, and resolve a secret only for a sealed ca
     seal: "sealed",
     storeId: parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array)?.id as string,
     key: new Uint8Array(32).fill(7),
+  });
+
+  // Task 15: keychain: and op: references resolve through the providers the opener carries, under the same deadline;
+  // since D108 only a sealed catalog asks for the secret.
+  const keychainConfig = () =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "local"',
+        'path = "~/ssd"',
+        'secret = "keychain:plainport/ssd"',
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+  /** watching(), with a keychain provider on the opener. */
+  const withKeychain = (seen: string[], keychain: SecretProvider): StoreOpener => ({
+    ...watching(seen, sealedPolicy()),
+    secrets: { keychain },
+  });
+
+  test("a sealed catalog's keychain: secret resolves through the opener's provider, within the views' deadline", async () => {
+    value(await offloadNow());
+    keychainConfig();
+    const asked: [string, number | undefined][] = [];
+    const seen: string[] = [];
+    const keychain: SecretProvider = {
+      get: async (ref, ctx) => {
+        asked.push([ref, ctx?.deadlineMs]);
+        return ok("from-keychain");
+      },
+    };
+    const view = await web({ opener: withKeychain(seen, keychain) });
+    expect(view.stale).toBe(false);
+    expect(asked).toEqual([["keychain:plainport/ssd", 50]]);
+    expect(seen).toEqual(["", "from-keychain"]);
+  });
+
+  test("a keychain: provider that never answers: secret-unavailable at the deadline, the sealed catalog never read", async () => {
+    value(await offloadNow());
+    await web();
+    keychainConfig();
+    const seen: string[] = [];
+    const view = await web({ opener: withKeychain(seen, { get: () => new Promise(() => {}) }) });
+    expect([view.state, view.stale, view.conditions]).toEqual([
+      "shelved",
+      true,
+      ["stale", "secret-unavailable"],
+    ]);
+    expect(seen).toEqual([""]);
   });
 
   test("a plain catalog is read live with no secret: the opener gets none, even when the provider has none", async () => {

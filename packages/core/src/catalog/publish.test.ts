@@ -241,11 +241,13 @@ describe("publish: the elected publication", () => {
   test("candidate and decision records are schema-checked: a marker that does not validate counts for nothing", async () => {
     const store = semanticBlobStore(NO_CREATE);
     await store.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
-    // B's "refusal" names another attempt: it is not B's refusal, so B stays undecided.
+    // B's "refusal" names another attempt: it is not B's refusal, so B still stands and A (the lower id) waits for it.
     await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"X","decision":"refused"}'));
-    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: ["B"] });
+    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "waiting", undecided: ["B"] });
+    expect(store.data.has(`${CANDIDATES}A.refused`)).toBe(false);
+    // B's own refusal: B is out (D109), and A, resuming with its id, publishes.
     await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}\n'));
-    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: [] });
+    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
     for (const key of keysOf(store, CANDIDATES)) {
       expect(
         ElectionRecordSchema.safeParse(JSON.parse(decode(store.data.get(key) as Uint8Array))).success,
@@ -298,7 +300,7 @@ describe("publish: the elected publication", () => {
     expect(keysOf(store, CANDIDATES)).toEqual([`${CANDIDATES}A.json`, `${CANDIDATES}A.publishing`]);
   });
 
-  test("a crash after the candidacy, then a re-run with the same id, reaches a final outcome", async () => {
+  test("a crash after the candidacy, then a re-run with the same id, decides the election (D109)", async () => {
     const store = semanticBlobStore(NO_CREATE);
     // A writes its candidacy and dies before it lists.
     let crashed = false;
@@ -318,9 +320,9 @@ describe("publish: the elected publication", () => {
       expect(b.fix).toContain("same id");
       expect(b.fix).toContain("every device");
     }
-    // A's recovery re-runs with the journaled id: it sees B, refuses, and the election is final.
-    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested", undecided: [] });
-    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: [] });
+    // A's recovery re-runs with the journaled id: B has refused and is out, so A publishes.
+    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
+    expect(await outcome(store, election("B"))).toEqual({ outcome: "lost", winner: "A" });
   });
 
   test("without list-after-write a contested is never final: a lagging lister may still win by conditional create (quality r2)", async () => {
@@ -334,11 +336,14 @@ describe("publish: the elected publication", () => {
         return listed.ok ? ok(listed.value.filter((entry) => !hide(entry.key))) : listed;
       },
     });
-    await inner.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
-    await inner.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}'));
-    // A sees B refused, but its own files do not show in its listing yet.
+    // A and B have refused before (a round on a store whose listings mislead).
+    for (const id of ["A", "B"]) {
+      await inner.put(`${CANDIDATES}${id}.json`, bytes(`{"v":1,"id":"${id}","decision":"candidate"}`));
+      await inner.put(`${CANDIDATES}${id}.refused`, bytes(`{"v":1,"id":"${id}","decision":"refused"}`));
+    }
+    // A re-runs: every candidate it sees refuses, but its device cannot prove no lagging lister was sole.
     const a = await outcome(
-      lagging((key) => key.startsWith(`${CANDIDATES}A.`)),
+      lagging(() => false),
       election("A"),
     );
     // C's listing misses A's and B's files: it is sole, and wins through its conditional create.
@@ -358,10 +363,17 @@ describe("publish: the elected publication", () => {
   test("a refusal written on behalf of an attempt whose device is gone settles the election (the withdraw rule)", async () => {
     const store = semanticBlobStore(NO_CREATE);
     await store.put(`${CANDIDATES}GONE.json`, bytes('{"v":1,"id":"GONE","decision":"candidate"}'));
-    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: ["GONE"] });
+    // B has the lower id: it holds the tie-break and waits for GONE, which never refuses.
+    const b = await outcome(store, election("B"));
+    expect(b).toMatchObject({ outcome: "waiting", undecided: ["GONE"] });
+    if (b.outcome === "waiting") expect(b.fix).toContain(`${CANDIDATES}GONE.refused`);
     // Every device quiesced, the operator withdraws GONE: its refusal record, exactly as GONE would write it.
     await store.put(`${CANDIDATES}GONE.refused`, bytes('{"v":1,"id":"GONE","decision":"refused"}\n'));
-    expect(await outcome(store, election("B"))).toMatchObject({ outcome: "contested", undecided: [] });
+    expect(await outcome(store, election("B"))).toEqual({ outcome: "won" });
+    // A higher id that stands refuses to the lower; a withdrawn rival frees it the same way.
+    const z = semanticBlobStore(NO_CREATE);
+    await z.put(`${CANDIDATES}A.json`, bytes('{"v":1,"id":"A","decision":"candidate"}'));
+    expect(await outcome(z, election("Z"))).toMatchObject({ outcome: "contested", undecided: ["A"] });
   });
 
   test("elect() checks its input: a bad prefix, id or value is a bug and throws", async () => {
@@ -404,7 +416,7 @@ describe("publish: the elected publication", () => {
     expect(keysOf(store, CANDIDATES)).toEqual([`${CANDIDATES}A.json`, `${CANDIDATES}A.publishing`]);
   });
 
-  test("when every candidate is visible before any listing, all end contested and nothing is published", async () => {
+  test("when every candidate is visible before any listing, the lowest id wins and the others refuse (D109)", async () => {
     for (const n of [2, 3]) {
       const inner = semanticBlobStore(NO_CREATE);
       const ids = Array.from({ length: n }, (_, i) => `C${i}`);
@@ -427,23 +439,69 @@ describe("publish: the elected publication", () => {
         },
       };
       const outcomes = await Promise.all(ids.map((id) => outcome(gated, election(id))));
-      for (const o of outcomes) {
-        expect(o).toMatchObject({ outcome: "contested", candidates: ids });
-        if (o.outcome === "contested") {
-          expect(o.fix).toContain("every device");
-          expect(o.fix).toContain(`${CANDIDATES}C0.json`);
-        }
-      }
-      expect(inner.data.has(PUBLISHED)).toBe(false);
+      expect(outcomes[0]).toEqual({ outcome: "won" });
+      for (const o of outcomes.slice(1)) expect(["lost", "contested"]).toContain(o.outcome);
+      for (const id of ids.slice(1)) expect(inner.data.has(`${CANDIDATES}${id}.refused`)).toBe(true);
+      expect(election("x").winnerOf(inner.data.get(PUBLISHED) as Uint8Array)).toBe("C0");
     }
   });
 
-  test("after a contested run, the quiesced cleanup lets a single retry win", async () => {
+  test("a fresh attempt after an all-refused round wins: refused candidates no longer stand (D109)", async () => {
+    for (const options of [{}, NO_CREATE]) {
+      const store = semanticBlobStore(options);
+      for (const id of ["A", "B"]) {
+        await store.put(`${CANDIDATES}${id}.json`, bytes(`{"v":1,"id":"${id}","decision":"candidate"}`));
+        await store.put(`${CANDIDATES}${id}.refused`, bytes(`{"v":1,"id":"${id}","decision":"refused"}`));
+      }
+      const a = await outcome(store, election("A"));
+      expect(a).toMatchObject({ outcome: "contested", undecided: [] });
+      if (a.outcome === "contested") expect(a.fix).toContain("new attempt");
+      expect(await outcome(store, election("C"))).toEqual({ outcome: "won" });
+      expect(await outcome(store, election("A"))).toEqual({ outcome: "lost", winner: "C" });
+    }
+  });
+
+  test("a refused candidate whose .publishing is visible still stands: it may be publishing late (D109)", async () => {
     const store = semanticBlobStore(NO_CREATE);
-    await store.put(`${CANDIDATES}B.json`, bytes("{}"));
-    expect(await outcome(store, election("A"))).toMatchObject({ outcome: "contested" });
-    for (const key of keysOf(store, CANDIDATES)) await store.delete(key);
-    expect(await outcome(store, election("A"))).toEqual({ outcome: "won" });
+    await store.put(`${CANDIDATES}A.json`, bytes('{"v":1,"id":"A","decision":"candidate"}'));
+    await store.put(`${CANDIDATES}A.publishing`, bytes('{"v":1,"id":"A","decision":"publishing"}'));
+    await store.put(`${CANDIDATES}A.refused`, bytes('{"v":1,"id":"A","decision":"refused"}'));
+    expect(await outcome(store, election("C"))).toMatchObject({ outcome: "contested" });
+    expect(store.data.has(PUBLISHED)).toBe(false);
+  });
+
+  test("the tie-break holder refuses when a lower id or a publishing rival turns up while it waits", async () => {
+    for (const late of ["lower", "publishing"] as const) {
+      const store = semanticBlobStore(NO_CREATE);
+      await store.put(`${CANDIDATES}C.json`, bytes('{"v":1,"id":"C","decision":"candidate"}'));
+      let waits = 0;
+      const b = election("B", {
+        wait: async () => {
+          if (++waits !== 1) return;
+          if (late === "lower") await store.put(`${CANDIDATES}A.json`, bytes("{}"));
+          else
+            await store.put(`${CANDIDATES}C.publishing`, bytes('{"v":1,"id":"C","decision":"publishing"}'));
+        },
+      });
+      expect(await outcome(store, b)).toMatchObject({ outcome: "contested" });
+      expect(store.data.has(`${CANDIDATES}B.refused`)).toBe(true);
+    }
+  });
+
+  test("an attempt's own refusal stands even when its listing does not show it", async () => {
+    const inner = semanticBlobStore();
+    await inner.put(`${CANDIDATES}A.json`, bytes('{"v":1,"id":"A","decision":"candidate"}'));
+    await inner.put(`${CANDIDATES}A.refused`, bytes('{"v":1,"id":"A","decision":"refused"}'));
+    const lagging: BlobStore = {
+      ...inner,
+      semantics: () => ({ ...inner.semantics(), listAfterWrite: "unknown" }),
+      list: async (prefix) => {
+        const listed = await inner.list(prefix);
+        return listed.ok ? ok(listed.value.filter((entry) => !entry.key.endsWith("A.refused"))) : listed;
+      },
+    };
+    expect(await outcome(lagging, election("A"))).toMatchObject({ outcome: "contested" });
+    expect(inner.data.has(PUBLISHED)).toBe(false);
   });
 
   test("a contested claimant that sees a winner published while it re-reads loses, naming it", async () => {
@@ -498,8 +556,10 @@ describe("publish: the elected publication", () => {
 
   test("a terminal contested names no undecided candidate, and its fix is the quiesced cleanup", async () => {
     const store = semanticBlobStore(NO_CREATE);
-    await store.put(`${CANDIDATES}B.json`, bytes('{"v":1,"id":"B","decision":"candidate"}'));
-    await store.put(`${CANDIDATES}B.refused`, bytes('{"v":1,"id":"B","decision":"refused"}'));
+    for (const id of ["A", "B"]) {
+      await store.put(`${CANDIDATES}${id}.json`, bytes(`{"v":1,"id":"${id}","decision":"candidate"}`));
+      await store.put(`${CANDIDATES}${id}.refused`, bytes(`{"v":1,"id":"${id}","decision":"refused"}`));
+    }
     const o = await outcome(store, election("A"));
     expect(o).toMatchObject({ outcome: "contested", candidates: ["A", "B"], undecided: [] });
     if (o.outcome === "contested") expect(o.fix).toContain("every device");
@@ -525,7 +585,7 @@ describe("publish: the elected publication", () => {
     ["sole candidate", NO_CREATE],
   ] as const) {
     for (const n of [2, 3]) {
-      test(`${route}: every interleaving of ${n} claimants ends with at most one won`, async () => {
+      test(`${route}: every interleaving of ${n} claimants ends with at most one won, and a re-run decides it`, async () => {
         await fc.assert(
           fc.asyncProperty(fc.scheduler(), fc.boolean(), async (s, lossy) => {
             const inner = semanticBlobStore(options);
@@ -544,14 +604,23 @@ describe("publish: the elected publication", () => {
             if (won.length === 1) expect(winner).toBe(won[0]);
             for (const o of outcomes) {
               if (o.outcome === "lost") expect(o.winner).toBe(winner as string);
-              if (o.outcome === "contested") {
-                expect(o.candidates.length).toBeGreaterThan(1);
-                // A terminal contested ("every visible candidate refuses") is never wrong: nobody won.
-                if (o.undecided.length === 0) expect(won).toEqual([]);
-              }
+              if (o.outcome === "contested") expect(o.candidates.length).toBeGreaterThan(1);
             }
             // A published value always names a claimant, and only one ever is.
             if (winner !== undefined) expect(ids).toContain(winner);
+            // Liveness (D109): each attempt re-run with its id (its recovery), then a new attempt, ends with a winner,
+            // the same one, and nobody else won.
+            const again: ElectionOutcome[] = [];
+            for (const id of ids) again.push(await outcome(inner, election(id)));
+            const fresh = await outcome(inner, election("Z"));
+            const final = election("x").winnerOf(inner.data.get(PUBLISHED) as Uint8Array) as string;
+            expect(final).toBeDefined();
+            if (winner !== undefined) expect(final).toBe(winner);
+            for (const [i, o] of again.entries()) {
+              if (o.outcome === "won") expect(ids[i]).toBe(final);
+              else expect(o).toEqual({ outcome: "lost", winner: final });
+            }
+            expect(fresh).toEqual(final === "Z" ? { outcome: "won" } : { outcome: "lost", winner: final });
           }),
           { numRuns: RUNS },
         );
@@ -563,7 +632,58 @@ describe("publish: the elected publication", () => {
     ["conditional create", {}],
     ["sole candidate", NO_CREATE],
   ] as const) {
-    test(`${route}: a cancelled write that lands late never makes a second winner or a wrong final contested`, async () => {
+    test(`${route}: two simultaneous live attempts end with exactly one winner (D109)`, async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.scheduler(), async (s) => {
+          const inner = semanticBlobStore(options);
+          const store = scheduled(inner, s);
+          const ids = ["C0", "C1"];
+          const results = await s.waitFor(Promise.all(ids.map((id) => elect(store, election(id)))));
+          const outcomes = results.map((r) => (r.ok ? r.value : undefined));
+          const won = ids.filter((_, i) => outcomes[i]?.outcome === "won");
+          expect(won.length).toBe(1);
+          expect(election("x").winnerOf(inner.data.get(PUBLISHED) as Uint8Array)).toBe(won[0] as string);
+          for (const o of outcomes) {
+            if (o?.outcome !== "won") expect(o?.outcome === "lost" || o?.outcome === "contested").toBe(true);
+          }
+        }),
+        { numRuns: RUNS },
+      );
+    });
+
+    test(`${route}: an attempt after a mutual refusal can win (D109)`, async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.scheduler(),
+          fc.subarray(["C0", "C1", "C2"], { minLength: 2 }),
+          async (s, refused) => {
+            const inner = semanticBlobStore(options);
+            for (const id of refused) {
+              await inner.put(
+                `${CANDIDATES}${id}.json`,
+                bytes(`{"v":1,"id":"${id}","decision":"candidate"}`),
+              );
+              await inner.put(
+                `${CANDIDATES}${id}.refused`,
+                bytes(`{"v":1,"id":"${id}","decision":"refused"}`),
+              );
+            }
+            // Two new attempts race on the refused round, and every refused attempt re-runs beside them.
+            const store = scheduled(inner, s);
+            const ids = [...refused, "N0", "N1"];
+            const results = await s.waitFor(Promise.all(ids.map((id) => elect(store, election(id)))));
+            const won = ids.filter(
+              (_, i) => results[i]?.ok && (results[i] as { value: ElectionOutcome }).value.outcome === "won",
+            );
+            expect(won.length).toBe(1);
+            expect(["N0", "N1"]).toContain(won[0] as string);
+          },
+        ),
+        { numRuns: RUNS },
+      );
+    });
+
+    test(`${route}: a cancelled write that lands late never makes a second winner`, async () => {
       await fc.assert(
         fc.asyncProperty(fc.scheduler(), fc.nat(8), fc.nat(8), async (s, cancelAt, failAt) => {
           const inner = semanticBlobStore({ ...options, lateLanding: true });
@@ -588,16 +708,12 @@ describe("publish: the elected publication", () => {
           inner.settle();
           const again = await Promise.all(ids.map((id) => elect(inner, election(id))));
           const won = new Set<string>();
-          let final = false;
           for (const results of [first, early, again]) {
             results.forEach((r, i) => {
               if (r.ok && r.value.outcome === "won") won.add(ids[i] as string);
-              if (r.ok && r.value.outcome === "contested" && r.value.undecided.length === 0) final = true;
             });
           }
           expect(won.size).toBeLessThanOrEqual(1);
-          // A final contested is never wrong: nobody wins, then or later.
-          if (final) expect([...won]).toEqual([]);
           const published = inner.data.get(PUBLISHED);
           if (won.size === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe([...won][0]);
           for (const r of again) {
@@ -634,12 +750,6 @@ describe("publish: the elected publication", () => {
               return r?.ok === true && r.value.outcome === "won";
             });
             expect(won.length).toBeLessThanOrEqual(1);
-            // A final contested is never wrong, whatever mix of profiles took part.
-            if (
-              results.some((r) => r.ok && r.value.outcome === "contested" && r.value.undecided.length === 0)
-            ) {
-              expect(won).toEqual([]);
-            }
             const published = inner.data.get(PUBLISHED);
             if (won.length === 1) expect(election("x").winnerOf(published as Uint8Array)).toBe(won[0]);
             for (const r of results) {

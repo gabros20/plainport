@@ -9,8 +9,10 @@
 // device's registry before the claim, so a re-run of the offload stands again with the same id (D99), and the same root
 // claiming from two devices is one attempt, publishing one value. The outcomes are won (the claim is the root's), lost
 // (another root holds it: the caller refuses with store.root-mismatch) and contested: no root holds it and this one
-// refuses, final (store.root-contested, the quiesced cleanup) or undecided while a rival may still publish
-// (store.root-undecided, re-run later). `root.json` keeps format 1's shape, so v0.1.1 reads a claim as before,
+// refuses, final (store.root-contested: every root that stood refuses, and another root is no longer blocked by
+// them, D109) or undecided while a rival may still publish (store.root-undecided, re-run later). A root that holds the
+// tie-break (the lowest id, D109) and waited out its budget for the others' refusals is store.root-undecided too,
+// without a refusal: its re-run resumes the wait. `root.json` keeps format 1's shape, so v0.1.1 reads a claim as before,
 // and a claim v0.1.1 wrote (create-only, without candidates) is a published winner like any other.
 //
 // On a store without hard links the file is created in place (D41): a reader can see it empty or partial while its
@@ -84,6 +86,15 @@ export const claimStoreRoot = async (
   const outcome = elected.value;
   if (outcome.outcome === "won") return ok({ root });
   if (outcome.outcome === "lost") return ok({ root: outcome.winner });
+  if (outcome.outcome === "waiting") {
+    return fail(
+      finding("store.root-undecided", {
+        message: `the store's root claim is not decided: this root (${root}) holds the tie-break and waited for ${outcome.undecided.join(", ")} to refuse; nothing was claimed yet`,
+        fix: outcome.fix,
+        paths: [ROOT_CLAIMS_PREFIX],
+      }),
+    );
+  }
   const others = outcome.candidates.filter((id) => id !== root);
   return outcome.undecided.length === 0
     ? fail(
