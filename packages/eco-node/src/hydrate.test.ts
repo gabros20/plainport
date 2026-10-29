@@ -377,12 +377,16 @@ describe("hydrate: real frozen installs, offline", () => {
   );
 
   // D79: package scripts run (D54), so no store password may be in their environment: plainport's own variables,
-  // restic's and rclone's, and whatever variable a configured env: secret reference names.
+  // restic's, rclone's, AWS's and 1Password's (Task 15), and whatever variable a configured env: secret reference names.
   const secretEnv = (path?: string) => ({
     ...offlineEnv(path),
     PLAINPORT_STORE_PASSWORD: "pw-default-store",
     RESTIC_PASSWORD: "pw-restic",
     RCLONE_CONFIG_PASS: "pw-rclone",
+    AWS_SECRET_ACCESS_KEY: "pw-aws-secret",
+    AWS_SESSION_TOKEN: "pw-aws-session",
+    OP_SERVICE_ACCOUNT_TOKEN: "pw-op-token",
+    MY_S3_SECRET: "pw-s3-ref",
     MY_VAULT_PW: "pw-custom-ref",
     MY_RECOVERY_PW: "pw-recovery-ref",
     KEEP_ME: "visible",
@@ -397,6 +401,13 @@ describe("hydrate: real frozen installs, offline", () => {
         'kind = "local"',
         `path = "${join(root, "store")}"`,
         'secret = "env:MY_VAULT_PW"',
+        "[stores.b2]",
+        'kind = "s3"',
+        'endpoint = "https://s3.example.com"',
+        'bucket = "b"',
+        'secret = "op://Private/b2/password"',
+        'accessKeyId = "keychain:plainport/b2-key"',
+        'secretAccessKey = "env:MY_S3_SECRET"',
         "[secrets]",
         'recovery = "env:MY_RECOVERY_PW"',
         "",
@@ -408,7 +419,17 @@ describe("hydrate: real frozen installs, offline", () => {
   };
   const expectNoSecrets = (printed: string) => {
     expect(printed).toContain("KEEP_ME=visible");
-    for (const value of ["pw-default-store", "pw-restic", "pw-rclone", "pw-custom-ref", "pw-recovery-ref"])
+    for (const value of [
+      "pw-default-store",
+      "pw-restic",
+      "pw-rclone",
+      "pw-aws-secret",
+      "pw-aws-session",
+      "pw-op-token",
+      "pw-s3-ref",
+      "pw-custom-ref",
+      "pw-recovery-ref",
+    ])
       expect(printed).not.toContain(value);
   };
   const hydrateWith = (dir: string, env: Record<string, string>) =>
