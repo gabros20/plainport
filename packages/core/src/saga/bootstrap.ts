@@ -11,10 +11,12 @@
 //
 // The election ends won (published, as above), lost (another attempt published first: store.bootstrap-lost names it;
 // this attempt records nothing and never touches the winner's repository) or contested (no winner, and this attempt
-// refused): final when every visible candidate's refusal is read back (store.bootstrap-contested, the quiesced cleanup),
-// undecided while one may still publish (store.bootstrap-undecided: the journal stays, and a re-run decides it with the
-// same id). A losing or contested attempt writes nothing after its candidacy but its own refusal (D99), and its
-// repository stays for `store test` to list; plainport never deletes a repository.
+// refused): final when every visible candidate's refusal is read back (store.bootstrap-contested: a re-run of the setup
+// stands as a new attempt, which does not count them, D109), undecided while one may still publish
+// (store.bootstrap-undecided: the journal stays, and a re-run decides it with the same id). An attempt that holds the
+// tie-break (the lowest id, D109) and waited out its budget is store.bootstrap-undecided too, without a refusal. A
+// losing or contested attempt writes nothing after its candidacy but its own refusal (D99), and its repository stays
+// for `store test` to list; plainport never deletes a repository.
 //
 // A store that already has a store.json is adopted instead, without an election and without writing to it: its
 // published repository (repos/<id> for format 2, repo/ for an M1 store) must open with this device's password before
@@ -98,7 +100,7 @@ const SEAM_OF: Readonly<Record<ElectionWrite, BootstrapAfterEffect>> = {
 /** Points a plain run (alone on the store) does not reach, and what reaching them needs. */
 export const BOOTSTRAP_BRANCHES = {
   rival: {
-    when: "another attempt's candidacy is visible when this one lists, so this one refuses",
+    when: "another attempt with a lower id stands when this one lists, so this one refuses (D109)",
     reaches: ["bootstrap.refusal.written"],
   },
 } as const satisfies Record<string, { when: string; reaches: readonly string[] }>;
@@ -473,6 +475,25 @@ const electAndFinish = async (
       ),
     };
   }
+  if (outcome.outcome === "waiting") {
+    // This attempt holds the tie-break (D109) and has not refused: it keeps its journal, and a re-run resumes the wait.
+    return {
+      outcome: "pending",
+      problem: failWith(
+        finding("store.bootstrap-undecided", {
+          message: `store ${name} is not set up yet: this attempt (${journal.op}) holds the tie-break and waited for ${outcome.undecided.join(", ")} to refuse; nothing was published yet`,
+          fix: outcome.fix,
+          paths: [STORE_CLAIMS_PREFIX],
+        }),
+        {
+          outcome: "waiting",
+          attempt: journal.op,
+          candidates: outcome.candidates,
+          undecided: outcome.undecided,
+        },
+      ),
+    };
+  }
   const data = {
     outcome: "contested",
     attempt: journal.op,
@@ -486,7 +507,7 @@ const electAndFinish = async (
       problem: failWith(
         finding("store.bootstrap-contested", {
           message: `store ${name} has no winner: every attempt that stood (${outcome.candidates.join(", ")}) refuses, so nothing was published; this attempt's repository ${journal.repo} was left in the store as it is`,
-          fix: outcome.fix,
+          fix: `re-run the setup on one device: it stands as a new attempt, which does not count refused candidates and can win (D109); ${outcome.fix}`,
           paths: [STORE_CLAIMS_PREFIX],
         }),
         data,

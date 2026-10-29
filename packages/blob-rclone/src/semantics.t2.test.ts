@@ -452,18 +452,14 @@ const electionRace = async (
       expect({ round, a, b, errors: [a, b].filter((r) => r.outcome === "error") }).toMatchObject({
         errors: [],
       });
+      // Exactly one winner per simultaneous round (D109): the lowest id holds the tie-break and publishes once the
+      // other's refusal is read back, so a round never ends with nobody (review phase 4 I1, N1).
       const won = [a, b].filter((r) => r.outcome === "won");
-      expect({ round, a, b, twoWinners: won.length > 1 }).toMatchObject({ twoWinners: false });
+      expect({ round, a, b, winners: won.length }).toMatchObject({ winners: 1 });
       const published = value(await reader.get(`elect/${String(round).padStart(3, "0")}/store.json`));
-      if (won.length === 1) {
-        const winner = won[0] as RoundResult;
-        expect(text(published)).toBe(`${JSON.stringify({ id: winner.id })}\n`);
-        for (const r of [a, b]) if (r.outcome === "lost") expect(r.winner).toBe(winner.id);
-      } else {
-        // No winner: nobody published, and neither attempt can have lost to anyone.
-        expect(published).toBeNull();
-        for (const r of [a, b]) expect(r.outcome).toBe("contested");
-      }
+      const winner = won[0] as RoundResult;
+      expect(text(published)).toBe(`${JSON.stringify({ id: winner.id })}\n`);
+      for (const r of [a, b]) if (r.outcome === "lost") expect(r.winner).toBe(winner.id);
       const key = `${a.outcome}/${b.outcome}`;
       tally[key] = (tally[key] ?? 0) + 1;
     }

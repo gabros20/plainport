@@ -105,12 +105,12 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     "conditional create": new Set(),
     "sole candidate": new Set(),
   };
-  // Not vacuous: across the runs, the race both elects a winner and ends contested on each route.
+  // Not vacuous: across the runs, the race both elects a winner and has a losing attempt on each route.
   afterAll(() => {
     if (RUNS < 20) return;
     for (const [route, outcomes] of Object.entries(reached)) {
       expect([route, outcomes.has("published")]).toEqual([route, true]);
-      expect([route, outcomes.has("store.bootstrap-contested")]).toEqual([route, true]);
+      expect([route, outcomes.has("store.bootstrap-lost")]).toEqual([route, true]);
     }
   });
 
@@ -183,6 +183,9 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
             expect(recorders.length).toBeLessThanOrEqual(1);
             if (published === undefined) {
               expect(recorders).toEqual([]);
+              // Liveness (D109): with every attempt that stood refused, a re-run of the setup is a new attempt and wins.
+              const fresh = done(await w.device("pw-c").run());
+              expect(fresh.outcome).toBe("published");
               return;
             }
             // One repository is published, and only the device that initialised it ever reached it.
@@ -204,24 +207,18 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     }, 60_000);
   }
 
-  /** Lists wait until both candidacies are written, and re-reads until both refusals are: every candidate is seen. */
+  /** Lists wait until both candidacies are written: every candidate is seen by both. */
   const bothVisible = (w: BootstrapWorld) => {
     let candidacies = 0;
-    let refusals = 0;
     let listed: () => void = () => {};
-    let refused: () => void = () => {};
     const allCandidates = new Promise<void>((resolve) => {
       listed = resolve;
-    });
-    const allRefused = new Promise<void>((resolve) => {
-      refused = resolve;
     });
     const gated: BlobStore = {
       ...w.store,
       put: async (key, data, opts) => {
         const put = await w.store.put(key, data, opts);
         if (key.startsWith(STORE_CLAIMS_PREFIX) && key.endsWith(".json") && ++candidacies === 2) listed();
-        if (key.startsWith(STORE_CLAIMS_PREFIX) && key.endsWith(".refused") && ++refusals === 2) refused();
         return put;
       },
       list: async (prefix) => {
@@ -229,65 +226,76 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
         return w.store.list(prefix);
       },
     };
-    return { gated, wait: () => allRefused };
+    return { gated, wait: () => new Promise<void>((done) => setTimeout(done, 1)) };
   };
 
   for (const [route, options] of [
     ["conditional create", {}],
     ["sole candidate", NO_CREATE],
   ] as const) {
-    test(`${route}: when both candidates are visible before either lists, both end contested and nothing is published`, async () => {
+    test(`${route}: when both candidates are visible before either lists, the lower id publishes and the other loses (D109)`, async () => {
       const w = world(options);
       const { gated, wait } = bothVisible(w);
       const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
       for (const d of devices) d.target.blob = gated;
       const results = await Promise.all(devices.map((d) => d.run()));
-      for (const r of results) {
-        const f = failed(r);
-        expect(f.finding.code).toBe("store.bootstrap-contested");
-        expect(f.finding.fix).toContain("every device");
-        expect(f.data).toMatchObject({ outcome: "contested", undecided: [] });
-      }
-      expect(w.store.data.has(STORE_IDENTITY_KEY)).toBe(false);
-      for (const d of devices) {
-        expect(await d.recorded()).toBeUndefined();
-        // Settled: a final contested leaves no journal, and its repository is left where it is.
-        expect(await d.journals()).toEqual([]);
-      }
+      const winners = results.flatMap((r) => (r.ok ? [r.value.id] : []));
+      const attempts = keysUnder(w.store, STORE_CLAIMS_PREFIX)
+        .filter((k) => k.endsWith(".json"))
+        .map((k) => k.slice(STORE_CLAIMS_PREFIX.length, -".json".length))
+        .sort();
+      expect(winners).toEqual([attempts[0] as string]);
+      const loser = results.find((r) => !r.ok);
+      expect(loser === undefined ? "" : failed(loser).finding.code).toBe("store.bootstrap-lost");
+      expect(publishedStore(w.store)?.id).toBe(attempts[0]);
+      for (const d of devices) expect(await d.journals()).toEqual([]);
+      // Both repositories stay: plainport never deletes one.
       expect([...w.repos.keys()].filter((k) => k.startsWith("repos/"))).toHaveLength(2);
     });
 
-    test(`${route}: a contested attempt writes nothing after its candidate but its own refusal`, async () => {
+    test(`${route}: a refusing attempt writes nothing after its candidate but its own refusal`, async () => {
       const w = world(options);
       const { gated, wait } = bothVisible(w);
       const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
       for (const d of devices) d.target.blob = gated;
-      const results = await Promise.all(devices.map((d) => d.run()));
-      const attempts =
-        results.map((r) => (failed(r).data as { candidates: string[] }).candidates).at(0) ?? [];
-      expect(keysUnder(w.store, "")).toEqual(
-        attempts
-          .flatMap((id) => [`${STORE_CLAIMS_PREFIX}${id}.json`, `${STORE_CLAIMS_PREFIX}${id}.refused`])
-          .sort(),
+      await Promise.all(devices.map((d) => d.run()));
+      const [low, high] = keysUnder(w.store, STORE_CLAIMS_PREFIX)
+        .filter((k) => k.endsWith(".json"))
+        .map((k) => k.slice(STORE_CLAIMS_PREFIX.length, -".json".length))
+        .sort() as [string, string];
+      expect(keysUnder(w.store, STORE_CLAIMS_PREFIX)).toEqual(
+        [
+          `${STORE_CLAIMS_PREFIX}${low}.json`,
+          `${STORE_CLAIMS_PREFIX}${low}.publishing`,
+          `${STORE_CLAIMS_PREFIX}${high}.json`,
+          `${STORE_CLAIMS_PREFIX}${high}.refused`,
+        ].sort(),
       );
     });
 
-    test(`${route}: after a contested run, the documented cleanup (quiesce, remove the candidates) lets a single retry win`, async () => {
+    test(`${route}: after a final contested, a re-run of the setup stands as a new attempt and wins (D109)`, async () => {
       const w = world(options);
-      const { gated, wait } = bothVisible(w);
-      const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw, { wait }));
-      for (const d of devices) d.target.blob = gated;
-      const results = await Promise.all(devices.map((d) => d.run()));
-      const fix = failed(results[0] as Result<BootstrapDone>).finding.fix ?? "";
-      // The fix names every file to remove; nothing else runs meanwhile.
-      for (const key of keysUnder(w.store, STORE_CLAIMS_PREFIX)) {
-        expect(fix).toContain(key);
-        await w.store.delete(key);
-      }
-      const [a] = devices as [(typeof devices)[0]];
-      a.target.blob = w.store;
+      // A lower attempt that stands and never decides (its device gone): this attempt refuses, undecided.
+      const gone = "00000000000000000000000000";
+      await w.store.put(`${STORE_CLAIMS_PREFIX}${gone}.json`, new TextEncoder().encode("{}"));
+      const a = w.device("pw-a");
+      const undecided = failed(await a.run());
+      expect(undecided.finding.code).toBe("store.bootstrap-undecided");
+      const [attempt] = await a.journals();
+      // The operator withdraws the gone attempt; this attempt's re-run sees every attempt refused: final.
+      await w.store.put(
+        `${STORE_CLAIMS_PREFIX}${gone}.refused`,
+        new TextEncoder().encode(`{"v":1,"id":"${gone}","decision":"refused"}\n`),
+      );
+      const contested = failed(await a.run());
+      expect(contested.finding.code).toBe("store.bootstrap-contested");
+      expect(contested.finding.fix).toContain("re-run the setup");
+      expect(contested.finding.fix).toContain("every device");
+      expect(await a.journals()).toEqual([]);
+      // The re-run is a new attempt: the refused ones no longer stand, so it publishes.
       const retry = done(await a.run());
       expect(retry.outcome).toBe("published");
+      expect(retry.id).not.toBe(attempt);
       expect(publishedStore(w.store)?.id).toBe(retry.id);
       expect(await a.recorded()).toBe(retry.id);
     });
@@ -443,25 +451,32 @@ describe("bootstrap: interrupted attempts", () => {
     expect(settled.ok && settled.value.operations).toMatchObject([{ attempt, outcome: "published" }]);
   });
 
-  test("killed after the candidacy on a conditional-create store: another attempt is undecided until the killed attempt's recovery re-runs with its journaled id, which settles it", async () => {
+  test("killed after the candidacy on a conditional-create store: another attempt is undecided until the recoveries re-run with the journaled ids, and one publishes", async () => {
     const w = world();
     const { d: a, attempt } = await crash(w, "bootstrap.candidacy.written");
     const b = w.device("pw-b");
     const undecided = failed(await b.run());
     expect(undecided.finding.code).toBe("store.bootstrap-undecided");
-    expect(undecided.data).toMatchObject({ outcome: "contested", undecided: [attempt] });
+    // B refused (A's id is lower) or holds the tie-break and waited for A (B's is): either way A stands, undecided.
+    expect(undecided.data).toMatchObject({ undecided: [attempt] });
     expect(undecided.finding.fix).not.toContain("remove");
-    // B refused for good, and keeps its journal to re-run later.
+    // B keeps its journal to re-run later.
     expect((await b.journals()).length).toBe(1);
 
+    // The recoveries, with the journaled ids, settle it: exactly one publishes and the other loses (D109).
     a.ports.faultAt = () => {};
-    const settled = await a.recover();
-    expect(settled.ok && settled.value.operations).toMatchObject([{ attempt, outcome: "contested" }]);
+    const outcomes: string[] = [];
+    for (let round = 0; round < 2; round++) {
+      for (const d of [a, b]) {
+        const settled = await d.recover();
+        if (settled.ok) for (const op of settled.value.operations) outcomes.push(op.outcome);
+      }
+    }
+    expect(outcomes.filter((o) => o === "published")).toHaveLength(1);
+    expect(outcomes).toContain("lost");
     expect(await a.journals()).toEqual([]);
-    const later = await b.recover();
-    expect(later.ok && later.value.operations).toMatchObject([{ outcome: "contested" }]);
     expect(await b.journals()).toEqual([]);
-    expect(w.store.data.has(STORE_IDENTITY_KEY)).toBe(false);
+    expect(w.store.data.has(STORE_IDENTITY_KEY)).toBe(true);
   });
 
   test("a publication torn in place by a crash is completed by its own attempt's recovery", async () => {

@@ -24,7 +24,7 @@ export interface ElectChildConfig {
 export interface RoundResult {
   round: number;
   id: string;
-  outcome: "won" | "lost" | "contested" | "error";
+  outcome: "won" | "lost" | "contested" | "waiting" | "error";
   winner?: string;
   error?: string;
 }

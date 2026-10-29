@@ -570,7 +570,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is the quiesced cleanup it names (stop plainport on every device that uses the store, remove the candidates), then one re-run",
+      "Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is to re-run the setup, which stands as a new attempt that does not count refused candidates and can win (D109)",
   },
   "store.bootstrap-lost": {
     severity: "block",
@@ -584,7 +584,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused and keeps its journal, so a later re-run (or plainport recover) ends it lost or contested",
+      "Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused, or holds the tie-break (the lowest id, D109) and waits for the others' refusals, and keeps its journal, so a later re-run (or plainport recover) decides it",
   },
   "store.failed": {
     severity: "block",
@@ -632,7 +632,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run",
+      "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; another root is not blocked by them (D109), and fix is the quiesced cleanup it names for one of these roots to claim it",
   },
   "store.root-mismatch": {
     severity: "block",
@@ -646,7 +646,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later",
+      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99), or this root holds the tie-break (the lowest id, D109) and waits for the others' refusals; re-run later",
   },
   "store.secret-missing": {
     severity: "block",
