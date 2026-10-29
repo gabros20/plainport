@@ -77,7 +77,14 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogEvent } from "../catalog/events.ts";
-import { catalogReader, headCheck, otherRoot, rootMismatch } from "../catalog/head.ts";
+import {
+  catalogReader,
+  headCheck,
+  namesSnapshot,
+  otherRoot,
+  rootMismatch,
+  storeHolding,
+} from "../catalog/head.ts";
 import { appendEvent, storeEventLog } from "../catalog/log.ts";
 import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
@@ -486,6 +493,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   if (!registered.ok) return registered;
   const projectId = registered.value.id;
   const base = registered.value.registry.projects[projectId]?.base;
+  const storeIds = registered.value.registry.stores ?? {};
 
   const gate = { io, paths, clock, log: deps.log };
   // Nesting by effective folders (D53 revised): a project placed inside this folder with --to counts.
@@ -527,7 +535,22 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     });
     const before = await catalog();
     if (!before.ok) return before;
-    const early = headCheck(before.value, projectId, base, ref.address);
+    // The project's home store (Q12): a copy whose base this store's catalog does not name came from another store's
+    // history, which this device's mirrors name (an offline store by its mirror).
+    const home =
+      base === undefined || namesSnapshot(before.value, projectId, base)
+        ? undefined
+        : {
+            store: store.name,
+            holder: await storeHolding({
+              stores: storeIds,
+              exclude: store.id,
+              id: projectId,
+              snapshot: base,
+              openMirror: deps.openMirror,
+            }),
+          };
+    const early = headCheck(before.value, projectId, base, ref.address, home);
     if (early.kind !== "ok") return fail(early.finding);
     const ctx: RunContext = {
       op,
@@ -812,7 +835,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       // A store from before root claims (D50) can still be shared by a root whose first offload raced this one (D48).
       const sharedNow = otherRoot(current.value, rootId);
       if (sharedNow !== undefined) return fail(rootMismatch(store.name, ref.root, sharedNow));
-      const head = headCheck(current.value, projectId, base, ref.address);
+      const head = headCheck(current.value, projectId, base, ref.address, home);
       if (head.kind === "incomplete") return fail(head.finding);
       // The folder's own mode as the snapshot's tag records it (D55, Q5 ii): onload gives it back.
       const { rootMode } = verified;

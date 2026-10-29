@@ -90,6 +90,12 @@ export interface Skip {
   bytes: boolean;
   /** A stored-multiple event: it parsed, so its project and snapshot are known (Q11). */
   taint?: Tainted;
+  /**
+   * The project the file is an event of, where the bytes say so and the policy vouches for them (Task 21): a plain
+   * store's bytes, or a sealed event's opened bytes. Absent when the file cannot say (it does not open, it is
+   * plaintext on a sealed store, or its project is not among the bytes there are): it may then be any project's.
+   */
+  project?: string;
 }
 
 export type Decoded = { event: CatalogEvent; opened: Uint8Array } | { skip: Skip };
@@ -126,9 +132,32 @@ const skippedFinding = (key: string, reason: string): Finding =>
 /** catalog.event-skipped for a file left out for a reason of the caller's (a clash in the mirror, a name). */
 export const skippedEvent = (key: string, reason: string): Finding => skippedFinding(key, reason);
 
-const skip = (reason: SkipReason, finding: Finding): { skip: Skip } => ({
-  skip: { reason, finding, bytes: reason === "torn" || reason === "not-json" },
+const skip = (reason: SkipReason, finding: Finding, project?: string): { skip: Skip } => ({
+  skip: {
+    reason,
+    finding,
+    bytes: reason === "torn" || reason === "not-json",
+    ...(project === undefined ? {} : { project }),
+  },
 });
+
+const ULID_TEXT = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+/** A parsed event's own `project`, when it is a ULID. */
+const projectOf = (data: unknown): string | undefined => {
+  const project = typeof data === "object" && data !== null && "project" in data ? data.project : undefined;
+  return typeof project === "string" && ULID_TEXT.test(project) ? project : undefined;
+};
+
+/**
+ * The project a cut-short or broken event line names, where its bytes hold the whole member: a writer writes an event
+ * as one line in its schema's key order, so `,"project":"<ulid>"` outside every string is the event's own (a quote
+ * inside a string is escaped, and no nested object has a project).
+ */
+const projectInLine = (bytes: Uint8Array): string | undefined => {
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  return /[{,]"project":"([0-9A-HJKMNP-TV-Z]{26})"/.exec(text)?.[1];
+};
 
 /** The id a key names (`…/<id>.json`). */
 const idOfKey = (key: string): string => {
@@ -136,20 +165,25 @@ const idOfKey = (key: string): string => {
   return name.endsWith(".json") ? name.slice(0, -5) : name;
 };
 
-/** Text, then JSON: a failure is torn when the bytes do not end their line (a write cut short), else not JSON. */
-const parseLine = (key: string, bytes: Uint8Array): { value: unknown } | { skip: Skip } => {
+/**
+ * Text, then JSON: a failure is torn when the bytes do not end their line (a write cut short), else not JSON. With
+ * `vouched` (a plain store's bytes, or a sealed event's opened ones) the project its bytes name is kept.
+ */
+const parseLine = (key: string, bytes: Uint8Array, vouched: boolean): { value: unknown } | { skip: Skip } => {
   try {
     return { value: JSON.parse(decoder.decode(bytes)) };
   } catch (error) {
     const whole = bytes.length > 0 && bytes[bytes.length - 1] === 0x0a;
+    const project = vouched ? projectInLine(bytes) : undefined;
     return whole
-      ? skip("not-json", skippedFinding(key, `it is not JSON (${(error as Error).message})`))
+      ? skip("not-json", skippedFinding(key, `it is not JSON (${(error as Error).message})`), project)
       : skip(
           "torn",
           skippedFinding(
             key,
             `it is not JSON, and cut short (a write that did not finish: ${(error as Error).message})`,
           ),
+          project,
         );
   }
 };
@@ -170,6 +204,7 @@ const checkEvent = (key: string, data: unknown, opened: Uint8Array): Decoded => 
     return skip(
       "unknown-type",
       skippedFinding(key, `this version of plainport does not know the event type ${JSON.stringify(type)}`),
+      projectOf(data),
     );
   }
   const checked = CatalogEventSchema.safeParse(data);
@@ -177,11 +212,16 @@ const checkEvent = (key: string, data: unknown, opened: Uint8Array): Decoded => 
     return skip(
       "schema",
       skippedFinding(key, `it does not match the event schema: ${describeIssues(checked.error)}`),
+      projectOf(data),
     );
   }
   const id = idOfKey(key);
   if (checked.data.id !== id) {
-    return skip("wrong-id", skippedFinding(key, `its id is ${checked.data.id}, not the ${id} its name says`));
+    return skip(
+      "wrong-id",
+      skippedFinding(key, `its id is ${checked.data.id}, not the ${id} its name says`),
+      projectOf(checked.data),
+    );
   }
   const entries = storedCount(checked.data);
   if (entries !== undefined && entries !== 1) {
@@ -192,6 +232,7 @@ const checkEvent = (key: string, data: unknown, opened: Uint8Array): Decoded => 
         key,
         `unsupported (${STORED_MULTIPLE}): it names its snapshot's location in ${entries} stores, and this version reads one, the store that holds the event (Q11)`,
       ),
+      event.project,
     );
     skipped.skip.taint = {
       event: event.id,
@@ -210,7 +251,7 @@ const checkEvent = (key: string, data: unknown, opened: Uint8Array): Decoded => 
  * under the plain policy), with its opened bytes; or the reason it is no usable event.
  */
 export const decode = (bytes: Uint8Array, key: string, policy: CatalogPolicy): Decoded => {
-  const line = parseLine(key, bytes);
+  const line = parseLine(key, bytes, policy.seal === "plain");
   if ("skip" in line) return line;
   const sealed = looksSealed(bytes);
   if (policy.seal === "plain") {
@@ -244,7 +285,7 @@ export const decode = (bytes: Uint8Array, key: string, policy: CatalogPolicy): D
         paths: [key],
       }),
     );
-  const inner = parseLine(key, opened.value);
+  const inner = parseLine(key, opened.value, true);
   if ("skip" in inner) return inner;
   return checkEvent(key, inner.value, opened.value);
 };

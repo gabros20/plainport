@@ -23,7 +23,14 @@ import { FINDINGS, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { FIXTURES, GOLDEN_CASES } from "../../../eco-node/src/testing.ts";
-import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
+import {
+  appendEvent,
+  type CatalogEvent,
+  foldCatalog,
+  loadCatalog,
+  readEvents,
+  storeEventLog,
+} from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { type Journal, type OnloadJournal, readJournals } from "../journal/index.ts";
@@ -1887,15 +1894,36 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     expect(logs.some((l) => l.includes(dir) && l.includes("mode") && l.includes("unknown"))).toBe(true);
   });
 
-  test("a skipped event that leaves the known snapshot named does not stop the default onload", async () => {
+  test("a skipped event of another project leaves the known snapshot's head certain: the default onload goes on", async () => {
     await offload();
     value(await onload());
     writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
     const second = await offload();
-    store.data.set(`meta/v1/events/${ulid()}.json`, new TextEncoder().encode(malformed()));
+    const id = ulid();
+    const other = `${JSON.stringify({ v: 1, id, type: "merged", project: ulid(), at: new Date().toISOString() })}\n`;
+    store.data.set(`meta/v1/events/${id}.json`, new TextEncoder().encode(other));
     mirror = memoryBlobStore({ createIfAbsent: true });
     const result = value(await onload());
     expect(result).toMatchObject({ snapshot: second.op });
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+  });
+
+  test("a skipped event whose project cannot be told stops the default onload even with the known snapshot named; --snapshot goes on (Task 21)", async () => {
+    await offload();
+    value(await onload());
+    writeFileSync(join(dir, "src/main.ts"), "export const main = 2;\n");
+    const second = await offload();
+    // Its ULID sorts before every readable event: its writer's clock may simply have run slow.
+    const early = ulid(1_000_000);
+    store.data.set(`meta/v1/events/${early}.json`, new TextEncoder().encode(malformed()));
+    mirror = memoryBlobStore({ createIfAbsent: true });
+    const refused = await onload();
+    expect(!refused.ok && [refused.exitCode, refused.finding.code]).toEqual([6, "catalog.head-uncertain"]);
+    expect(!refused.ok && refused.finding.message).toContain(early);
+    expect(!refused.ok && refused.finding.fix).toContain("plainport onload work:web --snapshot <id>");
+    await expectStillShelved(second);
+    const result = value(await onload({ snapshot: second.op }));
+    expect(result).toMatchObject({ snapshot: second.op, over: second.op });
     expect(existsSync(`${dir}.plainport`)).toBe(false);
   });
 
@@ -1918,6 +1946,57 @@ describe("onload: a newer snapshot the catalog cannot read (D86)", () => {
     expect(!result.ok && result.finding.message).toContain(second.op);
     expect(treeOf(dir)).toEqual(tree);
     expect(await storeEvents()).toHaveLength(before);
+  });
+});
+
+describe("onload: the project's home store (Q12)", () => {
+  test("a default onload from a store whose catalog does not name the stub's snapshot refuses with store.history-elsewhere, naming the offline home store by its mirror", async () => {
+    const first = await offload();
+    // Any read since (ls, status) brought this device's mirror of ssd up to its commit.
+    const ssdId = value(await readRegistry(testHost(), box.paths)).stores?.ssd as string;
+    value(await loadCatalog({ store, mirror, storeId: ssdId, now: new Date() }));
+    config('[stores.nas]\nkind = "local"\npath = "~/nas"');
+    box.dir("nas");
+    const nas = memoryBlobStore({ createIfAbsent: true });
+    const nasMirror = memoryBlobStore({ createIfAbsent: true });
+    const nasOpener: StoreOpener = {
+      open: async (name) =>
+        name === "nas"
+          ? { ok: true, value: { blob: nas, engine } }
+          : {
+              ok: false,
+              exitCode: 9,
+              finding: {
+                code: "store.unreachable",
+                severity: "block",
+                message: `${name} is offline`,
+                allowable: false,
+              },
+            },
+    };
+    const nasId = ulid();
+    value(
+      await setUpStore(testHost(), {
+        paths: box.paths,
+        env: { PLAINPORT_STORE_PASSWORD: "pw" },
+        name: "nas",
+        store: { kind: "local", path: "~/nas" },
+        opener: nasOpener,
+        mint: () => nasId,
+      }),
+    );
+    const result = await onload(
+      { store: "nas" },
+      {
+        opener: nasOpener,
+        openMirror: async (id) => ({ ok: true, value: id === nasId ? nasMirror : mirror }),
+      },
+    );
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.history-elsewhere"]);
+    expect(!result.ok && result.finding.message).toContain(first.op);
+    expect(!result.ok && result.finding.message).toContain("store ssd");
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    expect(existsSync(dir)).toBe(false);
   });
 });
 

@@ -52,7 +52,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)",
+      "The catalog left out an event it could not read or use that may change the project's head: one whose project cannot be told or authenticated (it may be any project's) or one of this project's, whatever its id's time says (a writer's clock may run slow), so the head may be older than the newest snapshot; nothing is restored or offloaded. When this device knows a snapshot no readable event names (its stub's or its registry's), the fix names it: onload or restore --snapshot <it> restores it from the repository by its tag, and any other snapshot is refused; otherwise onload or restore --snapshot <id> takes the snapshot named. The doubt ends when the event reads again (D86, Task 21)",
   },
   "catalog.seal-failed": {
     severity: "block",
@@ -626,6 +626,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
+  },
+  "store.history-elsewhere": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's catalog does not name the snapshot this copy came from (or the stub's): before replication a project's history lives in one store (Q12), so nothing is offloaded or restored there; the message names the store whose catalog this device's mirror shows holding it, by store id, or says it is unknown",
   },
   "store.root-contested": {
     severity: "block",

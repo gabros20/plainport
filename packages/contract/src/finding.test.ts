@@ -149,6 +149,12 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.history-elsewhere": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.root-contested": {
         severity: "block",
         allowable: false,
