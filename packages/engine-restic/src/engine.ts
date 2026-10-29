@@ -6,8 +6,15 @@
 // partial success.
 //
 // The password reaches restic only as RESTIC_PASSWORD in the child's environment, never as an argument; it is cut
-// out of every message, log line and report the engine passes on. Before its first command, the engine checks that
-// the restic it was given is the version tools.lock.json pins.
+// out of every message, log line and report the engine passes on, as is every other secret the child is given (an S3
+// key pair, secretEnv). Before its first command, the engine checks that the restic it was given is the version
+// tools.lock.json pins.
+//
+// A remote repository (sftp:, s3:; location.ts builds it) fails in two more ways (M2 Task 18). A connection that
+// cannot be made is store.unreachable: restic's own words name it when it gives up (ssh's "connect to host", "dial
+// tcp"), and on S3, where restic retries a refused connection for up to 15 minutes, the engine stops it once it has
+// retried a failing connection for unreachableAfterMs. A missing repository there is store.not-set-up: the store's
+// published repository is not where its store.json says, or the store was never set up.
 
 import { isAbsolute, normalize } from "node:path";
 import { decode, type Failure, fail, finding, ok, type Result } from "@plainport/contract";
@@ -55,6 +62,17 @@ export interface ResticEngineOptions {
   /** How long restic retries a locked repository before exiting 11 (DESIGN.md "Edge cases"). Default 1m; null
    * fails at once. */
   retryLock?: string | null;
+  /** Secrets the child needs besides the password (an S3 key pair: s3Environment), given in its environment only
+   * and cut out of every message like the password. */
+  secretEnv?: Readonly<Record<string, string>>;
+  /** restic's extended options (`-o key=value`: s3.region, sftp.command); never a secret. */
+  extended?: readonly string[];
+  /** A repository reached over the network (sftp:, s3:): restic's exit 10 is store.not-set-up, not a disk to mount. */
+  remote?: boolean;
+  /** How long restic may retry a failing connection before it is stopped as store.unreachable. Default 60 seconds. */
+  unreachableAfterMs?: number;
+  /** The clock the retry budget is measured with (ms). Default Date.now; tests pass their own. */
+  now?: () => number;
   /** Default: PINNED_RESTIC. */
   expectedVersion?: string;
   /** Status lines per second while backup and restore run. Default 1. */
@@ -118,6 +136,29 @@ export const redactor =
     return out;
   };
 
+/** redactor for several secrets, the longest first, so one that holds another is cut whole. */
+const redactorOf = (secrets: readonly string[]) => {
+  const each = [...new Set(secrets)]
+    .filter((secret) => secret !== "")
+    .sort((a, b) => b.length - a.length)
+    .map(redactor);
+  return (text: string): string => each.reduce((out, cut) => cut(out), text);
+};
+
+/**
+ * What restic, Go and the system's ssh print when a connection cannot be made or breaks. Not a refused host key or
+ * login ("Host key verification failed", "Permission denied"): those are failures to fix, not an unreachable store.
+ */
+const CONNECTION =
+  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|connection closed by remote host|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
+const REFUSED_HANDSHAKE =
+  /host key verification failed|permission denied \(|too many authentication failures|no \S+ host key is known/i;
+/** restic's line when a backend request failed and it waits to try again. */
+const RETRYING = /returned error, retrying after/;
+
+/** Whether what restic said names a connection that could not be made, and not a refused login. */
+const unreachableSaid = (text: string): boolean => CONNECTION.test(text) && !REFUSED_HANDSHAKE.test(text);
+
 const MAX_MESSAGES = 100;
 /** At most this many folders are read with cat tree for symlinks that ls -l could not place. */
 const TREE_LOOKUPS = 16;
@@ -157,22 +198,35 @@ const progressOf = (
 
 export const resticEngine = (options: ResticEngineOptions): Engine => {
   const { host, repository, password } = options;
-  const redact = redactor(password);
+  const secretEnv = options.secretEnv ?? {};
+  const redact = redactorOf([password, ...Object.values(secretEnv)]);
   const expected = options.expectedVersion ?? PINNED_RESTIC;
   const retryLock = options.retryLock === undefined ? "1m" : options.retryLock;
+  const unreachableAfterMs = options.unreachableAfterMs ?? 60_000;
+  const clock = options.now ?? Date.now;
   const global = [
     "--repo",
     repository,
+    ...(options.extended ?? []).flatMap((option) => ["-o", option]),
     ...(options.cacheDir === undefined ? [] : ["--cache-dir", options.cacheDir]),
     ...(retryLock === null ? [] : [`--retry-lock=${retryLock}`]),
   ];
 
+  // Neither restic's own variables nor a cloud SDK's from the environment given: only what the engine sets.
   const childEnv = (extra: Record<string, string>): Record<string, string> => {
     const env: Record<string, string> = {};
     for (const [name, value] of Object.entries(options.env))
-      if (!name.startsWith("RESTIC_")) env[name] = value;
+      if (!name.startsWith("RESTIC_") && !name.startsWith("AWS_")) env[name] = value;
     return { ...env, RESTIC_PROGRESS_FPS: String(options.progressFps ?? 1), ...extra };
   };
+
+  const unreachable = (said: string): Failure =>
+    fail(
+      finding("store.unreachable", {
+        message: `restic could not reach the repository at ${repository}${said === "" ? "" : `: ${said}`}`,
+        fix: "check the network and that the store's host is up and reachable from this device, then re-run",
+      }),
+    );
 
   const redactFailure = (failure: Failure): Failure => ({
     ...failure,
@@ -188,6 +242,10 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
   const exitFailure = (outcome: RunOutcome, command: string): Failure => {
     const said = redact(resticSaid(outcome));
     const saying = said === "" ? "" : `: ${said}`;
+    // Not a run whose code says what went wrong otherwise: unreadable files (3), a missing repository (10), a lock (11),
+    // a wrong password (12).
+    if (![0, 3, 10, 11, 12].includes(outcome.exitCode ?? -1) && unreachableSaid(outcome.stderr.text))
+      return unreachable(said);
     if (outcome.exitCode === null) {
       return fail(
         finding("restic.failed", {
@@ -205,6 +263,13 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
           }),
         );
       case 10:
+        if (options.remote)
+          return fail(
+            finding("store.not-set-up", {
+              message: `no restic repository at ${repository}${saying}`,
+              fix: "set the store up from this device, or check that the store's location in config.toml is the one that was set up",
+            }),
+          );
         return fail(
           finding("restic.repo-missing", {
             message: `no restic repository at ${repository}${saying}`,
@@ -255,6 +320,19 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
     } = {},
   ): Promise<Result<RunOutcome>> => {
     const emit = ctx?.emit;
+    // A connection restic keeps retrying: stopped once the retries have gone on for unreachableAfterMs. A pause of
+    // that long between failures ends the streak (restic reached the store in between).
+    const stop = new AbortController();
+    const streak: { first?: number; last?: number; said?: string } = {};
+    const watch = (line: { stream: string; text: string }) => {
+      if (line.stream !== "stderr" || !RETRYING.test(line.text) || !unreachableSaid(line.text)) return;
+      const at = clock();
+      if (streak.last === undefined || at - streak.last > unreachableAfterMs) streak.first = at;
+      streak.last = at;
+      streak.said = line.text;
+      if (at - (streak.first ?? at) >= unreachableAfterMs) stop.abort();
+    };
+    const signal = ctx?.signal === undefined ? stop.signal : AbortSignal.any([ctx.signal, stop.signal]);
     const result = await host.run({
       command: options.restic,
       args: [...(how.repo === false ? [] : global), command, ...args],
@@ -264,13 +342,20 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       env: childEnv(
         how.repo === false
           ? {}
-          : { RESTIC_PASSWORD: password, ...(how.cwd === undefined ? {} : { PWD: how.cwd }) },
+          : {
+              ...secretEnv,
+              RESTIC_PASSWORD: password,
+              ...(how.cwd === undefined ? {} : { PWD: how.cwd }),
+            },
       ),
-      ...(ctx?.signal === undefined ? {} : { signal: ctx.signal }),
+      signal,
       ...(options.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.idleTimeoutMs }),
       ...(how.capture ? { capture: { maxBytes: options.captureLimitBytes ?? 1024 ** 3 } } : {}),
       ...(how.wholeStdout ? { wholeStdout: true } : {}),
-      ...(how.onLine === undefined ? {} : { onLine: how.onLine }),
+      onLine: (line) => {
+        watch(line);
+        how.onLine?.(line);
+      },
       ...(emit === undefined || ctx === undefined
         ? {}
         : {
@@ -281,6 +366,10 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
             },
           }),
     });
+    if (stop.signal.aborted && !ctx?.signal?.aborted)
+      return unreachable(
+        `${redact(streak.said ?? "")} (still failing after ${Math.round(unreachableAfterMs / 1000)} seconds of retries)`,
+      );
     return result.ok ? result : redactFailure(result);
   };
 
@@ -536,6 +625,8 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       if (!version.ok) return version;
       const args = [
         "--json",
+        // A probe that only opens the repository (adopting a store, D85) takes no lock, so it writes nothing there.
+        ...(filter.noLock === true ? ["--no-lock"] : []),
         ...(tags.value.length === 0 ? [] : ["--tag", tags.value.map(encodeTag).join(",")]),
       ];
       const listed = await capture("snapshots", args, ctx);

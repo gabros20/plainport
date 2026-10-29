@@ -734,7 +734,10 @@ describe("recover: keepLocalFor, locks and an unreachable store", () => {
   });
 
   test("nothing to recover: an empty report, exit 0", async () => {
-    expect(await recover(recoverDeps())).toEqual({ ok: true, value: { operations: [], unreadable: [] } });
+    expect(await recover(recoverDeps())).toEqual({
+      ok: true,
+      value: { operations: [], bootstraps: [], unreadable: [] },
+    });
   });
 
   test("a journal this version cannot read is reported and left alone (journal.pending, 6)", async () => {

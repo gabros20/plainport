@@ -890,6 +890,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           stillHeld: lock.stillHeld,
           env: deps.env,
           stores,
+          store: { name: store.name, semantics: store.blob.semantics() },
         },
         { at: event.at, bytes: verified.bytes },
       );

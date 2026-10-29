@@ -6,6 +6,7 @@ import {
   ensureStoreIdentity,
   readStoreDescriptor,
   readStoreIdentity,
+  readUsableStore,
   STORE_IDENTITY_KEY,
   StoreIdentitySchema,
 } from "./identity.ts";
@@ -40,8 +41,12 @@ describe("store identity: format 1 and format 2 (Q2)", () => {
       ok: true,
       value: { format: 2, id, repo: `repos/${id}`, seal: "v1" },
     });
-    // M1's paths (setup, the catalog, recover) bind restic at repo/, so they fail closed on format 2 until its repo is
-    // wired (Task 18): only readStoreDescriptor, which bootstrap reads, accepts it.
+    // M1's setup binds restic at repo/ and may init there, so it fails closed on format 2 until init sets stores up
+    // through bootstrap (Task 19); the catalog's read path (readUsableStore) accepts it since Task 18.
+    expect(await readUsableStore(store)).toEqual({
+      ok: true,
+      value: { format: 2, id, repo: `repos/${id}`, seal: "v1" },
+    });
     const m1 = await readStoreIdentity(store);
     expect(m1.ok ? "" : m1.finding.code).toBe("store.unsupported");
     const ensured = await ensureStoreIdentity(store, () => ulid());

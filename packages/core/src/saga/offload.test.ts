@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { fail, finding, ok, type Result, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
+import { readStoreIdentity } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
@@ -30,6 +31,7 @@ import { listPlans, savePlan } from "../plan/store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { recover } from "../recover/recover.ts";
 import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { includedFingerprint, scanTree } from "../scan/walk.ts";
@@ -2662,5 +2664,83 @@ describe("offload: a store inside the project is never offloaded with it (D83)",
     });
     expect(result.ok ? 0 : result.finding.code).toBe("store.inside-project");
     expect(existsSync(join(dir, ".store"))).toBe(false);
+  });
+});
+
+describe("offload: a store whose profile does not admit release (M2 Task 18)", () => {
+  // An SFTP-like store: everything a commit needs, but acknowledged writes are not synced (acked-unsynced), so release
+  // needs Q21's post-grace proof (Task 24). Until then the offload commits and keeps the folder.
+  const NAS = [
+    "version = 1",
+    'defaultStore = "nas"',
+    "[stores.nas]",
+    'kind = "sftp"',
+    'host = "nas"',
+    'path = "/volume1/plainport"',
+    'secret = "env:PLAINPORT_STORE_PASSWORD"',
+    "[roots.work]",
+    'store = "nas"',
+    'on = { mbp = "~/work" }',
+  ];
+  const profiled = (durability: "acked-unsynced" | "durable"): StoreOpener => ({
+    open: async () => ({
+      ok: true,
+      value: {
+        blob: {
+          ...store,
+          semantics: () => ({
+            ...store.semantics(),
+            durability: { value: durability, evidence: "measured" },
+          }),
+        },
+        engine,
+      },
+    }),
+  });
+
+  beforeEach(async () => {
+    box.file(".config/plainport/config.toml", NAS.join("\n"));
+    const id = value(await readStoreIdentity(store));
+    value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: id ?? "" } })));
+  });
+
+  const recoverWith = (opener: StoreOpener) =>
+    recover({
+      host: testHost(),
+      paths: box.paths,
+      device,
+      env: { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" },
+      loader: new ConfigLoader(testHost(), box.paths),
+      opener,
+      openMirror: async () => ({ ok: true, value: mirror }),
+      log: () => {},
+    });
+
+  test("the offload commits, keeps the folder and its journal, and says why release was refused", async () => {
+    const result = await offload({}, { opener: profiled("acked-unsynced") });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.semantics-unknown"]);
+    expect(result.ok ? "" : result.finding.message).toContain("committed");
+    expect(result.ok ? "" : result.finding.message).toContain("durability is acked-unsynced (measured)");
+    // Committed: the snapshot is the head on the store.
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
+    // Kept: the folder as it was, no stub, no trash.
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(existsSync(join(dir, "node_modules/dep/index.js"))).toBe(true);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+    const journals = (await readJournals(testHost(), box.paths)).journals;
+    expect(journals.map((j) => j.step)).toEqual(["offload.committed"]);
+  });
+
+  test("recover keeps it pending on that profile, and finishes the release once the profile admits it", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    const held = await recoverWith(profiled("acked-unsynced"));
+    expect(held.ok ? "" : held.finding.code).toBe("store.semantics-unknown");
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect((await readJournals(testHost(), box.paths)).journals).toHaveLength(1);
+
+    const done = value(await recoverWith(profiled("durable")));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
   });
 });

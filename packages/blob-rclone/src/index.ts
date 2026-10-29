@@ -1,7 +1,12 @@
 // @plainport/blob-rclone — The BlobStore port over the pinned rclone CLI (S3 buckets and SFTP).
 
 export const packageName = "@plainport/blob-rclone";
-export { AWS_S3_DOCUMENTED, SEAWEEDFS_PROFILE, SFTP_OPENSSH_PROFILE } from "./profiles.ts";
+export {
+  AWS_S3_DOCUMENTED,
+  PINNED_RCLONE,
+  SEAWEEDFS_PROFILE,
+  SFTP_OPENSSH_PROFILE,
+} from "./profiles.ts";
 export {
   classifyExit,
   RCLONE_REMOTE,

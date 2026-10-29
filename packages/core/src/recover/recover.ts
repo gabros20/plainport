@@ -69,9 +69,10 @@ import {
   rereadJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
-import type { BlobStore } from "../ports/blob-store.ts";
+import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { type RecoveredBootstrap, recoverBootstraps } from "../saga/bootstrap.ts";
 import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
 import type { OffloadStep } from "../saga/offload.ts";
 import { finishOnload, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
@@ -84,7 +85,7 @@ import {
 } from "../saga/project-gate.ts";
 import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
-import { type ConfiguredStore, openStore } from "../store.ts";
+import { type ConfiguredStore, openBootstrapStore, openStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { isUlid, ulid } from "../ulid.ts";
@@ -124,6 +125,11 @@ export interface RecoverDeps {
   now?: () => Date;
   /** Ctrl-C: recover stops before the next operation (each one is settled or still journaled), exit 130. */
   signal?: AbortSignal;
+  /**
+   * Waits between a recovered store setup's election re-reads (saga/bootstrap.ts): a timer in the CLI. Without it the
+   * re-reads follow each other at once, so an attempt holding the tie-break may end undecided sooner.
+   */
+  wait?(ms: number): Promise<void>;
 }
 
 export type RecoveredOperation = {
@@ -151,6 +157,8 @@ export type RecoveredOperation = {
 
 export type RecoveryReport = {
   operations: RecoveredOperation[];
+  /** Store setups (bootstrap attempts) this device left open, and what recover settled them to (Task 18). */
+  bootstraps: RecoveredBootstrap[];
   /** Journal files this version cannot read: never touched. */
   unreadable: string[];
 };
@@ -297,8 +305,40 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     settled.push(...(deps.signal?.aborted ? ordered.map(cancelled) : await settleProject(ordered)));
   }
 
-  const report: RecoveryReport = { operations: settled.map((s) => s.op), unreadable: read.unreadable };
+  // Store setups this device left open (saga/bootstrap.ts), each under its store's lock, after the projects.
+  const setups = deps.signal?.aborted
+    ? ok({ operations: [], unreadable: [] })
+    : await recoverBootstraps(
+        {
+          io,
+          paths,
+          faultAt: (point) => host.faultAt(point),
+          clock,
+          log: (level, message) => deps.log(level, message),
+          wait: (ms) => deps.wait?.(ms) ?? Promise.resolve(),
+        },
+        async (name) => {
+          const loaded = await deps.loader.load({ env: deps.env });
+          if (!loaded.ok) return loaded;
+          return openBootstrapStore(io, {
+            paths,
+            env: deps.env,
+            name,
+            config: loaded.value.config,
+            opener: deps.opener,
+          });
+        },
+      );
+  const report: RecoveryReport = {
+    operations: settled.map((s) => s.op),
+    bootstraps: setups.ok ? setups.value.operations : [],
+    unreadable: [...read.unreadable, ...(setups.ok ? setups.value.unreadable : [])],
+  };
   const problems = settled.flatMap((s) => (s.problem === undefined ? [] : [s.problem]));
+  if (!setups.ok) problems.push(setups);
+  // An attempt not settled now is pending, as a journal is; lost and contested are settled outcomes, not failures.
+  for (const setup of report.bootstraps)
+    if (setup.outcome === "pending" && setup.finding !== undefined) problems.push(fail(setup.finding));
   if (read.unreadable.length > 0)
     problems.push(
       fail(
@@ -773,9 +813,33 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     );
   }
 
+  /**
+   * The store's profile, which release checks before the folder moves: a remote store's, from its opener (config and
+   * this device's measurement; nothing is reached). A local store has every property, so it is not opened.
+   */
+  async function releaseStore(
+    journal: OffloadJournal,
+  ): Promise<Result<{ name: string; semantics: StoreSemantics } | undefined>> {
+    const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
+    if (!loaded.ok) return loaded;
+    const configured = loaded.value.config.stores[journal.store.name];
+    if (configured === undefined || configured.kind === "local") return ok(undefined);
+    const opened = await openStore(io, {
+      paths,
+      env: deps.env,
+      name: journal.store.name,
+      config: loaded.value.config,
+      opener: deps.opener,
+    });
+    if (!opened.ok) return opened;
+    return ok({ name: journal.store.name, semantics: opened.value.blob.semantics() });
+  }
+
   /** Finishes a committed offload's release, as the live saga does (releaseOffload, D51). */
   async function release(journal: OffloadJournal, lock: ProjectLock): Promise<Settled> {
     const needsStub = journal.release?.stub === true && journal.step !== "offload.release.stub";
+    const gate = await releaseStore(journal);
+    if (!gate.ok) return pending(journal, gate);
     let facts = { at: journal.updatedAt, bytes: 0 };
     if (needsStub) {
       const read = await eventFacts(journal);
@@ -797,6 +861,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         // The stores no released folder may hold (D83), read fresh and clean right before the rename (astra r2
         // finding 5): a configuration that reads only as its last good copy moves nothing.
         stores: () => freshStores(io, paths, deps.env),
+        ...(gate.value === undefined ? {} : { store: gate.value }),
       },
       facts,
     );

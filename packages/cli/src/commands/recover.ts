@@ -6,6 +6,7 @@
 import { openEventMirror } from "@plainport/blob-fs";
 import { ok, ProjectStateSchema } from "@plainport/contract";
 import {
+  BOOTSTRAP_RECOVERY_OUTCOMES,
   ConfigLoader,
   collectTrash,
   expandHome,
@@ -46,6 +47,26 @@ const RecoveredSchema = z.looseObject({
     .meta({ description: "diverged-after-commit: exit 8's data, as offload gives it (D52)" }),
 });
 
+const RecoveredBootstrapSchema = z.looseObject({
+  attempt: z.string().meta({ description: "The setup attempt's id (a ULID)" }),
+  store: z.string().meta({ description: "The store's name in config" }),
+  step: z.string().meta({ description: "The journal step recover found" }),
+  outcome: z.enum(BOOTSTRAP_RECOVERY_OUTCOMES).meta({
+    description:
+      "published: this attempt's store.json is on the store and its id recorded here. lost: another attempt published first. contested: no attempt won and every visible one refuses. rolled-back: its candidacy never reached the store, so nothing was published. pending: not settled now (finding says why)",
+  }),
+  id: z.string().optional().meta({ description: "published, lost: the published store's id" }),
+  finding: FindingDataSchema.optional(),
+});
+
+const BOOTSTRAP_TEXT: Record<(typeof BOOTSTRAP_RECOVERY_OUTCOMES)[number], string> = {
+  published: "published; the store is set up",
+  lost: "lost: another attempt set the store up first",
+  contested: "contested: no attempt won",
+  "rolled-back": "rolled back; nothing was published",
+  pending: "not settled now",
+};
+
 const OUTCOME_TEXT: Record<(typeof RECOVERY_OUTCOMES)[number], string> = {
   "rolled-back": "rolled back; nothing local had changed",
   finished: "finished",
@@ -68,6 +89,10 @@ export const recover = defineCommand({
   output: z
     .looseObject({
       operations: z.array(RecoveredSchema),
+      bootstraps: z
+        .array(RecoveredBootstrapSchema)
+        .optional()
+        .meta({ description: "Store setups this device left open, and what recover settled them to" }),
       unreadable: z
         .array(z.string())
         .meta({ description: "Journal files this version cannot read: never touched" }),
@@ -78,7 +103,7 @@ export const recover = defineCommand({
     }),
   examples: [{ argv: ["recover"], summary: "Settle whatever was interrupted on this device" }],
   human: (data) =>
-    data.operations.length === 0 && data.unreadable.length === 0
+    data.operations.length === 0 && (data.bootstraps ?? []).length === 0 && data.unreadable.length === 0
       ? "nothing to recover"
       : [
           ...data.operations.map(
@@ -86,6 +111,10 @@ export const recover = defineCommand({
               `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${OUTCOME_TEXT[o.outcome]}${
                 o.keepUntil === undefined || o.outcome !== "trash-kept" ? "" : ` until ${o.keepUntil}`
               }${o.finding === undefined || o.outcome === "diverged-after-commit" ? "" : ` (${o.finding.code}: ${o.finding.message})`}; now ${o.state}`,
+          ),
+          ...(data.bootstraps ?? []).map(
+            (b) =>
+              `setup ${b.attempt} of store ${b.store} (stopped at ${b.step}): ${BOOTSTRAP_TEXT[b.outcome]}${b.id === undefined ? "" : ` (${b.id})`}${b.finding === undefined || b.outcome === "lost" ? "" : ` (${b.finding.code}: ${b.finding.message})`}`,
           ),
           ...data.unreadable.map((u) => `${u}: a journal this version cannot read; left as it is`),
         ].join("\n"),
@@ -106,6 +135,7 @@ export const recover = defineCommand({
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
         signal: ctx.signal,
+        wait: (ms) => ctx.system.clock.sleep(ms),
       });
     } finally {
       release();
