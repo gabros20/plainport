@@ -29,6 +29,7 @@
         "@plainport/eco-node": "workspace:*",
         "@plainport/engine-restic": "workspace:*",
         "@plainport/host-macos": "workspace:*",
+        "@plainport/secrets": "workspace:*",
         "zod": "4.6.5",
       },
     },
@@ -76,6 +77,17 @@
         "zod": "4.6.5",
       },
     },
+    "packages/secrets": {
+      "name": "@plainport/secrets",
+      "dependencies": {
+        "@plainport/contract": "workspace:*",
+        "@plainport/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@plainport/host-macos": "workspace:*",
+        "fast-check": "4.10.2",
+      },
+    },
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.5.15", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.5.15", "@biomejs/cli-darwin-x64": "2.5.15", "@biomejs/cli-linux-arm64": "2.5.15", "@biomejs/cli-linux-arm64-musl": "2.5.15", "@biomejs/cli-linux-x64": "2.5.15", "@biomejs/cli-linux-x64-musl": "2.5.15", "@biomejs/cli-win32-arm64": "2.5.15", "@biomejs/cli-win32-x64": "2.5.15" }, "bin": { "biome": "bin/biome" } }, "sha512-WZTW4slm/pdkh92K6t/3aEN++44JD1PQ7squ7RCMLI1flHGl43DVOIGXvCjHiZgBMO1V4uYxoFNtqrIA4qGuIQ=="],
@@ -115,6 +127,8 @@
     "@plainport/engine-restic": ["@plainport/engine-restic@workspace:packages/engine-restic"],
 
     "@plainport/host-macos": ["@plainport/host-macos@workspace:packages/host-macos"],
+
+    "@plainport/secrets": ["@plainport/secrets@workspace:packages/secrets"],
 
     "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
 

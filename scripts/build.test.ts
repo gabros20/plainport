@@ -83,6 +83,8 @@ test("a binary built by scripts/build.ts contains none of the hook's variable na
       "PLAINPORT_TEST_FAULT_OCCURRENCE",
       "PLAINPORT_TEST_PAUSE_AT",
       "PLAINPORT_TEST_PAUSE_FILE",
+      // The keychain provider's throwaway-keychain hook (Task 15): folded away with the rest.
+      "testKeychain",
     ];
     expect(names.filter((n) => bytes.includes(n))).toEqual([]);
   } finally {
