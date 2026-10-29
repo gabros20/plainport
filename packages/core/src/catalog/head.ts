@@ -213,7 +213,7 @@ export const historyElsewhere = (options: {
     message: `this copy of ${options.address} came from snapshot ${options.snapshot}, which store ${options.store}'s catalog does not name: the project's history is in ${options.holder === undefined ? "a store this device cannot tell (unknown)" : `store ${options.holder}`}, and a second history is never started elsewhere (Q12); ${options.what}`,
     fix:
       options.holder === undefined
-        ? `connect the store that holds snapshot ${options.snapshot}, and name it with --store <name> (plainport store list lists them)`
+        ? `connect the store that holds snapshot ${options.snapshot}, and name it with --store <name>`
         : `use the project's home store: --store ${options.holder}, or set the root's store back to ${options.holder}`,
   });
 
