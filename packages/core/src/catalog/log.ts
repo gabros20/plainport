@@ -5,10 +5,12 @@
 //   <store root>/meta/v1/state.json           a cache of the fold, rebuilt whenever the events change
 //   ~/.cache/plainport/<store>/events/        this machine's mirror of a store's events, so ls works offline
 //
-// An event file is one line of JSON. Appending the same event twice is a no-op, so a step that is retried after a
-// crash (D24) does not fail on its own earlier write. Reading skips what it cannot use, with catalog.event-skipped,
-// and never changes or deletes an event file. A snapshot event names its location by containment (Q11, stored.ts):
-// one `stored` entry, so one with zero or several is skipped as unsupported (stored-multiple) and a writer refuses it.
+// An event file is one line: plain JSON, or that line sealed on a sealed store. Every byte read and written here goes
+// through the codec (codec.ts). Appending the same event twice is a no-op, so a step that is retried after a crash
+// (D24) does not fail on its own earlier write. Reading skips what it cannot use, with the codec's finding, and never
+// changes or deletes an event file. The mirror holds opened events, and records each store file's name and size.
+// A snapshot event names its location by containment (Q11, stored.ts): one `stored` entry, so one with zero or
+// several is skipped by the codec as unsupported (stored-multiple) and a writer refuses it.
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -26,13 +28,27 @@ import { describeIssues } from "../config/toml.ts";
 import type { PlainportPaths } from "../paths.ts";
 import type { BlobEntry, BlobStore } from "../ports/blob-store.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
-import { CATALOG_EVENT_TYPES, type CatalogEvent, CatalogEventSchema } from "./events.ts";
+import {
+  type CatalogPolicy,
+  decode,
+  encode,
+  encodePlain,
+  PLAIN_CATALOG,
+  policyFits,
+  SKIP_CODES,
+  type Skip,
+  STORE_EVENTS_PREFIX,
+  sameEvent,
+  skippedEvent,
+  storedCount,
+  type Tainted,
+} from "./codec.ts";
+import { type CatalogEvent, CatalogEventSchema } from "./events.ts";
 import { type CatalogState, CatalogStateSchema, compare, FOLD_VERSION, foldCatalog } from "./fold.ts";
 import { identityChanged, readUsableStore } from "./identity.ts";
-import { STORED_MULTIPLE } from "./stored.ts";
 
-/** Where events live on a store, and in a local mirror. */
-export const STORE_EVENTS_PREFIX = "meta/v1/events/";
+/** Where events live on a store (codec.ts), and in a local mirror. */
+export { STORE_EVENTS_PREFIX, type Tainted };
 export const MIRROR_EVENTS_PREFIX = "events/";
 /** The store-side fold cache DESIGN's layout allows. Reads never write to a store (D45), so M1 never writes it. */
 export const STATE_KEY = "meta/v1/state.json";
@@ -41,14 +57,25 @@ export const MIRROR_STATE_KEY = "state.json";
 /** Beside a mirror's events: the store it mirrors, its last sync, and store files it could not copy. */
 export const MIRROR_FILE_KEY = "mirror.json";
 
-/** A folder of event files: a BlobStore and the prefix the events sit under. */
+/** A folder of event files: a BlobStore, the prefix the events sit under, and how they are encoded there. */
 export interface EventLog {
   store: BlobStore;
   prefix: string;
+  policy: CatalogPolicy;
 }
 
-export const storeEventLog = (store: BlobStore): EventLog => ({ store, prefix: STORE_EVENTS_PREFIX });
-export const mirrorEventLog = (store: BlobStore): EventLog => ({ store, prefix: MIRROR_EVENTS_PREFIX });
+/** A store's events, under its catalog policy (plain unless the store's is sealed). */
+export const storeEventLog = (store: BlobStore, policy: CatalogPolicy = PLAIN_CATALOG): EventLog => ({
+  store,
+  prefix: STORE_EVENTS_PREFIX,
+  policy,
+});
+/** A mirror's events: always the opened, plain bytes. */
+export const mirrorEventLog = (store: BlobStore): EventLog => ({
+  store,
+  prefix: MIRROR_EVENTS_PREFIX,
+  policy: PLAIN_CATALOG,
+});
 
 /**
  * The root of a store's event mirror, `<cache>/plainport/<store id>` (D45): keyed by the id in the store's
@@ -63,13 +90,8 @@ export const eventMirrorDir = (paths: PlainportPaths, storeId: string): string =
 const keyOf = (log: EventLog, id: string): string => `${log.prefix}${id}.json`;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
-export const encodeEvent = (event: CatalogEvent): Uint8Array => encoder.encode(`${JSON.stringify(event)}\n`);
-
-/** How many `stored` entries a snapshot event has, or undefined for an event that names no location. */
-const storedCount = (event: CatalogEvent): number | undefined =>
-  event.type === "offloaded" || event.type === "checkpointed" || event.type === "snapshot-discarded"
-    ? Object.keys(event.stored).length
-    : undefined;
+/** An event's plain line, as a plain store and every mirror hold it. */
+export const encodeEvent = encodePlain;
 
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
@@ -104,15 +126,19 @@ export const appendEvent = async (log: EventLog, event: CatalogEvent): Promise<R
     );
   }
   const key = keyOf(log, checked.data.id);
-  const data = encodeEvent(checked.data);
+  const encoded = encode(checked.data, log.policy);
+  if (!encoded.ok) return encoded;
+  const data = encoded.value;
   const createOnly = log.store.capabilities().createIfAbsent;
   const put = await log.store.put(key, data, createOnly ? { ifNotExists: true } : {});
   if (put.ok) return ok(undefined);
   if (put.finding.code !== "store.key-exists") return put;
   const existing = await log.store.get(key);
   if (!existing.ok) return existing;
-  if (existing.value === null || sameBytes(existing.value, data))
-    return existing.value === null ? put : ok(undefined);
+  if (existing.value === null) return put;
+  // The same event, opened: a retry whose first write landed (a sealed one under another nonce, R2-8).
+  const same = await sameEvent(key, log.policy)(existing.value, data);
+  if (same.ok && same.value) return ok(undefined);
   // A store without hard links creates the key in place (D41), so a crash mid-write can leave a strict prefix of
   // these very bytes. Only this event's own writer makes that prefix; completing it overwrites nothing of anyone's.
   if (
@@ -122,89 +148,28 @@ export const appendEvent = async (log: EventLog, event: CatalogEvent): Promise<R
     const completed = await log.store.put(key, data);
     return completed.ok ? ok(undefined) : completed;
   }
-  return put;
+  return same.ok ? put : same;
 };
 
-const skipped = (key: string, reason: string): Finding =>
-  finding("catalog.event-skipped", {
-    message: `the catalog event ${key} was left out: ${reason}`,
-    fix: "nothing to do if a newer plainport wrote it; otherwise keep the file and report it, plainport never changes it",
-    paths: [key],
-  });
+const skipped = skippedEvent;
 
 /**
- * A file left out of the fold. `bytes` says whether the bytes themselves are no event (torn, not JSON): only such a
- * file is remembered as skipped by the mirror (I7). JSON that this version cannot use (a type or a schema it does not
- * know, a name that disagrees with the id) is read again on every sync, since a newer plainport may accept it.
+ * The resolved events the fold skipped as invalid (Q18): left out like any event this version cannot use, so they
+ * taint the read (uncertainEvents) where they could have mattered.
  */
-interface Skipped {
-  finding: Finding;
-  bytes: boolean;
-  /** A stored-multiple event: it parsed, so its project and snapshot are known (Q11). */
-  taint?: Tainted;
-}
-
-/**
- * A snapshot event skipped as stored-multiple (Q11). It parsed, so what it says is known: a producer (offloaded,
- * checkpointed) makes its project's head uncertain whatever this device knows (head.ts), and a discard's restic ids
- * are still never restored by tag.
- */
-export interface Tainted {
-  event: string;
-  type: "offloaded" | "checkpointed" | "snapshot-discarded";
-  project: string;
-  snapshot: string;
-  /** The restic ids its entries name. */
-  stored: string[];
-}
-
-const parseEvent = (key: string, id: string, bytes: Uint8Array): CatalogEvent | Skipped => {
-  let data: unknown;
-  try {
-    data = JSON.parse(decoder.decode(bytes));
-  } catch (error) {
-    return { finding: skipped(key, `it is not JSON (${(error as Error).message})`), bytes: true };
-  }
-  const type = typeof data === "object" && data !== null && "type" in data ? data.type : undefined;
-  if (typeof type === "string" && !(CATALOG_EVENT_TYPES as readonly string[]).includes(type)) {
-    return {
-      finding: skipped(key, `this version of plainport does not know the event type ${JSON.stringify(type)}`),
-      bytes: false,
-    };
-  }
-  const checked = CatalogEventSchema.safeParse(data);
-  if (!checked.success) {
-    return {
-      finding: skipped(key, `it does not match the event schema: ${describeIssues(checked.error)}`),
-      bytes: false,
-    };
-  }
-  if (checked.data.id !== id) {
-    return {
-      finding: skipped(key, `its id is ${checked.data.id}, not the ${id} its name says`),
-      bytes: false,
-    };
-  }
-  const entries = storedCount(checked.data);
-  if (entries !== undefined && entries !== 1) {
-    const event = checked.data as Extract<CatalogEvent, { type: Tainted["type"] }>;
-    return {
-      taint: {
-        event: event.id,
-        type: event.type,
-        project: event.project,
-        snapshot: event.snapshot,
-        stored: Object.values(event.stored),
-      },
-      finding: skipped(
-        key,
-        `unsupported (${STORED_MULTIPLE}): it names its snapshot's location in ${entries} stores, and this version reads one, the store that holds the event (Q11)`,
+const invalidResolutions = (log: EventLog, state: CatalogState): Finding[] =>
+  Object.values(state.projects)
+    .flatMap((project) => project.invalid)
+    .sort(compare)
+    .map((id) =>
+      skipped(
+        keyOf(log, id),
+        "resolution-invalid: a resolved event with an empty over, a keep in its over, a reference to another project or to the wrong kind of event, or a supersedes that loops",
       ),
-      bytes: false,
-    };
-  }
-  return checked.data;
-};
+    );
+
+/** The event in one file of the log, or why it is left out (the codec's reason). */
+const parseEvent = (log: EventLog, key: string, bytes: Uint8Array) => decode(bytes, key, log.policy);
 
 interface Listed {
   /** Every entry under the prefix, sorted by key. */
@@ -237,8 +202,8 @@ export const eventAt = async (
   const bytes = await log.store.get(key);
   if (!bytes.ok) return bytes;
   if (bytes.value === null) return ok(null);
-  const parsed = parseEvent(key, id, bytes.value);
-  return ok("finding" in parsed ? { skipped: parsed.finding } : { event: parsed });
+  const parsed = parseEvent(log, key, bytes.value);
+  return ok("skip" in parsed ? { skipped: parsed.skip.finding } : { event: parsed.event });
 };
 
 /**
@@ -282,11 +247,11 @@ const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsR
     const bytes = await log.store.get(key);
     if (!bytes.ok) return bytes;
     if (bytes.value === null) continue; // removed since the listing (a store's own cleanup); nothing to fold
-    const parsed = parseEvent(key, id, bytes.value);
-    if ("finding" in parsed) {
-      findings.push(parsed.finding);
-      if (parsed.taint !== undefined) tainted.push(parsed.taint);
-    } else events.push(parsed);
+    const parsed = parseEvent(log, key, bytes.value);
+    if ("skip" in parsed) {
+      findings.push(parsed.skip.finding);
+      if (parsed.skip.taint !== undefined) tainted.push(parsed.skip.taint);
+    } else events.push(parsed.event);
   }
   events.sort((a, b) => compare(a.id, b.id));
   return ok({ events, findings, tainted });
@@ -321,6 +286,11 @@ export const MirrorFileSchema = z
      * same and the reader is the same version, and reported each time. A file this version cannot use although it is
      * JSON (a type or schema it does not know) is never listed here: it is read again on every sync. */
     skipped: z.record(z.string(), z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema })),
+    /** The size of the store file each mirrored event was opened from, by event id: the mirror holds opened bytes,
+     * so a sealed store's files differ in size from their copies. A file is fetched again when its size on the store
+     * is not this one, and the fold cache's digest is taken over these sizes. Recorded only where it differs from the
+     * copy's size, and absent when none does (an M1 or plain store's mirror): there the copy's size stands in. */
+    transport: z.record(z.string(), z.int().nonnegative()).optional(),
   })
   .meta({ title: "EventMirror", description: "mirror.json beside a store's local event mirror" });
 export type MirrorFile = z.infer<typeof MirrorFileSchema>;
@@ -331,7 +301,8 @@ export const StateCacheSchema = z
     v: z.literal(1),
     /** The FOLD_VERSION that built it. */
     fold: z.int().positive(),
-    /** sha256 over the sorted `<name>\0<size>` of every file listed under the mirror's events/ (D43). */
+    /** sha256 over the sorted `<name>\0<size>` of every file listed under the mirror's events/ (D43), each event's
+     * size being its store file's (mirror.json's transport) where recorded. */
     digest: z.string().regex(/^[0-9a-f]{64}$/),
     count: z.int().nonnegative(),
     state: CatalogStateSchema,
@@ -344,10 +315,21 @@ export const StateCacheSchema = z
   });
 export type StateCache = z.infer<typeof StateCacheSchema>;
 
-/** Names and sizes: a torn event completed under its own name (D42) changes its size, so the digest too. */
-const digestOf = (log: EventLog, entries: BlobEntry[]): string =>
+/**
+ * Names and sizes, an event's size being its store file's where the mirror recorded it: a torn event completed under
+ * its own name (D42), or any store file that changes size, changes the digest too.
+ */
+const digestOf = (log: EventLog, listed: Listed, transport: Readonly<Record<string, number>>): string =>
   createHash("sha256")
-    .update(entries.map((entry) => `${entry.key.slice(log.prefix.length)}\0${entry.size}`).join("\n"))
+    .update(
+      listed.entries
+        .map((entry) => {
+          const id = listed.ids.get(entry.key);
+          const size = (id === undefined ? undefined : transport[id]) ?? entry.size;
+          return `${entry.key.slice(log.prefix.length)}\0${size}`;
+        })
+        .join("\n"),
+    )
     .digest("hex");
 
 /** A JSON document a schema checks; undefined when missing, damaged or of another shape. */
@@ -368,14 +350,14 @@ const readJson = async <S extends z.ZodType>(
 };
 
 /**
- * The ids of event files left out of the fold (catalog.event-skipped on a `<ulid>.json`), sorted: torn, damaged or of a
- * type or schema this version does not know. Any of them may change a project's state, so the fold without them is
+ * The ids of event files left out of the fold (any of the codec's skip findings on a `<ulid>.json`), sorted: torn,
+ * damaged, of a type or schema this version does not know, plaintext on a sealed store, or not opening. Any of them may change a project's state, so the fold without them is
  * not known to be whole (D86). A file not named as an event is no event, and leaves the fold certain.
  */
 export const uncertainEvents = (findings: readonly Finding[]): string[] => {
   const ids = new Set<string>();
   for (const f of findings) {
-    if (f.code !== "catalog.event-skipped") continue;
+    if (!SKIP_CODES.includes(f.code)) continue;
     for (const path of f.paths ?? []) {
       const name = path.slice(path.lastIndexOf("/") + 1);
       if (name.endsWith(".json") && isUlid(name.slice(0, -5))) ids.add(name.slice(0, -5));
@@ -401,7 +383,7 @@ export interface LoadedCatalog {
   syncedAt?: string;
   /** Events this read copied from the store into the mirror. */
   copied: number;
-  /** Why the state is stale: the store's store.unreachable finding. */
+  /** Why the state is stale: the finding that kept the store from being asked (one of OFFLINE_CODES). */
   unreachable?: Finding;
   /** The store's format (its meta/v1/store.json), when the store answered: what a writer keys `stored` by (Q11). */
   format?: 1 | 2;
@@ -413,8 +395,9 @@ export interface LoadedCatalog {
 const foldMirror = async (
   mirror: EventLog,
   listed: Listed,
+  transport: Readonly<Record<string, number>>,
 ): Promise<Result<{ state: CatalogState; findings: Finding[]; cached: boolean }>> => {
-  const digest = digestOf(mirror, listed.entries);
+  const digest = digestOf(mirror, listed, transport);
   const count = listed.entries.length;
   const cache = await readJson(mirror.store, MIRROR_STATE_KEY, StateCacheSchema);
   if (!cache.ok) return cache;
@@ -425,9 +408,10 @@ const foldMirror = async (
   const read = await readListed(mirror, listed);
   if (!read.ok) return read;
   const state = foldCatalog(read.value.events);
-  const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings: read.value.findings };
+  const findings = [...read.value.findings, ...invalidResolutions(mirror, state)];
+  const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings };
   await mirror.store.put(MIRROR_STATE_KEY, encoder.encode(`${JSON.stringify(next)}\n`));
-  return ok({ state, findings: read.value.findings, cached: false });
+  return ok({ state, findings, cached: false });
 };
 
 /** Which side failed: a store failure decides the outcome, a mirror failure only sends the read to the store. */
@@ -436,38 +420,38 @@ const storeFault = (failure: Failure): Fault => ({ ok: false, side: "store", fai
 const mirrorFault = (failure: Failure): Fault => ({ ok: false, side: "mirror", failure });
 
 /**
- * Copies one store file into the mirror byte for byte, if it reads as a whole event, so its name and size match on
- * both sides and it is never fetched again. A torn mirror copy (a prefix of these bytes) is completed (D42).
+ * Opens one store file through the codec and copies the opened event into the mirror, so it is never fetched again
+ * while the store file keeps its size. A plain store's copy is its bytes as they are; a torn mirror copy (a prefix of
+ * the opened bytes) is completed (D42). The sizes of the store file and of the copy, or why the file was left out.
  */
 const download = async (
   remote: EventLog,
   mirror: EventLog,
   id: string,
-): Promise<{ ok: true; value: number | Skipped | undefined } | Fault> => {
+): Promise<{ ok: true; value: { transport: number; opened: number } | Skip | undefined } | Fault> => {
   const key = keyOf(remote, id);
   const bytes = await remote.store.get(key);
   if (!bytes.ok) return storeFault(bytes);
   if (bytes.value === null) return ok(undefined);
-  const parsed = parseEvent(key, id, bytes.value);
-  if ("finding" in parsed) return ok(parsed);
+  const parsed = parseEvent(remote, key, bytes.value);
+  if ("skip" in parsed) return ok(parsed.skip);
+  const opened = parsed.opened;
+  const sizes = { transport: bytes.value.length, opened: opened.length };
   const target = keyOf(mirror, id);
   const createOnly = mirror.store.capabilities().createIfAbsent;
-  const put = await mirror.store.put(target, bytes.value, createOnly ? { ifNotExists: true } : {});
-  if (put.ok) return ok(bytes.value.length);
+  const put = await mirror.store.put(target, opened, createOnly ? { ifNotExists: true } : {});
+  if (put.ok) return ok(sizes);
   if (put.finding.code !== "store.key-exists") return mirrorFault(put);
   const held = await mirror.store.get(target);
   if (!held.ok) return mirrorFault(held);
   const mine = held.value;
-  if (
-    mine !== null &&
-    mine.length < bytes.value.length &&
-    sameBytes(mine, bytes.value.subarray(0, mine.length))
-  ) {
-    const completed = await mirror.store.put(target, bytes.value);
-    return completed.ok ? ok(bytes.value.length) : mirrorFault(completed);
+  if (mine !== null && mine.length < opened.length && sameBytes(mine, opened.subarray(0, mine.length))) {
+    const completed = await mirror.store.put(target, opened);
+    return completed.ok ? ok(sizes) : mirrorFault(completed);
   }
-  if (mine !== null && sameBytes(mine, bytes.value)) return ok(bytes.value.length);
+  if (mine !== null && sameBytes(mine, opened)) return ok(sizes);
   return ok({
+    reason: "mirror-clash",
     finding: skipped(
       key,
       `the mirror holds other bytes under its name (${target}); both are kept as they are`,
@@ -488,7 +472,17 @@ const syncDown = async (
   storeId: string,
   now: Date,
 ): Promise<
-  { ok: true; value: { listed: Listed; copied: number; findings: Finding[]; tainted: Tainted[] } } | Fault
+  | {
+      ok: true;
+      value: {
+        listed: Listed;
+        transport: Record<string, number>;
+        copied: number;
+        findings: Finding[];
+        tainted: Tainted[];
+      };
+    }
+  | Fault
 > => {
   const theirs = await listEvents(remote);
   if (!theirs.ok) return storeFault(theirs);
@@ -500,13 +494,19 @@ const syncDown = async (
   const mine = await listEvents(mirror);
   if (!mine.ok) return mirrorFault(mine);
   const known = recorded.value?.fold === FOLD_VERSION ? recorded.value.skipped : {};
+  const transportBefore = recorded.value?.transport ?? {};
   const mirrorSizes = sizesById(mine.value);
   const skippedNow: MirrorFile["skipped"] = {};
+  const transport: Record<string, number> = {};
   const findings: Finding[] = [];
   const tainted: Tainted[] = [];
   let copied = 0;
   for (const [id, size] of [...sizesById(theirs.value)].sort(([a], [b]) => compare(a, b))) {
-    if (mirrorSizes.get(id) === size) continue;
+    // Held, and opened from a store file of this size (an M1 mirror records none: its copy's size is the file's).
+    if (mirrorSizes.has(id) && (transportBefore[id] ?? mirrorSizes.get(id)) === size) {
+      if (size !== mirrorSizes.get(id)) transport[id] = size;
+      continue;
+    }
     const before = known[id];
     if (before !== undefined && before.size === size) {
       skippedNow[id] = before;
@@ -516,8 +516,9 @@ const syncDown = async (
     const result = await download(remote, mirror, id);
     if (!result.ok) return result;
     if (result.value === undefined) continue;
-    if (typeof result.value === "number") {
-      mirrorSizes.set(id, result.value);
+    if ("transport" in result.value) {
+      mirrorSizes.set(id, result.value.opened);
+      if (result.value.transport !== result.value.opened) transport[id] = result.value.transport;
       copied++;
     } else {
       if (result.value.bytes) skippedNow[id] = { size, finding: result.value.finding };
@@ -531,6 +532,8 @@ const syncDown = async (
     fold: FOLD_VERSION,
     lastSyncedAt: now.toISOString(),
     skipped: skippedNow,
+    // Only sizes that differ from the copy's (a sealed store's): a plain store's file keeps v0.1.1's strict shape.
+    ...(Object.keys(transport).length === 0 ? {} : { transport }),
   };
   const written = await mirror.store.put(MIRROR_FILE_KEY, encoder.encode(`${JSON.stringify(file)}\n`));
   if (!written.ok) return mirrorFault(written);
@@ -542,10 +545,17 @@ const syncDown = async (
     ids.set(key, id);
   }
   const listed = { entries: [...entries.values()].sort((a, b) => compare(a.key, b.key)), ids };
-  return ok({ listed, copied, findings, tainted });
+  return ok({ listed, transport, copied, findings, tainted });
 };
 
-/** The mirror alone, while the store is unreachable: its state as of its last sync, marked stale. */
+/** Why a store could not be asked at all, as a finding code: the mirror then stands in for it (Task 13). */
+export const OFFLINE_CODES: readonly string[] = [
+  "store.unreachable",
+  "store.secret-missing",
+  "store.seal-key-unavailable",
+];
+
+/** The mirror alone, while the store cannot be asked (`unreachable` says why): its state as of its last sync, marked stale. */
 const readOffline = async (
   mirror: EventLog,
   storeId: string,
@@ -558,7 +568,7 @@ const readOffline = async (
   }
   const listed = await listEvents(mirror);
   if (!listed.ok) return listed;
-  const folded = await foldMirror(mirror, listed.value);
+  const folded = await foldMirror(mirror, listed.value, recorded.value?.transport ?? {});
   if (!folded.ok) return folded;
   const skippedOnStore = Object.values(recorded.value?.skipped ?? {}).map((entry) => entry.finding);
   const findings = [...skippedOnStore, ...folded.value.findings];
@@ -576,6 +586,17 @@ const readOffline = async (
 };
 
 /**
+ * The mirror alone, without asking the store: for a view whose store could not be opened (a secret, the seal key or the
+ * network failed). Opens by the pinned store id first (Task 13): a mirror recorded for another store is refused.
+ */
+export const readMirrorCatalog = (options: {
+  mirror: BlobStore;
+  storeId: string;
+  reason: Finding;
+}): Promise<Result<LoadedCatalog>> =>
+  readOffline(mirrorEventLog(options.mirror), options.storeId, options.reason);
+
+/**
  * The catalog, the one way to read it (D43, D45). It checks the store's identity against `storeId` (what this device
  * recorded for the store: store.identity-changed when it differs), brings this device's mirror up to the store
  * (download only: a read never writes to a store), and folds the mirror's events through the cache beside them.
@@ -584,17 +605,20 @@ const readOffline = async (
  * - The mirror broken (cannot be listed, read or written, or recorded for another store) while the store is
  *   reachable: the store's events are read and folded directly, with the reason in mirrorFailure.
  * - Any other store failure fails the call.
+ *
+ * The store's events are opened under `policy` (plain when absent); the mirror holds them opened.
  */
 export const loadCatalog = async (options: {
   store: BlobStore;
   mirror: BlobStore;
   storeId: string;
   now: Date;
+  policy?: CatalogPolicy;
 }): Promise<Result<LoadedCatalog>> => {
-  const remote = storeEventLog(options.store);
+  const remote = storeEventLog(options.store, options.policy);
   const mirror = mirrorEventLog(options.mirror);
   const offline = (failure: Failure): Promise<Result<LoadedCatalog>> | Failure =>
-    failure.finding.code === "store.unreachable"
+    OFFLINE_CODES.includes(failure.finding.code)
       ? readOffline(mirror, options.storeId, failure.finding)
       : failure;
 
@@ -604,11 +628,13 @@ export const loadCatalog = async (options: {
   if (identity.value === null || found !== options.storeId)
     return identityChanged(options.storeId, found, "store");
   const { format } = identity.value;
+  const fits = policyFits(options.policy ?? PLAIN_CATALOG, identity.value);
+  if (!fits.ok) return fits;
 
   const synced = await syncDown(remote, mirror, options.storeId, options.now);
   let mirrorFailure: Finding | undefined;
   if (synced.ok) {
-    const folded = await foldMirror(mirror, synced.value.listed);
+    const folded = await foldMirror(mirror, synced.value.listed, synced.value.transport);
     if (folded.ok) {
       const findings = [...synced.value.findings, ...folded.value.findings];
       return ok({
@@ -632,10 +658,12 @@ export const loadCatalog = async (options: {
   // The mirror is only a cache: read the store directly.
   const direct = await readEvents(remote);
   if (!direct.ok) return offline(direct);
+  const state = foldCatalog(direct.value.events);
+  const findings = [...direct.value.findings, ...invalidResolutions(remote, state)];
   return ok({
-    state: foldCatalog(direct.value.events),
-    findings: direct.value.findings,
-    uncertain: uncertainEvents(direct.value.findings),
+    state,
+    findings,
+    uncertain: uncertainEvents(findings),
     tainted: direct.value.tainted,
     cached: false,
     stale: false,

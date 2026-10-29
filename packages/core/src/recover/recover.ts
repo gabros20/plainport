@@ -41,15 +41,17 @@ import {
   shellWord,
 } from "@plainport/contract";
 import { TEMP_SUFFIX } from "../atomic.ts";
-import { type CatalogEvent, OffloadedEventSchema } from "../catalog/events.ts";
+import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
+import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
 import {
   appendEvent,
+  type EventLog,
+  eventAt,
   eventForOp,
-  MIRROR_EVENTS_PREFIX,
+  mirrorEventLog,
   readEvents,
-  STORE_EVENTS_PREFIX,
   storeEventLog,
 } from "../catalog/log.ts";
 import { storedHere, storedKey } from "../catalog/stored.ts";
@@ -85,7 +87,7 @@ import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
-import { ulid } from "../ulid.ts";
+import { isUlid, ulid } from "../ulid.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
@@ -95,6 +97,7 @@ import { claimedReason, removeTrash } from "./trash.ts";
  * released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (the finding
  * says why); its journal stays for the next recover.
  */
+
 export const RECOVERY_OUTCOMES = [
   "rolled-back",
   "finished",
@@ -225,6 +228,18 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
 
 type OffloadRule = (typeof OFFLOAD_RECOVERY)[OffloadStep];
 type OnloadRule = (typeof ONLOAD_RECOVERY)[OnloadStep];
+/**
+ * Whether the event file `key` names was made before the operation `op` began, by the time each ULID starts with. A
+ * file whose name is no ULID may be anything, so it is never ruled out.
+ */
+const madeBefore = (key: string | undefined, op: string): boolean => {
+  const id = key
+    ?.split("/")
+    .at(-1)
+    ?.replace(/\.json$/, "");
+  return id !== undefined && isUlid(id) && id.slice(0, 10) < op.slice(0, 10);
+};
+
 const offloadRule = (step: string): OffloadRule | undefined =>
   Object.hasOwn(OFFLOAD_RECOVERY, step) ? OFFLOAD_RECOVERY[step as OffloadStep] : undefined;
 /**
@@ -466,11 +481,25 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         `connect the store the ${journal.kind} ${journal.op} wrote to (stores.${journal.store.name}), then run plainport recover`,
       );
     }
+    const fits = policyFits(opened.value.catalog ?? PLAIN_CATALOG, identity.value);
+    if (!fits.ok) return fits;
     return ok({ ...opened.value, format: identity.value.format });
   }
 
-  async function eventState(store: BlobStore, id: string, ours: (event: CatalogEvent) => boolean) {
-    return eventForOp(storeEventLog(store), id, ours);
+  /**
+   * eventForOp, except that an event this policy cannot open (catalog.seal-failed, catalog.unsealed-event) is a
+   * failure, so the step stays pending: it may be this operation's own event, and is never taken for an absent,
+   * torn or foreign one (review r1 I2), which would roll back a commit or write it twice.
+   */
+  async function eventState(
+    log: EventLog,
+    id: string,
+    ours: (event: CatalogEvent) => boolean,
+  ): Promise<Result<"absent" | "ours" | Finding>> {
+    const there = await eventForOp(log, id, ours);
+    if (there.ok && typeof there.value === "object" && UNOPENED_CODES.includes(there.value.code))
+      return fail(there.value);
+    return there;
   }
 
   /**
@@ -575,11 +604,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       case "search-store": {
         const store = await storeOf(journal);
         if (!store.ok) return pending(journal, store);
-        if (rule === "discard")
-          return discard(journal, store.value.blob, storedKey(journal.store, store.value.format));
-        if (rule === "fork") return keepFork(journal, store.value);
-        if (rule === "commit-check") return commitCheck(journal, store.value.blob, lock);
-        return searchStore(journal, store.value.blob, lock);
+        const events = storeEventLog(store.value.blob, store.value.catalog);
+        if (rule === "discard") return discard(journal, events, storedKey(journal.store, store.value.format));
+        if (rule === "fork") return keepFork(journal, store.value, events);
+        if (rule === "commit-check") return commitCheck(journal, events, lock);
+        return searchStore(journal, events, lock);
       }
       default: {
         const never: never = rule;
@@ -589,11 +618,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /** offload.snapshot.discarded: the snapshot-discarded event the store lacks is written (D28), then roll back. */
-  async function discard(journal: OffloadJournal, blob: BlobStore, key: string): Promise<Settled> {
+  async function discard(journal: OffloadJournal, events: EventLog, key: string): Promise<Settled> {
     const discarded = journal.discarded;
     if (discarded !== undefined) {
       const there = await eventState(
-        blob,
+        events,
         discarded.event,
         (e) =>
           e.type === "snapshot-discarded" &&
@@ -610,7 +639,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         id = renamed.value;
       }
       if (there.value !== "ours") {
-        const written = await appendEvent(storeEventLog(blob), {
+        const written = await appendEvent(events, {
           v: 1,
           id,
           type: "snapshot-discarded",
@@ -630,12 +659,12 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /** offload.commit.start: the journaled event on the store, and the operation's own, is the commit. */
-  async function commitCheck(journal: OffloadJournal, blob: BlobStore, lock: ProjectLock): Promise<Settled> {
+  async function commitCheck(journal: OffloadJournal, events: EventLog, lock: ProjectLock): Promise<Settled> {
     const there =
       journal.event === undefined
         ? ok("absent" as const)
         : await eventState(
-            blob,
+            events,
             journal.event,
             (e) =>
               e.type === "offloaded" &&
@@ -653,8 +682,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /** snapshot.done, verified: the write after them may be the one a power loss dropped (D50). */
-  async function searchStore(journal: OffloadJournal, blob: BlobStore, lock: ProjectLock): Promise<Settled> {
-    const events = await readEvents(storeEventLog(blob));
+  async function searchStore(journal: OffloadJournal, log: EventLog, lock: ProjectLock): Promise<Settled> {
+    const events = await readEvents(log);
     if (!events.ok) return pending(journal, events);
     const made = events.value.events.find(
       (e): e is Extract<CatalogEvent, { type: "offloaded" }> =>
@@ -663,7 +692,14 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         e.project === journal.project.id &&
         journal.attempts.includes(storedHere(e.stored) ?? ""),
     );
-    if (made === undefined) return rollBack(journal);
+    if (made === undefined) {
+      // An event that does not open may be the one searched for: wait, never roll back (review r1 I2). One made before
+      // the operation began cannot be its commit (review r2 #3): an event's id starts with its time, as an op's does.
+      const unopened = events.value.findings.find(
+        (f) => UNOPENED_CODES.includes(f.code) && !madeBefore(f.paths?.[0], journal.op),
+      );
+      return unopened === undefined ? rollBack(journal) : pending(journal, fail(unopened));
+    }
     const folded = foldCatalog(events.value.events).projects[journal.project.id];
     // Forked only when the fold's conflicts name this snapshot (D61): the event keeps it as a fork, as
     // offload.diverged does, and the folder stays.
@@ -714,27 +750,21 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   /** The offloaded event's time and bytes, for the stub: from the mirror, else the store. */
   async function eventFacts(journal: OffloadJournal): Promise<Result<{ at: string; bytes: number }>> {
     const id = journal.event as string;
-    const parse = (bytes: Uint8Array | null) => {
-      if (bytes === null) return undefined;
-      try {
-        const parsed = OffloadedEventSchema.safeParse(JSON.parse(new TextDecoder().decode(bytes)));
-        return parsed.success ? { at: parsed.data.at, bytes: parsed.data.stats.bytes } : undefined;
-      } catch {
-        return undefined;
-      }
-    };
+    const facts = (read: Result<{ event: CatalogEvent } | { skipped: Finding } | null>) =>
+      read.ok && read.value !== null && "event" in read.value && read.value.event.type === "offloaded"
+        ? { at: read.value.event.at, bytes: read.value.event.stats.bytes }
+        : undefined;
     const mirror = await deps.openMirror(journal.store.id);
     if (mirror.ok) {
-      const got = await mirror.value.get(`${MIRROR_EVENTS_PREFIX}${id}.json`);
-      const facts = got.ok ? parse(got.value) : undefined;
-      if (facts !== undefined) return ok(facts);
+      const held = facts(await eventAt(mirrorEventLog(mirror.value), id));
+      if (held !== undefined) return ok(held);
     }
     const store = await storeOf(journal);
     if (!store.ok) return store;
-    const got = await store.value.blob.get(`${STORE_EVENTS_PREFIX}${id}.json`);
-    if (!got.ok) return got;
-    const facts = parse(got.value);
-    if (facts !== undefined) return ok(facts);
+    const read = await eventAt(storeEventLog(store.value.blob, store.value.catalog), id);
+    if (!read.ok) return read;
+    const found = facts(read);
+    if (found !== undefined) return ok(found);
     return fail(
       finding("store.failed", {
         message: `the offloaded event ${id} of ${journal.project.address} is not readable on store ${journal.store.name}; the folder was not touched`,
@@ -796,12 +826,13 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   async function keepFork(
     journal: OffloadJournal,
     store: ConfiguredStore & { format: 1 | 2 },
+    events: EventLog,
   ): Promise<Settled> {
     const id = journal.event;
     const verified = journal.verified;
     if (id !== undefined && verified !== undefined) {
       const there = await eventState(
-        store.blob,
+        events,
         id,
         (e) =>
           e.type === "offloaded" &&
@@ -840,7 +871,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         } catch (error) {
           systemErrorCode(error);
         }
-        const appended = await appendEvent(storeEventLog(store.blob), {
+        const appended = await appendEvent(events, {
           v: 1,
           id: eventId,
           type: "offloaded",
@@ -951,6 +982,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       env: deps.env,
       saga,
       store: store.value.blob,
+      ...(store.value.catalog === undefined ? {} : { catalog: store.value.catalog }),
       device: deps.device.id,
       clock,
       log: deps.log,

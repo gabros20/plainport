@@ -147,6 +147,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
     storeId: store.id,
     storeName: store.name,
     now: clock,
+    ...(store.catalog === undefined ? {} : { policy: store.catalog }),
     report,
   })();
   if (!read.ok) return read;
@@ -320,6 +321,7 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       io,
       engine: store.engine,
       store: store.blob,
+      ...(store.catalog === undefined ? {} : { catalog: store.catalog }),
       stored: chosen.stored,
       ...(chosen.event === undefined ? {} : { event: chosen.event }),
       ctx,

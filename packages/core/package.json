@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@noble/ciphers": "2.4.0",
     "@plainport/contract": "workspace:*",
     "smol-toml": "1.9.0",
     "zod": "4.6.5"

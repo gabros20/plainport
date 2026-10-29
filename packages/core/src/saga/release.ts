@@ -212,6 +212,7 @@ export const releaseOffload = async (
         }),
       );
     }
+    rc.host.faultAt("offload.release.reread");
     // The D51 guard, right before the rename: only the folder as it was verified is ever moved aside.
     const same = await unchanged(
       io.fs,

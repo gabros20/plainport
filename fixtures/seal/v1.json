@@ -1,0 +1,18 @@
+{
+  "master": {
+    "created": "2026-01-01T00:00:00Z",
+    "encrypt": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "mac": {
+      "k": "QEFCQ0RFRkdISUpLTE1OTw==",
+      "r": "gIGCg4SFhoeIiYqLjI2Ojw=="
+    }
+  },
+  "storeId": "01J8ZQ4X7K3M5N9P2R6T8V0W1Y",
+  "eventKey": "meta/v1/events/01J8ZQ5A0B1C2D3E4F5G6H7J8K.json",
+  "plaintext": "{\"v\":1,\"type\":\"root-created\",\"id\":\"01J8ZQ5A0B1C2D3E4F5G6H7J8K\"}\n",
+  "nonceHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7",
+  "materialHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f808182838485868788898a8b8c8d8e8f",
+  "keyHex": "096cfb242c86a8357b9acaa0b97fa3dae38d6f39c376104cf404c60770035a50",
+  "kid": "5253b09874735a42",
+  "sealed": "{\"pp_seal\":1,\"alg\":\"xchacha20poly1305\",\"kdf\":\"hkdf-sha256-restic-master-v1\",\"kid\":\"5253b09874735a42\",\"nonce\":\"oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3\",\"ct\":\"f1fQ9thzZSmkXs4TF86RZ9drzdmhABD93osWaf9zBztMl5oOZTLQ_jVPHP5dzOvQonJ1PsRnFRAKwkXrFoRsySWebBfH6oLLveDmmEk64uY\"}"
+}

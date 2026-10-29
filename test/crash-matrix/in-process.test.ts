@@ -18,7 +18,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "../../packages/contract/src/index.ts";
+import type { CatalogPolicy } from "../../packages/core/src/catalog/codec.ts";
+import { parseStoreIdentity } from "../../packages/core/src/catalog/identity.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import { looksSealed } from "../../packages/core/src/catalog/seal.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import { type Device, ensureDevice } from "../../packages/core/src/device.ts";
 import { type HostPorts, InjectedFault } from "../../packages/core/src/ports/host.ts";
@@ -59,6 +62,7 @@ import {
   type TreeHash,
 } from "./fixture.ts";
 import {
+  ALL_ROWS,
   MATRIX_POINTS,
   type OFFLOAD_BRANCH_KINDS,
   OFFLOAD_ROWS,
@@ -94,7 +98,21 @@ const capture = (step: string) => {
   if (step === "offload.release.trash" && existsSync(dir)) released = captureTree(dir);
 };
 
-const opener: StoreOpener = { open: async () => ({ ok: true, value: { blob: store, engine } }) };
+/** The store's catalog policy: plain, or sealed for the sealed rows (Task 11). */
+let catalog: CatalogPolicy | undefined;
+/** A sealed policy is bound to its store (review r1 I4): each row's store has its own id. */
+const sealedFor = (store: MemoryBlobStore): CatalogPolicy => {
+  const identity = parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array);
+  if (identity === undefined) throw new Error("the row's store has no identity");
+  return { seal: "sealed", storeId: identity.id, key: new Uint8Array(32).fill(5) };
+};
+
+const opener: StoreOpener = {
+  open: async () => ({
+    ok: true,
+    value: { blob: store, engine, ...(catalog === undefined ? {} : { catalog }) },
+  }),
+};
 
 const config = (extra = "") =>
   box.file(
@@ -135,6 +153,7 @@ beforeEach(async () => {
   copyProject(template, dir);
   released = undefined;
   heldDelete = undefined;
+  catalog = undefined;
   reference = hashTree(dir);
 });
 
@@ -265,7 +284,7 @@ const otherCopyDuringUpload = async () => {
   engine.hooks.duringSnapshot = async () => {
     engine.hooks.duringSnapshot = undefined;
     const s = ulid();
-    const appended = await appendEvent(storeEventLog(store), {
+    const appended = await appendEvent(storeEventLog(store, catalog), {
       v: 1,
       id: s,
       op: s,
@@ -340,6 +359,8 @@ interface RowOptions {
   crash?: Scenario;
   /** Harm done after recover, which the row's checks must then report (the damage mode and its standing test). */
   damage?: (world: World) => void;
+  /** Recover starts with this device's event mirror empty: it must read the store itself, through the codec. */
+  emptyMirror?: boolean;
 }
 
 /** Runs a row's crash, recover twice, and the row's checks. */
@@ -361,6 +382,7 @@ const runRow = async (row: Row, options: RowOptions = {}) => {
     await settleJournals(box.paths);
   }
   const journalAtRecover = crashedOp !== undefined && journalSteps(box.paths).has(crashedOp);
+  if (options.emptyMirror) mirror.data.clear();
   const report = reportOf(await recover(recoverDeps()));
   // A finished release hands its trash to a detached delete, which holds it (trash-kept) until it is done.
   await settleJournals(box.paths);
@@ -392,8 +414,28 @@ const world = (): World => ({
   device: device.id,
   dir,
   root: join(box.home, "work"),
-  store: { name: "ssd", blob: store, engine },
+  store: { name: "ssd", blob: store, engine, ...(catalog === undefined ? {} : { catalog }) },
 });
+
+// A sealed store's catalog (Task 11): at every boundary where recover decides from the store's events whether the
+// operation committed, a crash then recover with an empty mirror settles exactly as on a plain store: the same row,
+// the same checks. The store's event files are sealed, so a recover that read them without the codec would find
+// no event, and roll back an operation that committed.
+const CATALOG_STEPS = /commit|snapshot\.(done|verified|discarded)|diverged/;
+const catalogRows = ALL_ROWS.filter((row) => CATALOG_STEPS.test(row.step));
+
+for (const kind of ["plain", "sealed"] as const)
+  describe(`crash matrix, in-process: recover from the store alone, ${kind} catalog (${catalogRows.length} rows)`, () => {
+    for (const row of catalogRows)
+      test(row.name, async () => {
+        if (kind === "sealed") catalog = sealedFor(store);
+        const { problems } = await runRow(row, { emptyMirror: true });
+        expect(problems).toEqual([]);
+        const events = [...store.data].filter(([key]) => key.startsWith("meta/v1/events/"));
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.every(([, data]) => looksSealed(data) === (kind === "sealed"))).toBe(true);
+      }, 30_000);
+  });
 
 describe(`crash matrix, in-process: offload (${OFFLOAD_ROWS.length} rows)`, () => {
   for (const row of OFFLOAD_ROWS) test(row.name, rowTest(row), 30_000);

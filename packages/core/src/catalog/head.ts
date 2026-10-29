@@ -14,6 +14,7 @@ import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
 import type { ProjectRegistry } from "../registry.ts";
 import type { Stub } from "../stub.ts";
+import type { CatalogPolicy } from "./codec.ts";
 import type { CatalogProject, CatalogState } from "./fold.ts";
 import { loadCatalog, type Tainted } from "./log.ts";
 
@@ -41,6 +42,8 @@ export const catalogReader =
     mirror: BlobStore;
     storeId: string;
     storeName: string;
+    /** The store's catalog policy; plain when absent. */
+    policy?: CatalogPolicy;
     now(): Date;
     report(finding: Finding): void;
   }): (() => Promise<Result<CatalogRead>>) =>
@@ -50,6 +53,7 @@ export const catalogReader =
       mirror: options.mirror,
       storeId: options.storeId,
       now: options.now(),
+      ...(options.policy === undefined ? {} : { policy: options.policy }),
     });
     if (!read.ok) return read;
     if (read.value.stale)
@@ -206,6 +210,10 @@ export const recordedProject = (options: {
     conflicts: [],
     missing: [],
     discarded: [],
+    resolutions: [],
+    rejected: [],
+    kept: [],
+    invalid: [],
     snapshots: {},
   };
 };
