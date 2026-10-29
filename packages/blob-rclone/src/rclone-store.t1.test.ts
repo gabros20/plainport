@@ -192,9 +192,18 @@ describeT1("blob-rclone on rclone's local backend", () => {
       const temporaries = keysUnder(join(w.root, "meta/v1/tmp"));
       expect(temporaries.length).toBeLessThanOrEqual(1);
 
-      // A fresh temporary is not swept (another device's put may be in flight); an old one is.
-      expect(value(await after.sweepTemporaries(60 * 60 * 1000)).swept).toEqual([]);
-      const swept = value(await after.sweepTemporaries(0)).swept;
+      // A fresh temporary is not swept (another device's put may be in flight); an old one is: seen from a clock
+      // past the sweep's floor (one call's deadline plus clock skew).
+      expect(value(await after.sweepTemporaries(after.minSweepAgeMs)).swept).toEqual([]);
+      const base = testHost();
+      const later = rcloneBlobStore({
+        ...w.options,
+        host: {
+          ...base,
+          clock: { ...base.clock, now: () => new Date(Date.now() + after.minSweepAgeMs + 60_000) },
+        },
+      });
+      const swept = value(await later.sweepTemporaries(later.minSweepAgeMs)).swept;
       expect(swept).toEqual(temporaries.map((name) => `${TEMP_PREFIX}${name}`));
       expect(keysUnder(join(w.root, "meta/v1/tmp"))).toEqual([]);
       expect(value(await after.list("meta/v1/events/")).length).toBe(at === "rclone.put.uploaded" ? 0 : 1);

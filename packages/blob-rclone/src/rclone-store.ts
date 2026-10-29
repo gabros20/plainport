@@ -7,23 +7,32 @@
 // once it is complete. Elsewhere (SFTP, local) rclone's rcat can write in place, so a put uploads to its own
 // temporary, `meta/v1/tmp/<op>-<ulid>`, and `moveto`s it onto the key: a reader of the key sees nothing or every
 // byte. A put that dies between the two leaves that temporary, which sweepTemporaries removes once it is old enough
-// (gc's job); nothing else ever writes, lists or deletes under that prefix. On OpenSSH the move is one
+// (gc's job): older than one call's overall deadline plus a day for clock skew between devices, since a temporary's
+// age is read from the writing device's clock. Nothing else ever writes, lists or deletes under that prefix. On OpenSSH the move is one
 // posix-rename@openssh.com, which replaces a key that is there whole (measured in Task 17).
 //
 // semantics() is every property unknown unless the caller passes the store's profile (profiles.ts holds the measured
 // ones), and a profile may never claim more than this adapter does: only the publication its route gives, and
 // conditional create only on the S3 route, where a create-only put is the same direct upload with
 // `If-None-Match: *` (rclone 1.75.1 forwards it through --header-upload; a store that refuses with 412 answers
-// store.key-exists). A temp-then-rename put has no conditional form: its rename replaces.
+// store.key-exists). Only a single-part upload is measured to carry the header, so a create-only put pins rclone's
+// --s3-upload-cutoff and refuses a value that would go multipart (CONDITIONAL_MAX_BYTES; callers publish small
+// records). A temp-then-rename put has no conditional form: its rename replaces.
 //
 // The remote is defined by environment variables only (RCLONE_CONFIG_PLAINPORT_<OPTION>), with RCLONE_CONFIG naming
 // a file under plainport's cache that must not exist, so no rclone.conf and none of this process's own rclone settings
-// are ever read. Network calls are bounded by rclone's own timeouts and one retry, on top of the runner's deadlines.
+// are ever read. Network calls are bounded by rclone's own timeouts and one retry, on top of the runner's deadlines,
+// and one port call (which may chain several runs: a get's cat and stat, an SFTP put's upload, move and clean-up) by
+// one overall deadline across its runs; an AbortSignal, when given, cancels the run in flight and every later one.
 // Secret options (a secret access key, an SFTP password) reach rclone only in its environment, never in argv, and are
 // cut out of everything rclone says before it reaches a finding.
 //
 // Exit codes: on get, stat, list and delete, 3 (directory not found) and 4 (file not found) mean the key is not
 // there. 5 (a temporary error) and connection failures are store.unreachable; anything else is store.failed.
+//
+// An SFTP remote must check host keys: through the system's OpenSSH (the `ssh` option, which checks them as configured)
+// or with rclone's own SSH given `known_hosts_file`. Without either, rclone's SSH connects to any host, so every call
+// on such a remote is refused before anything runs.
 //
 // SFTP through the system's OpenSSH (rclone's `ssh` option, DESIGN "Machines → SSH policy"): rclone keeps nothing of
 // what ssh says, so a refused host key and a lost link both read as "server unexpectedly closed connection". Each run
@@ -60,6 +69,13 @@ export const RCLONE_REMOTE = "PLAINPORT";
 
 /** Where a temp-then-rename put uploads before it moves onto its key (D98); the adapter's own, hidden from callers. */
 export const TEMP_PREFIX = "meta/v1/tmp/";
+
+/** What the sweep allows for clocks that disagree between devices (a temporary's age is its writer's clock). */
+export const SWEEP_SKEW_MS = 24 * 60 * 60 * 1000;
+
+/** The largest value a create-only put takes: below the --s3-upload-cutoff it pins, so the upload is single-part. */
+export const CONDITIONAL_MAX_BYTES = 16 * 1024 * 1024;
+const CONDITIONAL_CUTOFF = "16Mi";
 
 export interface RcloneRemote {
   /** The rclone backend: "s3", "sftp", or "local" (tests). */
@@ -101,14 +117,23 @@ export interface RcloneBlobStoreOptions {
   /** The runner's deadlines for one rclone run. Defaults: 2 minutes without output, 10 minutes in all. */
   idleTimeoutMs?: number;
   timeoutMs?: number;
+  /** One port call's deadline across all its rclone runs. Default 30 minutes. */
+  callTimeoutMs?: number;
+  /** Cancels the run in flight (its whole process group) and refuses every later one: Ctrl-C, a caller's timeout. */
+  signal?: AbortSignal;
   /** rclone's --bwlimit, for slow links (and tests that watch an upload). */
   bwlimit?: string;
 }
 
 export interface RcloneBlobStore extends BlobStore {
   getMany(keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>>;
-  /** Deletes this adapter's temporaries older than `olderThanMs` (by the time in their name); gc's sweep (D98). */
+  /**
+   * Deletes this adapter's temporaries older than `olderThanMs` (by the time in their name); gc's sweep (D98). A value
+   * below minSweepAgeMs is a bug and throws: a younger temporary may be another device's put in flight.
+   */
   sweepTemporaries(olderThanMs: number): Promise<Result<{ swept: string[] }>>;
+  /** The youngest age sweepTemporaries accepts: one call's overall deadline plus SWEEP_SKEW_MS. */
+  readonly minSweepAgeMs: number;
 }
 
 /** How an rclone exit reads: ok, the key or folder is not there, the store could not be reached, or another failure. */
@@ -269,6 +294,9 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       "only rclone's S3 route can create a key only if it is absent: this store's profile may not claim it",
     );
   const externalSsh = remote.type === "sftp" ? remote.options?.ssh : undefined;
+  const hostKeyUnchecked =
+    remote.type === "sftp" && (externalSsh ?? "") === "" && (remote.options?.known_hosts_file ?? "") === "";
+  const callTimeoutMs = options.callTimeoutMs ?? 30 * 60 * 1000;
   const op = options.op ?? "put";
   if (!OP_NAME.test(op)) throw new RangeError(`not a valid op for a temporary's name: ${JSON.stringify(op)}`);
 
@@ -345,7 +373,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
 
   /** The failure for an rclone exit that was not ok (or not missing, where that is fine). */
   const exitFailure = (outcome: RunOutcome, command: string, what: string): Failure => {
-    const said = redact(rcloneSaid(outcome.stderr.text, externalSsh !== undefined));
+    // Redacted whole before it is cut down, so a secret cut by the truncation cannot leave a slice behind.
+    const said = rcloneSaid(redact(outcome.stderr.text), externalSsh !== undefined);
     if (outcome.exitCode === null)
       return failed(`${what}: rclone ${command} was ended by ${outcome.signal}`, said);
     if (classifyExit(outcome.exitCode, outcome.stderr.text) === "unreachable")
@@ -403,11 +432,38 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       .join("");
   };
 
+  /** One port call: the deadline every rclone run it makes shares. */
+  interface Call {
+    deadline: number;
+  }
+  const newCall = (): Call => ({ deadline: host.clock.now().getTime() + callTimeoutMs });
+
   const run = async (
+    call: Call,
     command: string,
     args: readonly string[],
     how: { stdin?: string | Uint8Array; capture?: boolean } = {},
   ): Promise<Result<RunOutcome>> => {
+    if (hostKeyUnchecked)
+      return failed(
+        `rclone ${command} was not run: the SFTP remote checks no host key (neither ssh nor known_hosts_file is set), so it could be talking to anyone`,
+        "",
+        "connect through the system's ssh (the store's ssh option, which checks host keys) or set known_hosts_file, then re-run",
+      );
+    if (options.signal?.aborted)
+      return fail(
+        finding("process.cancelled", {
+          message: `rclone ${command} was not started: the store call was cancelled`,
+        }),
+      );
+    const remaining = call.deadline - host.clock.now().getTime();
+    if (remaining <= 0)
+      return fail(
+        finding("process.timeout", {
+          message: `rclone ${command} was not started: the store call ran past its overall deadline (${callTimeoutMs} ms)`,
+          fix: "check the network connection and the store, then re-run",
+        }),
+      );
     const refused = await checkNoConfig();
     if (refused !== undefined) return refused;
     const log = await sshLog();
@@ -425,7 +481,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       cwd: "/",
       env,
       idleTimeoutMs: options.idleTimeoutMs ?? 120_000,
-      timeoutMs: options.timeoutMs ?? 600_000,
+      timeoutMs: Math.min(options.timeoutMs ?? 600_000, remaining),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(how.stdin === undefined ? {} : { stdin: how.stdin }),
       ...(how.capture ? { capture: { maxBytes: 1024 ** 3 } } : {}),
     };
@@ -438,17 +495,18 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
 
   /** A write run, tried once more when its parent folder was made by another writer at the same moment. */
   const runWrite = async (
+    call: Call,
     command: string,
     args: readonly string[],
     how: { stdin?: string | Uint8Array } = {},
   ): Promise<Result<RunOutcome>> => {
-    const ran = await run(command, args, how);
+    const ran = await run(call, command, args, how);
     if (!ran.ok || ran.value.exitCode === 0 || !MKDIR_RACE.test(ran.value.stderr.text)) return ran;
-    return run(command, args, how);
+    return run(call, command, args, how);
   };
 
-  const stat = async (key: string): Promise<Result<{ size: number } | null>> => {
-    const ran = await run("lsjson", ["--stat", ...NO_METADATA, remotePath(key)], { capture: true });
+  const stat = async (call: Call, key: string): Promise<Result<{ size: number } | null>> => {
+    const ran = await run(call, "lsjson", ["--stat", ...NO_METADATA, remotePath(key)], { capture: true });
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
     if (exit === "missing") return ok(null);
@@ -461,14 +519,17 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   /** How often get reads a key again that was written between its read and its stat. */
   const GET_TRIES = 3;
 
-  const get = async (key: string): Promise<Result<Uint8Array | null>> => {
+  const get = async (call: Call, key: string): Promise<Result<Uint8Array | null>> => {
     const { dir, name } = splitKey(key);
     for (let tries = 0; tries < GET_TRIES; tries++) {
       // A name rclone's raw file list cannot hold is read by its path; elsewhere the list makes cat read that one
       // file, never a folder of the same name (whose files cat would join).
       const ran = /[\r\n]/.test(name)
-        ? await run("cat", [remotePath(key)], { capture: true })
-        : await run("cat", ["--files-from-raw", "-", remotePath(dir)], { capture: true, stdin: `${name}\n` });
+        ? await run(call, "cat", [remotePath(key)], { capture: true })
+        : await run(call, "cat", ["--files-from-raw", "-", remotePath(dir)], {
+            capture: true,
+            stdin: `${name}\n`,
+          });
       if (!ran.ok) return ran;
       const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
       if (exit === "missing") return ok(null);
@@ -477,7 +538,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       if (bytes.length > 0) return ok(bytes);
       // Nothing printed: an empty file, or no such file. stat tells which, unless the key was written in between
       // (it now has bytes the read did not see): then it is read again.
-      const found = await stat(key);
+      const found = await stat(call, key);
       if (!found.ok) return found;
       if (found.value === null) return ok(null);
       if (found.value.size === 0) return ok(new Uint8Array());
@@ -486,8 +547,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   };
 
   /** Every file under a folder ("" is the root), as keys; a folder that is not there is empty. */
-  const listUnder = async (dir: string): Promise<Result<BlobEntry[]>> => {
-    const ran = await run("lsjson", ["-R", "--files-only", ...NO_METADATA, remotePath(dir)], {
+  const listUnder = async (call: Call, dir: string): Promise<Result<BlobEntry[]>> => {
+    const ran = await run(call, "lsjson", ["-R", "--files-only", ...NO_METADATA, remotePath(dir)], {
       capture: true,
     });
     if (!ran.ok) return ran;
@@ -506,9 +567,9 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     );
   };
 
-  const list = async (prefix: string): Promise<Result<BlobEntry[]>> => {
+  const list = async (call: Call, prefix: string): Promise<Result<BlobEntry[]>> => {
     const slash = prefix.lastIndexOf("/");
-    const listed = await listUnder(slash < 0 ? "" : prefix.slice(0, slash));
+    const listed = await listUnder(call, slash < 0 ? "" : prefix.slice(0, slash));
     if (!listed.ok) return listed;
     return ok(
       listed.value
@@ -517,8 +578,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     );
   };
 
-  const remove = async (key: string): Promise<Result<void>> => {
-    const ran = await run("deletefile", [remotePath(key)]);
+  const remove = async (call: Call, key: string): Promise<Result<void>> => {
+    const ran = await run(call, "deletefile", [remotePath(key)]);
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
     if (exit === "ok" || exit === "missing") return ok(undefined);
@@ -530,6 +591,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
    * copyto from an empty file under rclone's cache folder.
    */
   const upload = async (
+    call: Call,
     target: string,
     key: string,
     data: Uint8Array,
@@ -537,9 +599,12 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   ): Promise<Result<void>> => {
     let command = "rcat";
     let ran: Result<RunOutcome>;
-    const condition = ifNotExists ? ["--header-upload", "If-None-Match: *"] : [];
+    // Pinned, so a create-only put stays the single-part upload the header was measured on.
+    const condition = ifNotExists
+      ? ["--header-upload", "If-None-Match: *", "--s3-upload-cutoff", CONDITIONAL_CUTOFF]
+      : [];
     if (data.length > 0) {
-      ran = await runWrite(command, [...condition, "--size", String(data.length), remotePath(target)], {
+      ran = await runWrite(call, command, [...condition, "--size", String(data.length), remotePath(target)], {
         stdin: data,
       });
     } else {
@@ -551,7 +616,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       } catch (error) {
         return failed(`${key} could not be written: ${empty} could not be made`, systemErrorCode(error));
       }
-      ran = await runWrite(command, [...condition, "--ignore-times", empty, remotePath(target)]);
+      ran = await runWrite(call, command, [...condition, "--ignore-times", empty, remotePath(target)]);
     }
     if (!ran.ok) return ran;
     if (ran.value.exitCode === 0) return ok(undefined);
@@ -566,43 +631,44 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   };
 
   const put = async (
+    call: Call,
     key: string,
     data: Uint8Array,
     ifNotExists: boolean,
   ): Promise<Result<{ etag?: string }>> => {
     if (publication === "atomic-put") {
-      const written = await upload(key, key, data, ifNotExists);
+      const written = await upload(call, key, key, data, ifNotExists);
       return written.ok ? ok({}) : written;
     }
     const temp = `${TEMP_PREFIX}${op}-${ulid(host.clock.now().getTime())}`;
-    const uploaded = await upload(temp, key, data);
+    const uploaded = await upload(call, temp, key, data);
     if (!uploaded.ok) {
-      await remove(temp); // as far as it can: what is left is swept by age
+      await remove(call, temp); // as far as it can: what is left is swept by age
       return uploaded;
     }
     host.faultAt("rclone.put.uploaded");
     // --no-check-dest: the move is the backend's rename onto the key, with no look at the key first (which would
     // delete a key that is there before moving, leaving a moment with no key at all).
-    const moved = await runWrite("moveto", ["--no-check-dest", remotePath(temp), remotePath(key)]);
+    const moved = await runWrite(call, "moveto", ["--no-check-dest", remotePath(temp), remotePath(key)]);
     const failure = !moved.ok
       ? moved
       : moved.value.exitCode === 0
         ? undefined
         : exitFailure(moved.value, "moveto", `${key} could not be written`);
     if (failure !== undefined) {
-      await remove(temp);
+      await remove(call, temp);
       return failure;
     }
     host.faultAt("rclone.put.moved");
     return ok({});
   };
 
-  const getMany = async (keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>> => {
+  const getMany = async (call: Call, keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>> => {
     const got = new Map<string, Uint8Array>();
     const batch = [...new Set(keys)].filter((key) => !/[\r\n]/.test(key));
     for (const key of new Set(keys)) {
       if (!/[\r\n]/.test(key)) continue;
-      const one = await get(key);
+      const one = await get(call, key);
       if (!one.ok) return one;
       if (one.value !== null) got.set(key, one.value);
     }
@@ -614,7 +680,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     } catch (error) {
       return failed(`a temporary folder could not be made at ${folder}`, `${systemErrorCode(error)}`);
     }
-    const ran = await run("copy", ["--files-from-raw", "-", "--no-traverse", remotePath(""), folder], {
+    const ran = await run(call, "copy", ["--files-from-raw", "-", "--no-traverse", remotePath(""), folder], {
       stdin: `${batch.join("\n")}\n`,
     });
     let result: Result<Map<string, Uint8Array>> | undefined;
@@ -648,8 +714,9 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     return result ?? ok(got);
   };
 
-  const sweepTemporaries = async (olderThanMs: number): Promise<Result<{ swept: string[] }>> => {
-    const listed = await listUnder(TEMP_PREFIX.slice(0, -1));
+  const minSweepAgeMs = callTimeoutMs + SWEEP_SKEW_MS;
+  const sweepTemporaries = async (call: Call, olderThanMs: number): Promise<Result<{ swept: string[] }>> => {
+    const listed = await listUnder(call, TEMP_PREFIX.slice(0, -1));
     if (!listed.ok) return listed;
     const now = host.clock.now().getTime();
     const swept: string[] = [];
@@ -659,7 +726,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
         : null;
       if (name === null) continue; // not one of this adapter's temporaries
       if (now - ulidTime(name[1] as string) < olderThanMs) continue;
-      const removed = await remove(key);
+      const removed = await remove(call, key);
       if (!removed.ok) return removed;
       swept.push(key);
     }
@@ -679,7 +746,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     capabilities: () => capabilitiesOf(semantics),
     get: (key) => {
       assertBlobKey(key);
-      return get(key);
+      return get(newCall(), key);
     },
     put: (key, data, opts: PutOptions = {}) => {
       assertCallerKey(key);
@@ -689,25 +756,36 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
         throw new Error(
           "this rclone store's profile does not claim conditional create; check capabilities() first",
         );
-      return put(key, data, opts.ifNotExists === true);
+      if (opts.ifNotExists && data.length >= CONDITIONAL_MAX_BYTES)
+        throw new RangeError(
+          `a create-only put takes at most ${CONDITIONAL_MAX_BYTES - 1} bytes (single-part); ${key} has ${data.length}`,
+        );
+      return put(newCall(), key, data, opts.ifNotExists === true);
     },
     list: (prefix) => {
       assertBlobPrefix(prefix);
-      return list(prefix);
+      return list(newCall(), prefix);
     },
     stat: (key) => {
       assertBlobKey(key);
-      return stat(key);
+      return stat(newCall(), key);
     },
     delete: (key) => {
       assertCallerKey(key);
-      return remove(key);
+      return remove(newCall(), key);
     },
     getMany: (keys) => {
       for (const key of keys) assertBlobKey(key);
-      return getMany(keys);
+      return getMany(newCall(), keys);
     },
-    sweepTemporaries: (olderThanMs) => sweepTemporaries(olderThanMs),
+    sweepTemporaries: (olderThanMs) => {
+      if (!(olderThanMs >= minSweepAgeMs))
+        throw new RangeError(
+          `sweepTemporaries: ${olderThanMs} ms is younger than ${minSweepAgeMs} ms (one call's deadline plus clock skew): a temporary that young may be a put in flight`,
+        );
+      return sweepTemporaries(newCall(), olderThanMs);
+    },
+    minSweepAgeMs,
   };
 };
 

@@ -8,16 +8,19 @@ import {
   type RunSpec,
   type StoreSemantics,
   UNKNOWN_SEMANTICS,
+  ulid,
 } from "@plainport/core";
 import { expectNoCanary, makeCanary } from "../../core/src/testing/canary.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { makeSandbox, type Sandbox } from "../../core/src/testing/sandbox.ts";
 import recorded from "./fixtures/stderr.json" with { type: "json" };
 import {
+  CONDITIONAL_MAX_BYTES,
   classifyExit,
   RCLONE_REMOTE,
   type RcloneBlobStoreOptions,
   rcloneBlobStore,
+  SWEEP_SKEW_MS,
   TEMP_PREFIX,
 } from "./rclone-store.ts";
 
@@ -45,11 +48,12 @@ beforeEach(() => {
 afterEach(() => sandbox.cleanup());
 
 /** A store whose rclone runs are scripted; every spec it ran is kept. */
-const scripted = (script: Script, options: Partial<RcloneBlobStoreOptions> = {}) => {
+const scripted = (script: Script, options: Partial<RcloneBlobStoreOptions> = {}, now?: () => Date) => {
   const specs: RunSpec[] = [];
   const base = testHost();
   const host: HostPorts = {
     ...base,
+    ...(now === undefined ? {} : { clock: { ...base.clock, now } }),
     run: async (spec) => {
       specs.push(spec);
       const result = script(spec);
@@ -59,7 +63,11 @@ const scripted = (script: Script, options: Partial<RcloneBlobStoreOptions> = {})
   const store = rcloneBlobStore({
     host,
     rclone: "/opt/plainport/rclone",
-    remote: { type: "sftp", root: "plainport", options: { host: "nas.local", user: "me" } },
+    remote: {
+      type: "sftp",
+      root: "plainport",
+      options: { host: "nas.local", user: "me", known_hosts_file: "/home/me/.ssh/known_hosts" },
+    },
     paths: sandbox.paths,
     env: {
       HOME: sandbox.home,
@@ -106,6 +114,7 @@ const VALUED = new Set([
   "--size",
   "--bwlimit",
   "--header-upload",
+  "--s3-upload-cutoff",
   "--log-level",
 ]);
 
@@ -434,7 +443,9 @@ describe("publication", () => {
 
   test("an empty value is copied from an empty local file: rclone's rcat refuses an empty stdin", async () => {
     for (const type of ["s3", "sftp"]) {
-      const { store, specs } = scripted(() => outcome(0), { remote: { type, root: "r" } });
+      const { store, specs } = scripted(() => outcome(0), {
+        remote: { type, root: "r", options: { known_hosts_file: "/k" } },
+      });
       value(await store.put("meta/v1/empty", new Uint8Array()));
       expect(specs.map(commandOf)).toEqual(type === "s3" ? ["copyto"] : ["copyto", "moveto"]);
       const source = (specs[0]?.args ?? []).at(-2) as string;
@@ -591,5 +602,126 @@ describe("reads", () => {
   test("a listing rclone printed that does not parse is store.failed", async () => {
     const { store } = scripted(() => outcome(0, { stdout: "[{not json" }));
     expect(await store.list("")).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+  });
+});
+
+describe("review phase 4 (I2, I3, M1, M2, M6)", () => {
+  test("an SFTP remote that checks no host key is refused before anything runs (I3)", async () => {
+    const { store, specs } = scripted(() => outcome(0, { stdout: "[]" }), {
+      remote: { type: "sftp", root: "plainport", options: { host: "nas.local", user: "me" } },
+    });
+    for (const result of [
+      await store.get("a"),
+      await store.list(""),
+      await store.put("meta/v1/a.json", new Uint8Array([1])),
+      await store.delete("a"),
+    ]) {
+      expect(result).toMatchObject({ ok: false, finding: { code: "store.failed" } });
+      if (!result.ok) expect(result.finding.fix).toContain("known_hosts_file");
+    }
+    expect(specs).toEqual([]);
+    // Either check is enough: the system's ssh, or rclone's own SSH with a known_hosts file.
+    const checks: Record<string, string>[] = [
+      { ssh: "/usr/bin/ssh nas" },
+      { host: "nas.local", known_hosts_file: "/k" },
+    ];
+    for (const options of checks) {
+      const checked = scripted(() => outcome(0, { stdout: "[]" }), {
+        remote: { type: "sftp", root: "plainport", options },
+      });
+      value(await checked.store.list(""));
+      expect(checked.specs).toHaveLength(1);
+    }
+  });
+
+  test("what rclone says is redacted before it is cut down, so no slice of a secret survives the cut (M1)", async () => {
+    const secret = crypto.randomUUID().replaceAll("-", "");
+    // The 600-character cut keeps the secret's first 11 characters: a slice too short to be recognised afterwards.
+    const line = `${"a".repeat(589)}${secret}`;
+    const { store } = scripted(() => outcome(7, { stderr: `2026/10/29 17:30:53 ERROR : ${line}\n` }), {
+      remote: {
+        type: "s3",
+        root: "bucket",
+        options: { provider: "Other" },
+        secrets: { secret_access_key: secret },
+      },
+    });
+    const failed = await store.get("a");
+    if (failed.ok) throw new Error("expected a failure");
+    expect(failed.finding.message).not.toContain(secret.slice(0, 11));
+    expect(failed.finding.message).toContain("[redacted]");
+  });
+
+  test("a create-only put is single-part: it pins the upload cutoff and refuses a value that would go multipart (M2)", async () => {
+    const { store, specs } = scripted(() => outcome(0), { remote: S3_REMOTE, semantics: CONDITIONAL });
+    value(
+      await store.put("meta/v1/store.json", new Uint8Array(CONDITIONAL_MAX_BYTES - 1), { ifNotExists: true }),
+    );
+    const args = specs[0]?.args ?? [];
+    expect(args[args.indexOf("--s3-upload-cutoff") + 1]).toBe("16Mi");
+    expect(() =>
+      store.put("meta/v1/store.json", new Uint8Array(CONDITIONAL_MAX_BYTES), { ifNotExists: true }),
+    ).toThrow(RangeError);
+    // A plain put of any size is not limited.
+    value(await store.put("meta/v1/big", new Uint8Array(CONDITIONAL_MAX_BYTES)));
+    expect(specs).toHaveLength(2);
+  });
+
+  test("one call's runs share one overall deadline, and a cancelled call starts nothing more (M6)", async () => {
+    let clock = 1_000_000;
+    const { store, specs } = scripted(
+      () => {
+        clock += 60;
+        return outcome(0);
+      },
+      { callTimeoutMs: 100 },
+      () => new Date(clock),
+    );
+    // An SFTP put: the upload takes 60 ms of the 100, the move gets the rest, the clean-up nothing.
+    const put = await store.put("meta/v1/a.json", new Uint8Array([1]));
+    expect(put.ok).toBe(true);
+    expect(specs.map((spec) => spec.timeoutMs)).toEqual([100, 40]);
+    clock += 1;
+    specs.length = 0;
+    const slow = scripted(
+      () => {
+        clock += 120;
+        return outcome(0);
+      },
+      { callTimeoutMs: 100 },
+      () => new Date(clock),
+    );
+    const late = await slow.store.put("meta/v1/b.json", new Uint8Array([1]));
+    expect(late).toMatchObject({ ok: false, finding: { code: "process.timeout" } });
+    expect(slow.specs.map(commandOf)).toEqual(["rcat"]);
+
+    const controller = new AbortController();
+    const cancellable = scripted(() => outcome(0, { stdout: "[]" }), { signal: controller.signal });
+    value(await cancellable.store.list(""));
+    expect(cancellable.specs[0]?.signal).toBe(controller.signal);
+    controller.abort();
+    expect(await cancellable.store.list("")).toMatchObject({
+      ok: false,
+      finding: { code: "process.cancelled" },
+    });
+    expect(cancellable.specs).toHaveLength(1);
+  });
+
+  test("the sweep never deletes a temporary younger than one call's deadline plus clock skew (I2)", async () => {
+    const written = Date.now();
+    const temp = `put-${ulid(written)}`;
+    const listing = () => outcome(0, { stdout: JSON.stringify([{ Path: temp, Size: 1, IsDir: false }]) });
+    // The sweeping device's clock runs two hours ahead of the writer's.
+    const ahead = scripted(listing, {}, () => new Date(written + 2 * 60 * 60 * 1000));
+    expect(ahead.store.minSweepAgeMs).toBe(30 * 60 * 1000 + SWEEP_SKEW_MS);
+    expect(() => ahead.store.sweepTemporaries(60 * 60 * 1000)).toThrow(RangeError);
+    expect(() => ahead.store.sweepTemporaries(0)).toThrow(RangeError);
+    expect(value(await ahead.store.sweepTemporaries(ahead.store.minSweepAgeMs)).swept).toEqual([]);
+    expect(ahead.specs.map(commandOf)).toEqual(["lsjson"]);
+    // Older than the floor by the writer's own clock: swept.
+    const old = scripted(listing, {}, () => new Date(written + SWEEP_SKEW_MS + 31 * 60 * 1000));
+    expect(value(await old.store.sweepTemporaries(old.store.minSweepAgeMs)).swept).toEqual([
+      `${TEMP_PREFIX}${temp}`,
+    ]);
   });
 });
