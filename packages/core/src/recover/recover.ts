@@ -87,7 +87,7 @@ import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
-import { ulid } from "../ulid.ts";
+import { isUlid, ulid } from "../ulid.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
@@ -228,6 +228,18 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
 
 type OffloadRule = (typeof OFFLOAD_RECOVERY)[OffloadStep];
 type OnloadRule = (typeof ONLOAD_RECOVERY)[OnloadStep];
+/**
+ * Whether the event file `key` names was made before the operation `op` began, by the time each ULID starts with. A
+ * file whose name is no ULID may be anything, so it is never ruled out.
+ */
+const madeBefore = (key: string | undefined, op: string): boolean => {
+  const id = key
+    ?.split("/")
+    .at(-1)
+    ?.replace(/\.json$/, "");
+  return id !== undefined && isUlid(id) && id.slice(0, 10) < op.slice(0, 10);
+};
+
 const offloadRule = (step: string): OffloadRule | undefined =>
   Object.hasOwn(OFFLOAD_RECOVERY, step) ? OFFLOAD_RECOVERY[step as OffloadStep] : undefined;
 /**
@@ -681,8 +693,11 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         journal.attempts.includes(storedHere(e.stored) ?? ""),
     );
     if (made === undefined) {
-      // An event that does not open may be the one searched for: wait, never roll back (review r1 I2).
-      const unopened = events.value.findings.find((f) => UNOPENED_CODES.includes(f.code));
+      // An event that does not open may be the one searched for: wait, never roll back (review r1 I2). One made before
+      // the operation began cannot be its commit (review r2 #3): an event's id starts with its time, as an op's does.
+      const unopened = events.value.findings.find(
+        (f) => UNOPENED_CODES.includes(f.code) && !madeBefore(f.paths?.[0], journal.op),
+      );
       return unopened === undefined ? rollBack(journal) : pending(journal, fail(unopened));
     }
     const folded = foldCatalog(events.value.events).projects[journal.project.id];

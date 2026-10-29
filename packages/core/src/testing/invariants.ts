@@ -18,9 +18,11 @@
 //    keepLocalFor deadline still ahead. A released trash with no deadline is deleted by a detached process after the
 //    command returns, so this waits up to `settleMs` for it.
 // 4. Folding the same events in any order (and with copies, as a union of stores gives) yields the same state.
-// 5. Per Q17 (leases are advisory): the fold names at most one holder, no onload operation wrote two onloaded events,
-//    and no device that observed a holder under onload.leases = "strict" onloaded (`strictOnloads`: what each such
-//    onload saw is the events the store held when it began).
+// 5. Per Q17 (leases are advisory): no onload operation wrote two onloaded events, the device the fold names as the
+//    lease holder is one whose own last event for the project is an onload (derived per device, as invariant 2 is),
+//    and no strict onload (`strictOnloads`, by op: the events the store held when it began) onloaded a project it
+//    observed another device holding. Several devices may each hold a working copy (both onloaded under "warn"),
+//    and a project may be shelved while another device's copy is still live: neither is a violation.
 // 6. In M2's scope nothing forgets, prunes or deletes a snapshot or an event: no snapshot the repository held is gone,
 //    no event the store held is gone or rewritten, a recorder of the run's calls shows no restic forget or prune and no
 //    store delete under the events or the repository's snapshots, and nothing discards a snapshot an offloaded or
@@ -167,17 +169,20 @@ type OwnEvent = Extract<CatalogEvent, { type: "offloaded" | "onloaded" }>;
 const buildsOn = (a: OwnEvent, b: OwnEvent): boolean =>
   b.type === "offloaded" ? a.base === b.snapshot : a.type === "offloaded" && a.base === b.base;
 
-/**
- * One device's events for a project, oldest first: by the time in their ids, and within one millisecond (a test's
- * pinned clock) by which builds on which.
- */
-const ownOrder = (a: OwnEvent, b: OwnEvent): number => {
+/** Which of two events of one device came later, by the time in their ids, then by which builds on which; 0 if neither tells. */
+const later = (a: OwnEvent, b: OwnEvent): number => {
   const [ta, tb] = [a.id.slice(0, 10), b.id.slice(0, 10)];
   if (ta !== tb) return ta < tb ? -1 : 1;
   if (buildsOn(a, b)) return 1;
   if (buildsOn(b, a)) return -1;
-  return a.id < b.id ? -1 : 1;
+  return 0;
 };
+
+/**
+ * One device's events for a project, oldest first: by the time in their ids, and within one millisecond (a test's
+ * pinned clock) by which builds on which.
+ */
+const ownOrder = (a: OwnEvent, b: OwnEvent): number => later(a, b) || (a.id < b.id ? -1 : 1);
 
 /** Every invariant 1–3 violation, as sentences; none means all hold. */
 export const invariantViolations = async (subject: InvariantSubject): Promise<string[]> => {
@@ -345,10 +350,10 @@ export interface CatalogInvariantSubject {
   /** The fold under test; foldCatalog by default (a test of this helper passes a broken one). */
   fold?: (events: readonly CatalogEvent[]) => CatalogState;
   /**
-   * Invariant 5 (Q17): each onload run under onload.leases = "strict", by device, with the ids of the events the store
-   * held when it began (what its fresh read could not miss). That device's onloaded events not among them are its own.
+   * Invariant 5 (Q17): each onload run under onload.leases = "strict", by its device and op, with the ids of the events
+   * the store held when it began (what its fresh read could not miss). Only that op's onloaded event is judged.
    */
-  strictOnloads?: readonly { device: string; before: Iterable<string> }[];
+  strictOnloads?: readonly { device: string; op: string; before: Iterable<string> }[];
   /** Invariant 6: the events the store held before (after the crash, say); none may be gone or rewritten since. */
   eventsBefore?: readonly CatalogEvent[];
   /** Invariant 6: what a recorder saw the run do (recordingBlobStore, or a restic wrapper's log). */
@@ -429,24 +434,39 @@ export const catalogInvariantViolations = (subject: CatalogInvariantSubject): st
     if (canonical(fold(order)) !== expected)
       problems.push(`invariant 4: folding the events ${name} gives another state`);
 
-  // 5: the fold's lease is one by its schema; what a crash could add is a second onloaded event for one onload.
+  // 5: what a crash could add is a second onloaded event for one onload.
   const onloads = new Map<string, Set<string>>();
   for (const e of events)
     if (e.type === "onloaded") onloads.set(e.op, (onloads.get(e.op) ?? new Set()).add(e.id));
   for (const [op, ids] of onloads)
     if (ids.size > 1) problems.push(`invariant 5: the onload ${op} wrote ${ids.size} onloaded events`);
-  for (const [id, project] of Object.entries(state.projects))
-    if (project.status === "shelved" && project.lease !== null)
-      problems.push(`invariant 5: the project ${id} is shelved, yet ${project.lease.device} holds its lease`);
+  // The holder, judged per device: its own last offloaded or onloaded event for the project is an onload. Not
+  // compared with the global status: B's later offload shelves the project while A's onloaded copy stays live.
+  for (const [id, project] of Object.entries(state.projects)) {
+    if (project.lease === null) continue;
+    const holder = project.lease.device;
+    const own = events.filter(
+      (e): e is OwnEvent =>
+        (e.type === "offloaded" || e.type === "onloaded") && e.project === id && e.device === holder,
+    );
+    const onloadsOf = own.filter((e) => e.type === "onloaded");
+    // Only an offload that is plainly after every onload of the holder's closes its lease: two events in one
+    // millisecond that neither builds on (a pinned clock) tell nothing.
+    const closing = own.find((o) => o.type === "offloaded" && onloadsOf.every((l) => later(o, l) > 0));
+    if (onloadsOf.length === 0 || closing !== undefined)
+      problems.push(
+        `invariant 5: ${holder} holds the lease of ${id}, but ${closing === undefined ? "it has no onloaded event for it" : `its own last event for it is the offload ${closing.op}`}`,
+      );
+  }
   for (const strict of subject.strictOnloads ?? []) {
     const before = new Set(strict.before);
     const seen = fold(events.filter((e) => before.has(e.id)));
     for (const e of events) {
-      if (e.type !== "onloaded" || e.device !== strict.device || before.has(e.id)) continue;
+      if (e.type !== "onloaded" || e.device !== strict.device || e.op !== strict.op) continue;
       const holder = seen.projects[e.project]?.lease;
       if (holder !== undefined && holder !== null && holder.device !== strict.device)
         problems.push(
-          `invariant 5: ${strict.device} onloaded ${e.project} under strict leases although it observed ${holder.device} holding it`,
+          `invariant 5: ${strict.device} onloaded ${e.project} under strict leases (${strict.op}) although it observed ${holder.device} holding it`,
         );
     }
   }

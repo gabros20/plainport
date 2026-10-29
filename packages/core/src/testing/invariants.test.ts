@@ -201,24 +201,98 @@ describe("catalogInvariantViolations: M2's per-device and recorded checks", () =
         events,
         snapshotsBefore: [restic("a")],
         snapshotsNow: [restic("a")],
-        strictOnloads: [{ device, before: [first, theirs.id] }],
+        strictOnloads: [{ device, op: mine.op, before: [first, theirs.id] }],
       }),
     ).toEqual([
-      `invariant 5: ${device} onloaded ${project} under strict leases although it observed ${other} holding it`,
+      `invariant 5: ${device} onloaded ${project} under strict leases (${mine.op}) although it observed ${other} holding it`,
+    ]);
+  });
+
+  // Review r2 #2: a strict onload is judged by its own op. One that observed the holder and refused wrote no event; the
+  // device's later onload, after the holder offloaded, is judged by what that later run observed.
+  test("invariant 5 (Q17): only the strict onload's own event is judged, not the device's later onloads", () => {
+    const first = ulid();
+    const second = ulid();
+    const theirs = onloaded(first, { device: other });
+    const released = offloaded(second, { device: other, base: first, stored: { ssd: restic("b") } });
+    const mine = onloaded(second);
+    const events = [offloaded(first), theirs, released, mine];
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+        strictOnloads: [
+          { device, op: ulid(), before: [first, theirs.id] },
+          { device, op: mine.op, before: [first, theirs.id, second] },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  // Review r2 #1: leases are advisory. A and B both onload (warn), then B offloads while A's copy is still live: the
+  // fold says shelved with A's lease, which is right (A's next offload forks).
+  test("invariant 5 (Q17): shelved by one device while another's onloaded copy is live is no violation", () => {
+    const first = ulid();
+    const second = ulid();
+    const events = [
+      offloaded(first),
+      onloaded(first),
+      onloaded(first, { device: other }),
+      offloaded(second, { device: other, base: first, stored: { ssd: restic("b") } }),
+    ];
+    const state = foldCatalog(events).projects[project];
+    expect([state?.status, state?.lease?.device]).toEqual(["shelved", device]);
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+      }),
+    ).toEqual([]);
+  });
+
+  test("invariant 5 (Q17): a lease named for a device whose own last event is an offload is caught", () => {
+    const first = ulid();
+    const second = ulid();
+    const events = [
+      offloaded(first),
+      onloaded(first),
+      offloaded(second, { base: first, stored: { ssd: restic("b") } }),
+    ];
+    // A fold that leaves the closed onload holding the lease.
+    const stale = (list: readonly CatalogEvent[]) => {
+      const state = foldCatalog(list);
+      const onload = list.find((e) => e.type === "onloaded") as CatalogEvent;
+      const p = state.projects[project];
+      if (p !== undefined) p.lease = { device, event: onload.id, base: first, at };
+      return state;
+    };
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+        fold: stale,
+      }),
+    ).toEqual([
+      `invariant 5: ${device} holds the lease of ${project}, but its own last event for it is the offload ${second}`,
     ]);
   });
 
   test("invariant 5 (Q17): two simultaneous strict onloads, neither seeing the other, hold it", () => {
     const first = ulid();
-    const events = [offloaded(first), onloaded(first, { device: other }), onloaded(first)];
+    const theirs = onloaded(first, { device: other });
+    const mine = onloaded(first);
+    const events = [offloaded(first), theirs, mine];
     expect(
       catalogInvariantViolations({
         events,
         snapshotsBefore: [restic("a")],
         snapshotsNow: [restic("a")],
         strictOnloads: [
-          { device, before: [first] },
-          { device: other, before: [first] },
+          { device, op: mine.op, before: [first] },
+          { device: other, op: theirs.op, before: [first] },
         ],
       }),
     ).toEqual([]);

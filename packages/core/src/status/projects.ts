@@ -30,6 +30,7 @@ import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok, shellWord } from "@plainport/contract";
 import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
+import { readStoreDescriptor } from "../catalog/identity.ts";
 import {
   eventAt,
   type LoadedCatalog,
@@ -315,8 +316,9 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     const store = config.stores[name];
     if (store === undefined) continue;
     // The mirror first, by the pinned store id (Task 13): no secret is resolved, no engine opened, no seal key derived
-    // to read it. Refreshing it from the store resolves the store's secret through its provider (D105); the provider
-    // and the opener each answer within Q14's deadline, and a secret that does not come is secret-unavailable.
+    // to read it. A plain catalog is refreshed from the store without the secret, as v0.1.1 did (D108); only a sealed
+    // one resolves the store's secret through its provider (D105). The provider, the opener and every store read each
+    // answer within Q14's deadline, and a secret that does not come is secret-unavailable.
     const mirror = await deps.openMirror(id);
     const mirrorBlob = mirror.ok ? mirror.value : failingStore(mirror);
     const deadline = deps.providerDeadlineMs ?? PROVIDER_DEADLINE_MS;
@@ -332,20 +334,34 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
           fix: `check the store ${name}, then re-run`,
         }),
       );
-    const secret = await withinDeadline(
-      resolveSecret(io, deps.env, paths.home, name, secretRefOf(store)),
-      deadline,
-      scheduler,
-    );
-    const password: Result<string> = secret.timedOut
-      ? timedOut(secret.seconds, "store.secret-missing", `the secret provider of store ${name}`)
-      : secret.value;
-    const opening = password.ok
-      ? await withinDeadline(deps.opener.open(name, store, password.value), deadline, scheduler)
-      : { timedOut: false as const, value: password };
-    const opened: Result<OpenedStore> = opening.timedOut
-      ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
-      : opening.value;
+    const openWith = async (password: string): Promise<Result<OpenedStore>> => {
+      const opening = await withinDeadline(deps.opener.open(name, store, password), deadline, scheduler);
+      return opening.timedOut
+        ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
+        : opening.value;
+    };
+    /** Whether the catalog is sealed: by the opener's policy, or by the seal the store's identity publishes. */
+    const sealed = async (target: OpenedStore): Promise<Result<boolean>> => {
+      if (target.catalog?.seal === "sealed") return ok(true);
+      const identity = await withinDeadline(readStoreDescriptor(target.blob), deadline, scheduler);
+      if (identity.timedOut) return timedOut(identity.seconds, "store.unreachable", `store ${name}`);
+      // An identity that cannot be read is loadCatalog's to report.
+      return ok(identity.value.ok && identity.value.value?.seal === "v1");
+    };
+    let opened = await openWith("");
+    const needsSecret = opened.ok ? await sealed(opened.value) : ok(false);
+    if (!needsSecret.ok) opened = needsSecret;
+    else if (needsSecret.value) {
+      const secret = await withinDeadline(
+        resolveSecret(io, deps.env, paths.home, name, secretRefOf(store)),
+        deadline,
+        scheduler,
+      );
+      const password: Result<string> = secret.timedOut
+        ? timedOut(secret.seconds, "store.secret-missing", `the secret provider of store ${name}`)
+        : secret.value;
+      opened = password.ok ? await openWith(password.value) : password;
+    }
     let read: Result<LoadedCatalog>;
     if (!opened.ok) {
       // A store that cannot be asked is read from the mirror, stale, with the reason beside it.

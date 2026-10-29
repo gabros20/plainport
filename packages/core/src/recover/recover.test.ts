@@ -19,7 +19,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
-import { encode } from "../catalog/codec.ts";
+import { type CatalogPolicy, encode } from "../catalog/codec.ts";
 import { catalogReader } from "../catalog/head.ts";
 import { parseStoreIdentity } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
@@ -2888,7 +2888,7 @@ describe("round 3 minors: a refused detached delete is said, and keeps its deadl
   });
 });
 
-describe("views read the mirror first and never resolve a secret (Task 13)", () => {
+describe("views read the mirror first, and resolve a secret only for a sealed catalog (Task 13, D108)", () => {
   const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
     io: testHost(),
     paths: box.paths,
@@ -3013,38 +3013,50 @@ describe("views read the mirror first and never resolve a secret (Task 13)", () 
     ]);
   });
 
-  // D105: a refresh from the store resolves the secret through its provider, under Q14's deadline.
-  test("a refresh resolves the store's secret through its provider, and the opener gets it", async () => {
-    value(await offloadNow());
-    const seen: string[] = [];
-    const watching: StoreOpener = {
-      open: async (n, s, password) => {
-        seen.push(password);
-        return opener.open(n, s, password);
-      },
-    };
-    const view = await web({ opener: watching });
-    expect(view.stale).toBe(false);
-    expect(seen).toEqual(["pw"]);
+  // D108: a plain catalog is refreshed without the secret, as v0.1.1 did; only a sealed one resolves it (D105).
+  const watching = (seen: string[], catalog?: CatalogPolicy): StoreOpener => ({
+    open: async (n, s, password) => {
+      seen.push(password);
+      const opened = await opener.open(n, s, password);
+      return opened.ok && catalog !== undefined ? { ok: true, value: { ...opened.value, catalog } } : opened;
+    },
+  });
+  const sealedPolicy = (): CatalogPolicy => ({
+    seal: "sealed",
+    storeId: parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array)?.id as string,
+    key: new Uint8Array(32).fill(7),
   });
 
-  test("a secret the provider does not give: the mirror's state, secret-unavailable, the store never opened", async () => {
+  test("a plain catalog is read live with no secret: the opener gets none, even when the provider has none", async () => {
+    value(await offloadNow());
+    await web();
+    for (const environment of [env(), { HOME: box.home, PATH }]) {
+      const seen: string[] = [];
+      const view = await web({ opener: watching(seen), env: environment });
+      expect([view.state, view.stale, view.conditions]).toEqual(["shelved", false, []]);
+      expect(seen).toEqual([""]);
+    }
+  });
+
+  test("a sealed catalog resolves the store's secret through its provider, and the opener gets it", async () => {
     value(await offloadNow());
     await web();
     const seen: string[] = [];
-    const watching: StoreOpener = {
-      open: async (n, s, password) => {
-        seen.push(password);
-        return opener.open(n, s, password);
-      },
-    };
-    const view = await web({ opener: watching, env: { HOME: box.home, PATH } });
+    value(await projectViews(viewDeps({ opener: watching(seen, sealedPolicy()) })));
+    expect(seen).toEqual(["", "pw"]);
+  });
+
+  test("a sealed catalog whose secret the provider does not give: the mirror's state, secret-unavailable", async () => {
+    value(await offloadNow());
+    await web();
+    const seen: string[] = [];
+    const view = await web({ opener: watching(seen, sealedPolicy()), env: { HOME: box.home, PATH } });
     expect([view.state, view.stale, view.conditions]).toEqual([
       "shelved",
       true,
       ["stale", "secret-unavailable"],
     ]);
-    expect(seen).toEqual([]);
+    expect(seen).toEqual([""]);
   });
 
   test("a refresh that times out never writes the mirror afterwards", async () => {
@@ -3195,6 +3207,44 @@ describe("review r1 I2: a sealed event that does not open is never an absent or 
     expect(done?.outcome).toBe("finished");
     expect((await storeEvents()).filter((e) => e.type === "onloaded")).toHaveLength(1);
   });
+
+  // Review r2 #3: an event that does not open but was made before the operation began cannot be its commit, so it
+  // does not hold the store search; one made since does.
+  for (const [when, outcome] of [
+    ["before", "rolled-back"],
+    ["after", "pending"],
+  ] as const)
+    test(`snapshot.done, an unopenable event made ${when} the op began: ${outcome}`, async () => {
+      await crashOffloadAt("offload.snapshot.done");
+      const journal = onlyJournal<OffloadJournal>();
+      // Far from the op either way, whatever clock the test host pins.
+      const time = Date.parse(when === "before" ? "2001-01-01T00:00:00.000Z" : "2999-01-01T00:00:00.000Z");
+      const id = ulid(time);
+      const sealed = value(
+        encode(
+          {
+            v: 1,
+            id,
+            op: id,
+            type: "offloaded",
+            device: device.id,
+            at: new Date(time).toISOString(),
+            project: journal.project.id,
+            root: journal.project.rootId,
+            path: journal.project.path,
+            snapshot: id,
+            stored: { ssd: "a".repeat(64) },
+            stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+          } as CatalogEvent,
+          { seal: "sealed", storeId: storeId(), key: KEY },
+        ),
+      );
+      store.data.set(`meta/v1/events/${id}.json`, sealed);
+      const [op] = reportOf(await recover(recoverDeps())).operations;
+      expect(op?.outcome).toBe(outcome);
+      if (outcome === "pending") expect(op?.finding?.code).toBe("catalog.seal-failed");
+      expect(readFileSync(join(dir, "src/main.ts"), "utf8")).toBe("export const main = 1;\n");
+    });
 
   test("verified, commit.start lost, the event not opening: the store search waits, never rolls back", async () => {
     await crashOffloadAt("offload.commit.appended");
