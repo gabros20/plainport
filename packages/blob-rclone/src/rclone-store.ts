@@ -28,7 +28,10 @@
 // cut out of everything rclone says before it reaches a finding.
 //
 // Exit codes: on get, stat, list and delete, 3 (directory not found) and 4 (file not found) mean the key is not
-// there. 5 (a temporary error) and connection failures are store.unreachable; anything else is store.failed.
+// there. 5 (a temporary error) and connection failures are store.unreachable; anything else is store.failed. On SFTP
+// and local, where the store's root is a real folder, a 3 on a read is checked against the root: a root that is not
+// there (a volume not mounted, a path renamed) is store.unreachable, never an empty store. The root is made when the
+// store is set up; on S3 a prefix is no folder, and the bucket's absence is rclone's own error.
 //
 // An SFTP remote must check host keys: through the system's OpenSSH (the `ssh` option, which checks them as configured)
 // or with rclone's own SSH given `known_hosts_file`. Without either, rclone's SSH connects to any host, so every call
@@ -509,11 +512,40 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     const ran = await run(call, "lsjson", ["--stat", ...NO_METADATA, remotePath(key)], { capture: true });
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
-    if (exit === "missing") return ok(null);
+    if (exit === "missing") return absent(call, ran.value.exitCode, null);
     if (exit !== "ok") return exitFailure(ran.value, "lsjson", `${key} could not be looked up`);
     const parsed = EntrySchema.safeParse(parseJson(ran.value.captured));
     if (!parsed.success) return failed(`${key} could not be looked up`, "rclone lsjson printed no entry");
     return ok(parsed.data.IsDir ? null : { size: parsed.data.Size });
+  };
+
+  /**
+   * After a read found a folder missing (exit 3): ok when the store's root is there (or is no folder, on S3), else
+   * store.unreachable, so a vanished root never reads as an empty store.
+   */
+  const rootThere = async (call: Call): Promise<Result<void>> => {
+    if (remote.type === "s3") return ok(undefined);
+    const ran = await run(call, "lsjson", ["--stat", ...NO_METADATA, remotePath("")], { capture: true });
+    if (!ran.ok) return ran;
+    const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
+    if (exit === "missing")
+      return fail(
+        finding("store.unreachable", {
+          message: `the store's folder ${where} is not there (a volume not mounted, or a path that moved); nothing was read`,
+          fix: "mount the volume or fix the store's path, then re-run; plainport never takes a missing store for an empty one",
+        }),
+      );
+    if (exit !== "ok") return exitFailure(ran.value, "lsjson", "the store's root could not be looked up");
+    const parsed = EntrySchema.safeParse(parseJson(ran.value.captured));
+    if (!parsed.success || !parsed.data.IsDir)
+      return failed("the store's root is not a folder", "", "fix the store's path, then re-run");
+    return ok(undefined);
+  };
+  /** A read's "not there", unless the exit says a folder is missing and the root is gone with it. */
+  const absent = async <T>(call: Call, exitCode: number | null, value: T): Promise<Result<T>> => {
+    if (exitCode !== 3) return ok(value);
+    const there = await rootThere(call);
+    return there.ok ? ok(value) : there;
   };
 
   /** How often get reads a key again that was written between its read and its stat. */
@@ -532,7 +564,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
           });
       if (!ran.ok) return ran;
       const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
-      if (exit === "missing") return ok(null);
+      if (exit === "missing") return absent(call, ran.value.exitCode, null);
       if (exit !== "ok") return exitFailure(ran.value, "cat", `${key} could not be read`);
       const bytes = ran.value.captured ?? new Uint8Array();
       if (bytes.length > 0) return ok(bytes);
@@ -553,7 +585,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     });
     if (!ran.ok) return ran;
     const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
-    if (exit === "missing") return ok([]);
+    if (exit === "missing") return absent(call, ran.value.exitCode, []);
     const what = `${dir === "" ? "the root" : `${dir}/`} could not be listed`;
     if (exit !== "ok") return exitFailure(ran.value, "lsjson", what);
     const parsed = ListingSchema.safeParse(parseJson(ran.value.captured));
@@ -687,7 +719,10 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     if (!ran.ok) result = ran;
     else {
       const exit = classifyExit(ran.value.exitCode, ran.value.stderr.text);
-      if (exit !== "ok" && exit !== "missing")
+      if (exit === "missing") {
+        const there = await absent(call, ran.value.exitCode, undefined);
+        if (!there.ok) result = there;
+      } else if (exit !== "ok")
         result = exitFailure(ran.value, "copy", `${batch.length} keys could not be read`);
     }
     // Every copy is read, then unlinked by name, so the folder the guarded delete then removes holds no store files.

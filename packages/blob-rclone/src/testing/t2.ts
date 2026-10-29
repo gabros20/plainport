@@ -92,19 +92,46 @@ export const t2World = async (how: { trace?: boolean } = {}): Promise<T2World> =
     sandbox,
     shim,
     rclone,
-    store: (remote, patch = {}) =>
-      rcloneBlobStore({
+    store: (remote, patch = {}) => {
+      // An SFTP store's root is a real folder, which setting the store up makes (a missing one is unreachable).
+      if (remote.type === "sftp")
+        makeRoot({ home: sandbox.home, path: `${shim.dir}:/usr/bin:/bin`, rclone }, remote);
+      return rcloneBlobStore({
         host,
         rclone,
         remote,
         paths: sandbox.paths,
         env: { HOME: sandbox.home, PATH: `${shim.dir}:/usr/bin:/bin`, TMPDIR: sandbox.dir("tmp") },
         ...patch,
-      }),
+      });
+    },
     remote: (backend, root, remoteHow = {}) =>
       backend === "s3" ? s3Remote(env, root, remoteHow) : sftpRemote(env, shim, root, remoteHow),
     cleanup: () => sandbox.cleanup(),
   };
+};
+
+/**
+ * Makes `remote`'s root folder (rclone mkdir, which is idempotent), as setting a store up does. Test-only: it builds
+ * the remote's environment the way the adapter does.
+ */
+export const makeRoot = (how: { home: string; path: string; rclone: string }, remote: RcloneRemote): void => {
+  const env: Record<string, string> = {
+    HOME: how.home,
+    PATH: how.path,
+    RCLONE_CONFIG: join(how.home, "absent", "rclone.conf"),
+    RCLONE_CONFIG_ROOT_TYPE: remote.type,
+  };
+  for (const [name, option] of Object.entries({ ...remote.options, ...remote.secrets }))
+    env[`RCLONE_CONFIG_ROOT_${name.toUpperCase()}`] = option;
+  const ran = Bun.spawnSync([how.rclone, "-q", "mkdir", `ROOT:${remote.root}`], {
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 120_000,
+  });
+  if (ran.exitCode !== 0)
+    throw new Error(`rclone mkdir ${remote.root}: ${ran.exitCode} ${ran.stderr.toString()}`);
 };
 
 /**

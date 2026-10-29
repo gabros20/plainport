@@ -11,6 +11,7 @@ import { blobStoreContract } from "../../core/src/testing/blob-store-contract.ts
 import { testHost } from "../../core/src/testing/host.ts";
 import { makeSandbox } from "../../core/src/testing/sandbox.ts";
 import { type RcloneRemote, rcloneBlobStore } from "./rclone-store.ts";
+import { makeRoot } from "./testing/t2.ts";
 
 const value = <T>(result: Result<T>): T => {
   if (!result.ok) throw new Error(`${result.finding.code}: ${result.finding.message}`);
@@ -64,10 +65,13 @@ for (const kind of ["s3", "sftp"] as const) {
       const host = testHost();
       const found = await toolPath(host, "rclone", { env: {} });
       if (!found.ok) throw new Error(found.finding.message);
+      const remote = remotes()[kind](crypto.randomUUID());
+      if (kind === "sftp")
+        makeRoot({ home: sandbox.home, path: "/usr/bin:/bin", rclone: found.value.path }, remote);
       const store = rcloneBlobStore({
         host,
         rclone: found.value.path,
-        remote: remotes()[kind](crypto.randomUUID()),
+        remote,
         paths: sandbox.paths,
         env: { HOME: sandbox.home, PATH: "/usr/bin:/bin" },
       });

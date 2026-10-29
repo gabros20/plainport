@@ -83,6 +83,11 @@ const scripted = (script: Script, options: Partial<RcloneBlobStoreOptions> = {},
   return { store, specs };
 };
 
+/** Whether a run is the adapter's look at the store's root (lsjson --stat of the remote's root). */
+const isRootStat = (spec: RunSpec): boolean =>
+  (spec.args ?? []).includes("--stat") && (spec.args ?? []).at(-1) === `${RCLONE_REMOTE}:plainport`;
+const ROOT_THERE = outcome(0, { stdout: JSON.stringify({ Path: "", Size: -1, IsDir: true }) });
+
 const S3_REMOTE = {
   type: "s3",
   root: "bucket/store",
@@ -134,14 +139,18 @@ describe("exit codes, on recorded stderr", () => {
 
   test("on get and stat, 3 and 4 mean null", async () => {
     for (const code of [3, 4]) {
-      const { store } = scripted(() => outcome(code, { stderr: "ERROR : object not found\n" }));
+      const { store } = scripted((spec) =>
+        isRootStat(spec) ? ROOT_THERE : outcome(code, { stderr: "ERROR : object not found\n" }),
+      );
       expect(value(await store.get("meta/v1/events/a.json"))).toBeNull();
       expect(value(await store.stat("meta/v1/events/a.json"))).toBeNull();
     }
   });
 
   test("a listing of a folder that is not there is empty; deleting a missing key is fine", async () => {
-    const { store } = scripted(() => outcome(3, { stderr: "ERROR : error listing: directory not found\n" }));
+    const { store } = scripted((spec) =>
+      isRootStat(spec) ? ROOT_THERE : outcome(3, { stderr: "ERROR : error listing: directory not found\n" }),
+    );
     expect(value(await store.list("meta/v1/events/"))).toEqual([]);
     expect(value(await store.delete("meta/v1/events/a.json"))).toBeUndefined();
   });
@@ -705,6 +714,28 @@ describe("review phase 4 (I2, I3, M1, M2, M6)", () => {
       finding: { code: "process.cancelled" },
     });
     expect(cancellable.specs).toHaveLength(1);
+  });
+
+  test("a store whose root folder is not there is store.unreachable, never an empty store (M3)", async () => {
+    const missing = () => outcome(3, { stderr: "ERROR : error listing: directory not found\n" });
+    const { store } = scripted(missing);
+    for (const result of [
+      await store.get("meta/v1/store.json"),
+      await store.stat("meta/v1/store.json"),
+      await store.list("meta/v1/events/"),
+      await store.list(""),
+      await store.getMany(["meta/v1/store.json"]),
+    ]) {
+      expect(result).toMatchObject({ ok: false, finding: { code: "store.unreachable" } });
+      if (!result.ok) expect(result.finding.message).toContain("is not there");
+    }
+    // A file not found (4) is a missing key with no look at the root; on S3 a prefix is no folder to look at.
+    const file = scripted(() => outcome(4, { stderr: "ERROR : object not found\n" }));
+    expect(value(await file.store.get("meta/v1/store.json"))).toBeNull();
+    expect(file.specs.some(isRootStat)).toBe(false);
+    const s3 = scripted(missing, { remote: S3_REMOTE });
+    expect(value(await s3.store.list("meta/v1/events/"))).toEqual([]);
+    expect(s3.specs).toHaveLength(1);
   });
 
   test("the sweep never deletes a temporary younger than one call's deadline plus clock skew (I2)", async () => {
