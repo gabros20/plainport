@@ -18,7 +18,8 @@
 //   PLAINPORT_TEST_FAULT_OCCURRENCE=<n>    the nth time it is reached (default 1);
 //   PLAINPORT_TEST_PAUSE_AT=<step>         the first time the step is reached, create PLAINPORT_TEST_PAUSE_FILE and
 //   PLAINPORT_TEST_PAUSE_FILE=<path>       block until it is removed (two minutes at most), then go on.
-// They are documented here and in CONTRIBUTING.md, never in DESIGN.md's configuration.
+// They are documented here and in CONTRIBUTING.md, never in DESIGN.md's configuration. The detached delete's child gets
+// them too (testHookEnv), so a test can pause or kill it at trash.delete.checked.
 
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -72,4 +73,21 @@ export const testFaultPlan = async (
       while (existsSync(pauseFile) && Date.now() < deadline) Bun.sleepSync(10);
     },
   };
+};
+
+const HOOK_VARIABLES = [
+  "PLAINPORT_TEST_FAULT_AT",
+  "PLAINPORT_TEST_FAULT_OCCURRENCE",
+  "PLAINPORT_TEST_PAUSE_AT",
+  "PLAINPORT_TEST_PAUSE_FILE",
+] as const;
+
+/** The hook's variables this process has, for the detached delete's child (whose environment is otherwise scrubbed). */
+export const testHookEnv = (env: Readonly<Record<string, string | undefined>>): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const name of HOOK_VARIABLES) {
+    const value = env[name];
+    if (value !== undefined) out[name] = value;
+  }
+  return out;
 };

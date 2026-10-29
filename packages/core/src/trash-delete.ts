@@ -87,9 +87,15 @@ const unlinkIfThere = async (io: LocalIo, path: string): Promise<boolean> => {
   }
 };
 
-/** Runs the detached delete in this process and returns its exit code (TRASH_DELETE_EXIT); never throws for I/O. */
+/** The pause seam for the race schedules (see OFFLOAD_PAUSE_SEAMS): the guard passed, nothing is deleted yet. */
+export const TRASH_DELETE_PAUSE_SEAMS = ["trash.delete.checked"] as const;
+
+/**
+ * Runs the detached delete in this process and returns its exit code (TRASH_DELETE_EXIT); never throws for I/O. A host
+ * with a fault seam reaches trash.delete.checked; the child of a release build has none that pauses (D67).
+ */
 export const runTrashDelete = async (
-  io: LocalIo & Pick<HostPorts, "bootSession">,
+  io: LocalIo & Pick<HostPorts, "bootSession"> & Partial<Pick<HostPorts, "faultAt">>,
   payloadText: string | undefined,
 ): Promise<number> => {
   let payload: TrashDeletePayload;
@@ -134,6 +140,7 @@ export const runTrashDelete = async (
     await unlinkIfThere(io, boot);
     return TRASH_DELETE_EXIT.refused;
   }
+  io.faultAt?.("trash.delete.checked");
   try {
     await io.fs.removeTree(trash);
   } catch {

@@ -38,6 +38,8 @@ export interface MacosHostOptions {
   spawner?: Spawner;
   /** How to run plainport itself, for the detached delete's guarded child (D87); selfCommand() by default. */
   self?: readonly string[];
+  /** More of the environment the detached delete's child gets: the crash matrix's own variables, in its build only. */
+  detachedEnv?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -103,7 +105,14 @@ export const createMacosHost = (options: MacosHostOptions = {}): MacosHost => {
         trash,
         journal,
         device,
-        { self, ...context, ...(tripwire ? { passEnv: { PLAINPORT_TRIPWIRE_REAL_HOME: tripwire } } : {}) },
+        {
+          self,
+          ...context,
+          passEnv: {
+            ...options.detachedEnv,
+            ...(tripwire ? { PLAINPORT_TRIPWIRE_REAL_HOME: tripwire } : {}),
+          },
+        },
       );
     },
   };

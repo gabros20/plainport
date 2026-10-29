@@ -390,6 +390,13 @@ describe("onload: the round trip", () => {
     await expectInvariants();
   });
 
+  test("reaches the race schedules' pause seam onload.lease-checked once, after the lease check and before the restore", async () => {
+    await offload();
+    value(await onload());
+    expect(steps.filter((s) => s === "onload.lease-checked")).toHaveLength(1);
+    expect(steps.indexOf("onload.lease-checked")).toBeLessThan(steps.indexOf("onload.restore.start"));
+  });
+
   test("reports its phases in order and reaches every journal step once, in ONLOAD_STEPS order", async () => {
     await offload();
     const result = value(await onload());

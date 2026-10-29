@@ -1,13 +1,27 @@
-// Invariants 4–6 on a catalog (catalogInvariantViolations): what the crash matrix asserts after every recover.
+// The invariants' own tests (M2 Task 14): each catches a seeded violation. Invariants 1–3 on one device
+// (invariantViolations), 4–6 on a catalog (catalogInvariantViolations): what the saga tests, the crash matrix and the
+// race schedules assert.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { foldCatalog } from "../catalog/fold.ts";
+import { appendEvent, storeEventLog } from "../catalog/log.ts";
 import { ulid } from "../ulid.ts";
-import { catalogInvariantViolations, namesIn } from "./invariants.ts";
+import { fakeEngine } from "./fake-engine.ts";
+import {
+  captureTree,
+  catalogInvariantViolations,
+  type InvariantSubject,
+  invariantViolations,
+  namesIn,
+  type RecordedCall,
+  recordingBlobStore,
+} from "./invariants.ts";
+import { memoryBlobStore } from "./memory-blob-store.ts";
+import { makeSandbox, type Sandbox } from "./sandbox.ts";
 
 const device = ulid();
 const other = ulid();
@@ -173,5 +187,340 @@ describe("namesIn: listing a holder a detached delete may remove", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("catalogInvariantViolations: M2's per-device and recorded checks", () => {
+  test("invariant 5 (Q17): a strict onload by a device that observed another's lease is caught", () => {
+    const first = ulid();
+    const theirs = onloaded(first, { device: other });
+    const mine = onloaded(first);
+    const events = [offloaded(first), theirs, mine];
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a")],
+        snapshotsNow: [restic("a")],
+        strictOnloads: [{ device, op: mine.op, before: [first, theirs.id] }],
+      }),
+    ).toEqual([
+      `invariant 5: ${device} onloaded ${project} under strict leases (${mine.op}) although it observed ${other} holding it`,
+    ]);
+  });
+
+  // Review r2 #2: a strict onload is judged by its own op. One that observed the holder and refused wrote no event; the
+  // device's later onload, after the holder offloaded, is judged by what that later run observed.
+  test("invariant 5 (Q17): only the strict onload's own event is judged, not the device's later onloads", () => {
+    const first = ulid();
+    const second = ulid();
+    const theirs = onloaded(first, { device: other });
+    const released = offloaded(second, { device: other, base: first, stored: { ssd: restic("b") } });
+    const mine = onloaded(second);
+    const events = [offloaded(first), theirs, released, mine];
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+        strictOnloads: [
+          { device, op: ulid(), before: [first, theirs.id] },
+          { device, op: mine.op, before: [first, theirs.id, second] },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  // Review r2 #1: leases are advisory. A and B both onload (warn), then B offloads while A's copy is still live: the
+  // fold says shelved with A's lease, which is right (A's next offload forks).
+  test("invariant 5 (Q17): shelved by one device while another's onloaded copy is live is no violation", () => {
+    const first = ulid();
+    const second = ulid();
+    const events = [
+      offloaded(first),
+      onloaded(first),
+      onloaded(first, { device: other }),
+      offloaded(second, { device: other, base: first, stored: { ssd: restic("b") } }),
+    ];
+    const state = foldCatalog(events).projects[project];
+    expect([state?.status, state?.lease?.device]).toEqual(["shelved", device]);
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+      }),
+    ).toEqual([]);
+  });
+
+  test("invariant 5 (Q17): a lease named for a device whose own last event is an offload is caught", () => {
+    const first = ulid();
+    const second = ulid();
+    const events = [
+      offloaded(first),
+      onloaded(first),
+      offloaded(second, { base: first, stored: { ssd: restic("b") } }),
+    ];
+    // A fold that leaves the closed onload holding the lease.
+    const stale = (list: readonly CatalogEvent[]) => {
+      const state = foldCatalog(list);
+      const onload = list.find((e) => e.type === "onloaded") as CatalogEvent;
+      const p = state.projects[project];
+      if (p !== undefined) p.lease = { device, event: onload.id, base: first, at };
+      return state;
+    };
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a"), restic("b")],
+        snapshotsNow: [restic("a"), restic("b")],
+        fold: stale,
+      }),
+    ).toEqual([
+      `invariant 5: ${device} holds the lease of ${project}, but its own last event for it is the offload ${second}`,
+    ]);
+  });
+
+  test("invariant 5 (Q17): two simultaneous strict onloads, neither seeing the other, hold it", () => {
+    const first = ulid();
+    const theirs = onloaded(first, { device: other });
+    const mine = onloaded(first);
+    const events = [offloaded(first), theirs, mine];
+    expect(
+      catalogInvariantViolations({
+        events,
+        snapshotsBefore: [restic("a")],
+        snapshotsNow: [restic("a")],
+        strictOnloads: [
+          { device, op: mine.op, before: [first] },
+          { device: other, op: theirs.op, before: [first] },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  test("invariant 6: an event gone from the store, or rewritten, is caught", () => {
+    const first = ulid();
+    const second = ulid();
+    const kept = offloaded(first);
+    const gone = offloaded(second, { base: first, stored: { ssd: restic("b") } });
+    const rewritten = { ...kept, path: "elsewhere" } as CatalogEvent;
+    expect(
+      catalogInvariantViolations({
+        events: [rewritten],
+        snapshotsBefore: [restic("a")],
+        snapshotsNow: [restic("a")],
+        eventsBefore: [kept, gone],
+      }),
+    ).toEqual([
+      `invariant 6: the event ${first} was rewritten`,
+      `invariant 6: the event ${second} is gone from the store`,
+    ]);
+  });
+
+  test("invariant 6: a recorded restic forget or prune, or a store delete of an event or a snapshot, is caught", async () => {
+    const log: RecordedCall[] = [];
+    const store = recordingBlobStore(memoryBlobStore(), log);
+    await store.put("meta/v1/state.json", new Uint8Array());
+    await store.delete("meta/v1/state.json");
+    await store.delete(`meta/v1/events/${ulid()}.json`);
+    await store.delete(`repo/snapshots/${restic("c")}`);
+    log.push({ tool: "restic", args: ["--repo", "/s", "snapshots", "--json"] });
+    log.push({ tool: "restic", args: ["--repo", "/s", "forget", "--prune", restic("a")] });
+    const found = catalogInvariantViolations({
+      events: [],
+      snapshotsBefore: [],
+      snapshotsNow: [],
+      recorded: log,
+    });
+    expect(found).toEqual([
+      `invariant 6: the store's ${(log[2] as { key: string }).key} was deleted`,
+      `invariant 6: the store's repo/snapshots/${restic("c")} was deleted`,
+      `invariant 6: restic forget ran: --repo /s forget --prune ${restic("a")}`,
+    ]);
+    expect(log.slice(0, 2)).toEqual([
+      { tool: "store", method: "put", key: "meta/v1/state.json" },
+      { tool: "store", method: "delete", key: "meta/v1/state.json" },
+    ]);
+  });
+});
+
+// Invariants 1–3 on one device: a project offloaded by this device (dev A) and forked later by another (dev B).
+describe("invariantViolations: per device", () => {
+  let box: Sandbox;
+  const rootKey = "work";
+  const a = ulid();
+  const b = ulid();
+
+  beforeEach(() => {
+    box = makeSandbox("plainport-invariants-");
+  });
+  afterEach(() => box.cleanup());
+
+  /** A project folder snapshotted by a fake engine; the offloaded event from `by`, and the folder as captured. */
+  const world = async () => {
+    const root = box.dir(rootKey);
+    const dir = box.dir(`${rootKey}/web`);
+    box.file(`${rootKey}/web/src/main.ts`, "export const main = 1;\n");
+    const blob = memoryBlobStore();
+    const engine = fakeEngine(undefined, {}, { password: "pw" });
+    await engine.init();
+    const snap = await engine.snapshot({ dir, excludes: [], tags: ["plainport"] }, { op: ulid() });
+    if (!snap.ok) throw new Error("the fake snapshot failed");
+    const released = captureTree(dir);
+    const projectId = ulid();
+    const rootId = ulid();
+    const event = (by: string, snapshot: string, extra: Partial<CatalogEvent> = {}): CatalogEvent =>
+      ({
+        v: 1,
+        id: snapshot,
+        op: snapshot,
+        type: "offloaded",
+        device: by,
+        at,
+        project: projectId,
+        root: rootId,
+        path: "web",
+        snapshot,
+        stored: { ssd: snap.value.id },
+        stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        ...extra,
+      }) as CatalogEvent;
+    const append = async (e: CatalogEvent) => {
+      const done = await appendEvent(storeEventLog(blob), e);
+      if (!done.ok) throw new Error(done.finding.message);
+    };
+    const stub = (snapshot: string) =>
+      writeFileSync(
+        `${dir}.plainport`,
+        `${JSON.stringify({
+          plainport: 1,
+          project: projectId,
+          root: rootKey,
+          rootId,
+          path: "web",
+          store: "ssd",
+          snapshot,
+          offloadedAt: at,
+          bytes: 1,
+          restore: "plainport onload work:web",
+        })}\n`,
+      );
+    const subject = (device: string, extra: Partial<InvariantSubject> = {}): InvariantSubject => ({
+      paths: box.paths,
+      device,
+      project: { id: projectId, dir },
+      roots: [root],
+      store: { name: "ssd", blob, engine },
+      released,
+      now: new Date(),
+      settleMs: 0,
+      ...extra,
+    });
+    return { root, rootId, projectId, dir, event, append, stub, subject };
+  };
+
+  test("A shelved it and B forked it later: A's stub stays right although the catalog is conflicted", async () => {
+    const w = await world();
+    const base = ulid();
+    await w.append(w.event(a, base));
+    // A and B both worked on the base; A committed first, B's offload forked it.
+    const mine = ulid();
+    await w.append(w.event(a, mine, { base }));
+    await w.append(w.event(b, ulid(), { base }));
+    rmSync(w.dir, { recursive: true });
+    w.stub(mine);
+    expect(await invariantViolations(w.subject(a))).toEqual([]);
+    // B's view of its own (other) folder: its last operation was its fork, its folder is still there.
+    mkdirSync(w.dir);
+    rmSync(`${w.dir}.plainport`);
+    expect(await invariantViolations(w.subject(b))).toEqual([]);
+  });
+
+  test("invariant 2: a stub missing after this device's own offload shelved the project is caught", async () => {
+    const w = await world();
+    const mine = ulid();
+    await w.append(w.event(a, mine));
+    rmSync(w.dir, { recursive: true });
+    const found = await invariantViolations(w.subject(a));
+    expect(found.filter((p) => p.startsWith("invariant 2"))).toEqual([
+      `invariant 2: the stub is missing, but this device's last operation on the project was an offload (${mine}) and its folder is gone`,
+    ]);
+  });
+
+  test("invariant 2: a device that never shelved the project needs no stub where another device shelved it", async () => {
+    const w = await world();
+    await w.append(w.event(a, ulid()));
+    rmSync(w.dir, { recursive: true });
+    expect((await invariantViolations(w.subject(b))).filter((p) => p.startsWith("invariant 2"))).toEqual([]);
+  });
+
+  test("invariant 2: a stub beside the folder of a device whose last operation was an onload is caught", async () => {
+    const w = await world();
+    const first = ulid();
+    await w.append(w.event(a, first));
+    const back = ulid();
+    await w.append({
+      v: 1,
+      id: back,
+      op: back,
+      type: "onloaded",
+      device: a,
+      at,
+      project: w.projectId,
+      root: w.rootId,
+      path: "web",
+      base: first,
+      over: first,
+    } as CatalogEvent);
+    w.stub(first);
+    expect(await invariantViolations(w.subject(a))).toEqual([
+      `invariant 2: the stub exists, but this device's last operation on the project was an onload (${back}) and its folder is present`,
+    ]);
+  });
+
+  test("invariant 2: a stub naming another snapshot than this device's last offload is caught", async () => {
+    const w = await world();
+    const mine = ulid();
+    await w.append(w.event(a, mine));
+    rmSync(w.dir, { recursive: true });
+    const wrong = ulid();
+    w.stub(wrong);
+    expect((await invariantViolations(w.subject(a))).filter((p) => p.startsWith("invariant 2"))).toEqual([
+      `invariant 2: the stub names ${wrong}, this device's last offload made ${mine}`,
+    ]);
+  });
+
+  test("invariant 1: a folder gone with no offloaded event from this device is caught", async () => {
+    const w = await world();
+    const theirs = ulid();
+    await w.append(w.event(b, theirs));
+    rmSync(w.dir, { recursive: true });
+    w.stub(theirs);
+    const found = await invariantViolations(w.subject(a));
+    expect(found).toContain(
+      `invariant 1: ${w.dir} is gone, but its snapshot ${theirs} has no offloaded event in the store`,
+    );
+  });
+
+  test("invariant 1: a snapshot that does not match the folder as released is caught", async () => {
+    const w = await world();
+    const mine = ulid();
+    await w.append(w.event(a, mine));
+    const released = captureTree(w.dir);
+    released.set("src/lost.ts", { type: "file", size: 4, mode: 0o644 });
+    rmSync(w.dir, { recursive: true });
+    w.stub(mine);
+    expect(await invariantViolations(w.subject(a, { released }))).toEqual([
+      `invariant 1: ${w.dir} is gone, but its snapshot does not match the folder as released: src/lost.ts`,
+    ]);
+  });
+
+  test("invariant 3: a trash folder no open journal accounts for is caught", async () => {
+    const w = await world();
+    const left = join(w.root, ".plainport-trash", ulid());
+    mkdirSync(left, { recursive: true });
+    expect(await invariantViolations(w.subject(a))).toEqual([
+      `invariant 3: ${left} remains from a finished operation`,
+    ]);
   });
 });
