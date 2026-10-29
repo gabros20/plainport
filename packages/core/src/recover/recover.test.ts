@@ -3309,3 +3309,97 @@ describe("review r1 I2: a sealed event that does not open is never an absent or 
     await expectPendingThenFinished(await sealEvents());
   });
 });
+
+describe("ls merges catalogs by project id (Task 21)", () => {
+  const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
+    io: testHost(),
+    paths: box.paths,
+    env: env(),
+    device,
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: async () => ({ ok: true, value: mirror }),
+    providerDeadlineMs: 5_000,
+    ...over,
+  });
+
+  /** A second store, nas, whose catalog holds the web project too (an offload made there from another copy). */
+  const nasHolding = async (names: string[]) => {
+    const done = value(await offloadNow());
+    await waitJournalsGone();
+    const event = value(await readEvents(storeEventLog(store))).events.find((e) => e.type === "offloaded");
+    if (event?.type !== "offloaded") throw new Error("no offloaded event");
+    config(names.map((n) => `[stores.${n}]\nkind = "local"\npath = "~/nas"`).join("\n"));
+    box.dir("nas");
+    const nas = memoryBlobStore({ createIfAbsent: true });
+    const nasMirror = memoryBlobStore({ createIfAbsent: true });
+    const nasId = ulid();
+    const both: StoreOpener = {
+      open: async (name) => ({ ok: true, value: { blob: names.includes(name) ? nas : store, engine } }),
+    };
+    value(
+      await setUpStore(testHost(), {
+        paths: box.paths,
+        env: { PLAINPORT_STORE_PASSWORD: "pw" },
+        name: names[0] as string,
+        store: { kind: "local", path: "~/nas" },
+        opener: both,
+        mint: () => nasId,
+      }),
+    );
+    for (const name of names.slice(1))
+      value(
+        await updateRegistry(testHost(), box.paths, (r) => ({
+          ok: true,
+          value: { ...r, stores: { ...r.stores, [name]: nasId } },
+        })),
+      );
+    const other = ulid();
+    value(
+      await appendEvent(storeEventLog(nas), {
+        ...event,
+        id: ulid(),
+        op: other,
+        snapshot: other,
+        stored: { [nasId]: "e".repeat(64) },
+      }),
+    );
+    return {
+      done,
+      deps: viewDeps({
+        opener: both,
+        openMirror: async (id) => ({ ok: true, value: id === nasId ? nasMirror : mirror }),
+      }),
+    };
+  };
+
+  test("a project in two stores' catalogs is one row, with several-stores, showing its root's store's", async () => {
+    const { done, deps } = await nasHolding(["nas"]);
+    const views = value(await projectViews(deps));
+    const webs = views.projects.filter((p) => p.address === "work:web");
+    expect(webs).toHaveLength(1);
+    const [web] = webs;
+    expect(web?.conditions).toContain("several-stores");
+    expect(web?.store).toBe("ssd");
+    expect(web?.head).toBe(done.snapshot);
+    expect(web?.conditionDetails.find((d) => d.condition === "several-stores")?.message).toContain(
+      "stores ssd and nas",
+    );
+  });
+
+  test("one store under two names is one catalog: no several-stores", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    config('[stores.disk]\nkind = "local"\npath = "~/ssd"');
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: { ...r, stores: { ...r.stores, disk: r.stores?.ssd as string } },
+      })),
+    );
+    const views = value(await projectViews(viewDeps()));
+    const webs = views.projects.filter((p) => p.address === "work:web");
+    expect(webs.map((w) => w.conditions)).toEqual([[]]);
+    expect(views.stores.map((st) => st.name).sort()).toEqual(["disk", "ssd"]);
+  });
+});
