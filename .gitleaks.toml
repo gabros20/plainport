@@ -1,0 +1,9 @@
+# gitleaks configuration (ADR-0021): the default rules, plus one narrow allowlist.
+[extend]
+useDefault = true
+
+[allowlist]
+# fixtures/seal/v1.json holds the published Catalog seal v1 test vectors (a made-up master key, the key derived from
+# it and fixed nonces). They are public by design and no real key; nothing else is allowlisted.
+description = "Catalog seal v1 test vectors: published, no real keys"
+paths = ['''(^|/)fixtures/seal/v1\.json$''']

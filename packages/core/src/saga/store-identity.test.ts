@@ -12,6 +12,7 @@ import {
   appendEvent,
   type CatalogEvent,
   encodeEvent,
+  mirrorEventLog,
   readEvents,
   STORE_EVENTS_PREFIX,
   storeEventLog,
@@ -445,7 +446,7 @@ describe("store identity: a snapshot is located on the store its event was read 
     expect(view?.head).toBe(done.snapshot);
     expect(view?.stale).toBe(true);
     // The mirror is the store's by its id, so the snapshot's location is still the old store's.
-    const mirrored = value(await readEvents({ store: mbp.mirror, prefix: "events/" })).events.find(
+    const mirrored = value(await readEvents(mirrorEventLog(mbp.mirror))).events.find(
       (e) => e.type === "offloaded" && e.snapshot === done.snapshot,
     );
     expect(mirrored?.type === "offloaded" ? Object.values(mirrored.stored) : []).toHaveLength(1);

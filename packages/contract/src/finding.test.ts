@@ -230,6 +230,18 @@ describe("findings", () => {
       "plan.not-found": { severity: "block", allowable: false, exitCode: 4, summary: expect.any(String) },
       "catalog.head-moved": { severity: "block", allowable: false, exitCode: 8, summary: expect.any(String) },
       "catalog.incomplete": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "catalog.seal-failed": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "catalog.unsealed-event": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "catalog.head-uncertain": {
         severity: "block",
         allowable: false,
@@ -257,6 +269,12 @@ describe("findings", () => {
       "project.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "store.not-set-up": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.root-mismatch": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
+      "store.seal-key-unavailable": {
         severity: "block",
         allowable: false,
         exitCode: 6,

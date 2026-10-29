@@ -46,7 +46,13 @@ import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { isUlid, ulid } from "../ulid.ts";
 import { openSaga } from "./journaled.ts";
 import * as saga from "./offload.ts";
-import { OFFLOAD_STEPS, type OffloadDeps, type OffloadRequest, runOffload } from "./offload.ts";
+import {
+  OFFLOAD_PAUSE_SEAMS,
+  OFFLOAD_STEPS,
+  type OffloadDeps,
+  type OffloadRequest,
+  runOffload,
+} from "./offload.ts";
 import { releaseOffload } from "./release.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
@@ -336,6 +342,16 @@ describe("offload: the happy path", () => {
       OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
     );
     await expectInvariants();
+  });
+
+  test("reaches the race schedules' pause seams in place: head-checked before the commit, release.reread before the rename", async () => {
+    value(await offload());
+    const at = (step: string) => steps.indexOf(step);
+    for (const seam of OFFLOAD_PAUSE_SEAMS) expect(steps.filter((s) => s === seam)).toHaveLength(1);
+    expect(at("offload.verified")).toBeLessThan(at("offload.head-checked"));
+    expect(at("offload.head-checked")).toBeLessThan(at("offload.commit.start"));
+    expect(at("offload.release.trash")).toBeLessThan(at("offload.release.reread"));
+    expect(at("offload.release.reread")).toBeLessThan(at("offload.release.renamed"));
   });
 
   test("the journal is written at every boundary: each step finds its own name on disk", async () => {

@@ -146,6 +146,42 @@
                   "description": "A ULID: 26 upper-case Crockford base32 characters"
                 }
               },
+              "resolutions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
+              "rejected": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
+              "kept": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
+              "invalid": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                  "title": "Ulid",
+                  "description": "A ULID: 26 upper-case Crockford base32 characters"
+                }
+              },
               "snapshots": {
                 "type": "object",
                 "propertyNames": {
@@ -218,6 +254,10 @@
               "conflicts",
               "missing",
               "discarded",
+              "resolutions",
+              "rejected",
+              "kept",
+              "invalid",
               "snapshots"
             ],
             "additionalProperties": false

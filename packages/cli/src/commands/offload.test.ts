@@ -755,7 +755,9 @@ describeT1("offload with the real restic on a temp external-disk store", () => {
     });
     // Invariant 2 (a stub exactly when shelved) holds only once recover finishes release (Task 14); 1 and 3 hold now.
     expect(violations.filter((v) => !v.startsWith("invariant 2"))).toEqual([]);
-    expect(violations).toEqual(["invariant 2: the stub is missing, but the project is shelved"]);
+    expect(violations).toEqual([
+      `invariant 2: the stub is missing, but this device's last operation on the project was an offload (${journal.op}) and its folder is gone`,
+    ]);
   }, 120_000);
 
   test("init creates the repository; offload snapshots, verifies and releases; restic lists what the catalog names", async () => {

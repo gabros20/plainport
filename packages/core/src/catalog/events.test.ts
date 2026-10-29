@@ -46,6 +46,7 @@ const valid = {
     snapshot: OP,
     stored: { ssd: RESTIC },
   },
+  resolved: { ...common, type: "resolved", ...project, keep: OP, over: [BASE], supersedes: [] },
   "root-created": { ...common, type: "root-created", root: ROOT, key: "work", label: "Work" },
   "root-bound": { ...common, type: "root-bound", root: ROOT, path: "~/work" },
 } as const;
