@@ -26,7 +26,7 @@ import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry } from "../registry.ts";
 import { type BootstrapPorts, runBootstrap } from "../saga/bootstrap.ts";
 import { withFix } from "../saga/journaled.ts";
-import { prepareLocalStore, secretRefOf } from "../store.ts";
+import { checkStorePin, prepareLocalStore, secretRefOf, setUpStore } from "../store.ts";
 import { storeLocation } from "./location.ts";
 import { bootstrapStoreOf, reachStore } from "./reach.ts";
 import { refuseWhileUpgrading } from "./upgrade.ts";
@@ -205,5 +205,69 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
     location: storeLocation(store, paths.home),
     configChanged,
     secretSaved,
+  });
+};
+
+export interface InitSetUp {
+  id: string;
+  format: 1 | 2;
+  /** This run created the identity file, the restic repository, the id's record in registry.json. */
+  identityCreated: boolean;
+  repositoryCreated: boolean;
+  recorded: boolean;
+  path: string;
+}
+
+/**
+ * `init`'s store setup (D45, D85, D104): a store with no store.json yet is set up through bootstrap, so a store v0.2's
+ * init creates is format 2; an M1 store (format 1) is finished as M1 did and stays format 1 until `store upgrade` (Q2);
+ * a format-2 store is adopted. An opener that cannot set stores up (no location and engineAt) keeps M1's setup. The
+ * name's pin is checked before anything is written, the folder included.
+ */
+export const setUpForInit = async (
+  io: LocalIo,
+  options: {
+    paths: PlainportPaths;
+    env: Env;
+    name: string;
+    store: Store;
+    opener: StoreOpener;
+    ports: Omit<BootstrapPorts, "io" | "paths">;
+    mint: () => string;
+    seal?: SealPolicy;
+  },
+): Promise<Result<InitSetUp>> => {
+  const { paths, env, name, store } = options;
+  const m1 = async (): Promise<Result<InitSetUp>> => {
+    const done = await setUpStore(io, options);
+    return done.ok ? ok({ ...done.value, format: 1 }) : done;
+  };
+  if (store.kind !== "local") return m1();
+  const pin = await checkStorePin(io, options);
+  if (!pin.ok) return pin;
+  const prepared = await prepareLocalStore(io, { paths, env, name, store });
+  if (!prepared.ok) return prepared;
+  const opened = await reachStore(io, { paths, env, name, store, opener: options.opener });
+  if (!opened.ok) return opened;
+  const target = bootstrapStoreOf(opened.value);
+  const found = await readStoreDescriptor(opened.value.blob);
+  if (!found.ok) return found;
+  if (target === undefined || found.value?.format === 1) return m1();
+  const registry = await readRegistry(io, paths);
+  if (!registry.ok) return registry;
+  const wasRecorded = registry.value.stores?.[name] !== undefined;
+  const done = await runBootstrap({ ...options.ports, io, paths }, target, {
+    name,
+    seal: options.seal ?? "none",
+  });
+  if (!done.ok) return done;
+  const published = done.value.outcome === "published";
+  return ok({
+    id: done.value.id,
+    format: done.value.format,
+    identityCreated: published,
+    repositoryCreated: published,
+    recorded: !wasRecorded,
+    path: prepared.value.root,
   });
 };

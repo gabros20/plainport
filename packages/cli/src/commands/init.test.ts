@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { nodeLocalIo } from "@plainport/core";
 import { makeSandbox, type Sandbox } from "../../../core/src/testing/sandbox.ts";
 import type { Prompter } from "../prompt.ts";
-import { capture, fakeRepositoryAt, sandboxPorts } from "../testing.ts";
+import { capture, fakeRepositoryAt, fakeRepositoryIn, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
 
 let box: Sandbox;
@@ -342,9 +342,15 @@ describe("init: setting the store up (D45)", () => {
     expect(run.code).toBe(0);
     const ssd = join(box.home, "ssd");
     const { id } = storeJson(ssd);
-    expect(envelope(run.out).data).toMatchObject({ store: { name: "local", path: ssd, id }, changed: true });
+    // D104: a store v0.2's init creates is format 2, published by bootstrap with its own repository.
+    expect(storeJson(ssd)).toEqual({ v: 2, id, repo: `repos/${id}`, catalog: { seal: "none" }, format: 2 });
+    expect(envelope(run.out).data).toMatchObject({
+      store: { name: "local", path: ssd, id, format: 2 },
+      changed: true,
+    });
     expect(registry().stores).toEqual({ local: id });
-    expect(fakeRepositoryAt(ssd).initialized).toBe(true);
+    expect(fakeRepositoryIn(ssd, `repos/${id}`).initialized).toBe(true);
+    expect(fakeRepositoryAt(ssd).initialized).toBe(false);
 
     const again = await init(["--yes", "--json"]);
     expect(again.code).toBe(0);
@@ -508,6 +514,7 @@ describe("init: secrets stay references (fix wave r1)", () => {
     ]);
     expect(first.code).toBe(0);
     const again = await init(["--store-path", "~/ssd", "--yes"]);
+    expect(again.err).toBe("");
     expect(again.code).toBe(0);
     expect(managed()).toMatchObject({ stores: { local: { secret: "file:~/secrets/ssd.key" } } });
   });
