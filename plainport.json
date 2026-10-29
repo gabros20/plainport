@@ -3586,6 +3586,68 @@
               "additionalProperties": {}
             }
           },
+          "bootstraps": {
+            "description": "Store setups this device left open, and what recover settled them to",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "string",
+                  "description": "The setup attempt's id (a ULID)"
+                },
+                "store": {
+                  "type": "string",
+                  "description": "The store's name in config"
+                },
+                "step": {
+                  "type": "string",
+                  "description": "The journal step recover found"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "published",
+                    "lost",
+                    "contested",
+                    "rolled-back",
+                    "pending"
+                  ],
+                  "description": "published: this attempt's store.json is on the store and its id recorded here. lost: another attempt published first. contested: no attempt won and every visible one refuses. rolled-back: its candidacy never reached the store, so nothing was published. pending: not settled now (finding says why)"
+                },
+                "id": {
+                  "description": "published, lost: the published store's id",
+                  "type": "string"
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "attempt",
+                "store",
+                "step",
+                "outcome"
+              ],
+              "additionalProperties": {}
+            }
+          },
           "unreadable": {
             "type": "array",
             "items": {

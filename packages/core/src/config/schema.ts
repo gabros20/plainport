@@ -7,6 +7,7 @@
 // with built-in defaults are complete.
 
 import { z } from "zod";
+import { CancellationSchema, DurabilitySchema, PublicationSchema } from "../ports/blob-store.ts";
 import { parseSecretRef } from "../ports/secrets.ts";
 
 /** "0", or a whole number with a unit: 30s, 15m, 24h, 7d, 2w. */
@@ -81,11 +82,29 @@ const LocalStore = z.strictObject({
   secret: SecretRefSchema.optional(),
   ...storeShared,
 });
+/**
+ * What the owner asserts of a remote store (Q8): each property given here is in the store's semantics profile with
+ * evidence `asserted`, over what `store test` measured. A property left out keeps its measured value, or unknown.
+ */
+export const AssertedSemanticsSchema = z
+  .strictObject({
+    readAfterWrite: z.boolean(),
+    listAfterWrite: z.boolean(),
+    listComplete: z.boolean(),
+    publication: PublicationSchema,
+    conditionalCreate: z.boolean(),
+    durability: DurabilitySchema,
+    cancellation: CancellationSchema,
+  })
+  .partial();
+export type AssertedSemantics = z.infer<typeof AssertedSemanticsSchema>;
+
 const SftpStore = z.strictObject({
   kind: z.literal("sftp"),
   host: Name,
   path: z.string().min(1),
   secret: SecretRefSchema,
+  semantics: AssertedSemanticsSchema.optional(),
   ...storeShared,
 });
 /**
@@ -104,6 +123,7 @@ const S3Store = z.strictObject({
     .string()
     .regex(/^[^/](.*[^/])?$/, "a prefix inside the bucket, without a leading or trailing /")
     .optional(),
+  semantics: AssertedSemanticsSchema.optional(),
   ...storeShared,
 });
 const PeerStore = z.strictObject({
@@ -128,6 +148,7 @@ const StoreLayerSchema = z
     secretAccessKey: CheckedSecretRefSchema,
     region: Name,
     device: Name,
+    semantics: AssertedSemanticsSchema,
     ...storeShared,
   })
   .partial();

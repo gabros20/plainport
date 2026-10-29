@@ -15,7 +15,7 @@ import { preloadPlans } from "./plans.ts";
 import { clackPrompter } from "./prompt.ts";
 import type { CommandContext, Ports, Registry } from "./registry.ts";
 import { type IO, Output } from "./render.ts";
-import { localStores } from "./stores.ts";
+import { storeOpener } from "./stores.ts";
 import { testFaultPlan, testHookEnv } from "./test-hooks.ts";
 
 export type { IO } from "./render.ts";
@@ -190,7 +190,7 @@ const realPorts = async (host: MacosHost, cancellation: Cancellation): Promise<P
     system: host,
     checks: createMacosChecks(host),
     plugins: [nodePlugin],
-    stores: localStores(host, process.env),
+    stores: storeOpener(host, process.env),
     stdin: () => Bun.stdin.text(),
     cancellation,
   };

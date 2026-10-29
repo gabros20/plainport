@@ -197,7 +197,8 @@ const DOING: Record<StoreOperation, string> = {
   release: "release a folder after an offload",
 };
 
-const describeProperty = (semantics: StoreSemantics, p: SemanticProperty): string => {
+/** A property as a message names it: its value and evidence, or that it is unknown. */
+export const describeProperty = (semantics: StoreSemantics, p: SemanticProperty): string => {
   const value = semantics[p];
   return value === "unknown" ? `${p} is unknown` : `${p} is ${String(value.value)} (${value.evidence})`;
 };

@@ -184,10 +184,11 @@ export const readStoreIdentity = async (store: BlobStore): Promise<Result<string
 };
 
 /**
- * The id of a format-1 store. M1's paths (setup, the catalog, recover) bind restic at `repo/`, so on a format-2 store
- * they would read, or `restic init`, a repository the store does not publish: they fail closed with store.unsupported
- * before anything is written, until a format-2 store's `repo` is wired (Task 18). Bootstrap reads format 2 through
- * readStoreDescriptor.
+ * The id of a format-1 store. M1's setup (ensureStoreIdentity, `plainport init`) binds restic at `repo/` and may
+ * `restic init` there, so on a format-2 store it would make a repository the store does not publish: it fails closed
+ * with store.unsupported before anything is written, until `init` sets stores up through bootstrap (Task 19). The
+ * catalog, offload, onload and recover read format 2 through readUsableStore, since the opener binds their engine to
+ * the repository store.json names (Task 18); bootstrap reads it through readStoreDescriptor.
  */
 const m1Only = (found: StoreDescriptor): Result<string> =>
   found.format === 1
@@ -201,19 +202,13 @@ const m1Only = (found: StoreDescriptor): Result<string> =>
       );
 
 /**
- * What a usable store's identity file says, null when it has none, or a failure as readStoreIdentity's: the catalog's
- * read path takes the store's format from it, which is what a writer keys `stored` by (Q11).
+ * What a usable store's identity file says (either format), null when it has none, or a failure as
+ * readStoreIdentity's: the catalog's read path takes the store's format from it, which is what a writer keys `stored`
+ * by (Q11). A format-2 store is usable since the opener's engine is bound to the repository its store.json names
+ * (store.ts publishedEngine, Task 18).
  */
-export const readUsableStore = async (store: BlobStore): Promise<Result<StoreDescriptor | null>> => {
-  const found = await inspect(store);
-  if (!found.ok) return found;
-  if (found.value.kind === "absent") return ok(null);
-  if (found.value.kind === "id") {
-    const usable = m1Only(found.value.descriptor);
-    return usable.ok ? ok(found.value.descriptor) : usable;
-  }
-  return refuse(found.value);
-};
+export const readUsableStore = (store: BlobStore): Promise<Result<StoreDescriptor | null>> =>
+  readStoreDescriptor(store);
 
 /** What the store's identity file says (either format), null when it has none, or a failure as readStoreIdentity's. */
 export const readStoreDescriptor = async (store: BlobStore): Promise<Result<StoreDescriptor | null>> => {

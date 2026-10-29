@@ -124,8 +124,14 @@ export interface Engine {
     input: SnapshotInput,
     ctx: RunContext,
   ): Promise<Ok<{ id: string; stats: SnapshotStats }> | SnapshotFailure>;
-  /** Snapshots carrying every tag in the filter. */
-  list(filter: { tags?: readonly string[] }, ctx?: RunContext): Promise<Result<SnapshotInfo[]>>;
+  /**
+   * Snapshots carrying every tag in the filter. noLock: a probe that only opens the repository (adopting a store)
+   * takes no lock on it, so it writes nothing there.
+   */
+  list(
+    filter: { tags?: readonly string[]; noLock?: boolean },
+    ctx?: RunContext,
+  ): Promise<Result<SnapshotInfo[]>>;
   /**
    * Hands every entry of a snapshot below its root to onEntry, one at a time (symlinks last, once their targets
    * are known). What onEntry received counts only when the Result is ok: a listing that cannot be shown whole

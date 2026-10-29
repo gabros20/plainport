@@ -179,7 +179,7 @@ export type BootstrapDone =
   /** The store was set up already: its repository opened with this device's password, and its id is recorded. */
   | { outcome: "adopted"; id: string; repo: string; format: 1 | 2 };
 
-export interface RecoveredBootstrap {
+export type RecoveredBootstrap = {
   attempt: string;
   /** The store's name in config. */
   store: string;
@@ -190,7 +190,7 @@ export interface RecoveredBootstrap {
   id?: string;
   /** Why it is not published: lost, contested or pending's finding. */
   finding?: Finding;
-}
+};
 
 export interface BootstrapRecoveryReport {
   operations: RecoveredBootstrap[];
@@ -276,9 +276,9 @@ const adopt = async (
   pinned: string | undefined,
 ): Promise<Result<BootstrapDone>> => {
   if (pinned !== undefined && pinned !== found.id) return pinRefusal(name, pinned, found.id);
-  // A probe that opens the repository with this device's password. Task 18's restic engine must make it without taking
-  // restic's lock (--no-lock, or reading the config), so adopting writes nothing to the winner's repository either.
-  const opens = await store.engineAt(found.repo).list({ tags: ["plainport"] });
+  // A probe that opens the repository with this device's password, without taking restic's lock (--no-lock), so
+  // adopting writes nothing to the winner's repository either.
+  const opens = await store.engineAt(found.repo).list({ tags: ["plainport"], noLock: true });
   if (!opens.ok) {
     if (opens.finding.code === "restic.wrong-password")
       return withFix(

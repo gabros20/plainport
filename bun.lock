@@ -32,6 +32,7 @@
       "dependencies": {
         "@clack/prompts": "1.8.1",
         "@plainport/blob-fs": "workspace:*",
+        "@plainport/blob-rclone": "workspace:*",
         "@plainport/contract": "workspace:*",
         "@plainport/core": "workspace:*",
         "@plainport/eco-node": "workspace:*",
