@@ -107,9 +107,10 @@ for (const backend of ["s3", "sftp"] as const) {
       },
       {
         eligibility: ADMITTED,
-        // Every SFTP put is two ssh connections: the listing probe keeps to a few dozen keys there, and the 1,001-key
-        // listing is measured below with keys copied in one run.
-        listProbeKeys: backend === "s3" ? 1001 : 30,
+        // Every SFTP put is two ssh connections, and the probe writes its listing keys all at once: sshd drops new
+        // connections beyond its MaxStartups (10 unauthenticated by default, found here as "Connection closed by"),
+        // so the probe keeps to 8 keys there. The 1,500-key listing is measured below with keys copied in one run.
+        listProbeKeys: backend === "s3" ? 1001 : 8,
         probeTimeout: 600_000,
       },
     );

@@ -71,7 +71,12 @@ and passed every T2 check above.
   charge; that is unverified.
 - **To check when the mini is online:** `orb version` on the i3-8100B. Coffee Lake should be supported, since
   OrbStack's cutoff is Broadwell. Fall back to Lima if it isn't.
-- Retest rclone's `If-None-Match` on the pinned rclone in M2.
+- Retest rclone's `If-None-Match` on the pinned rclone in M2. **Result (M2 Task 17, 2026-10-29):** rclone 1.75.1
+  forwards `--header-upload "If-None-Match: *"` on a single-part S3 `PutObject` (`rcat --size`, and `copyto` for an
+  empty value). On SeaweedFS 4.48 the direct SigV4 probe (`test/support/s3-probe.ts`) and the adapter agree: an
+  absent key is created, an existing one is refused with 412 `PreconditionFailed`, and of 12 racing writers exactly
+  one wins. blob-rclone's S3 route offers conditional create when its profile claims it; R2 and B2 are measured at T3
+  (Task 28).
 
 **Status.** Accepted (owner, 2026-10-02). The Hetzner spend starts at M3.
 

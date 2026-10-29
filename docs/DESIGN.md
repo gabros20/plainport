@@ -263,7 +263,18 @@ A local disk shows a write at once, lists every file and renames whole. A bucket
 | `durability` | `durable`, `acked-unsynced`, `unknown` | Whether an acknowledged write survives the server's crash or power loss |
 | `cancellation` | `never-lands-late`, `may-land-late` | Whether a put that failed or was cancelled can still land afterwards |
 
-The profile's JSON Schema is published as `schemas/store-semantics.json`. `capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store kind whose properties are not yet measured reports `unknown` (rclone until Task 17).
+The profile's JSON Schema is published as `schemas/store-semantics.json`. `capabilities()` stays for its callers and derives from the profile: `createIfAbsent` holds only when `conditionalCreate` is known to be yes. The local stores (blob-fs, and the memory store in tests) have every property: blob-fs's are documented file-system behaviour, with durability asserted under D24 (plain `fsync`, and every saga's recovery stays correct if a power loss drops the last write). A store reached through rclone reports `unknown` until its profile is passed in; `packages/blob-rclone/src/profiles.ts` holds the profiles measured on T2 with rclone 1.75.1, which `semantics.t2.test.ts` measures again:
+
+| Property | S3 store (SeaweedFS 4.48, T2) | SFTP (OpenSSH, system ssh) | AWS S3 |
+| --- | --- | --- | --- |
+| `readAfterWrite`, `listAfterWrite` | yes (measured) | yes (measured) | yes (documented) |
+| `listComplete` | yes (measured: 2,500 keys over three pages) | yes (measured: 1,500 keys in one folder) | yes (documented) |
+| `publication` | `atomic-put` (measured: no reader sees a part during a slow upload) | `temp-then-rename` (measured: each move is one `posix-rename@openssh.com`, which replaces an existing key; no reader sees it gone or torn) | `atomic-put` (documented) |
+| `conditionalCreate` | yes (measured: `If-None-Match: *` through `--header-upload`; 412 is `store.key-exists`) | no (asserted: a rename replaces) | unknown until measured on the real bucket (Task 28) |
+| `durability` | `acked-unsynced` (measured: survives a restart; volumes fsync only on request) | `acked-unsynced` (measured: OpenSSH offers `fsync@openssh.com`, rclone never sends it) | `durable` (documented) |
+| `cancellation` | `may-land-late` (asserted) | `may-land-late` (asserted) | `may-land-late` (asserted) |
+
+Both measured backends therefore pass `read`, `append`, `elect` and `commit`, and `release` only with Q21's post-grace proof. SFTP through the system's ssh uses the ssh command it is given (in tests, `-F` with the sandbox config, `BatchMode=yes` and strict host keys); each rclone run has ssh log to its own file under plainport's cache, so a refused host key or login (`store.failed`) is told apart from a lost link (`store.unreachable`), which rclone alone reports the same way.
 
 **Eligibility per operation.** One exported predicate each (`canRead`, `canAppend`, `canElect`, `canCommit`, `canRelease`):
 
