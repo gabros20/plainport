@@ -688,7 +688,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 9,
     summary:
-      "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved",
+      "The store's folder is missing or is not a folder (a disk that is not mounted, or a path that moved), or a remote store could not be reached over the network",
   },
   "store.unsupported": {
     severity: "block",

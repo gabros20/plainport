@@ -236,6 +236,8 @@ Every recursive delete plainport makes goes through one guard (D87), run immedia
     root-claims/             the root claim's candidates, named by root id, as store-claims/
     events/<ulid>.json       append-only catalog events, never overwritten
     state.json               compacted fold of events (optional, rebuildable; M1 keeps it beside the mirror instead)
+    tmp/<op>-<ulid>          a temp-then-rename put's upload before it moves onto its key (blob-rclone off S3, D98);
+                             never listed to callers, swept by age by gc
 ```
 
 A format-2 store's repository is wherever its `store.json` says, under the store's root; the restic location and the

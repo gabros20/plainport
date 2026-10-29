@@ -288,7 +288,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `store.semantics-unknown` | block | no | 6 | The store's semantics profile lacks a property this operation needs (read-after-write, whole publication, complete listings, durability…), or does not know it; the message names the property, the operation refuses before writing, and the store stays usable for what its profile allows (Q8) |
 | `store.setup-pending` | warn | no | 6 | init recorded the store but could not set it up yet (its disk is not mounted); plainport init sets it up once it is reachable |
 | `store.state-invalid` | block | no | 6 | This device's record of a store (stores/<store id>.json under the state folder: its seal pin, measured semantics and last test) cannot be read or is not valid; plainport never overwrites it |
-| `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved |
+| `store.unreachable` | block | no | 9 | The store's folder is missing or is not a folder (a disk that is not mounted, or a path that moved), or a remote store could not be reached over the network |
 | `store.unsupported` | block | no | 6 | This build cannot use the store's kind or format yet: M1 supports local stores (an external disk or a local folder), and its setup, catalog and recover paths read format-1 store.json only |
 | `strip.kept` | info | no | 6 | Paths a plugin or strip.extra proposed stay in the snapshot; the message says why for each (git tracks it, strip.keep or strip.never matches, it holds a repository, dependencies are kept) |
 | `stub.invalid` | block | no | 6 | A .plainport stub file does not match the stub schema |

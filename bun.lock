@@ -19,6 +19,14 @@
         "@plainport/core": "workspace:*",
       },
     },
+    "packages/blob-rclone": {
+      "name": "@plainport/blob-rclone",
+      "dependencies": {
+        "@plainport/contract": "workspace:*",
+        "@plainport/core": "workspace:*",
+        "zod": "4.6.5",
+      },
+    },
     "packages/cli": {
       "name": "@plainport/cli",
       "dependencies": {
@@ -103,6 +111,8 @@
     "@noble/ciphers": ["@noble/ciphers@2.4.0", "", {}, "sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw=="],
 
     "@plainport/blob-fs": ["@plainport/blob-fs@workspace:packages/blob-fs"],
+
+    "@plainport/blob-rclone": ["@plainport/blob-rclone@workspace:packages/blob-rclone"],
 
     "@plainport/cli": ["@plainport/cli@workspace:packages/cli"],
 

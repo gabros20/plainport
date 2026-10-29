@@ -1,0 +1,75 @@
+{
+  "comment": "stderr the pinned rclone 1.75.1 printed (with -q), recorded on macOS against unreachable endpoints, the T2 SFTP server with a mismatched host key, a missing key and a read-only folder; paths shortened. `expect` is how the adapter classifies the exit: a refused host key is a failure to fix, never an unreachable store.",
+  "fixtures": [
+    {
+      "name": "sftp connection refused",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"plainport:a/b\": NewFs: couldn't connect SSH: dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp unknown host",
+      "command": "cat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"plainport:a/b\": NewFs: couldn't connect SSH: dial tcp: lookup nonexistent.invalid: no such host\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp host key mismatch",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:47:12 CRITICAL: Failed to create file system for \"PLAINPORT:/data/x\": NewFs: couldn't connect SSH: ssh: handshake failed: knownhosts: key mismatch\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 connection refused",
+      "command": "cat",
+      "exitCode": 5,
+      "stderr": "2026/10/29 17:30:53 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:1/bucket?delimiter=%2F&max-keys=1000&prefix=a%2F\": dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "s3 connection refused while listing",
+      "command": "lsjson",
+      "exitCode": 5,
+      "stderr": "2026/10/29 17:30:53 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:1/bucket?delimiter=%2F&max-keys=1000&prefix=\": dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "s3 unknown host on upload",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 ERROR : b: Post request rcat error: failed to prepare upload: operation error S3: CreateBucket, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Put \"http://nonexistent.invalid/bucket\": dial tcp: lookup nonexistent.invalid: no such host\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "missing key",
+      "command": "cat",
+      "exitCode": 3,
+      "stderr": "2026/10/29 17:30:27 ERROR : error listing: directory not found\n",
+      "expect": "missing"
+    },
+    {
+      "name": "missing key on stat",
+      "command": "lsjson",
+      "exitCode": 3,
+      "stderr": "2026/10/29 17:29:56 NOTICE: Failed to lsjson: directory not found\n",
+      "expect": "missing"
+    },
+    {
+      "name": "unknown remote",
+      "command": "cat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"Z:a\": didn't find section in config file (\"Z\")\n",
+      "expect": "failed"
+    },
+    {
+      "name": "permission denied",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 ERROR : x: Post request rcat error: open /tmp/x/ro/x: permission denied\n",
+      "expect": "failed"
+    }
+  ]
+}
