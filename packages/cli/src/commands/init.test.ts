@@ -350,7 +350,8 @@ describe("init: setting the store up (D45)", () => {
     });
     expect(registry().stores).toEqual({ local: id });
     expect(fakeRepositoryIn(ssd, `repos/${id}`).initialized).toBe(true);
-    expect(fakeRepositoryAt(ssd).initialized).toBe(false);
+    expect(fakeRepositoryIn(ssd, "repo").initialized).toBe(false);
+    expect(fakeRepositoryAt(ssd)).toBe(fakeRepositoryIn(ssd, `repos/${id}`));
 
     const again = await init(["--yes", "--json"]);
     expect(again.code).toBe(0);
@@ -551,5 +552,57 @@ describe("init: secrets stay references (fix wave r2)", () => {
       finding: { code: "usage.invalid" },
       hint: "plainport init --store-path ~/ssd --store-secret file:~/secrets/ssd.key --yes",
     });
+  });
+});
+
+describe("init: re-pointing an unreachable pinned name (Q15) and folder sizes (D70)", () => {
+  const args = (path: string) => [
+    "--root",
+    "work=~/work",
+    "--store-path",
+    path,
+    "--device",
+    "mbp",
+    "--yes",
+    "--json",
+  ];
+
+  test("re-pointing a pinned name at a path that cannot be reached is refused, and nothing is written", async () => {
+    box.dir("work");
+    box.dir("Volumes/Disk");
+    expect((await init(args("~/Volumes/Disk/plainport"))).code).toBe(0);
+    const before = readFileSync(box.paths.managedFile, "utf8");
+    const registry = readFileSync(box.paths.registryFile, "utf8");
+    const run = await init(args("~/Volumes/Other/plainport"));
+    expect(run.code).toBe(9);
+    const failure = envelope(run.out).error.finding;
+    expect(failure.code).toBe("store.unreachable");
+    expect(failure.message).toContain("not re-pointed");
+    expect(failure.fix).toContain("config.toml");
+    expect(readFileSync(box.paths.managedFile, "utf8")).toBe(before);
+    expect(readFileSync(box.paths.registryFile, "utf8")).toBe(registry);
+    expect(existsSync(join(box.home, "Volumes/Other"))).toBe(false);
+  });
+
+  test("the same path again while its disk is away stays allowed: recorded, with store.setup-pending", async () => {
+    box.dir("work");
+    box.dir("Volumes/Disk");
+    expect((await init(args("~/Volumes/Disk/plainport"))).code).toBe(0);
+    rmSync(join(box.home, "Volumes/Disk"), { recursive: true });
+    const run = await init(args("~/Volumes/Disk/plainport"));
+    expect(run.code).toBe(0);
+    expect(envelope(run.out).data.findings.map((f: { code: string }) => f.code)).toEqual([
+      "store.setup-pending",
+    ]);
+  });
+
+  test("without a terminal, the refusal names the likely roots with their sizes, dependency folders left out", async () => {
+    box.repo("work/web");
+    box.file("work/web/src/main.ts", "x".repeat(2000));
+    box.file("work/web/node_modules/dep/index.js", "y".repeat(50_000));
+    const run = await init(["--store-path", "~/ssd", "--yes", "--json"]);
+    expect(run.code).toBe(2);
+    // 2,000 bytes of source and .git/HEAD's 21: node_modules is not counted.
+    expect(envelope(run.out).error.finding.message).toContain("likely roots: ~/work (1 project, 2.02 KB)");
   });
 });

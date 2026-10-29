@@ -19,12 +19,7 @@
 
 import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import {
-  ensureStoreIdentity,
-  identityChanged,
-  readStoreDescriptor,
-  readStoreIdentity,
-} from "./catalog/identity.ts";
+import { ensureStoreIdentity, identityChanged, readStoreDescriptor } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
 import { type ProbeOptions, probeDeadline, type Scheduler, withinDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";

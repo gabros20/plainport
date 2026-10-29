@@ -1,5 +1,6 @@
-// Reaching a configured store for `store list --probe`, `store test` and `store add`: its password read from its
-// reference (through the opener's providers, within Q14's deadline), then its two layers opened. Nothing is reached
+// Reaching a configured store for `store list --probe`, `store test` and `store add`: its password (and an S3 store's
+// key pair) read from their references (through the opener's providers, within Q14's deadline), then its two layers
+// opened. Nothing is reached
 // until the first call on a layer, and nothing here needs this device to have set the store up.
 
 import { type Finding, fail, finding, type Result } from "@plainport/contract";
@@ -11,7 +12,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import type { Engine } from "../ports/engine.ts";
 import type { OpenedStore, StoreOpener } from "../ports/store.ts";
 import type { BootstrapStore } from "../saga/bootstrap.ts";
-import { resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { resolveStoreSecrets, secretProvidersOf } from "../store.ts";
 
 export interface ReachOptions {
   paths: PlainportPaths;
@@ -24,19 +25,19 @@ export interface ReachOptions {
 
 /** The store's two layers, with its password read. */
 export const reachStore = async (io: LocalIo, options: ReachOptions): Promise<Result<OpenedStore>> => {
-  const password = await resolveSecret(
+  const secrets = await resolveStoreSecrets(
     io,
     options.env,
     options.paths.home,
     options.name,
-    secretRefOf(options.store),
+    options.store,
     {
       ...secretProvidersOf(options.opener),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     },
   );
-  if (!password.ok) return password;
-  return options.opener.open(options.name, options.store, password.value);
+  if (!secrets.ok) return secrets;
+  return options.opener.open(options.name, options.store, secrets.value.password, secrets.value.credentials);
 };
 
 /**

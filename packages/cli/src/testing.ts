@@ -3,12 +3,19 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, join as joinPath } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
 import { ok } from "@plainport/contract";
-import { nodeLocalIo, readStoreDescriptor, type StoreOpener, storeRoot } from "@plainport/core";
+import {
+  nodeLocalIo,
+  parseStoreIdentity,
+  readStoreDescriptor,
+  STORE_IDENTITY_KEY,
+  type StoreOpener,
+  storeRoot,
+} from "@plainport/core";
 import { nodePlugin } from "@plainport/eco-node";
 import { z } from "zod";
 import { quietChecks } from "../../core/src/testing/checks.ts";
@@ -66,9 +73,19 @@ export const fakeRepositoryIn = (storeFolder: string, repo: string): FakeReposit
   return repository;
 };
 
-/** The fake repository of the store at this folder (its repo/ inside), made on first use. */
-export const fakeRepositoryAt = (storeFolder: string): FakeRepository =>
-  fakeRepositoryIn(storeFolder, "repo");
+/**
+ * The fake repository the store at this folder publishes (its store.json's `repo`: repos/<id> for a format-2 store, repo/
+ * for an M1 store or one not set up yet), made on first use.
+ */
+export const fakeRepositoryAt = (storeFolder: string): FakeRepository => {
+  let repo = "repo";
+  try {
+    repo = parseStoreIdentity(readFileSync(joinPath(storeFolder, STORE_IDENTITY_KEY)))?.repo ?? repo;
+  } catch {
+    // No store.json yet: M1's place.
+  }
+  return fakeRepositoryIn(storeFolder, repo);
+};
 
 /**
  * Local stores as the binary opens them, but with the fake engine (T0): events on disk through blob-fs, the engine

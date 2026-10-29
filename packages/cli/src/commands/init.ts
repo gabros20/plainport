@@ -176,7 +176,7 @@ export const init = defineCommand({
   }),
   examples: [
     {
-      argv: ["init", "--root", "work=~/work", "--store-path", "/Volumes/Archive/plainport", "--yes"],
+      argv: ["init", "--root", "work=~/work", "--store-path", "~/store", "--yes"],
       summary: "Set up without prompts",
     },
     {
