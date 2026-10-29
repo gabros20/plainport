@@ -62,16 +62,38 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
   const record = (id: string, decision: string) =>
     new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision })}\n`);
 
-  test("two roots that both stand and both refuse: store.root-contested, nothing claimed, the fix is the quiesced cleanup", async () => {
+  test("two roots that both stood and both refused: store.root-contested for them, and a third root can claim (D109)", async () => {
     const store = memoryBlobStore();
-    const [a, b] = [ulid(), ulid()];
-    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
-    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.refused`, record(b, "refused"));
+    const [a, b, c] = [ulid(), ulid(), ulid()];
+    for (const id of [a, b]) {
+      store.data.set(`${ROOT_CLAIMS_PREFIX}${id}.json`, record(id, "candidate"));
+      store.data.set(`${ROOT_CLAIMS_PREFIX}${id}.refused`, record(id, "refused"));
+    }
     const result = await claimStoreRoot(store, a, { wait: async () => {} });
     expect(result.ok ? "" : result.finding.code).toBe("store.root-contested");
     expect(result.ok ? "" : result.finding.fix).toContain("every device");
     expect(result.ok ? "" : result.finding.message).toContain(b);
     expect(store.data.has(ROOT_CLAIM_KEY)).toBe(false);
+    // The refused roots no longer stand: another root's claim wins.
+    expect(await claimStoreRoot(store, c, { wait: async () => {} })).toEqual({
+      ok: true,
+      value: { root: c },
+    });
+  });
+
+  test("the root with the lower id holds the tie-break: it waits for a rival that stands, without refusing (D109)", async () => {
+    const store = memoryBlobStore();
+    const [a, b] = [ulid(), ulid()].sort() as [string, string];
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
+    const result = await claimStoreRoot(store, a, { wait: async () => {} });
+    expect(result.ok ? "" : result.finding.code).toBe("store.root-undecided");
+    expect(result.ok ? "" : result.finding.message).toContain("tie-break");
+    expect(store.data.has(`${ROOT_CLAIMS_PREFIX}${a}.refused`)).toBe(false);
+    store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.refused`, record(b, "refused"));
+    expect(await claimStoreRoot(store, a, { wait: async () => {} })).toEqual({
+      ok: true,
+      value: { root: a },
+    });
   });
 
   test("a rival root that has not decided yet: store.root-undecided, re-run later, nothing removed", async () => {
@@ -182,7 +204,8 @@ describe("root-claim: the store's root claim (D50, Q9)", () => {
 
   test("a crash right after a root's refusal, then a re-run: the refusal stands, and it never claims", async () => {
     const store = memoryBlobStore();
-    const [a, b] = [ulid(), ulid()];
+    // The rival has the lower id, so this root refuses (D109; with the higher one it would wait instead).
+    const [b, a] = [ulid(), ulid()].sort() as [string, string];
     store.data.set(`${ROOT_CLAIMS_PREFIX}${b}.json`, record(b, "candidate"));
     const crashed = claimStoreRoot(store, a, {
       wait: async () => {},

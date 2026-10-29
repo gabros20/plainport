@@ -1,0 +1,117 @@
+{
+  "comment": "stderr the pinned rclone 1.75.1 printed (with -q), recorded on macOS against unreachable endpoints, the T2 SFTP server with a mismatched host key, a missing key and a read-only folder, and (Task 17) SeaweedFS refusing If-None-Match and the system ssh closing under rclone's ssh option; paths shortened. `expect` is how the adapter classifies the exit: a refused host key is a failure to fix, never an unreachable store.",
+  "fixtures": [
+    {
+      "name": "sftp connection refused",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"plainport:a/b\": NewFs: couldn't connect SSH: dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp unknown host",
+      "command": "cat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"plainport:a/b\": NewFs: couldn't connect SSH: dial tcp: lookup nonexistent.invalid: no such host\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp host key mismatch",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:47:12 CRITICAL: Failed to create file system for \"PLAINPORT:/data/x\": NewFs: couldn't connect SSH: ssh: handshake failed: knownhosts: key mismatch\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 connection refused",
+      "command": "cat",
+      "exitCode": 5,
+      "stderr": "2026/10/29 17:30:53 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:1/bucket?delimiter=%2F&max-keys=1000&prefix=a%2F\": dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "s3 connection refused while listing",
+      "command": "lsjson",
+      "exitCode": 5,
+      "stderr": "2026/10/29 17:30:53 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:1/bucket?delimiter=%2F&max-keys=1000&prefix=\": dial tcp 127.0.0.1:1: connect: connection refused\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "s3 unknown host on upload",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 ERROR : b: Post request rcat error: failed to prepare upload: operation error S3: CreateBucket, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Put \"http://nonexistent.invalid/bucket\": dial tcp: lookup nonexistent.invalid: no such host\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "missing key",
+      "command": "cat",
+      "exitCode": 3,
+      "stderr": "2026/10/29 17:30:27 ERROR : error listing: directory not found\n",
+      "expect": "missing"
+    },
+    {
+      "name": "missing key on stat",
+      "command": "lsjson",
+      "exitCode": 3,
+      "stderr": "2026/10/29 17:29:56 NOTICE: Failed to lsjson: directory not found\n",
+      "expect": "missing"
+    },
+    {
+      "name": "unknown remote",
+      "command": "cat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 CRITICAL: Failed to create file system for \"Z:a\": didn't find section in config file (\"Z\")\n",
+      "expect": "failed"
+    },
+    {
+      "name": "permission denied",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:30:53 ERROR : x: Post request rcat error: open /tmp/x/ro/x: permission denied\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 precondition failed",
+      "command": "rcat",
+      "exitCode": 1,
+      "stderr": "2026/10/29 17:59:36 ERROR : x: Post request put error: operation error S3: PutObject, https response error StatusCode: 412, RequestID: 18E30EA4A655CC033E24B712, HostID: , api error PreconditionFailed: At least one of the pre-conditions you specified did not hold\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 cut while listing",
+      "command": "lsjson",
+      "exitCode": 5,
+      "stderr": "2026/10/29 18:08:37 ERROR : error listing: operation error S3: ListObjects, exceeded maximum number of attempts, 3, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:30401/plainport-t2?delimiter=%2F&max-keys=1000&prefix=\": EOF\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp external ssh closed",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:10:02 CRITICAL: Failed to create file system for \"P:/data\": NewFs: couldn't initialise SFTP: error receiving version packet from server: server unexpectedly closed connection: unexpected EOF\n",
+      "expect": "failed"
+    },
+    {
+      "name": "s3 cut mid-listing (lsjson's NOTICE)",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:34:17 NOTICE: Failed to lsjson: error in ListJSON: operation error S3: ListObjects, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Get \"http://127.0.0.1:30401/plainport-t2?delimiter=%2F&max-keys=50&prefix=cut600%2Ftree%2F\": EOF\nfailed to get rate limit token, retry quota exceeded, 0 available, 5 requested\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp cut mid-listing",
+      "command": "lsjson",
+      "exitCode": 1,
+      "stderr": "2026/10/29 18:30:02 NOTICE: Failed to lsjson: error in ListJSON: error listing: error listing \"\": connection lost\n",
+      "expect": "unreachable"
+    },
+    {
+      "name": "sftp mkdir race on move",
+      "command": "moveto",
+      "exitCode": 1,
+      "stderr": "2026/10/29 19:31:05 NOTICE: PLAINPORT{5rUnC}: No host key validation is being performed. Set known_hosts_file (to \"none\" to silence this notice) or use --sftp-pin-host-key to enable it. See: https://rclone.org/sftp/#host-key-validation\n2026/10/29 19:31:05 ERROR : put-01M64J3867BDP2T5XSQZG57GVA: Couldn't move: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n2026/10/29 19:31:05 ERROR : Attempt 1/1 failed with 1 errors and: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n2026/10/29 19:31:05 NOTICE: Failed to moveto: Move mkParentDir failed: mkdir \"/data/t17/elect/002\" failed: sftp: \"Failure\" (SSH_FX_FAILURE)\n",
+      "expect": "failed"
+    }
+  ]
+}

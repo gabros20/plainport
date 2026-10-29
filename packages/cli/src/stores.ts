@@ -14,6 +14,7 @@ import {
   toolPath,
 } from "@plainport/core";
 import { resticEngine } from "@plainport/engine-restic";
+import { secretProviders } from "@plainport/secrets";
 
 /** What restic's child process is given of the environment: enough to find its home, temp folder and locale. */
 const resticEnv = (env: Env): Record<string, string> => {
@@ -26,6 +27,8 @@ const resticEnv = (env: Env): Record<string, string> => {
 };
 
 export const localStores = (host: HostPorts, env: Env): StoreOpener => ({
+  // keychain: and op: references, read through the one runner (Task 15); env: and file: are core's own.
+  secrets: secretProviders({ run: (spec) => host.run(spec), env }),
   open: async (name, store, password) => {
     if (store.kind !== "local") {
       return fail(

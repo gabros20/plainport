@@ -149,14 +149,28 @@ export type ElectionOutcome =
    * No winner is published and this attempt refuses: it will never publish (D99). `undecided` names visible
    * candidates without a refusal read back from the store; while any is left this is not final (re-run later: it ends
    * lost if one publishes). With none left, this attempt's own refusal included, every visible candidate refuses
-   * (R2-7), nobody can win, and only the quiesced cleanup in `fix` helps. Final needs this device's profile to prove
-   * list-after-write and complete listings; without them `undecided` keeps this attempt's own id, and `fix` says why.
+   * (R2-7): none of them will ever publish, and a new attempt (another id) does not count them and can win (D109).
+   * Final needs this device's profile to prove list-after-write and complete listings; without them `undecided` keeps
+   * this attempt's own id, and `fix` says why.
    */
-  | { outcome: "contested"; candidates: string[]; undecided: string[]; fix: string };
+  | { outcome: "contested"; candidates: string[]; undecided: string[]; fix: string }
+  /**
+   * No winner is published and this attempt has not refused: it holds the tie-break (the lowest id among the
+   * candidates that stand, D109) and waited its budget for `undecided`, those that stand, to refuse. Not final:
+   * a re-run with the same id resumes the wait, publishes once they have refused, and ends lost if one published.
+   */
+  | { outcome: "waiting"; candidates: string[]; undecided: string[]; fix: string };
 
-/** How often the published value or the candidates are read again, and the wait between reads. */
+/** How often a value being written in place is read again, and the wait between reads. */
 const READS = 5;
 const WAIT_MS = 200;
+/**
+ * How often the candidates are listed again while a decision is awaited: the tie-break holder waiting for the
+ * others' refusals, and a refused attempt waiting for a winner (D109). About 10 s of waits, plus the reads
+ * themselves, which on SFTP are the slower part.
+ */
+const DECISION_READS = 40;
+const DECISION_WAIT_MS = 250;
 
 type Published = { kind: "absent" } | { kind: "winner"; winner: string } | { kind: "unreadable" };
 
@@ -219,17 +233,21 @@ const assertElection = (e: Election): void => {
  * with store.semantics-unknown before writing anything.
  *
  * One protocol for every device, whatever its own profile of the store (devices may have measured the store
- * differently): write the candidacy, list. As the sole candidate, write `<id>.publishing`, publish, read back.
- * Seeing another candidate, write `<id>.refused` and never publish; the outcome is lost if a winner turns up while
- * re-reading, else contested. Only the final write follows this device's profile: a conditional create where it
- * proves one, a plain put otherwise. A device with a proven conditional create still sees and respects every other
- * device's candidacy, so two devices taking different final writes never both win.
+ * differently): write the candidacy, list. A candidate whose refusal validates and that shows no `.publishing` is out
+ * (D109); the others stand. With none standing, write `<id>.publishing`, publish, read back. When one that stands is
+ * publishing or has a lower id, write `<id>.refused` and never publish; the outcome is lost if a winner turns up while
+ * re-reading, else contested. Otherwise this attempt has the lowest id and holds the tie-break: it lists again,
+ * within a budget, until the others have refused (then publishes), one turns up publishing or lower (then refuses),
+ * or the budget ends (waiting, with no refusal written). Only the final write follows this device's profile: a
+ * conditional create where it proves one, a plain put otherwise. A device with a proven conditional create still sees
+ * and respects every other device's candidacy, so two devices taking different final writes never both win.
  *
- * Why contested can be final, where this device's profile proves list-after-write and complete listings: a candidate
- * written after this attempt's listing lists after this candidacy was acknowledged, so it sees it and refuses; so every attempt that could still be sole is visible here, and once each
- * has refused nobody can publish. An attempt that has refused, or whose `.publishing` was acknowledged, keeps that
- * decision when re-run (its recovery). A re-run of the same attempt (same id) is otherwise safe: the same keys, and a
- * published value naming it is a win.
+ * Why contested can be final, where this device's profile proves list-after-write and complete listings: every
+ * visible candidate's refusal is read back, and a refused attempt never publishes. A candidate written after this
+ * attempt's listing does not count them (D109) and may win: a final contested speaks for the attempts that stood,
+ * not for the store. An attempt that has refused, or whose `.publishing` was acknowledged, keeps that decision when
+ * re-run (its recovery). A re-run of the same attempt (same id) is otherwise safe: the same keys, and a published
+ * value naming it is a win.
  */
 export const elect = async (store: BlobStore, e: Election): Promise<Result<ElectionOutcome>> => {
   assertElection(e);
@@ -344,18 +362,68 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
   }
   const listed = await listCandidates();
   if (!listed.ok) return listed;
-  const mine = listed.value;
-  if (!mine.ids.includes(e.id)) {
+  if (!listed.value.ids.includes(e.id) && listsAfterWrite) {
     // Promised by list-after-write; without it (a device electing on its conditional create alone) it may show later.
-    if (listsAfterWrite) return notSeen(candidacy);
-    mine.ids = [...mine.ids, e.id].sort();
+    return notSeen(candidacy);
   }
-  const others = mine.ids.filter((id) => id !== e.id);
+  /** A listing with this attempt's own candidacy counted, which a device without list-after-write may not see yet. */
+  const withMine = (c: Candidates): Candidates =>
+    c.ids.includes(e.id) ? c : { ...c, ids: [...c.ids, e.id].sort() };
+  let current = withMine(listed.value);
 
   // A decision already taken by this attempt stands; refusal wins, since a `.publishing` that failed is never acted on.
-  const hasRefused = mine.refused.has(e.id);
-  if (!hasRefused && (mine.publishing.has(e.id) || others.length === 0)) {
-    if (!mine.publishing.has(e.id)) {
+  // Its own refusal is also read by key, so a listing that lags can never hide it.
+  let hasRefused = current.refused.has(e.id);
+  if (!hasRefused) {
+    const own = await store.get(keyOf(e.id, "refused"));
+    if (!own.ok) return own;
+    hasRefused = own.value !== null && isElectionRecord(own.value, e.id, "refused");
+  }
+  /**
+   * The other candidates that still stand (D109): a candidate is out once its refusal validates and no `.publishing`
+   * of it is visible (a publication from a device without list-after-write may still be landing).
+   */
+  const standing = (c: Candidates): string[] =>
+    c.ids.filter((id) => id !== e.id && !(c.refused.has(id) && !c.publishing.has(id)));
+  /**
+   * What this attempt does on a listing (D109): publish when its `.publishing` stands or nobody else does; refuse when
+   * one that stands is publishing or has a lower id; otherwise it holds the tie-break and waits for their refusals.
+   */
+  const decide = (c: Candidates): "publish" | "refuse" | "wait" => {
+    if (hasRefused) return "refuse";
+    if (c.publishing.has(e.id)) return "publish";
+    const rivals = standing(c);
+    if (rivals.length === 0) return "publish";
+    return rivals.some((id) => c.publishing.has(id) || id < e.id) ? "refuse" : "wait";
+  };
+  let decision = decide(current);
+  // Why the tie-break holder may publish once the others have refused: of two attempts, the later lister sees the
+  // earlier candidacy (list-after-write, as D99); it proceeds only after the other's refusal is read back, and a
+  // refused attempt never publishes, so at most one ever proceeds.
+  for (let reads = 0; decision === "wait" && reads < DECISION_READS; reads++) {
+    await e.wait(DECISION_WAIT_MS);
+    const found = await readPublished();
+    if (!found.ok) return found;
+    if (found.value.kind === "winner") return decided(found.value.winner);
+    const now = await listCandidates();
+    if (!now.ok) return now;
+    current = withMine(now.value);
+    decision = decide(current);
+  }
+  const withdraw = (ids: string[]): string =>
+    `If an attempt will never run again (its device is gone), stop plainport on every device that uses the store ${name} and wait until none is running, then withdraw it by writing its refusal on its behalf (${ids.map((id) => `${keyOf(id, "refused")} holding {"v":1,"id":"${id}","decision":"refused"}`).join("; ")}) and re-run`;
+  if (decision === "wait") {
+    const undecided = standing(current);
+    return ok({
+      outcome: "waiting",
+      candidates: current.ids,
+      undecided,
+      fix: `this attempt (${e.id}) holds the tie-break (the lowest id) and waited for ${undecided.join(", ")} to refuse; re-run later with the same id (its recovery does): it publishes once they have refused, and ends lost if one of them published. ${withdraw(undecided)}`,
+    });
+  }
+
+  if (decision === "publish") {
+    if (!current.publishing.has(e.id)) {
       const intent = await store.put(keyOf(e.id, "publishing"), record(e.id, "publishing"));
       e.after?.("publishing");
       if (!intent.ok) {
@@ -381,21 +449,23 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
       return refusal.ok ? notSeen(keyOf(e.id, "refused")) : refusal;
     }
   }
-  let undecided: string[] = others;
-  let candidates = mine.ids;
-  for (let reads = 0; reads < READS; reads++) {
+  let undecided: string[] = current.ids.filter((id) => id !== e.id);
+  let candidates = current.ids;
+  // Re-read until a winner shows (the tie-break holder publishes once this refusal is read back) or every visible
+  // candidate refuses.
+  for (let reads = 0; reads < DECISION_READS; reads++) {
     const found = await readPublished();
     if (!found.ok) return found;
     if (found.value.kind === "winner") return decided(found.value.winner);
     const now = await listCandidates();
     if (!now.ok) return now;
-    candidates = now.value.ids;
+    candidates = withMine(now.value).ids;
     // Final only when every visible candidate, this attempt included, has a refusal read back from the store, and
     // this device's profile proves the listings that argument rests on; otherwise this attempt stays undecided.
-    undecided = candidates.filter((id) => !now.value.refused.has(id));
+    undecided = candidates.filter((id) => !now.value.refused.has(id) && id !== e.id);
     if (!canProveFinal && undecided.length === 0) undecided = [e.id];
     if (undecided.length === 0) break;
-    await e.wait(WAIT_MS);
+    await e.wait(DECISION_WAIT_MS);
   }
   const keys = candidates.flatMap((id) => [
     keyOf(id, "candidate"),
@@ -406,7 +476,7 @@ export const elect = async (store: BlobStore, e: Election): Promise<Result<Elect
     !canProveFinal && undecided.length === 1 && undecided[0] === e.id
       ? `every visible candidate refuses, but this device's profile of the store ${name} does not prove list-after-write and complete listings, so another attempt this listing could not see may still be sole and win; re-run later with the same id (it ends lost if one won), and leave every candidate in ${e.candidates} where it is`
       : undecided.length > 0
-        ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is. Re-running an attempt with the same id (its recovery does) decides it. If an attempt will never run again (its device is gone), stop plainport on every device that uses the store ${name} and wait until none is running, then withdraw it by writing its refusal on its behalf (${undecided.map((id) => `${keyOf(id, "refused")} holding {"v":1,"id":"${id}","decision":"refused"}`).join("; ")}) and re-run`
-        : `stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
+        ? `another attempt (${undecided.join(", ")}) has not decided yet and may still publish; re-run later, and leave every candidate in ${e.candidates} where it is. Re-running an attempt with the same id (its recovery does) decides it. ${withdraw(undecided)}`
+        : `every attempt that stood (${candidates.join(", ")}) refuses, and a refused attempt never publishes, even when re-run; a new attempt (another id) does not count them and can win (D109), so re-run the operation as a new attempt. Only to re-run one of these ids instead: stop plainport on every device that uses the store ${name} and wait until none is running, then remove ${e.candidates}'s files (${keys.join(", ")}) from the store and re-run on one device; removing them while any plainport process runs can elect two winners`;
   return ok({ outcome: "contested", candidates, undecided, fix });
 };

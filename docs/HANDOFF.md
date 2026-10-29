@@ -89,7 +89,7 @@ Three final whole-branch rounds ran after the last task. Rounds 1 and 2 used Fab
 
 ## Next: milestone M2, remote stores
 
-**Progress (12 October 2026):** M2 runs from `docs/plans/M2-remote-stores.md` (approved 10 October) on branch `m2-remote-stores`. Phase 1 (Tasks 1–5) and phase 2 (Tasks 6–9: publication and election protocol, the format and compatibility matrix against v0.1.1, the bootstrap protocol and store.json v2, stable store identity) are on `main`. Phase 3 (Tasks 10–14: the versioned catalog seal, the unified catalog codec, the causal resolution model, credential-independent offline views, the two-device gate harness and race schedules) is on `main` too; S2–S8 stay todo until Tasks 21–25 turn them on (`bun run test:m2-gate`). Phase 4 (Tasks 15–17) is in review. Run decisions D89–D109 are in `.orchestrate/decisions.md`; D93 and D96–D109 are flagged for owner review. From phase 3 on, tasks build first and are reviewed once per phase (D102).
+**Progress (12 October 2026):** M2 runs from `docs/plans/M2-remote-stores.md` (approved 10 October) on branch `m2-remote-stores`. Phase 1 (Tasks 1–5) and phase 2 (Tasks 6–9: publication and election protocol, the format and compatibility matrix against v0.1.1, the bootstrap protocol and store.json v2, stable store identity) are on `main`. Phase 3 (Tasks 10–14: the versioned catalog seal, the unified catalog codec, the causal resolution model, credential-independent offline views, the two-device gate harness and race schedules) is on `main` too; S2–S8 stay todo until Tasks 21–25 turn them on (`bun run test:m2-gate`). Phase 4 (Tasks 15–17: secret providers for env, file, Keychain and 1Password; the rclone blob store; SeaweedFS and SFTP semantics measured, with `If-None-Match` honoured on S3 and SFTP acked-unsynced) is on `main` as well. Run decisions D89–D109 are in `.orchestrate/decisions.md`; D93 and D96–D109 are flagged for owner review. From phase 3 on, tasks build first and are reviewed once per phase (D102).
 
 Scope, from `docs/ROADMAP.md`: SFTP and S3 stores through the rclone blob store; catalog events over stores; Keychain secrets; leases, head check, conflicts and `plainport resolve`. Gate: the two-Mac race ends in `conflicted`, never in lost work.
 
@@ -117,6 +117,7 @@ M2 phase 1 (Tasks 1–5, merged to `main` on 10 October 2026) closed the core-sa
 **Contract**
 
 - **Offline uncertainty:** the mirror never holds events skipped as `stored-multiple`, so offline `ls`/`status` cannot show a project's head as uncertain; write commands read the store and still refuse.
+- **SFTP flake watch:** the T2 sftp contract `list` test failed once with `process.output-incomplete` because rclone left an ssh child in its process group (24 of 24 green on rerun). sshd also drops new connections beyond about 10 still logging in, so callers must not open many SFTP runs at once.
 - **Format 2 end to end (D104):** the `[store.json.v2]` compatibility row and the format-2 writer path are tested at the catalog layer only until Tasks 18 and 19 lift the format-1-only refusal.
 
 **Secrets (for Tasks 15 and 19)**

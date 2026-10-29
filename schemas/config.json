@@ -159,6 +159,18 @@
             "type": "string",
             "pattern": "^(keychain|se|op|bw|file|env):.+$"
           },
+          "accessKeyId": {
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "secretAccessKey": {
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1
+          },
           "device": {
             "type": "string",
             "minLength": 1

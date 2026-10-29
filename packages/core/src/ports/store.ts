@@ -8,6 +8,7 @@ import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { Store } from "../config/schema.ts";
 import type { BlobStore } from "./blob-store.ts";
 import type { Engine } from "./engine.ts";
+import type { SecretProviders } from "./secrets.ts";
 
 export interface OpenedStore {
   blob: BlobStore;
@@ -17,6 +18,8 @@ export interface OpenedStore {
 }
 
 export interface StoreOpener {
+  /** The providers that read a store's `keychain:` and `op:` references (Task 15); `env:` and `file:` need none. */
+  secrets?: SecretProviders;
   /** The store's two layers; the engine is bound to its repository and this password. store.unsupported for a
    * kind this build cannot use. Opening reaches nothing: the first call on either layer does. */
   open(name: string, store: Store, password: string): Promise<Result<OpenedStore>>;

@@ -103,13 +103,16 @@ const VERSION_TIMEOUT_MS = 30_000;
  */
 const COREPACK_POLICY = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", COREPACK_ENABLE_AUTO_PIN: "0" } as const;
 
-/** Variables only plainport and its engines read: a store password or a restic or rclone setting may be among them. */
-const PRIVATE_PREFIXES = ["PLAINPORT_", "RESTIC_", "RCLONE_"];
+/**
+ * Variables that may hold a store's secrets: plainport's own, restic's and rclone's settings, an S3 store's AWS key
+ * pair, and the 1Password CLI's session or service account token (D79, Task 15).
+ */
+const PRIVATE_PREFIXES = ["PLAINPORT_", "RESTIC_", "RCLONE_", "AWS_", "OP_"];
 
 /**
- * The installs' environment (D79): the user's, without unset entries, without plainport's, restic's and rclone's
- * variables, and without `secrets`, the variables a configured `env:` secret reference names. Package scripts run
- * with it, so no store password reaches them.
+ * The installs' environment (D79): the user's, without unset entries, without plainport's, restic's, rclone's, AWS's
+ * and 1Password's variables, and without `secrets`, the variables a configured `env:` secret reference names. Package
+ * scripts run with it, so no store password or key reaches them.
  */
 const installEnv = (env: Env, secrets: readonly string[] = []): Record<string, string> => {
   const out: Record<string, string> = {};

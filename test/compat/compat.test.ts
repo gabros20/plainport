@@ -478,6 +478,37 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 120_000);
 
+  test("[config.keys] v0.2 reads the S3 keys and the keychain: and op: references that v0.1.1 refuses", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const file = w.box.paths.configFile;
+      const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+      // A store this device never set up: v0.2 reads its configuration and resolves none of its references.
+      appendFileSync(
+        file,
+        [
+          "",
+          "[stores.cloud]",
+          'kind = "s3"',
+          'endpoint = "https://s3.example.com"',
+          'bucket = "b"',
+          'region = "eu-central-003"',
+          'path = "plainport/one"',
+          'secret = "op://Private/plainport-cloud/password"',
+          'accessKeyId = "keychain:plainport/cloud-key-id"',
+          'secretAccessKey = "op://Private/plainport-cloud/secret-access-key"',
+          "",
+        ].join("\n"),
+      );
+      expectOk(await w.current(["ls", "--json"]), "current ls with the new keys");
+      const old = await w.old(["ls", "--json"]);
+      expect(old.code).toBe(6);
+      expect(`${old.out}${old.err}`).toContain("config.invalid");
+      writeFileSync(file, before);
+      expectOk(await w.old(["ls", "--json"]), "old ls after removing the lines");
+    });
+  }, 120_000);
+
   test("[plan][value.plan-fp] v0.1.1 reads and runs a plan v0.2 saved", async () => {
     await scenario(async (w) => {
       expectOk(await w.old(w.initArgs), "old init");
@@ -764,6 +795,6 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
   test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
   test.todo("[event.sealed] Tasks 10, 20: a sealed event on a format-2 store is not read by v0.1.1, which refuses the store first", () => {});
   test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
-  test.todo("[config.keys] Tasks 15, 18, 24: v0.2 accepts the S3 credential keys, secret providers and offload.conflictGrace that v0.1.1 refuses", () => {});
+  test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
   test.todo("[value.offload-kind] Task 23: a fork after the commit keeps kind fork and adds detail after-commit", () => {});
 });

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { fail, finding, ok } from "@plainport/contract";
 import { z } from "zod";
+import { memoryBlobStore } from "../testing/memory-blob-store.ts";
 import {
   canAppend,
   canCommit,
@@ -7,6 +9,7 @@ import {
   canRead,
   canRelease,
   capabilitiesOf,
+  getMany,
   requireEligible,
   type StoreSemantics,
   StoreSemanticsSchema,
@@ -156,5 +159,36 @@ describe("store semantics: refusals", () => {
     for (const op of ["read", "append", "elect", "commit"] as const) {
       expect(requireEligible(op, weak, { store: "nas" })).toEqual({ ok: true, value: undefined });
     }
+  });
+});
+
+describe("getMany: one batch where the store offers one", () => {
+  const bytes = (text: string) => new TextEncoder().encode(text);
+
+  test("without a batch read it gets each key once, leaving out the missing", async () => {
+    const store = memoryBlobStore();
+    await store.put("a", bytes("A"));
+    await store.put("b", bytes("B"));
+    const got = await getMany(store, ["a", "b", "a", "missing"]);
+    expect(got.ok && [...got.value.entries()]).toEqual([
+      ["a", bytes("A")],
+      ["b", bytes("B")],
+    ]);
+  });
+
+  test("a failed read fails the batch", async () => {
+    const store = memoryBlobStore();
+    const failing = { ...store, get: async () => fail(finding("store.unreachable", { message: "down" })) };
+    expect(await getMany(failing, ["a"])).toMatchObject({
+      ok: false,
+      finding: { code: "store.unreachable" },
+    });
+  });
+
+  test("a store's own batch read is used", async () => {
+    const store = memoryBlobStore();
+    const batch = new Map([["x", bytes("X")]]);
+    const batched = { ...store, getMany: async () => ok(batch) };
+    expect(await getMany(batched, ["x"])).toEqual(ok(batch));
   });
 });

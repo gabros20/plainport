@@ -570,7 +570,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is the quiesced cleanup it names (stop plainport on every device that uses the store, remove the candidates), then one re-run",
+      "Setting the store up found no winner: every attempt that stood refuses (Q9, D99), so nothing was published; fix is to re-run the setup, which stands as a new attempt that does not count refused candidates and can win (D109)",
   },
   "store.bootstrap-lost": {
     severity: "block",
@@ -584,7 +584,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused and keeps its journal, so a later re-run (or plainport recover) ends it lost or contested",
+      "Setting the store up is not decided yet: another attempt that stood has not refused and may still publish (D99); this attempt refused, or holds the tie-break (the lowest id, D109) and waits for the others' refusals, and keeps its journal, so a later re-run (or plainport recover) decides it",
   },
   "store.failed": {
     severity: "block",
@@ -632,7 +632,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; fix is the quiesced cleanup it names, then one re-run",
+      "No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; another root is not blocked by them (D109), and fix is the quiesced cleanup it names for one of these roots to claim it",
   },
   "store.root-mismatch": {
     severity: "block",
@@ -646,14 +646,14 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99); re-run later",
+      "The store's root claim is not decided yet: another root that stood for it has not refused and may still claim it (D99), or this root holds the tie-break (the lowest id, D109) and waits for the others' refusals; re-run later",
   },
   "store.secret-missing": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The store's repository password could not be read from its secret reference (env: or file: in M1)",
+      "A store's secret (its repository password, or an S3 key) could not be read from its reference: not found, empty, a garbled reference, a denied or unanswered Keychain prompt, a signed-out 1Password CLI, or no answer within 30 seconds (Q14); se: and bw: are refused until their milestones",
   },
   "store.seal-key-unavailable": {
     severity: "block",
@@ -688,7 +688,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 9,
     summary:
-      "The store's folder is missing or is not a folder: a disk that is not mounted, or a path that moved",
+      "The store's folder is missing or is not a folder (a disk that is not mounted, or a path that moved), or a remote store could not be reached over the network",
   },
   "store.unsupported": {
     severity: "block",
