@@ -49,18 +49,19 @@ import { type BlobStore, capabilitiesOf, UNKNOWN_SEMANTICS } from "../ports/blob
 import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
+import { SECRET_DEADLINE_MS } from "../ports/secrets.ts";
 import type { OpenedStore, StoreOpener } from "../ports/store.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
-import { resolveSecret, secretRefOf } from "../store.ts";
+import { resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
 
 /** How long opening a store or reading its catalog may take before the mirror stands in for it (Q14). */
-export const PROVIDER_DEADLINE_MS = 30_000;
+export const PROVIDER_DEADLINE_MS = SECRET_DEADLINE_MS;
 
 export interface ViewDeps {
   /** The host's files and processes, and its boot session, which says whether a trash's claim is live (Q5 i). */
@@ -333,7 +334,11 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         }),
       );
     const secret = await withinDeadline(
-      resolveSecret(io, deps.env, paths.home, name, secretRefOf(store)),
+      resolveSecret(io, deps.env, paths.home, name, secretRefOf(store), {
+        ...secretProvidersOf(deps.opener),
+        deadlineMs: deadline,
+        scheduler,
+      }),
       deadline,
       scheduler,
     );
