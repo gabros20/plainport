@@ -19,6 +19,7 @@ import {
 import { join } from "node:path";
 import { fail, finding, ok, type Result } from "../../packages/contract/src/index.ts";
 import type { CatalogPolicy } from "../../packages/core/src/catalog/codec.ts";
+import { parseStoreIdentity } from "../../packages/core/src/catalog/identity.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import { looksSealed } from "../../packages/core/src/catalog/seal.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
@@ -99,7 +100,12 @@ const capture = (step: string) => {
 
 /** The store's catalog policy: plain, or sealed for the sealed rows (Task 11). */
 let catalog: CatalogPolicy | undefined;
-const SEALED: CatalogPolicy = { seal: "sealed", storeId: ulid(), key: new Uint8Array(32).fill(5) };
+/** A sealed policy is bound to its store (review r1 I4): each row's store has its own id. */
+const sealedFor = (store: MemoryBlobStore): CatalogPolicy => {
+  const identity = parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array);
+  if (identity === undefined) throw new Error("the row's store has no identity");
+  return { seal: "sealed", storeId: identity.id, key: new Uint8Array(32).fill(5) };
+};
 
 const opener: StoreOpener = {
   open: async () => ({
@@ -422,7 +428,7 @@ for (const kind of ["plain", "sealed"] as const)
   describe(`crash matrix, in-process: recover from the store alone, ${kind} catalog (${catalogRows.length} rows)`, () => {
     for (const row of catalogRows)
       test(row.name, async () => {
-        if (kind === "sealed") catalog = SEALED;
+        if (kind === "sealed") catalog = sealedFor(store);
         const { problems } = await runRow(row, { emptyMirror: true });
         expect(problems).toEqual([]);
         const events = [...store.data].filter(([key]) => key.startsWith("meta/v1/events/"));
