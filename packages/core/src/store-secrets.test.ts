@@ -274,7 +274,10 @@ describe("S3 credentials (Q7)", () => {
   test("the key pair resolves through the providers; AWS_SESSION_TOKEN is never read", async () => {
     const store = StoreSchema.parse(s3) as Extract<Store, { kind: "s3" }>;
     const env = new Proxy(
-      { S3_KEY: "AKIA-key", S3_SECRET: "the-secret", AWS_SESSION_TOKEN: "session" } as Record<string, string>,
+      { S3_PW: "pw", S3_KEY: "AKIA-key", S3_SECRET: "the-secret", AWS_SESSION_TOKEN: "session" } as Record<
+        string,
+        string
+      >,
       {
         get: (target, name) => {
           if (name === "AWS_SESSION_TOKEN") throw new Error("AWS_SESSION_TOKEN was read");
@@ -283,13 +286,64 @@ describe("S3 credentials (Q7)", () => {
       },
     );
     const got = await resolveS3Credentials(testHost(), env, box.home, "b2", store);
-    expect(got).toEqual({ ok: true, value: { accessKeyId: "AKIA-key", secretAccessKey: "the-secret" } });
+    expect(got).toEqual({
+      ok: true,
+      value: { password: "pw", accessKeyId: "AKIA-key", secretAccessKey: "the-secret" },
+    });
   });
 
   test("a missing half of the key pair is store.secret-missing naming which", async () => {
     const store = StoreSchema.parse(s3) as Extract<Store, { kind: "s3" }>;
-    const got = await resolveS3Credentials(testHost(), { S3_KEY: "k" }, box.home, "b2", store);
+    const got = await resolveS3Credentials(testHost(), { S3_PW: "pw", S3_KEY: "k" }, box.home, "b2", store);
     expect(got.ok ? "" : got.finding.message).toContain("store b2's secret access key");
+  });
+
+  test("the password and the key pair share one Q14 budget, not one each (review phase 4 M5)", async () => {
+    const store = {
+      ...(StoreSchema.parse(s3) as Extract<Store, { kind: "s3" }>),
+      secret: "keychain:plainport/b2-pw",
+      accessKeyId: "keychain:plainport/b2-key",
+      secretAccessKey: "keychain:plainport/b2-secret",
+    };
+    // Each read answers in 200 ms, within a 300 ms deadline of its own; all three need 600.
+    const slow: SecretProvider = {
+      get: (ref, ctx) =>
+        new Promise((done) => {
+          const timer = setTimeout(() => done(ok(`value of ${ref}`)), 200);
+          ctx?.signal?.addEventListener("abort", () => clearTimeout(timer), { once: true });
+        }),
+    };
+    const got = await resolveS3Credentials(testHost(), {}, box.home, "b2", store, {
+      providers: { keychain: slow },
+      deadlineMs: 300,
+    });
+    expect(got.ok).toBe(false);
+    if (got.ok) throw new Error("unreachable");
+    expect(got.finding.code).toBe("store.secret-missing");
+    expect(got.finding.message).toContain("store b2's access key id");
+    expect(got.finding.message).toContain("share");
+  });
+
+  test("a garbled reference is never echoed: it may be the secret itself (D109, review phase 4 M4)", async () => {
+    const pasted = "p@ss w0rd-9f8e7d";
+    const local = missing(await resolve(`env:${pasted}`));
+    expect(local).not.toContain(pasted);
+    expect(local).toContain("stores.ssd.secret");
+    const store = {
+      ...(StoreSchema.parse(s3) as Extract<Store, { kind: "s3" }>),
+      accessKeyId: `op:${pasted}`,
+    };
+    const got = await resolveS3Credentials(testHost(), { S3_PW: "pw" }, box.home, "b2", store);
+    expect(got.ok).toBe(false);
+    if (got.ok) throw new Error("unreachable");
+    expect(`${got.finding.message} ${got.finding.fix}`).not.toContain(pasted);
+    expect(got.finding.message).toContain("stores.b2.accessKeyId");
+    // The keys new in M2 are checked per scheme at load, and the issue never repeats the value.
+    for (const key of ["accessKeyId", "secretAccessKey"]) {
+      const parsed = StoreSchema.safeParse({ ...s3, [key]: `op:${pasted}` });
+      expect(parsed.success).toBe(false);
+      expect(JSON.stringify(parsed.error?.issues)).not.toContain(pasted);
+    }
   });
 
   test("secretVariables names every env: reference: passwords, the S3 key pair, recovery and the prune key", () => {

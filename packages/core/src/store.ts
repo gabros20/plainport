@@ -77,6 +77,8 @@ export interface SecretOptions {
   scheduler?: Scheduler;
   /** What the secret is for, in messages: "password" (the restic repository's) by default. */
   what?: string;
+  /** The store's configuration key that holds the reference, in messages: "secret" by default. */
+  field?: string;
 }
 
 /** Why `se:` and `bw:` are not read, naming when they arrive. */
@@ -189,11 +191,11 @@ export const resolveSecret = async (
   const parsed = parseSecretRef(ref);
   if (parsed === undefined) {
     const scheme = secretSchemeOf(ref);
+    // Never echoed (D109): a garbled reference may be the secret itself, pasted where its reference belongs.
     return secretMissing(
       name,
       what,
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: a control character is shown as "?".
-      `"${ref.replace(/[\u0000-\u001f\u007f]/g, "?")}" is not a secret reference plainport can read`,
+      `stores.${name}.${options.field ?? "secret"} is not a secret reference plainport can read (its value is not shown: it may be a secret pasted in place of a reference)`,
       scheme === undefined
         ? `use one of ${Object.values(SECRET_REF_FORMS).slice(0, 4).join(", ")}`
         : `write it as ${SECRET_REF_FORMS[scheme]}`,
@@ -252,8 +254,9 @@ export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
   opener.secrets === undefined ? {} : { providers: opener.secrets };
 
 /**
- * An S3 store's key pair (Q7), each half through its own reference. Temporary session credentials are not supported
- * in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
+ * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
+ * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
  */
 export const resolveS3Credentials = async (
   io: LocalIo,
@@ -261,19 +264,55 @@ export const resolveS3Credentials = async (
   home: string,
   name: string,
   store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what"> = {},
-): Promise<Result<{ accessKeyId: string; secretAccessKey: string }>> => {
-  const accessKeyId = await resolveSecret(io, env, home, name, store.accessKeyId, {
-    ...options,
-    what: "access key id",
-  });
-  if (!accessKeyId.ok) return accessKeyId;
-  const secretAccessKey = await resolveSecret(io, env, home, name, store.secretAccessKey, {
-    ...options,
-    what: "secret access key",
-  });
-  if (!secretAccessKey.ok) return secretAccessKey;
-  return ok({ accessKeyId: accessKeyId.value, secretAccessKey: secretAccessKey.value });
+  options: Omit<SecretOptions, "what" | "field"> = {},
+): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
+  const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
+  // The budget's end stops the read in flight (a provider's child) as a cancel would.
+  const stop = new AbortController();
+  const onAbort = () => stop.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) stop.abort();
+  const reads = [
+    { what: "password", field: "secret", ref: store.secret },
+    { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
+    { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
+  ] as const;
+  let reading: (typeof reads)[number] = reads[0];
+  const all = async (): Promise<Result<string[]>> => {
+    const values: string[] = [];
+    for (const read of reads) {
+      reading = read;
+      const got = await resolveSecret(io, env, home, name, read.ref, {
+        ...options,
+        signal: stop.signal,
+        what: read.what,
+        field: read.field,
+      });
+      if (!got.ok) return got;
+      values.push(got.value);
+    }
+    return ok(values);
+  };
+  try {
+    const outcome = await withinDeadline(all(), deadlineMs, options.scheduler);
+    if (outcome.timedOut) {
+      stop.abort();
+      const provider = secretSchemeOf(reading.ref) ?? "secret";
+      return secretMissing(
+        name,
+        reading.what,
+        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's three secrets share`,
+        provider === "keychain"
+          ? "answer the Keychain prompt (or unlock the keychain), then re-run"
+          : "check that the provider is reachable and signed in, then re-run",
+      );
+    }
+    if (!outcome.value.ok) return outcome.value;
+    const [password, accessKeyId, secretAccessKey] = outcome.value.value as [string, string, string];
+    return ok({ password, accessKeyId, secretAccessKey });
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
+  }
 };
 
 /** The folder a local store lives in, absolute. */

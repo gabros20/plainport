@@ -7,6 +7,7 @@
 // with built-in defaults are complete.
 
 import { z } from "zod";
+import { parseSecretRef } from "../ports/secrets.ts";
 
 /** "0", or a whole number with a unit: 30s, 15m, 24h, 7d, 2w. */
 export const DurationSchema = z
@@ -20,6 +21,15 @@ export const SecretRefSchema = z
     /^(keychain|se|op|bw|file|env):.+$/,
     "a secret reference (keychain:, se:, op:, bw:, file: or env:), never the secret itself",
   );
+
+/**
+ * A reference checked per scheme (env:<VARIABLE>, keychain:<service>/<account>, op://<vault>/<item>/<field>, …), for
+ * the keys new in M2, so a value pasted after a scheme fails at load. The message never repeats the value (D109).
+ */
+const CheckedSecretRefSchema = SecretRefSchema.refine((ref) => parseSecretRef(ref) !== undefined, {
+  message:
+    "a secret reference in its scheme's form (env:<VARIABLE>, file:<path>, keychain:<service>/<account>, op://<vault>/<item>/<field>), never the secret itself",
+});
 
 const Name = z.string().min(1);
 const Patterns = z.array(z.string());
@@ -87,8 +97,8 @@ const S3Store = z.strictObject({
   endpoint: z.url(),
   bucket: Name,
   secret: SecretRefSchema,
-  accessKeyId: SecretRefSchema,
-  secretAccessKey: SecretRefSchema,
+  accessKeyId: CheckedSecretRefSchema,
+  secretAccessKey: CheckedSecretRefSchema,
   region: Name.optional(),
   path: z
     .string()
@@ -114,8 +124,8 @@ const StoreLayerSchema = z
     endpoint: z.url(),
     bucket: Name,
     secret: SecretRefSchema,
-    accessKeyId: SecretRefSchema,
-    secretAccessKey: SecretRefSchema,
+    accessKeyId: CheckedSecretRefSchema,
+    secretAccessKey: CheckedSecretRefSchema,
     region: Name,
     device: Name,
     ...storeShared,

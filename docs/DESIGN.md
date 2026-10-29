@@ -990,7 +990,7 @@ pruneKey = "op://Private/plainport-prune/b2-key"   # delete-capable; fetched onl
 
 The `secret`, `accessKeyId`, `secretAccessKey`, `recovery`, `pruneKey` and SSH settings are references, never values. A local store's `secret` is optional: without one, its restic repository password is read from `env:PLAINPORT_STORE_PASSWORD`, and `plainport init --store-secret <ref>` records another reference. An `s3` store needs three references (Q7): `secret` (the restic password) and the key pair `accessKeyId` and `secretAccessKey`; `region` and `path` (a prefix inside the bucket, no leading or trailing `/`) are optional. Temporary session credentials are not supported: `AWS_SESSION_TOKEN` is never read. v0.1.x refuses a config with these keys (`config.invalid`), so a rollback means removing the store's lines.
 
-Each reference resolves through a secret provider, within 30 seconds (Q14); whatever goes wrong (not found, empty, a garbled reference, a denied or unanswered prompt, a signed-out CLI, no answer in time) is `store.secret-missing`, naming the store and the fix:
+Each reference resolves through a secret provider, within 30 seconds (Q14); an S3 store's three references (its password and its key pair) share one 30-second budget, read one after another. Whatever goes wrong (not found, empty, a garbled reference, a denied or unanswered prompt, a signed-out CLI, no answer in time) is `store.secret-missing`, naming the store and the fix. A garbled reference is never repeated in a message, since it may be a secret pasted where its reference belongs: the message names the config key instead, and the S3 keys new in M2 are checked per scheme when the configuration loads:
 
 | Reference | Read by | Notes |
 | --- | --- | --- |
