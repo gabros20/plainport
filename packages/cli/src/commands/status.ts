@@ -1,7 +1,13 @@
 import { FindingSchema, ok, ProjectStateSchema } from "@plainport/contract";
-import { PROJECT_CONDITIONS, type ProjectStatus } from "@plainport/core";
+import {
+  dotGit,
+  PROJECT_CONDITIONS,
+  type ProjectStatus,
+  readTheirs,
+  type TheirsListed,
+} from "@plainport/core";
 import { z } from "zod";
-import { defineCommand } from "../registry.ts";
+import { type CommandContext, defineCommand } from "../registry.ts";
 import { formatBytes } from "./offload.ts";
 import { knownProjects, notKnown, resolveKnown } from "./resolve.ts";
 
@@ -109,6 +115,21 @@ export const ProjectStatusSchema = z
       description:
         "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
     }),
+    theirs: z
+      .array(
+        z.looseObject({
+          snapshot: z.string(),
+          leaves: z.array(z.string()),
+          complete: z.boolean(),
+          missing: z.array(z.string()),
+          extra: z.array(z.string()),
+        }),
+      )
+      .optional()
+      .meta({
+        description:
+          "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+      }),
   })
   .meta({ description: "A project as this device sees it" });
 
@@ -182,6 +203,15 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
         `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
       ),
     );
+  for (const t of p.theirs ?? [])
+    lines.push(
+      row(
+        "theirs",
+        t.complete
+          ? `refs/plainport/theirs/${t.snapshot}/ (git diff HEAD refs/plainport/theirs/${t.snapshot}/worktree)`
+          : `refs/plainport/theirs/${t.snapshot}/ is incomplete${t.missing.length === 0 ? "" : `: lacks ${t.missing.join(", ")}`}; plainport compare ${p.address} replaces it, --clean removes it`,
+      ),
+    );
   if (p.next !== undefined) lines.push(row("next", `${p.next.command}  (${p.next.reason})`));
   return lines.join("\n");
 };
@@ -215,9 +245,26 @@ export const status = defineCommand({
     if (named.value.known === undefined) return notKnown(named.value.ref);
     // Only this project's view is built, with its local details (D64 quality: views are lazy).
     for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
-    return ok(await known.value.set.view(named.value.known.id, { detail: true }));
+    const view = await known.value.set.view(named.value.known.id, { detail: true });
+    return ok({ ...view, ...(await theirsOf(ctx, view)) });
   },
 });
+
+/**
+ * The theirs refs compare wrote into the project's repository, when its folder is here and holds one; reading them
+ * is a read (for-each-ref, cat-file). A repository git cannot read leaves them out, said once.
+ */
+const theirsOf = async (ctx: CommandContext, view: ProjectStatus): Promise<{ theirs?: TheirsListed[] }> => {
+  if (!view.here || view.dir === undefined) return {};
+  const repo = await dotGit(ctx.system, view.dir);
+  if (!repo.ok || repo.value === "none") return {};
+  const listed = await readTheirs({ host: ctx.system, env: ctx.env }, view.dir);
+  if (!listed.ok) {
+    ctx.output.log("warn", `the theirs refs in ${view.dir} could not be read: ${listed.finding.message}`);
+    return {};
+  }
+  return listed.value.length === 0 ? {} : { theirs: listed.value };
+};
 
 const lsRow = (p: ProjectStatus, width: number): string => {
   const device = p.lease === undefined ? "-" : p.lease.here ? "here" : p.lease.device.slice(0, 10);

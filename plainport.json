@@ -94,6 +94,13 @@
                 "summary": {
                   "type": "string"
                 },
+                "details": {
+                  "description": "Paragraphs help prints after the usage; absent when the command has none",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "usage": {
                   "type": "string"
                 },
@@ -965,6 +972,47 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "theirs": {
+                  "description": "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "snapshot": {
+                        "type": "string"
+                      },
+                      "leaves": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "complete": {
+                        "type": "boolean"
+                      },
+                      "missing": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "extra": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "snapshot",
+                      "leaves",
+                      "complete",
+                      "missing",
+                      "extra"
+                    ],
+                    "additionalProperties": {}
+                  }
                 }
               },
               "required": [
@@ -1495,6 +1543,47 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "theirs": {
+            "description": "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "extra": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "snapshot",
+                "leaves",
+                "complete",
+                "missing",
+                "extra"
+              ],
+              "additionalProperties": {}
             }
           }
         },
@@ -3464,6 +3553,258 @@
             "~/personal/api-copy"
           ],
           "summary": "Read the head beside everything else"
+        }
+      ]
+    },
+    {
+      "name": "compare",
+      "summary": "Write each other head of a project into its repository as refs/plainport/theirs/<snapshot>/…",
+      "details": [
+        "While a conflict stands, each head other than the snapshot this copy came from is restored beside the project and written into its repository as sibling refs:",
+        "  refs/plainport/theirs/<snapshot>/HEAD       their HEAD commit, detached or not\n  refs/plainport/theirs/<snapshot>/heads/*    their branches\n  refs/plainport/theirs/<snapshot>/index      a commit of their staged index (absent when it is unmerged)\n  refs/plainport/theirs/<snapshot>/worktree   a commit of their working tree, parent = their HEAD",
+        "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) are never committed, and those that differ are listed. Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead."
+      ],
+      "usage": "plainport compare [<project>] [--clean]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "clean",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Remove every ref under refs/plainport/theirs/ instead, and nothing else"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "description": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+            "type": "string"
+          },
+          "clean": {
+            "description": "Remove every ref under refs/plainport/theirs/ instead, and nothing else",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "The project's folder, whose repository holds the refs"
+          },
+          "store": {
+            "type": "string"
+          },
+          "base": {
+            "description": "The snapshot this copy came from",
+            "type": "string"
+          },
+          "sets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "The device that made the snapshot"
+                },
+                "at": {
+                  "type": "string",
+                  "description": "When it was made"
+                },
+                "refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The set's refs, sorted"
+                },
+                "head": {
+                  "description": "Their HEAD commit; absent when it has no commit yet",
+                  "type": "string"
+                },
+                "detached": {
+                  "type": "boolean",
+                  "description": "Their HEAD was detached"
+                },
+                "branches": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Their branches, as heads/<name>"
+                },
+                "index": {
+                  "description": "The commit of their staged index; absent when unmerged",
+                  "type": "string"
+                },
+                "worktree": {
+                  "type": "string",
+                  "description": "The commit of their working tree, parent = their HEAD"
+                },
+                "unmerged": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Paths their index holds unmerged"
+                },
+                "submodules": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Gitlinks, kept as their index records them"
+                },
+                "nested": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Untracked repositories inside their copy, not committed"
+                },
+                "ignored": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Ignored files that differ between the copies (the first 100): listed, never committed"
+                },
+                "ignoredTotal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "changed": {
+                  "type": "boolean",
+                  "description": "Refs changed; false when the set was already exactly this"
+                }
+              },
+              "required": [
+                "snapshot",
+                "device",
+                "at",
+                "refs",
+                "detached",
+                "branches",
+                "worktree",
+                "unmerged",
+                "submodules",
+                "nested",
+                "ignored",
+                "ignoredTotal",
+                "changed"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "One per other head, written by this run"
+          },
+          "nothing": {
+            "description": "Why there was nothing to compare",
+            "type": "string"
+          },
+          "incomplete": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Leaves it should have that are missing or hold another value"
+                },
+                "extra": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Leaves it should not have"
+                }
+              },
+              "required": [
+                "snapshot",
+                "leaves",
+                "complete",
+                "missing",
+                "extra"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Sets still incomplete (a crash inside git's ref transaction, or an earlier run's): a rerun replaces them, --clean removes them"
+          },
+          "removed": {
+            "description": "--clean: the refs removed",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "dir",
+          "sets",
+          "incomplete"
+        ],
+        "additionalProperties": {},
+        "description": "The theirs refs written, or removed with --clean"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "compare",
+            "work:clients/acme/web"
+          ],
+          "summary": "Write the other heads as refs/plainport/theirs/<snapshot>/…; nothing to do until there is one"
+        },
+        {
+          "argv": [
+            "compare",
+            "work:clients/acme/web",
+            "--clean"
+          ],
+          "summary": "Remove the theirs refs"
         }
       ]
     },
@@ -5684,6 +6025,20 @@
       "allowable": false,
       "exitCode": 4,
       "summary": "No registered command has this name; the message suggests the closest one and fix is the corrected command line"
+    },
+    {
+      "code": "compare.not-git",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare writes the other copies as git refs, and this project's folder (or the other copy) holds no git repository, so no refs were written; the message and paths list the paths that differ, and fix reads the other copy side by side with plainport restore"
+    },
+    {
+      "code": "compare.not-local",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side"
     },
     {
       "code": "config.invalid",
