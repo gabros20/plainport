@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
-import { isUlid, nodeLocalIo, PLAN_TTL_MS, PlanSchema, StubSchema, ulid } from "@plainport/core";
+import {
+  isUlid,
+  nodeLocalIo,
+  PLAN_TTL_MS,
+  PlanSchema,
+  parseStoreIdentity,
+  StubSchema,
+  ulid,
+} from "@plainport/core";
 import { testHost as macosTestHost } from "@plainport/host-macos/testing";
 import { describeT1 } from "../../../../test/tiers.ts";
 import { fakeEngine } from "../../../core/src/testing/fake-engine.ts";
@@ -778,7 +786,10 @@ describeT1("offload with the real restic on a temp external-disk store", () => {
     const ssd = join(box.home, "t1-ssd");
     const setup = await cli(["init", "--store-path", "~/t1-ssd", "--store", "t1", "--yes", "--json"], real());
     expect(setup.code).toBe(0);
-    expect(existsSync(join(ssd, "repo/config"))).toBe(true);
+    // The repository the store publishes: repos/<attempt> on a store init set up through bootstrap (Task 19).
+    const published = parseStoreIdentity(readFileSync(join(ssd, "meta/v1/store.json")));
+    expect(published?.format).toBe(2);
+    expect(existsSync(join(ssd, published?.repo ?? "repo", "config"))).toBe(true);
     box.file("work/web/.env", "TOKEN=op://vault/item\n");
     symlinkSync("src/main.ts", join(box.home, "work/web/link"));
     const run = await cli(["offload", "work:web", "--store", "t1", "--yes", "--json"], real());
