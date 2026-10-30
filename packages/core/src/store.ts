@@ -39,6 +39,7 @@ import { readRegistry, updateRegistry } from "./registry.ts";
 import type { BootstrapStore } from "./saga/bootstrap.ts";
 import { registeredFolders } from "./saga/project-gate.ts";
 import { storeOverlap } from "./store-overlap.ts";
+import { storeCatalog } from "./stores/seal.ts";
 
 const secretMissing = (name: string, what: string, message: string, fix: string) =>
   fail(finding("store.secret-missing", { message: `store ${name}'s ${what}: ${message}`, fix }));
@@ -255,24 +256,36 @@ export const resolveSecret = async (
 export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
   opener.secrets === undefined ? {} : { providers: opener.secrets };
 
-type S3Read = { what: string; field: "secret" | "accessKeyId" | "secretAccessKey"; ref: string };
-
-/** An S3 store's references `reads`, one after another within one Q14 budget for all of them (review phase 4 M5). */
-const resolveS3Refs = async (
+/**
+ * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
+ * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
+ * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ * keyPairOnly reads the key pair alone (the password comes back empty): what a view needs to read a plain catalog,
+ * or to see that a catalog is sealed, before it asks for the password (D108).
+ */
+export const resolveS3Credentials = async (
   io: LocalIo,
   env: Env,
   home: string,
   name: string,
-  reads: readonly S3Read[],
-  options: Omit<SecretOptions, "what" | "field">,
-): Promise<Result<string[]>> => {
+  store: Extract<Store, { kind: "s3" }>,
+  options: Omit<SecretOptions, "what" | "field"> & { keyPairOnly?: boolean } = {},
+): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
   const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
   // The budget's end stops the read in flight (a provider's child) as a cancel would.
   const stop = new AbortController();
   const onAbort = () => stop.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) stop.abort();
-  let reading = reads[0] as S3Read;
+  const keyPair = [
+    { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
+    { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
+  ] as const;
+  const reads =
+    options.keyPairOnly === true
+      ? keyPair
+      : ([{ what: "password", field: "secret", ref: store.secret }, ...keyPair] as const);
+  let reading: (typeof reads)[number] = reads[0] as (typeof reads)[number];
   const all = async (): Promise<Result<string[]>> => {
     const values: string[] = [];
     for (const read of reads) {
@@ -302,59 +315,15 @@ const resolveS3Refs = async (
           : "check that the provider is reachable and signed in, then re-run",
       );
     }
-    return outcome.value;
+    if (!outcome.value.ok) return outcome.value;
+    const values = outcome.value.value;
+    const [password, accessKeyId, secretAccessKey] = (
+      options.keyPairOnly === true ? ["", ...values] : values
+    ) as [string, string, string];
+    return ok({ password, accessKeyId, secretAccessKey });
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
   }
-};
-
-const keyPairReads = (store: Extract<Store, { kind: "s3" }>): S3Read[] => [
-  { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
-  { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
-];
-
-/**
- * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
- * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
- * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
- */
-export const resolveS3Credentials = async (
-  io: LocalIo,
-  env: Env,
-  home: string,
-  name: string,
-  store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what" | "field"> = {},
-): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
-  const read = await resolveS3Refs(
-    io,
-    env,
-    home,
-    name,
-    [{ what: "password", field: "secret", ref: store.secret }, ...keyPairReads(store)],
-    options,
-  );
-  if (!read.ok) return read;
-  const [password, accessKeyId, secretAccessKey] = read.value as [string, string, string];
-  return ok({ password, accessKeyId, secretAccessKey });
-};
-
-/**
- * An S3 store's key pair alone, within one Q14 budget: what a view needs to read a plain catalog, which needs no
- * restic password (D108, review phase 5 M2).
- */
-export const resolveS3KeyPair = async (
-  io: LocalIo,
-  env: Env,
-  home: string,
-  name: string,
-  store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what" | "field"> = {},
-): Promise<Result<StoreCredentials>> => {
-  const read = await resolveS3Refs(io, env, home, name, keyPairReads(store), options);
-  if (!read.ok) return read;
-  const [accessKeyId, secretAccessKey] = read.value as [string, string];
-  return ok({ accessKeyId, secretAccessKey });
 };
 
 /**
@@ -462,6 +431,10 @@ export const publishedEngine = (
     check: async (options, ctx) => {
       const e = await engine();
       return e.ok ? e.value.check(options, ctx) : e;
+    },
+    catalogKey: async (storeId, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.catalogKey(storeId, ctx) : e;
     },
   };
 };
@@ -714,11 +687,21 @@ export interface ConfiguredStore extends OpenedStore {
 
 /**
  * A store an operation can use: named in config, set up on this device (its id recorded), of a kind this build
- * supports, with its password read. Nothing is reached yet.
+ * supports, with its password read, and its catalog policy (stores/seal.ts): the store's identity is read, its seal
+ * policy checked against this device's pin (pinned at the first contact), and a sealed catalog's key derived. With
+ * `catalog: false` (a caller that reads no catalog) nothing is reached.
  */
 export const openStore = async (
   io: LocalIo,
-  options: { paths: PlainportPaths; env: Env; name: string; config: ResolvedConfig; opener: StoreOpener },
+  options: {
+    paths: PlainportPaths;
+    env: Env;
+    name: string;
+    config: ResolvedConfig;
+    opener: StoreOpener;
+    catalog?: boolean;
+    now?: () => Date;
+  },
 ): Promise<Result<ConfiguredStore>> => {
   const { name, paths } = options;
   const store = options.config.stores[name];
@@ -754,7 +737,16 @@ export const openStore = async (
   if (!secrets.ok) return secrets;
   const opened = await options.opener.open(name, store, secrets.value.password, secrets.value.credentials);
   if (!opened.ok) return opened;
-  return ok({ ...opened.value, name, id, store });
+  if (options.catalog === false) return ok({ ...opened.value, name, id, store });
+  const now = options.now ?? (() => new Date());
+  const catalog = await storeCatalog(
+    io,
+    paths,
+    { ...opened.value, name, id },
+    { pin: true, at: () => now().toISOString() },
+  );
+  if (!catalog.ok) return catalog;
+  return ok({ ...opened.value, catalog: catalog.value, name, id, store });
 };
 
 /**

@@ -187,6 +187,7 @@ export const recover = defineCommand({
           name,
           config: loaded.value.config,
           opener: ctx.stores,
+          catalog: false,
         });
         return opened.ok ? ok(opened.value.blob) : opened;
       });

@@ -58,7 +58,8 @@ import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
-import { resolveS3KeyPair, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { resolveS3Credentials, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { sealedByPin, storeCatalog } from "../stores/seal.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
 
@@ -320,26 +321,25 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
           fix: `check the store ${name}, then re-run`,
         }),
       );
-    // An S3 store opens only with its key pair (review phase 5 M2): read it, and never the restic password here.
-    let credentials: Result<StoreCredentials | undefined> = ok(undefined);
-    if (store.kind === "s3") {
-      const pair = await withinDeadline(
-        resolveS3KeyPair(io, deps.env, paths.home, name, store, {
-          ...secretProvidersOf(deps.opener),
-          deadlineMs: deadline,
-          scheduler,
-        }),
-        deadline,
-        scheduler,
-      );
-      credentials = pair.timedOut
-        ? timedOut(pair.seconds, "store.secret-missing", `the secret provider of store ${name}`)
-        : pair.value;
-    }
+    // An S3 store is read only with its key pair, which a plain catalog needs too: it is read first, within the
+    // deadline, and the repository password only for a sealed catalog (D108).
+    const keyPair: Result<StoreCredentials | undefined> =
+      store.kind === "s3"
+        ? await resolveS3Credentials(io, deps.env, paths.home, name, store, {
+            ...secretProvidersOf(deps.opener),
+            deadlineMs: deadline,
+            scheduler,
+            keyPairOnly: true,
+          }).then((read) =>
+            read.ok
+              ? ok({ accessKeyId: read.value.accessKeyId, secretAccessKey: read.value.secretAccessKey })
+              : read,
+          )
+        : ok(undefined);
     const openWith = async (password: string): Promise<Result<OpenedStore>> => {
-      if (!credentials.ok) return credentials;
+      if (!keyPair.ok) return keyPair;
       const opening = await withinDeadline(
-        deps.opener.open(name, store, password, credentials.value),
+        deps.opener.open(name, store, password, keyPair.value),
         deadline,
         scheduler,
       );
@@ -347,13 +347,30 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
         : opening.value;
     };
-    /** Whether the catalog is sealed: by the opener's policy, or by the seal the store's identity publishes. */
+    /**
+     * Whether the catalog is sealed: by the opener's policy, by the seal the store's identity publishes, or by this
+     * device's pin (Task 20: a store pinned sealed that now says plain is then refused by storeCatalog).
+     */
     const sealed = async (target: OpenedStore): Promise<Result<boolean>> => {
       if (target.catalog?.seal === "sealed") return ok(true);
+      const pinned = await sealedByPin(io, paths, id);
+      if (!pinned.ok) return pinned;
+      if (pinned.value) return ok(true);
       const identity = await withinDeadline(readStoreDescriptor(target.blob), deadline, scheduler);
       if (identity.timedOut) return timedOut(identity.seconds, "store.unreachable", `store ${name}`);
       // An identity that cannot be read is loadCatalog's to report.
       return ok(identity.value.ok && identity.value.value?.seal === "v1");
+    };
+    /** A sealed catalog's policy, with its key (stores/seal.ts), when the opener gave none; views pin nothing. */
+    const withKey = async (target: OpenedStore): Promise<Result<OpenedStore>> => {
+      if (target.catalog !== undefined) return ok(target);
+      const policy = await withinDeadline(
+        storeCatalog(io, paths, { ...target, name, id }, { pin: false, at: () => now.toISOString() }),
+        deadline,
+        scheduler,
+      );
+      if (policy.timedOut) return timedOut(policy.seconds, "store.unreachable", `store ${name}`);
+      return policy.value.ok ? ok({ ...target, catalog: policy.value.value }) : policy.value;
     };
     let opened = await openWith("");
     const needsSecret = opened.ok ? await sealed(opened.value) : ok(false);
@@ -372,6 +389,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         ? timedOut(secret.seconds, "store.secret-missing", `the secret provider of store ${name}`)
         : secret.value;
       opened = password.ok ? await openWith(password.value) : password;
+      if (opened.ok) opened = await withKey(opened.value);
     }
     let read: Result<LoadedCatalog>;
     if (!opened.ok) {

@@ -15,20 +15,32 @@
 // tcp"), and on S3, where restic retries a refused connection for up to 15 minutes, the engine stops it once it has
 // retried a failing connection for unreachableAfterMs. A missing repository there is store.not-set-up: the store's
 // published repository is not where its store.json says, or the store was never set up.
+//
+// catalogKey (M2 Task 20) is the one run whose stdout is a secret: `restic cat masterkey` runs in the runner's
+// sensitive mode, so its output reaches no line, event or message, and only the catalog key derived from it (Catalog
+// seal v1) leaves the engine. Its stderr is never decoded either: a closed classifier says whether it names a
+// connection that could not be made, and its exit code says the rest.
 
 import { isAbsolute, normalize } from "node:path";
 import { decode, type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import {
+  bytesInclude,
+  type CatalogKey,
   type CheckReport,
   capturedOutput,
+  deriveSealKey,
   type Engine,
   type EntryMeta,
   type HostPorts,
+  keyId,
+  masterKeyMaterial,
+  parseSensitiveJson,
   type RestoreStats,
   type RunContext,
   type RunOutcome,
   type RunSpec,
   type SnapshotStats,
+  stderrClasses,
 } from "@plainport/core";
 import { z } from "zod";
 import lock from "../../../tools.lock.json" with { type: "json" };
@@ -159,6 +171,44 @@ const RETRYING = /returned error, retrying after/;
 
 /** Whether what restic said names a connection that could not be made, and not a refused login. */
 const unreachableSaid = (text: string): boolean => CONNECTION.test(text) && !REFUSED_HANDSHAKE.test(text);
+
+/** CONNECTION and REFUSED_HANDSHAKE as byte needles, for a sensitive run's stderr, which is never decoded (D92). */
+const CONNECTION_NEEDLES = [
+  "dial tcp",
+  "connection refused",
+  "no such host",
+  "i/o timeout",
+  "network is unreachable",
+  "no route to host",
+  "host is down",
+  "connection reset by peer",
+  "Connection closed by foreign host",
+  "connection closed by foreign host",
+  "TLS handshake timeout",
+  "ssh: connect to host",
+  "ssh: Could not resolve hostname",
+  "kex_exchange_identification",
+  "Connection closed by remote host",
+  "broken pipe",
+  "server unexpectedly closed connection",
+  "context deadline exceeded",
+];
+const REFUSED_NEEDLES = [
+  "Host key verification failed",
+  "Permission denied (",
+  "Too many authentication failures",
+  "host key is known",
+];
+/** What `restic cat masterkey`'s stderr may say, as a closed set: a connection that could not be made, or anything. */
+const MASTER_KEY_STDERR = stderrClasses(["unreachable", "other"] as const, (stderr) =>
+  REFUSED_NEEDLES.some((needle) => bytesInclude(stderr, needle))
+    ? "other"
+    : CONNECTION_NEEDLES.some((needle) => bytesInclude(stderr, needle))
+      ? "unreachable"
+      : "other",
+);
+/** A master key's JSON is a few hundred bytes; more on stdout is not one. */
+const MASTER_KEY_MAX_BYTES = 64 * 1024;
 
 const MAX_MESSAGES = 100;
 /** At most this many folders are read with cat tree for symlinks that ls -l could not place. */
@@ -527,8 +577,55 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
       }),
     );
 
+  /**
+   * `restic cat masterkey`, sensitive, without a lock: the catalog key derived from it, or a finding that says nothing
+   * of what restic printed.
+   */
+  const catalogKey = async (storeId: string, ctx: RunContext | undefined): Promise<Result<CatalogKey>> => {
+    const version = await ensureVersion(ctx);
+    if (!version.ok) return version;
+    const ran = await host.run({
+      command: options.restic,
+      args: [...global, "--no-lock", "cat", "masterkey"],
+      cwd: "/",
+      env: childEnv({ ...secretEnv, RESTIC_PASSWORD: password }),
+      sensitive: true,
+      capture: { maxBytes: MASTER_KEY_MAX_BYTES },
+      classifyStderr: MASTER_KEY_STDERR,
+      // A remote repository restic cannot reach is retried for minutes, and a sensitive run shows no retry lines to
+      // watch: the whole read is bounded instead.
+      ...(options.remote ? { timeoutMs: unreachableAfterMs } : {}),
+      ...(ctx?.signal === undefined ? {} : { signal: ctx.signal }),
+      ...(options.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: options.idleTimeoutMs }),
+    });
+    if (!ran.ok) {
+      if (options.remote && ["process.timeout", "process.idle-timeout"].includes(ran.finding.code))
+        return unreachable(
+          `restic did not read the repository's key within ${Math.round(unreachableAfterMs / 1000)} seconds`,
+        );
+      return redactFailure(ran);
+    }
+    const outcome = ran.value;
+    if (outcome.exitCode !== 0 || outcome.signal !== null) {
+      const said = MASTER_KEY_STDERR.codeOf(outcome);
+      if (said === "unreachable" && ![10, 11, 12].includes(outcome.exitCode ?? -1)) return unreachable("");
+      return exitFailure(outcome, "cat masterkey");
+    }
+    const captured = outcome.captured ?? new Uint8Array();
+    const parsed = parseSensitiveJson(captured);
+    captured.fill(0);
+    const material = parsed === undefined ? undefined : masterKeyMaterial(parsed.value);
+    if (material === undefined || !material.ok)
+      return outputInvalid("`restic cat masterkey` printed no master key of the shape Catalog seal v1 reads");
+    const key = deriveSealKey(material.value, storeId);
+    material.value.fill(0);
+    return key.ok ? ok({ key: key.value, kid: keyId(key.value) }) : key;
+  };
+
   return {
     id: "restic",
+
+    catalogKey: (storeId, ctx) => catalogKey(storeId, ctx),
 
     init: async (ctx) => {
       const version = await ensureVersion(ctx);

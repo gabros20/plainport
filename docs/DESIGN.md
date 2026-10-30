@@ -741,7 +741,7 @@ Event files are written create-only where the store can do it (exclusive create 
 | `~/.config/plainport/managed.toml` | Written by `plainport init`, the CLI and the app: roots, bindings, paired devices |
 | `~/.local/state/plainport/device.json` | This device's ULID, name (its key in each root's `on` table), role and public keys; private keys stay in Keychain or the Secure Enclave |
 | `~/.local/state/plainport/registry.json` | Project ULID → local path (root key plus relative path, or an override), base snapshot, onload time; `root scan` fills it. Also root key → root ULID, and store name → store id |
-| `~/.local/state/plainport/stores/<store id>.json` | This device's record of one store (Q4), keyed by its id so every name for the store shares it: the catalog's seal policy as first seen (the pin, Q10), and what was measured (the semantics profile with each property's evidence, Q8, and the last `store test`) with the facts it was measured against (endpoint, access kind, restic and rclone versions). A measurement under facts that differ in any way no longer holds and is left out; the pin stays. Written atomically under a lock (`stores/<store id>.json.lock`); a damaged file is `store.state-invalid` and never overwritten. v0.1 never reads it |
+| `~/.local/state/plainport/stores/<store id>.json` | This device's record of one store (Q4), keyed by its id so every name for the store shares it: the catalog's seal policy as first seen (the pin, Q10) with the key id of the first catalog key derived for a sealed one, and what was measured (the semantics profile with each property's evidence, Q8, and the last `store test`) with the facts it was measured against (endpoint, access kind, restic and rclone versions). A measurement under facts that differ in any way no longer holds and is left out; the pin stays. Written atomically under a lock (`stores/<store id>.json.lock`); a damaged file is `store.state-invalid` and never overwritten. v0.1 never reads it |
 | `~/.local/state/plainport/journal/<op>.json` | Phase log of running or interrupted operations, including detached jobs started by another device |
 | `~/.local/state/plainport/locks/<project>.lock` | PID, host and start time of the lock holder |
 | `~/.local/state/plainport/plans/<plan>.json` | Approved plans; they expire after one hour |
@@ -1034,7 +1034,7 @@ The CLI is a thin renderer over the core: it parses arguments, calls one core me
 | `plainport root add \| bind \| unbind \| rename \| scan \| list` | read, safe_write | Manage roots and each device's path for them; `list` only reads, and `scan` registers the projects it finds in this device's `registry.json`. `bind --device mini` runs on the mini over SSH. |
 | `plainport mv <project> <root>:<path>` | safe_write | Re-file a project under another root or relative path; for a shelved project it only updates the catalog. |
 | `plainport device add \| list \| role \| revoke` | read, confirm | Pair a machine over SSH and bind its roots, change its role, or revoke its keys everywhere; `list` only reads. |
-| `plainport store add \| list \| test \| upgrade \| remove` | read, safe_write, confirm | Manage stores (Q13). `add` (safe_write) sets a store up through bootstrap, or adopts one already set up, records it in managed.toml under its lock and sends only setup files; `--secret-stdin` saves the password to the Keychain. `list` (read) shows each store, its pin and its last test; `--probe` also asks each whether it answers. `test` (safe_write) writes, reads, lists and deletes one probe key under `meta/v1/store-test/`, records what it measured in this device's `stores/<id>.json` under the facts it measured with, reports `delete: denied \| allowed \| unreachable` (denied is never called append-only, which needs proof across the whole repository, M3), and lists losing bootstrap repositories and contested candidacies with the manual, quiesce-first cleanup. `upgrade` (confirm) moves a format-1 store to format 2 under Q2's quiescence checks (`store.not-quiescent`, `--others-stopped`, a quiet window of 15 minutes by default, `--quiet-window`), with an `upgrade-intent` marker and a `journal/upgrade/<op>.json` that `recover` settles. `remove` (confirm) forgets a store on this device only, its managed.toml table and its pin, and refuses `store.in-use` while a root, an open journal or a setup attempt uses it. |
+| `plainport store add \| list \| test \| upgrade \| remove` | read, safe_write, confirm | Manage stores (Q13). `add` (safe_write) sets a store up through bootstrap, or adopts one already set up, records it in managed.toml under its lock and sends only setup files; `--secret-stdin` saves the password to the Keychain; a new `s3` or `sftp` store's catalog is sealed and a local one's plain unless `--seal` or `--no-seal` says otherwise, and an existing store must already have the policy named ("Catalog seal v1"). `list` (read) shows each store, its pin, whether its catalog is sealed (as pinned here) and its last test; `--probe` also asks each whether it answers. `test` (safe_write) writes, reads, lists and deletes one probe key under `meta/v1/store-test/`, records what it measured in this device's `stores/<id>.json` under the facts it measured with, reports `delete: denied \| allowed \| unreachable` (denied is never called append-only, which needs proof across the whole repository, M3), and lists losing bootstrap repositories and contested candidacies with the manual, quiesce-first cleanup. `upgrade` (confirm) moves a format-1 store to format 2 under Q2's quiescence checks (`store.not-quiescent`, `--others-stopped`, a quiet window of 15 minutes by default, `--quiet-window`), with an `upgrade-intent` marker and a `journal/upgrade/<op>.json` that `recover` settles. `remove` (confirm) forgets a store on this device only, its managed.toml table and its pin, and refuses `store.in-use` while a root, an open journal or a setup attempt uses it. |
 | `plainport store replicate <from> <to>` | confirm | Copy snapshots and events to another store, e.g. from the mini to B2. `--schedule` installs the timer once; the timer then runs `restic copy` with an append-only key. |
 | `plainport ls` | read | Projects with root, status, device, size (the head snapshot's, or a never-offloaded folder's own) and last activity. `--root`, `--local`, `--shelved`, `--parked` (M3), `--sort size\|age`. |
 | `plainport status [project]` | read | One project in detail: state, head, lease, git warnings, strippable bytes. |
@@ -1280,6 +1280,9 @@ export interface Engine {
   ): Promise<Result<{ snapshot: SnapshotInfo; count: number }>>;
   restore(snapshot: string, target: string, ctx: RunContext, opts?: RestoreOptions): Promise<Result<RestoreStats>>;
   check(opts?: { readDataSubset?: string }, ctx?: RunContext): Promise<Result<CheckReport>>;
+  // The store's catalog key (Catalog seal v1): restic cat masterkey --no-lock in the runner's sensitive mode; only
+  // the key derived with the store id as salt, and its key id, leave the engine.
+  catalogKey(storeId: string, ctx?: RunContext): Promise<Result<{ key: Uint8Array; kid: string }>>;
   // M5: stream (restic dump, for full verify), forget and prune.
 }
 
@@ -1428,6 +1431,24 @@ spec (pure, no I/O) and `fixtures/seal/v1.json` holds its test vectors.
   and re-sealed events (M3 and M5 work); M2 only fails closed on a `kid` mismatch.
 - **No fallback.** A random-key fallback is never chosen silently (Q10).
 
+**Sealing on stores** (Q10; `packages/core/src/stores/seal.ts`). The policy is the store's: bootstrap publishes it once
+in `store.json` v2's `catalog.seal`, and nothing changes it afterwards. `plainport store add` seals a new `s3` or `sftp`
+store's catalog by default and leaves a local one plain; `--seal` and `--no-seal` choose for a new store, and for an
+existing one must name the policy it already publishes (`usage.invalid` otherwise, before anything is written), so an
+M1 store, or any plain one, is never sealed in place. `init` sets up local stores, plain. Each device pins the policy
+in its record of the store (`stores/<id>.json`, `seal`) at its first contact (bootstrap's publication or adoption, or
+the first command that opens the store), and with it the key id of the first catalog key it derives. Every command
+that reads or writes the catalog opens the store's policy through `openStore`: the store's identity is read, its policy
+checked against the pin, and a sealed catalog's key derived by the engine (`Engine.catalogKey`: `restic cat masterkey
+--no-lock` in the runner's sensitive mode, so the master key reaches no message, event or argument, and only the derived
+key leaves the engine). A store whose policy differs from the pin, either way, is `store.identity-changed`; a key whose id
+differs from the pinned one is `catalog.seal-failed`, before anything is read; a key that cannot be derived is
+`store.seal-key-unavailable` (an unreachable store stays `store.unreachable`). A store pinned sealed never reads a
+plaintext event (`catalog.unsealed-event`, D86), and a writer whose policy is not the store's refuses before it reads
+or writes an event (D106). Views pin nothing: they read the mirror first, see that a catalog is sealed from the store's
+identity or from the pin before any key is needed (D108), and only then resolve the password and derive the key; an S3
+store's key pair, which any read of the bucket needs, is resolved first and alone.
+
 **Other safeguards:**
 
 - `plainport init` prints the recovery key once and doesn't finish until you confirm it's stored.
@@ -1453,7 +1474,7 @@ Every file plainport persists, and every closed value it prints, has a row below
 | `event.root-bound` | `root-bound` event | parsing it | everything works | yes, from `root bind` | read as is | tested |
 | `event.unknown` | any event with a field or type v0.1.1 does not know, on `v: 1` | skipping it with `catalog.event-skipped` (D17); head-dependent defaults refuse under D86 | the store reads, minus those events | not applicable: v0.1.1 never writes one | never written to a format-1 store | tested |
 | `event.resolved` | `resolved` event (Q3), written only to format-2 stores | skipping it, as for any unknown type | v0.1.1 cannot reach a format-2 store, so it never meets one | no, it refuses the store first | `resolve` on a format-1 store refuses with `store upgrade` as the fix | todo: Task 25 |
-| `event.sealed` | sealed event envelope (Q10), format-2 stores that opt in | skipping it as not JSON of a known type, but v0.1.1 refuses the store first | a sealed store cannot be rolled back to v0.1.1 | no | an existing plaintext store is never sealed in place | todo: Task 10 |
+| `event.sealed` | sealed event envelope (Q10), format-2 stores that opt in | skipping it as not JSON of a known type, but v0.1.1 refuses the store first | a sealed store cannot be rolled back to v0.1.1 | no | an existing plaintext store is never sealed in place: `store add --seal` refuses an M1 or plain store (Q10) | tested |
 | `store.json.v1` | `meta/v1/store.json` `{v: 1, id}` | parsing it (`StoreIdentity`, strict) | everything works | yes, `init` creates it | stays format 1 and v0.2 writes nothing that v0.1.1 cannot read, until `store upgrade` | tested |
 | `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repo, catalog: {seal}, format: 2}` (Q2), published once by bootstrap's election (Task 8); `schemas/store-identity.json` now accepts either format | refusing it: `store.failed`, the file left as it is, nothing written before the refusal (tested with the real shape bootstrap writes and with a store v0.2's `init` creates; v0.2 round-trips on it) | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way: it refuses while a paused v0.1.1 holds a lock or lease (`store.not-quiescent`), and with `--others-stopped` a lease-less v0.1.1 first offload paused across it resumes and ends as M1's, its alias-keyed event read by v0.2 (Q2's residual) | no | made by `store upgrade`, or by v0.2's `init` and `store add` for a new store | tested |
 | `root.json` | `meta/v1/root.json` `{v: 1, root}` | parsing it; a second root is refused (`store.root-mismatch`) | everything works | yes, a first offload creates it exclusively | read as is | tested |

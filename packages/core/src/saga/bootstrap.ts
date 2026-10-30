@@ -65,6 +65,7 @@ import type { PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine } from "../ports/engine.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
+import { pinStoreSeal } from "../stores/seal.ts";
 import { refuseWhileUpgrading } from "../stores/upgrade.ts";
 import { ulid } from "../ulid.ts";
 import { withFix, writeFailed } from "./journaled.ts";
@@ -175,9 +176,9 @@ export interface BootstrapTarget {
 
 export type BootstrapDone =
   /** This attempt won the election: its store.json is published and its id recorded on this device. */
-  | { outcome: "published"; id: string; repo: string; format: 2 }
+  | { outcome: "published"; id: string; repo: string; format: 2; seal: SealPolicy }
   /** The store was set up already: its repository opened with this device's password, and its id is recorded. */
-  | { outcome: "adopted"; id: string; repo: string; format: 1 | 2 };
+  | { outcome: "adopted"; id: string; repo: string; format: 1 | 2; seal: SealPolicy };
 
 export type RecoveredBootstrap = {
   attempt: string;
@@ -250,8 +251,19 @@ const withStoreLock = async <T>(
   }
 };
 
-/** Records `id` under the store's name in this device's registry, unless the name is pinned to another id (D85). */
-const recordId = async (ports: BootstrapPorts, name: string, id: string): Promise<Result<void>> => {
+/**
+ * Records `id` under the store's name in this device's registry, unless the name is pinned to another id (D85). The
+ * store's seal policy is pinned first in this device's record of the store (Q10), or checked against the pin there:
+ * a store whose policy is not the one pinned is refused before its id is recorded.
+ */
+const recordId = async (
+  ports: BootstrapPorts,
+  name: string,
+  id: string,
+  seal: SealPolicy,
+): Promise<Result<void>> => {
+  const pinned = await pinStoreSeal(ports.io, ports.paths, { name, id }, seal, ports.clock().toISOString());
+  if (!pinned.ok) return pinned;
   const updated = await updateRegistry(ports.io, ports.paths, (registry) => {
     const current = registry.stores?.[name];
     if (current !== undefined && current !== id) return identityChanged(current, id, `store ${name}`);
@@ -287,9 +299,9 @@ const adopt = async (
       );
     return opens;
   }
-  const recorded = await recordId(ports, name, found.id);
+  const recorded = await recordId(ports, name, found.id, found.seal);
   if (!recorded.ok) return recorded;
-  return ok({ outcome: "adopted", id: found.id, repo: found.repo, format: found.format });
+  return ok({ outcome: "adopted", id: found.id, repo: found.repo, format: found.format, seal: found.seal });
 };
 
 /**
@@ -312,7 +324,13 @@ export const runBootstrap = (
     for (const journal of open.filter((j) => j.store.name === target.name)) {
       const settled = await settle(ports, store, journal);
       if (settled.outcome === "published")
-        return ok({ outcome: "published", id: settled.id, repo: settled.repo, format: 2 });
+        return ok({
+          outcome: "published",
+          id: settled.id,
+          repo: settled.repo,
+          format: 2,
+          seal: journal.seal,
+        });
       if (settled.outcome !== "rolled-back") return settled.problem;
     }
 
@@ -358,7 +376,7 @@ export const runBootstrap = (
     if (!initialised.ok) return initialised;
     const settled = await electAndFinish(ports, store, journal);
     return settled.outcome === "published"
-      ? ok({ outcome: "published", id: settled.id, repo: settled.repo, format: 2 })
+      ? ok({ outcome: "published", id: settled.id, repo: settled.repo, format: 2, seal: journal.seal })
       : settled.problem;
   });
 
@@ -554,7 +572,7 @@ const record = async (
         }),
       ),
     );
-  const recorded = await recordId(ports, name, journal.op);
+  const recorded = await recordId(ports, name, journal.op, journal.seal);
   if (!recorded.ok) return keep(recorded);
   ports.faultAt("bootstrap.recorded");
   await close(ports, journal);

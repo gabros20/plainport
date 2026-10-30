@@ -8,10 +8,14 @@
 //      another one is refused, since a name never moves to another store (D85, D68);
 //   2. a local store's folder is made ready (prepareLocalStore: holders, overlap, a mounted disk);
 //   3. with --secret-stdin, the password is saved to the Keychain under the store's keychain: reference;
-//   4. the store is reached and its identity read: a name already pinned here must find the same id (D85), and a store
-//      whose upgrade marker stands is refused (Q2);
+//   4. the store is reached and its identity read: a name already pinned here must find the same id (D85), a store
+//      whose upgrade marker stands is refused (Q2), and an explicit --seal or --no-seal must be the policy an existing
+//      store publishes, since a store's seal policy is fixed when it is set up and a plain store is never sealed in
+//      place (Q10);
 //   5. managed.toml gets the table (references only, never a value), and the default store when none is set;
 //   6. bootstrap runs: published (this attempt won), adopted, or lost, contested, undecided as failures with their data.
+//      A new store's catalog is sealed by default when it is remote (s3, sftp) and plain when it is local (Q10); this
+//      device pins the policy the store publishes (stores/seal.ts).
 // Every step is idempotent, so a re-run finishes a setup that stopped: an open attempt resumes with its id (D99).
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
@@ -39,6 +43,8 @@ export type StoreAdded = {
   format: 1 | 2;
   /** Where its restic repository lies under the store's root. */
   repo: string;
+  /** Whether its catalog is sealed (Q10): the policy it publishes, which this device pinned. */
+  sealed: boolean;
   location: string;
   /** This run wrote managed.toml. */
   configChanged: boolean;
@@ -55,7 +61,11 @@ export interface AddStoreOptions {
   opener: StoreOpener;
   /** Bootstrap's ports: the journal's crash seam, the clock, the election's waits. */
   ports: Omit<BootstrapPorts, "io" | "paths">;
-  /** The catalog's seal policy a new store publishes (Q10); plain until sealing lands (Task 20). */
+  /**
+   * --seal or --no-seal: the catalog's seal policy a new store publishes (Q10), and the one an existing store must
+   * publish. Absent: sealed for an s3 or sftp store, plain for a local one (defaultSeal), and an existing store is
+   * adopted with whatever it publishes.
+   */
   seal?: SealPolicy;
   /** --secret-stdin: the repository password, saved to the Keychain under the store's keychain: reference. */
   secretValue?: string;
@@ -85,6 +95,12 @@ const sorted = (store: Store): Record<string, unknown> =>
 
 const describe = (store: Store, home: string): string =>
   `a ${store.kind} store at ${storeLocation(store, home)}`;
+
+/** The seal policy a new store gets by default (Q10): sealed for a bucket or a VPS, plain on a local disk. */
+export const defaultSeal = (kind: Store["kind"]): SealPolicy =>
+  kind === "s3" || kind === "sftp" ? "v1" : "none";
+
+const sealWord = (seal: SealPolicy): string => (seal === "v1" ? "--seal" : "--no-seal");
 
 export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<Result<StoreAdded>> => {
   const { paths, env, name } = options;
@@ -184,6 +200,17 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   if (found.value !== null) {
     const quiet = await refuseWhileUpgrading(reached.blob, name, "store add");
     if (!quiet.ok) return quiet;
+    const published = found.value.seal;
+    if (options.seal !== undefined && options.seal !== published)
+      return fail(
+        finding("usage.invalid", {
+          message: `store ${name} is set up already (${found.value.id}, format ${found.value.format}) with a ${published === "v1" ? "sealed" : "plain"} catalog, and ${sealWord(options.seal)} asks for a ${options.seal === "v1" ? "sealed" : "plain"} one: a store's seal policy is fixed when it is set up, and ${published === "v1" ? "a sealed store" : found.value.format === 1 ? "an M1 store" : "a plain store"} is never ${options.seal === "v1" ? "sealed" : "unsealed"} in place (Q10); nothing was written`,
+          fix:
+            options.seal === "v1"
+              ? `re-run without --seal to use the store as it is, or set a new store up under a new name and path: plainport store add <new-name> --seal …`
+              : `re-run without --no-seal to use the store as it is`,
+        }),
+      );
   }
 
   // 5. managed.toml: the table, and the default store when none is set.
@@ -210,7 +237,7 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   // 6. Bootstrap: adopt, resume or stand.
   const done = await runBootstrap({ ...options.ports, io, paths }, reached, {
     name,
-    seal: options.seal ?? "none",
+    seal: options.seal ?? defaultSeal(store.kind),
   });
   if (!done.ok) return done;
   return ok({
@@ -219,6 +246,7 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
     outcome: done.value.outcome,
     format: done.value.format,
     repo: done.value.repo,
+    sealed: done.value.seal === "v1",
     location: storeLocation(store, paths.home),
     configChanged,
     secretSaved,

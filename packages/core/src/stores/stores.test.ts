@@ -274,6 +274,7 @@ describe("store list", () => {
         source: "managed",
         default: true,
         id: added.id,
+        sealed: false,
         roots: ["work"],
       },
       {

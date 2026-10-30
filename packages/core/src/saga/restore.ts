@@ -136,7 +136,14 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
       }),
     );
   }
-  const opened = await openStore(io, { paths, env: deps.env, name: storeName, config, opener: deps.opener });
+  const opened = await openStore(io, {
+    paths,
+    env: deps.env,
+    name: storeName,
+    config,
+    opener: deps.opener,
+    now: clock,
+  });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
   const mirror = await deps.openMirror(store.id);

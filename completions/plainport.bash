@@ -44,7 +44,7 @@ _plainport() {
     'root bind') opts='--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root list') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root scan') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
-    'store add') opts='--kind --path --host --endpoint --bucket --region --secret --access-key-id --secret-access-key --secret-stdin --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store add') opts='--kind --path --host --endpoint --bucket --region --secret --access-key-id --secret-access-key --secret-stdin --seal --no-seal --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'store list') opts='--probe --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'store test') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'store upgrade') opts='--others-stopped --quiet-window --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;

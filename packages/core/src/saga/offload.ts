@@ -479,6 +479,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     name: storeName,
     config: loaded.value.config,
     opener: deps.opener,
+    now: clock,
   });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;

@@ -5,5 +5,6 @@ export * from "./list.ts";
 export * from "./location.ts";
 export * from "./reach.ts";
 export * from "./remove.ts";
+export * from "./seal.ts";
 export * from "./test.ts";
 export * from "./upgrade.ts";
