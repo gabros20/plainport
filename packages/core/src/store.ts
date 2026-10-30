@@ -423,6 +423,10 @@ export const publishedEngine = (
       const e = await engine();
       return e.ok ? e.value.check(options, ctx) : e;
     },
+    catalogKey: async (storeId, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.catalogKey(storeId, ctx) : e;
+    },
   };
 };
 
