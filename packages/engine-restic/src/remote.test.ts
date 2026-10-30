@@ -234,6 +234,44 @@ describe("restic engine: a remote repository", () => {
     expect(host.calls[1]?.signal?.aborted).toBe(false);
   });
 
+  test("S3's 'Connection closed by foreign host' retries count as a failing connection (a cut link, T2)", async () => {
+    let now = 0;
+    const line =
+      'Stat(<config/>) returned error, retrying after 808ms: Stat: Head "http://127.0.0.1:9/b/config": Connection closed by foreign host http://127.0.0.1:9/b/config. Retry again.';
+    const retrying = edited(fixture("snapshots"), {
+      exitCode: 130,
+      stdout: "",
+      stderr: `${line}\n${line}\n`,
+    });
+    const { engine } = remoteSetup([retrying], {
+      unreachableAfterMs: 1_000,
+      now: () => {
+        now += 1_000;
+        return now;
+      },
+    });
+    expect(failure(await engine.list({})).finding.code).toBe("store.unreachable");
+  });
+
+  test("'wrong password' after connection retries is the connection, not the password", async () => {
+    const retry =
+      "Load(<key/1234>) returned error, retrying after 600ms: read tcp 127.0.0.1:1->127.0.0.1:9: read: connection reset by peer";
+    const keyless = edited(fixture("snapshots"), {
+      exitCode: 12,
+      stdout: "",
+      stderr: `${retry}\n${JSON.stringify({ message_type: "exit_error", code: 12, message: "Fatal: wrong password or no key found" })}\n`,
+    });
+    const { engine } = remoteSetup([keyless], { unreachableAfterMs: 60_000, now: () => 0 });
+    expect(failure(await engine.list({})).finding.code).toBe("store.unreachable");
+    // Without a connection retry, exit 12 stays the password.
+    const plain = remoteSetup([
+      edited(keyless, {
+        stderr: `${JSON.stringify({ message_type: "exit_error", code: 12, message: "Fatal: wrong password or no key found" })}\n`,
+      }),
+    ]);
+    expect(failure(await plain.engine.list({})).finding.code).toBe("restic.wrong-password");
+  });
+
   test("the adoption probe lists without a lock (--no-lock)", async () => {
     const { host, engine } = remoteSetup([fixture("snapshots")]);
     expect((await engine.list({ tags: ["plainport"], noLock: true })).ok).toBe(true);

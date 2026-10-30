@@ -151,7 +151,12 @@ const rcloneRemoteOf = (store: RemoteStore, credentials: StoreCredentials | unde
             }),
       };
 
-export const storeOpener = (host: HostPorts, env: Env): StoreOpener => ({
+export interface StoreOpenerOptions {
+  /** How long restic may retry a failing connection before it is store.unreachable (engine-restic's default). */
+  unreachableAfterMs?: number;
+}
+
+export const storeOpener = (host: HostPorts, env: Env, options: StoreOpenerOptions = {}): StoreOpener => ({
   // keychain: and op: references, read through the one runner (Task 15); env: and file: are core's own.
   secrets: secretProviders({ run: (spec) => host.run(spec), env }),
   open: async (name, store, password, credentials) => {
@@ -189,6 +194,9 @@ export const storeOpener = (host: HostPorts, env: Env): StoreOpener => ({
           ? { secretEnv: s3Environment(credentials) }
           : {}),
         remote,
+        ...(options.unreachableAfterMs === undefined
+          ? {}
+          : { unreachableAfterMs: options.unreachableAfterMs }),
         env: resticEnv(env),
         cacheDir: join(paths.value.cacheDir, "restic"),
       });
