@@ -4,11 +4,16 @@
 // reads comes from the journal and the committed event, so the live saga and `plainport recover` (Task 14) run the
 // same function.
 //
-// Right before the rename the folder's fingerprint is compared with the verified one (plan.fingerprint): an edit made
-// after verification, in the live run's commit window or in the hours before recover runs, is never deleted. Such a
-// folder is kept, no stub is written, its base becomes the committed snapshot, and the run ends with
-// offload.diverged-after-commit (exit 8, D51, D52). The lock is read before that scan, so the rename follows the
-// scan at once. A fingerprint of another kind than this build's (D53) is never compared: the folder is kept.
+// Right before the rename the catalog is read again (Q16, the fork table's F2 in DESIGN.md "Conflict at step 7"): a fork
+// that names the committed snapshot, or a resolution that rejected it, keeps the folder where it is with no stub, makes
+// the snapshot the copy's base, closes the journal and ends the run with catalog.head-moved (exit 8, kind fork, detail
+// after-commit). A store that does not answer moves nothing: the journal stays for recover, which reads it again.
+// Once the folder has moved (F3) the rename is never undone and nothing is read again. Then the folder's fingerprint is
+// compared with the verified one (plan.fingerprint): an edit made after verification, in the live run's commit window
+// or in the hours before recover runs, is never deleted. Such a folder is kept, no stub is written, its base becomes
+// the committed snapshot, and the run ends with offload.diverged-after-commit (exit 8, D51, D52). The lock is read
+// before that scan, so the rename follows the scan at once. A fingerprint of another kind than this build's (D53) is
+// never compared: the folder is kept.
 //
 // The folder is moved only onto a store whose semantics profile admits release (DESIGN.md "Remote stores: consistency
 // and publication": commit and durability = durable, or acked-unsynced with Q21's post-grace proof). A committed offload
@@ -24,6 +29,7 @@
 
 import { basename, dirname, join } from "node:path";
 import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { type CatalogRead, headUncertain } from "../catalog/head.ts";
 import { readDevice } from "../device.ts";
 import { makeInHolder } from "../holder.ts";
 import { systemErrorCode } from "../io.ts";
@@ -72,6 +78,11 @@ export interface ReleaseContext {
   /** The offload's saga, committed: its journal says what to release and how. */
   saga: Saga<OffloadJournal>;
   /**
+   * The store's catalog, read fresh right before the rename (F2): a fork naming the snapshot, or a resolution that
+   * rejected it, keeps the folder; a failure (a store that does not answer) moves nothing. Absent, nothing is read.
+   */
+  reread?(): Promise<Result<CatalogRead>>;
+  /**
    * The store's semantics profile, and its name in config: the folder is moved only when the profile admits release.
    * Absent, release is not checked (callers that release from a store already checked).
    */
@@ -80,8 +91,11 @@ export interface ReleaseContext {
   log(level: "warn", message: string): void;
 }
 
-/** Records the released copy's snapshot as the project's base on this device: the next offload builds on it. */
-const recordBase = (rc: ReleaseContext, journal: OffloadJournal) =>
+/**
+ * Records the offload's snapshot as the project's base on this device: the next offload builds on it. A released copy
+ * takes it, and so does a folder kept as a fork (F1, F2) or with edits after the commit (D51).
+ */
+export const recordBase = (rc: Pick<ReleaseContext, "host" | "paths">, journal: OffloadJournal) =>
   updateRegistry(rc.host, rc.paths, (registry) => {
     const entry = registry.projects[journal.project.id];
     if (entry === undefined) return ok(registry);
@@ -94,13 +108,16 @@ const recordBase = (rc: ReleaseContext, journal: OffloadJournal) =>
 
 /**
  * The error data of exit 8 (D14). `fork`: the head moved during the upload, so the snapshot is kept as a fork and
- * the folder stays. `diverged-after-commit`: the snapshot is committed and is the head, but the folder changed after
- * the commit, so it stays here with its edits and the next offload builds on the snapshot (D52).
+ * the folder stays; with `detail: "after-commit"` (Q6) the fork was seen after the commit, before the rename (F2).
+ * `diverged-after-commit`: the snapshot is committed and is the head, but the folder changed after the commit, so it
+ * stays here with its edits and the next offload builds on the snapshot (D52).
  */
 export interface OffloadConflict {
   op: string;
   exitCode: 8;
   kind: "fork" | "diverged-after-commit";
+  /** kind fork only: seen after the commit (F2), not at the commit's head check (F1). */
+  detail?: "after-commit";
   project: string;
   /** The plainport snapshot id, and this store's restic id for it. */
   snapshot: string;
@@ -118,6 +135,36 @@ const RELEASE_ORDER = [
   "offload.release.delete",
 ] as const;
 type ReleaseStep = (typeof RELEASE_ORDER)[number];
+
+/**
+ * What a catalog read after the commit says of the offload's snapshot (F2): `forked` when a fork names it, `rejected`
+ * when a resolution rejected it, undefined when neither. The snapshot's own event may be missing from a store whose
+ * listings lag: then a kept snapshot made from the same base is the fork. A read that left out an event that may be
+ * this project's cannot tell, so it is a failure (catalog.head-uncertain) and nothing moves.
+ */
+export const forkAfterCommit = (
+  read: CatalogRead,
+  journal: OffloadJournal,
+): Result<"forked" | "rejected" | undefined> => {
+  const { project, op } = journal;
+  const doubt = headUncertain(read, project.id, [op], project.address, {
+    what: "the folder was kept and nothing was moved",
+    instead: () => "plainport recover reads the catalog again and finishes the offload once it reads whole",
+  });
+  if (doubt !== undefined) return fail(doubt.finding);
+  const state = read.projects[project.id];
+  if (state === undefined) return ok(undefined);
+  if (state.rejected.includes(op)) return ok("rejected");
+  if (state.conflicts.some((fork) => fork.includes(op))) return ok("forked");
+  if (state.snapshots[op] === undefined) {
+    const sibling = Object.entries(state.snapshots).some(
+      ([snapshot, made]) =>
+        snapshot !== op && made.base === journal.base && !state.discarded.includes(snapshot),
+    );
+    if (sibling) return ok("forked");
+  }
+  return ok(undefined);
+};
 
 /** Whether the release has reached its rename: from there on the folder has moved, and no gate applies (I2). */
 export const releaseMoved = (journal: OffloadJournal): boolean =>
@@ -141,6 +188,45 @@ export interface Released {
   /** The detached delete has started. */
   freed: boolean;
 }
+
+/**
+ * F2: a fork naming the committed snapshot, or a resolution that rejected it, was seen before the rename. The folder
+ * stays where it is with no stub, the snapshot becomes the copy's base, the journal is closed, and the run ends with
+ * catalog.head-moved (exit 8, kind fork, detail after-commit).
+ */
+const keptAsFork = async (rc: ReleaseContext, why: "forked" | "rejected"): Promise<Result<never>> => {
+  const { saga } = rc;
+  const { project, op } = saga.journal;
+  const folder = project.dir;
+  const based = await recordBase(rc, saga.journal);
+  if (!based.ok) rc.log("warn", `registry.json was not updated: ${based.finding.message}`);
+  await saga.close();
+  const data: OffloadConflict = {
+    op,
+    exitCode: 8,
+    kind: "fork",
+    detail: "after-commit",
+    project: project.address,
+    snapshot: op,
+    store: saga.journal.store.name,
+    stored: saga.journal.verified ?? "",
+  };
+  return failWith(
+    finding("catalog.head-moved", {
+      message:
+        why === "forked"
+          ? `${project.address} forked after its offload was committed as snapshot ${op}: another copy was offloaded from the same snapshot, so ${folder} was kept with no stub; both snapshots are in the store`
+          : `another device's resolution of ${project.address} rejected snapshot ${op} after it was committed, so ${folder} was kept with no stub; the snapshot stays in the store`,
+      fix:
+        why === "forked"
+          ? `keep this folder; it is on snapshot ${op}, one side of the fork. plainport status ${shellWord(project.address)} shows both sides, and plainport restore ${shellWord(project.address)} --snapshot <id> --to <path> reads the other side by side`
+          : `keep this folder; it is on snapshot ${op}, which the resolution rejected. The next offload (plainport offload ${shellWord(project.address)} --yes) uploads it as live work, which conflicts again`,
+      paths: [folder],
+    }),
+    data,
+    8,
+  );
+};
 
 /**
  * Releases a committed offload, from wherever its journal stands (see above); `event` is its offloaded event (when
@@ -186,6 +272,15 @@ export const releaseOffload = async (
       );
     }
   }
+  const lockLost = async (): Promise<boolean> => rc.stillHeld !== undefined && !(await rc.stillHeld());
+  const locked = () =>
+    fail(
+      finding("project.locked", {
+        message: `the lock on ${project.address} was taken over by another run before ${folder} was moved; the snapshot is committed and the folder is untouched`,
+        fix: "wait for the other plainport run to finish, then run plainport recover to finish this offload",
+        paths: [folder],
+      }),
+    );
   /** Journals the step unless the journal is there already. */
   const advance = (step: ReleaseStep, change: Partial<OffloadJournal> = {}): Promise<Result<void>> =>
     reached(step) ? Promise.resolve(ok(undefined)) : saga.step(step, change);
@@ -235,15 +330,6 @@ export const releaseOffload = async (
   if (atDir) {
     const toTrash = await advance("offload.release.trash", { trash });
     if (!toTrash.ok) return toTrash;
-    if (rc.stillHeld !== undefined && !(await rc.stillHeld())) {
-      return fail(
-        finding("project.locked", {
-          message: `the lock on ${project.address} was taken over by another run before ${folder} was moved; the snapshot is committed and the folder is untouched`,
-          fix: "wait for the other plainport run to finish, then run plainport recover to finish this offload",
-          paths: [folder],
-        }),
-      );
-    }
     if (journal.plan?.fp !== FINGERPRINT_VERSION) {
       return fail(
         finding("journal.pending", {
@@ -253,7 +339,21 @@ export const releaseOffload = async (
         }),
       );
     }
+    // F2: the catalog read again, right before the rename (Q16). A store that does not answer moves nothing.
+    if (rc.reread !== undefined) {
+      const read = await rc.reread();
+      if (!read.ok)
+        return withFix(
+          read,
+          `nothing was moved: the snapshot ${op} is committed and ${folder} is as it was; plainport recover reads the catalog again and finishes the offload once the store answers`,
+        );
+      const seen = forkAfterCommit(read.value, journal);
+      if (!seen.ok) return seen;
+      // The journal is closed only under the lock (lock.ts's known limit), as the folder is moved only under it.
+      if (seen.value !== undefined) return (await lockLost()) ? locked() : keptAsFork(rc, seen.value);
+    }
     rc.host.faultAt("offload.release.reread");
+    if (await lockLost()) return locked();
     // The D51 guard, right before the rename: only the folder as it was verified is ever moved aside.
     const same = await unchanged(
       io.fs,

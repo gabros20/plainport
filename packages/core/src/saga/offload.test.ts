@@ -2209,6 +2209,7 @@ describe("offload: fix wave q1 (D52)", () => {
       [
         "offload.root-created",
         "offload.commit.appended",
+        "offload.release.reread",
         "offload.release.renamed",
         "offload.release.stub-placed",
         "offload.release.registry-updated",

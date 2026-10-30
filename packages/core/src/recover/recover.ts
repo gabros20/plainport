@@ -11,9 +11,11 @@
 //   offload.snapshot.done, offload.verified  search the store for this op's offloaded event (D50): none, roll back;
 //                                           named by the fold's conflicts, keep the folder (forked); no head (the
 //                                           catalog incomplete), pending (D61); otherwise committed: release
-//   offload.diverged                        append the fork event the store lacks, keep the folder
+//   offload.diverged                        append the fork event the store lacks, keep the folder (F1)
 //   offload.commit.start                    the event on the store: committed, release; not there: roll back
-//   offload.committed .. release.stub       release (releaseOffload: the D51 fingerprint guard, the derived trash)
+//   offload.committed .. release.stub       release (releaseOffload: while the folder is in place, the catalog read
+//                                           again (F2: a fork keeps the folder, forked; a store that does not answer,
+//                                           pending), the D51 fingerprint guard, the derived trash)
 //   offload.release.delete                  delete the trash once keepUntil, if any, has passed
 //   onload.restore.start, onload.restored    roll back (staging removed; the stub stays)
 //   onload.begin (restore mode)             roll back: nothing is staged yet, so a folder there is not this onload's
@@ -44,6 +46,7 @@ import { TEMP_SUFFIX } from "../atomic.ts";
 import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
+import { type CatalogRead, catalogReader } from "../catalog/head.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
 import {
   appendEvent,
@@ -87,6 +90,7 @@ import {
 import {
   type OffloadConflict,
   offloadTrashOf,
+  recordBase,
   releaseMoved,
   releaseOffload,
   rootFolderOf,
@@ -100,7 +104,8 @@ import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
  * What recover did with one operation. rolled-back: it had not committed, and nothing local changed. finished: the
- * release, or the onload, is done. forked: the offload's snapshot is kept as a fork and the folder stays (conflicted).
+ * release, or the onload, is done. forked: the offload's snapshot is kept as a fork and the folder stays on it, seen at
+ * the commit (F1) or after it (F2: conflicted, or local on a line a resolution rejected).
  * diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a
  * released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (the finding
  * says why); its journal stays for the next recover.
@@ -158,7 +163,7 @@ export type RecoveredOperation = {
   keepUntil?: string;
   /** Why it is pending, or diverged-after-commit's finding. */
   finding?: Finding;
-  /** diverged-after-commit: exit 8's data, as offload gives it (D52). */
+  /** diverged-after-commit, and forked after the commit (F2): exit 8's data, as offload gives it (D52, Q6). */
   conflict?: Pick<OffloadConflict, keyof OffloadConflict>;
 };
 
@@ -179,7 +184,8 @@ export type RecoveryReport = {
  *                  the folder; no head for another reason, pending (D61); otherwise committed, release
  *   fork           append the fork event the store lacks, keep the folder
  *   commit-check   the journaled event on the store and the operation's own: release; otherwise roll back
- *   release        committed by the journal's word: finish the release (releaseOffload, D51)
+ *   release        committed by the journal's word: finish the release (releaseOffload: the catalog read again while
+ *                  the folder is in place, F2; D51)
  *   delete-trash   a released offload: delete its trash once keepUntil, if any, has passed
  *   swap-check     swapped (onloadSwapped): finish the onload; otherwise roll back
  *   finish-onload  finish the onload (finishOnload)
@@ -234,8 +240,8 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
   discard: ["rolled-back", "pending"],
   "search-store": ["rolled-back", "forked", "finished", "diverged-after-commit", "pending"],
   fork: ["forked", "pending"],
-  "commit-check": ["rolled-back", "finished", "diverged-after-commit", "pending"],
-  release: ["finished", "diverged-after-commit", "pending"],
+  "commit-check": ["rolled-back", "finished", "forked", "diverged-after-commit", "pending"],
+  release: ["finished", "forked", "diverged-after-commit", "pending"],
   "delete-trash": ["trash-deleted", "trash-kept", "pending"],
   "swap-check": ["rolled-back", "finished", "pending"],
   "finish-onload": ["finished", "pending"],
@@ -752,6 +758,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     // Forked only when the fold's conflicts name this snapshot (D61): the event keeps it as a fork, as
     // offload.diverged does, and the folder stays.
     if (folded?.conflicts.some((fork) => fork.includes(journal.op))) {
+      await forkBase(journal);
       const closed = await close(journal);
       return closed ?? { op: entry(journal, "forked", "conflicted") };
     }
@@ -871,6 +878,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const saga = openSaga<OffloadJournal, OffloadStep>(sagaContext("offload"), journal);
     // The journal is past the commit, or the event was found on the store: committed either way.
     saga.commit();
+    // The read release's F2 check made, which says whether a kept folder is conflicted or on a rejected line.
+    let reread: CatalogRead | undefined;
     const released = await releaseOffload(
       {
         host,
@@ -884,6 +893,12 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         // finding 5): a configuration that reads only as its last good copy moves nothing.
         stores: () => freshStores(io, paths, deps.env),
         ...(gate.value === undefined ? {} : { store: gate.value }),
+        // Recover reads the store again before the rename, as the live run does (F2): never released unread.
+        reread: async () => {
+          const read = await rereadFor(journal);
+          if (read.ok) reread = read.value;
+          return read;
+        },
       },
       facts,
     );
@@ -893,6 +908,19 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
           ...entry(journal, "finished", "shelved"),
           trash: released.value.trash,
           ...(released.value.keepUntil === undefined ? {} : { keepUntil: released.value.keepUntil }),
+        },
+      };
+    }
+    const conflict = released.data as OffloadConflict | undefined;
+    if (released.finding.code === "catalog.head-moved" && conflict?.detail === "after-commit") {
+      // F2: kept as a fork, the journal closed. Conflicted while a fork names it; on a rejected line, local.
+      const forked =
+        reread?.projects[journal.project.id]?.conflicts.some((f) => f.includes(journal.op)) ?? true;
+      return {
+        op: {
+          ...entry(journal, "forked", forked ? "conflicted" : "local"),
+          finding: released.finding,
+          conflict,
         },
       };
     }
@@ -977,8 +1005,35 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         if (!appended.ok) return pending(journal, appended);
       }
     }
+    await forkBase(journal);
     const closed = await close(journal);
     return closed ?? { op: entry(journal, "forked", "conflicted") };
+  }
+
+  /** F1: the folder kept as a fork is on its own snapshot (registry.json's base), as the live offload records. */
+  async function forkBase(journal: OffloadJournal): Promise<void> {
+    const based = await recordBase({ host, paths }, journal);
+    if (!based.ok) deps.log("warn", `registry.json was not updated: ${based.finding.message}`);
+  }
+
+  /**
+   * The store's catalog, read fresh for release's check before the rename (F2): from the journal's own store (D45), as
+   * the live offload reads it. A store that does not answer is a failure, and the operation stays pending.
+   */
+  async function rereadFor(journal: OffloadJournal): Promise<Result<CatalogRead>> {
+    const store = await storeOf(journal);
+    if (!store.ok) return store;
+    const mirror = await deps.openMirror(store.value.id);
+    if (!mirror.ok) return mirror;
+    return catalogReader({
+      store: store.value.blob,
+      mirror: mirror.value,
+      storeId: store.value.id,
+      storeName: store.value.name,
+      now: clock,
+      ...(store.value.catalog === undefined ? {} : { policy: store.value.catalog }),
+      report: (f) => deps.log("warn", `${f.code}: ${f.message}`),
+    })();
   }
 
   async function close(journal: Journal): Promise<Settled | undefined> {

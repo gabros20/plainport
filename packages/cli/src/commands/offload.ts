@@ -149,6 +149,10 @@ const OffloadOutputSchema = z.union([
         description:
           "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
       }),
+      detail: z.enum(["after-commit"]).optional().meta({
+        description:
+          "kind fork only (Q6): after-commit when the fork was seen after the commit and before the rename, by release's catalog read (another copy offloaded from the same snapshot, or a resolution rejected this one); the snapshot is committed and the folder stays on it. Absent when the head check at the commit saw it",
+      }),
       project: z.string(),
       snapshot: z.string(),
       store: z.string(),
@@ -156,7 +160,7 @@ const OffloadOutputSchema = z.union([
     })
     .meta({
       description:
-        "Exit 8: the snapshot is kept as a fork (the head moved), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way (D14, D52)",
+        "Exit 8: the snapshot is kept as a fork (the head moved at the commit, or a fork was seen after it: detail), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way, on this snapshot (D14, D52)",
     }),
   PlanSchema.meta({ description: "Exit 6 (plan.stale): the fresh plan to review and approve (D14, D38)" }),
 ]);

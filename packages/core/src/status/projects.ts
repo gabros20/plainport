@@ -20,7 +20,9 @@
 // looks running), folder-missing (this device should hold it but its folder is gone), stale and never-synced (the
 // store did not answer), journal-unreadable (a journal this version cannot read names the project, or names none and
 // so may be any project's), several-stores (the catalogs of two stores hold the project, merged by its id; the view
-// shows its root's store's, else the first's). Each condition comes with a sentence in `conditionDetails`.
+// shows its root's store's, else the first's), rejected-line (the folder is here on a snapshot another device's
+// resolution rejected: its next offload is live work that conflicts again, Task 23). Each condition comes with a
+// sentence in `conditionDetails`.
 //
 // Views are lazy (loadProjects): the registry, roots, journals and catalogs are read once, for every project, since a
 // name is matched against all of them; a project's own view (its folder's stat, its head's size, its local planning)
@@ -103,6 +105,7 @@ export const PROJECT_CONDITIONS = [
   "catalog-unreadable",
   "journal-unreadable",
   "several-stores",
+  "rejected-line",
 ] as const;
 export type ProjectCondition = (typeof PROJECT_CONDITIONS)[number];
 
@@ -573,6 +576,12 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       state = "local";
       note("folder-missing", `it is registered here, but ${dir ?? "its folder"} is not here`);
     }
+    // A copy kept on a snapshot a resolution rejected (F2): live work that conflicts again at its next offload.
+    if (here && entry?.base !== undefined && catalog?.rejected.includes(entry.base) === true)
+      note(
+        "rejected-line",
+        `this copy is on snapshot ${entry.base}, which a resolution rejected; its next offload uploads it as live work, which conflicts again`,
+      );
     if (catalog !== undefined && catalog.missing.length > 0)
       note(
         "incomplete",
@@ -727,6 +736,11 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     return {
       command: `plainport offload ${address} --yes`,
       reason: `keep working in the folder; the next offload builds on snapshot ${p.head}`,
+    };
+  if (p.conditions.includes("rejected-line"))
+    return {
+      command: `plainport offload ${address} --yes`,
+      reason: `a resolution rejected snapshot ${p.base}, which this copy is on: the offload keeps its work as live work, which conflicts again and can then be resolved`,
     };
   if (p.conditions.includes("incomplete"))
     return {

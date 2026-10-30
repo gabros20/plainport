@@ -961,10 +961,34 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
+  // Q6: a fork seen after the commit (Task 23's F2) keeps the closed value kind: "fork" and adds the optional detail,
+  // so a consumer keyed on v0.1.1's published offload output still validates exit 8's data, and the enum is unchanged.
+  test("[value.offload-kind] a fork after the commit keeps kind fork and adds detail after-commit, which v0.1.1's published schema accepts", () => {
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    const outputOf = (manifest: { commands: { name: string; output: object }[] }) =>
+      ajv.compile(manifest.commands.find((c) => c.name === "offload")?.output as object);
+    const old = outputOf(JSON.parse(released("plainport.json")));
+    const now = outputOf(JSON.parse(readFileSync(join(import.meta.dir, "../../plainport.json"), "utf8")));
+    const data = {
+      op: ulid(),
+      exitCode: 8,
+      kind: "fork",
+      detail: "after-commit",
+      project: "work:web",
+      snapshot: ulid(),
+      store: "local",
+      stored: "a".repeat(64),
+    };
+    expect(old(data), JSON.stringify(old.errors)).toBe(true);
+    expect(now(data), JSON.stringify(now.errors)).toBe(true);
+    // The closed values stay closed: a new kind would be a contract change, refused by either schema.
+    for (const check of [old, now]) expect(check({ ...data, kind: "fork-after-commit" })).toBe(false);
+    expect(now({ ...data, detail: "later" })).toBe(false);
+  });
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
   test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
   test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
   test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
-  test.todo("[value.offload-kind] Task 23: a fork after the commit keeps kind fork and adds detail after-commit", () => {});
 });

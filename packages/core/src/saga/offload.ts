@@ -27,14 +27,18 @@
 //                                          snapshot or one made from it): committed, so go on as from
 //                                          offload.committed (the fingerprint check included)
 //   offload.diverged                       the head moved: the event (`event`, `diverged`) keeps the snapshot as a
-//                                          fork. Append it if the store lacks it, never release, remove the journal
+//                                          fork (F1). Append it if the store lacks it, never release, record the
+//                                          snapshot as the folder's base, remove the journal
 //   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, go on as
 //                                          from offload.committed; if not, roll back (a lost write never deletes a
 //                                          folder, D24)
 //   offload.committed .. release.stub      committed (the journal's word: its committed write follows the
 //                                          event's durable append, D24): finish release as `release` says (rename,
 //                                          stub, registry, delete), but while the folder still stands at
-//                                          project.dir, only if scanTree(project.dir) still has the verified
+//                                          project.dir, only once the store's catalog, read again, shows no fork
+//                                          naming the snapshot (F2: one keeps the folder on its snapshot, closes the
+//                                          journal, forked; a store that does not answer leaves it pending), and
+//                                          only if scanTree(project.dir) still has the verified
 //                                          fingerprint (plan.fingerprint: the plan of the attempt that was verified).
 //                                          The machine may have been used for hours since the crash; if the folder
 //                                          changed, keep it, write no stub, and report
@@ -120,7 +124,7 @@ import {
   registeredFolders,
   withProjectLock,
 } from "./project-gate.ts";
-import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
+import { type OffloadConflict, recordBase, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
 
@@ -159,6 +163,9 @@ export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
  */
 export const OFFLOAD_AFTER_EFFECT = {
   "offload.root-created": "offload.begin",
+  // Not an effect but the release's catalog read (F2): a crash between it and the rename leaves release.trash with the
+  // folder in place, and recover reads the catalog again.
+  "offload.release.reread": "offload.release.trash",
   "offload.snapshot.discarded.appended": "offload.snapshot.discarded",
   "offload.diverged.appended": "offload.diverged",
   "offload.commit.appended": "offload.commit.start",
@@ -559,7 +566,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
             }),
           };
     const early = headCheck(before.value, projectId, base, ref.address, home);
-    if (early.kind !== "ok") return fail(early.finding);
+    // A copy on a line a resolution rejected is live work (D103): it is uploaded and kept as a fork at the commit (F1),
+    // so it conflicts again and never vanishes, instead of being refused here with nothing uploaded.
+    const rejectedLine =
+      early.kind === "moved" &&
+      base !== undefined &&
+      before.value.projects[projectId]?.rejected.includes(base);
+    if (early.kind !== "ok" && !rejectedLine) return fail(early.finding);
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),
@@ -877,6 +890,9 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         const kept = await appendEvent(events, event);
         if (!kept.ok) return saga.keep(kept);
         saga.after("offload.diverged.appended");
+        // F1: the folder stays, on its own snapshot: the next offload builds on it, and resolve --keep names it.
+        const based = await recordBase({ host, paths }, saga.journal);
+        if (!based.ok) deps.log("warn", `registry.json was not updated: ${based.finding.message}`);
         const conflict: OffloadConflict = {
           op,
           exitCode: 8,
@@ -922,6 +938,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           env: deps.env,
           stores,
           store: { name: store.name, semantics: store.blob.semantics() },
+          // F2: the catalog read fresh again right before the rename (Q16).
+          reread: catalog,
         },
         { at: event.at, bytes: verified.bytes },
       );

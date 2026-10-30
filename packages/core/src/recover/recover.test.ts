@@ -436,6 +436,8 @@ describe("recover: an offload, at every journal step", () => {
 describe("recover: an offload, at every after-effect seam (D52)", () => {
   const FINISHED: Record<string, "finished" | "trash-deleted"> = {
     "offload.commit.appended": "finished",
+    // The release's catalog read (F2), then a crash before the rename: recover reads it again and releases.
+    "offload.release.reread": "finished",
     "offload.release.renamed": "finished",
     "offload.release.stub-placed": "finished",
     "offload.release.registry-updated": "finished",
