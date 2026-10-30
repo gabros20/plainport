@@ -272,6 +272,20 @@ describe("restic engine: a remote repository", () => {
     const { engine } = remoteSetup([cut]);
     const result = failure(await engine.list({}));
     expect([result.finding.code, result.exitCode]).toEqual(["store.unreachable", 9]);
+    // Cut before the session started: ssh's "Connection closed by <host> port <n>".
+    const early = edited(cut, {
+      stderr: [
+        "subprocess ssh: Connection closed by 127.0.0.1 port 39323",
+        JSON.stringify({
+          message_type: "exit_error",
+          code: 1,
+          message:
+            "Fatal: unable to open repository at sftp:nas:/x: unable to start the sftp session, error: error receiving version packet from server: error reading packet length: 0 of 4: read |0: file already closed",
+        }),
+        "",
+      ].join("\n"),
+    });
+    expect(failure(await remoteSetup([early]).engine.list({})).finding.code).toBe("store.unreachable");
     // A refused login over the same exit status stays a failure to fix.
     const login = edited(cut, {
       stderr: cut.stderr
