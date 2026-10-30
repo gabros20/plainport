@@ -6,6 +6,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
+import { encodeStoreIdentityV2, STORE_IDENTITY_KEY } from "../../packages/core/src/catalog/identity.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import { type Device, ensureDevice } from "../../packages/core/src/device.ts";
@@ -16,6 +17,8 @@ import { type RegistryEntry, readRegistry } from "../../packages/core/src/regist
 import { resolveProject } from "../../packages/core/src/roots/address.ts";
 import { type OffloadDeps, runOffload } from "../../packages/core/src/saga/offload.ts";
 import { type OnloadDeps, runOnload } from "../../packages/core/src/saga/onload.ts";
+import { type ResolveDeps, runResolve } from "../../packages/core/src/saga/resolve.ts";
+import { runRestore } from "../../packages/core/src/saga/restore.ts";
 import { setUpStore } from "../../packages/core/src/store.ts";
 import { quietChecks } from "../../packages/core/src/testing/checks.ts";
 import { type FakeEngine, fakeEngine, fakeRepository } from "../../packages/core/src/testing/fake-engine.ts";
@@ -51,14 +54,23 @@ export interface FakeDevice {
   offload(path?: string, faults?: RunFaults): ReturnType<typeof runOffload>;
   onload(path?: string): ReturnType<typeof runOnload>;
   recover(faults?: RunFaults): ReturnType<typeof recover>;
+  /** `resolve <path> --keep <snapshot>` (Task 25). */
+  resolve(keep: string, path?: string, faults?: RunFaults): ReturnType<typeof runResolve>;
+  /** `restore <path> --snapshot <snapshot> --to <to>`. */
+  restore(snapshot: string, to: string, path?: string): ReturnType<typeof runRestore>;
   /** This device's registry entry for the project at `path`. */
   entry(path?: string): Promise<RegistryEntry | undefined>;
 }
 
-/** Devices on `store`, each set up with `init`'s steps: its device id, its config, the store recorded by its id. */
+/**
+ * Devices on `store`, each set up with `init`'s steps: its device id, its config, the store recorded by its id. With
+ * `format: 2` the store's identity file is then format 2 (as `store upgrade` leaves it: its repository at `repo`),
+ * which `resolve` needs (Q2); otherwise it stays format 1, as M1's setup makes it.
+ */
 export const fakeDevices = async (
   store: SemanticBlobStore,
   names: readonly string[],
+  options: { format?: 1 | 2 } = {},
 ): Promise<FakeDevice[]> => {
   const repository = fakeRepository();
   const devices: FakeDevice[] = [];
@@ -129,6 +141,8 @@ export const fakeDevices = async (
       return resolved.value;
     };
     const offloadDeps: OffloadDeps = { ...common, checks: quietChecks, plugins: [nodePlugin] };
+    const resolveDeps = (faults?: RunFaults): ResolveDeps =>
+      faults === undefined ? common : { ...common, host: hostFor(faults) };
     const onloadDeps: OnloadDeps = { ...common, plugins: [nodePlugin] };
     const recoverDeps = (faults?: RunFaults): RecoverDeps => {
       const { emit: _, ...rest } = common;
@@ -148,6 +162,10 @@ export const fakeDevices = async (
           }),
         onload: async (path = "web") => runOnload(onloadDeps, { project: await ref(path), hydrate: false }),
         recover: (faults?: RunFaults) => recover(recoverDeps(faults)),
+        resolve: async (keep: string, path = "web", faults?: RunFaults) =>
+          runResolve(resolveDeps(faults), { project: await ref(path), keep }),
+        restore: async (snapshot: string, to: string, path = "web") =>
+          runRestore(common, { project: await ref(path), snapshot, to }),
         entry: async (path = "web") => {
           const registry = await readRegistry(testHost(), box.paths);
           if (!registry.ok) throw new Error(registry.finding.message);
@@ -155,6 +173,11 @@ export const fakeDevices = async (
         },
       }) as FakeDevice,
     );
+  }
+  if (options.format === 2) {
+    const m1 = new TextDecoder().decode(store.data.get(STORE_IDENTITY_KEY));
+    const { id } = JSON.parse(m1) as { id: string };
+    store.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id, repo: "repo", seal: "none" }));
   }
   return devices;
 };
