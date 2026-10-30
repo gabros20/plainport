@@ -205,6 +205,8 @@ describe("findings", () => {
         exitCode: 1,
         summary: expect.any(String),
       },
+      "compare.not-git": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "compare.not-local": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
       "device.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "internal.unexpected": {
