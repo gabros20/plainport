@@ -71,13 +71,19 @@ export interface T2World {
   rclone: string;
   /** A store over `remote` with this world's sandbox; `patch` overrides any option. */
   store(remote: RcloneRemote, patch?: Partial<RcloneBlobStoreOptions>): RcloneBlobStore;
-  /** The remote of `backend` under `root`. */
+  /** The remote of `backend` under `root`; dispose() purges every root asked for here. */
   remote(
     backend: Backend,
     root: string,
     how?: { proxied?: boolean; options?: Record<string, string> },
   ): RcloneRemote;
+  /** Removes the sandbox only: for a process (an election child) whose roots its parent purges. */
   cleanup(): void;
+  /**
+   * Purges every root remote() was asked for, one rclone run each, then removes the sandbox; the sandbox goes even
+   * when a purge fails or is killed (a test that timed out), so no temp folder outlives the test.
+   */
+  dispose(): Promise<void>;
 }
 
 /** A sandbox, an ssh shim in it (tracing when asked) and the pinned rclone. */
@@ -87,7 +93,12 @@ export const t2World = async (how: { trace?: boolean } = {}): Promise<T2World> =
   const shim = makeSshShim(join(sandbox.home, "bin"), env.sftp.sshConfig, { trace: how.trace === true });
   const rclone = await rclonePath();
   const host = testHost();
-  return {
+  const roots = new Map<string, { backend: Backend; root: string }>();
+  const remote: T2World["remote"] = (backend, root, remoteHow = {}) => {
+    roots.set(`${backend}:${root}`, { backend, root });
+    return backend === "s3" ? s3Remote(env, root, remoteHow) : sftpRemote(env, shim, root, remoteHow);
+  };
+  const world: T2World = {
     env,
     sandbox,
     shim,
@@ -105,10 +116,22 @@ export const t2World = async (how: { trace?: boolean } = {}): Promise<T2World> =
         ...patch,
       });
     },
-    remote: (backend, root, remoteHow = {}) =>
-      backend === "s3" ? s3Remote(env, root, remoteHow) : sftpRemote(env, shim, root, remoteHow),
+    remote,
     cleanup: () => sandbox.cleanup(),
+    dispose: async () => {
+      try {
+        const failed: string[] = [];
+        for (const { backend, root } of roots.values()) {
+          const purged = await purgeRoot(world, remote(backend, root));
+          if (purged !== undefined) failed.push(purged);
+        }
+        if (failed.length > 0) throw new Error(`the T2 roots could not be purged: ${failed.join("; ")}`);
+      } finally {
+        sandbox.cleanup();
+      }
+    },
   };
+  return world;
 };
 
 /**
@@ -134,29 +157,63 @@ export const makeRoot = (how: { home: string; path: string; rclone: string }, re
     throw new Error(`rclone mkdir ${remote.root}: ${ran.exitCode} ${ran.stderr.toString()}`);
 };
 
-/**
- * Copies a local folder's files under `remote`'s root in one rclone run, for tests that need many keys at once (the
- * adapter writes one key per run). Test-only: it builds the remote's environment the way the adapter does.
- */
-export const seedFrom = (world: T2World, remote: RcloneRemote, local: string, under: string): void => {
+/** One rclone run on `remote` (named AT), with the remote's environment built the way the adapter builds it. */
+const rcloneOn = async (
+  world: T2World,
+  remote: RcloneRemote,
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<{ exitCode: number | null; signal: string | null; stderr: string }> => {
   const env: Record<string, string> = {
     HOME: world.sandbox.home,
     PATH: `${world.shim.dir}:/usr/bin:/bin`,
     RCLONE_CONFIG: join(world.sandbox.home, "absent", "rclone.conf"),
-    RCLONE_CONFIG_SEED_TYPE: remote.type,
+    RCLONE_CONFIG_AT_TYPE: remote.type,
   };
   for (const [name, option] of Object.entries({ ...remote.options, ...remote.secrets }))
-    env[`RCLONE_CONFIG_SEED_${name.toUpperCase()}`] = option;
-  const ran = Bun.spawnSync(
-    [world.rclone, "-q", "--transfers", "16", "copy", local, `SEED:${remote.root}/${under}`],
-    { env, stdout: "pipe", stderr: "pipe", timeout: 300_000 },
-  );
-  if (ran.exitCode !== 0) throw new Error(`rclone copy ${local}: ${ran.exitCode} ${ran.stderr.toString()}`);
+    env[`RCLONE_CONFIG_AT_${name.toUpperCase()}`] = option;
+  // Asynchronous, unlike makeRoot: a long run must not hold the event loop, or a test's timeout could not fire.
+  const child = Bun.spawn([world.rclone, "-q", ...args], {
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+    timeout: timeoutMs,
+  });
+  const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+  return { exitCode, signal: child.signalCode, stderr };
 };
 
-/** Deletes every key under the store's root. */
-export const emptyStore = async (store: RcloneBlobStore): Promise<void> => {
-  for (const { key } of value(await store.list(""))) value(await store.delete(key));
+/**
+ * Copies a local folder's files under `remote`'s root in one rclone run, for tests that need many keys at once (the
+ * adapter writes one key per run). Test-only.
+ */
+export const seedFrom = async (
+  world: T2World,
+  remote: RcloneRemote,
+  local: string,
+  under: string,
+): Promise<void> => {
+  const ran = await rcloneOn(
+    world,
+    remote,
+    ["--transfers", "16", "copy", local, `AT:${remote.root}/${under}`],
+    300_000,
+  );
+  if (ran.exitCode !== 0)
+    throw new Error(`rclone copy ${local}: ${ran.exitCode ?? ran.signal} ${ran.stderr}`);
+};
+
+/** rclone's exit code for a folder that is not there (on S3, a prefix with no keys). */
+const DIRECTORY_NOT_FOUND = 3;
+
+/**
+ * Removes `remote`'s root and everything under it in one rclone run: a root never written is fine. Returns what went
+ * wrong, if anything. Test-only: deleting key by key through the adapter costs one run (one SFTP connection) per key.
+ */
+const purgeRoot = async (world: T2World, remote: RcloneRemote): Promise<string | undefined> => {
+  const ran = await rcloneOn(world, remote, ["purge", `AT:${remote.root}`], 120_000);
+  if (ran.exitCode === 0 || ran.exitCode === DIRECTORY_NOT_FOUND) return undefined;
+  return `rclone purge ${remote.root}: ${ran.exitCode ?? ran.signal} ${ran.stderr.trim()}`;
 };
 
 /**
