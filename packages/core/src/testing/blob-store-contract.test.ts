@@ -42,4 +42,37 @@ describe("blob-store contract: the semantic probe's time", () => {
     expect(child.exitCode, output).toBe(1);
     expect(output).toContain("timed out after 1ms");
   });
+
+  // A remote store pays a connection per call: the listing case's ten calls took 6.8 s on CI's SFTP, past bun's 5 s,
+  // and the timeout killed the rclone it was waiting for (CI run 40956615672). Here the same slow store is given 1 ms
+  // for every case: the listing case must time out at 1 ms, where without the option it would pass.
+  test("testTimeout bounds every other case", () => {
+    const file = join(scratch, "slow-cases.test.ts");
+    writeFileSync(
+      file,
+      [
+        `import { ALL_ELIGIBLE, blobStoreContract } from ${JSON.stringify(join(import.meta.dir, "blob-store-contract.ts"))};`,
+        `import { semanticBlobStore } from ${JSON.stringify(join(import.meta.dir, "semantic-blob-store.ts"))};`,
+        "blobStoreContract(",
+        `  "slow",`,
+        "  () => {",
+        "    const store = semanticBlobStore();",
+        "    const put = store.put.bind(store);",
+        "    store.put = async (...args) => { await Bun.sleep(20); return put(...args); };",
+        "    return { store, cleanup: () => {} };",
+        "  },",
+        "  { eligibility: ALL_ELIGIBLE, testTimeout: 1 },",
+        ");",
+        "",
+      ].join("\n"),
+    );
+    const child = Bun.spawnSync(["bun", "test", file, "-t", "list returns every key"], {
+      cwd: scratch,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = child.stdout.toString() + child.stderr.toString();
+    expect(child.exitCode, output).toBe(1);
+    expect(output).toContain("timed out after 1ms");
+  });
 });

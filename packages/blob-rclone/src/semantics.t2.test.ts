@@ -28,7 +28,7 @@ import { ALL_ELIGIBLE, blobStoreContract } from "../../core/src/testing/blob-sto
 import { testHost } from "../../core/src/testing/host.ts";
 import { SEAWEEDFS_PROFILE, SFTP_OPENSSH_PROFILE } from "./profiles.ts";
 import type { ElectChildConfig, RoundResult } from "./testing/elect-child.ts";
-import { type Backend, emptyStore, seedFrom, t2World, value } from "./testing/t2.ts";
+import { type Backend, seedFrom, t2World, value } from "./testing/t2.ts";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const text = (data: Uint8Array | null): string | null =>
@@ -96,13 +96,7 @@ for (const backend of ["s3", "sftp"] as const) {
         const store = world.store(world.remote(backend, run()), { semantics: PROFILES[backend] });
         return {
           store,
-          cleanup: async () => {
-            try {
-              await emptyStore(store);
-            } finally {
-              world.cleanup();
-            }
-          },
+          cleanup: () => world.dispose(),
         };
       },
       {
@@ -112,6 +106,8 @@ for (const backend of ["s3", "sftp"] as const) {
         // so the probe keeps to 8 keys there. The 1,500-key listing is measured below with keys copied in one run.
         listProbeKeys: backend === "s3" ? 1001 : 8,
         probeTimeout: 600_000,
+        // Each call is an rclone run (an SFTP one a connection or two): the listing case's ten took 6.8 s on CI.
+        testTimeout: 60_000,
       },
     );
   });
@@ -135,8 +131,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       found.readAfterWrite = measured(true);
       found.listAfterWrite = measured(true);
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -149,7 +144,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       const local = world.sandbox.dir("seed/page");
       const keys = Array.from({ length: 2500 }, (_, i) => `page/${String(i).padStart(5, "0")}`);
       for (const key of keys) writeFileSync(join(local, key.slice("page/".length)), "p");
-      seedFrom(world, world.remote("s3", root), local, "page");
+      await seedFrom(world, world.remote("s3", root), local, "page");
       const listed = value(await store.list("page/"));
       expect(listed.map((e) => e.key)).toEqual(keys);
       const direct = await probe.list(`${root}/page/`, 1000);
@@ -157,8 +152,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       expect(direct.pages).toBe(3);
       found.listComplete = measured(true);
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -184,8 +178,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       expect(value(await store.get(key))?.length).toBe(data.length);
       found.publication = measured("atomic-put");
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -244,8 +237,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       value(await plain.put("meta/v1/store.json", bytes("replaced")));
       expect(text(value(await store.get("meta/v1/store.json")))).toBe("replaced");
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -273,8 +265,7 @@ describeT2("blob-rclone semantics on s3 (SeaweedFS): measured", () => {
       // A restart is not a power cut, and SeaweedFS's volumes fsync only on request: acknowledged, not synced.
       found.durability = measured("acked-unsynced");
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -301,8 +292,7 @@ describeT2("blob-rclone semantics on sftp (OpenSSH, through the system's ssh): m
       found.readAfterWrite = measured(true);
       found.listAfterWrite = measured(true);
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -314,12 +304,11 @@ describeT2("blob-rclone semantics on sftp (OpenSSH, through the system's ssh): m
       const local = world.sandbox.dir("seed/page");
       const keys = Array.from({ length: 1500 }, (_, i) => `page/${String(i).padStart(5, "0")}`);
       for (const key of keys) writeFileSync(join(local, key.slice("page/".length)), "p");
-      seedFrom(world, world.remote("sftp", root), local, "page");
+      await seedFrom(world, world.remote("sftp", root), local, "page");
       expect(value(await store.list("page/")).map((e) => e.key)).toEqual(keys);
       found.listComplete = measured(true);
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -367,8 +356,7 @@ describeT2("blob-rclone semantics on sftp (OpenSSH, through the system's ssh): m
       }
       found.publication = measured("temp-then-rename");
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -390,8 +378,7 @@ describeT2("blob-rclone semantics on sftp (OpenSSH, through the system's ssh): m
       expect(up.flat().filter((p) => p.extended === "fsync@openssh.com")).toEqual([]);
       found.durability = measured("acked-unsynced");
     } finally {
-      await emptyStore(store);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -465,8 +452,7 @@ const electionRace = async (
     }
     return tally;
   } finally {
-    await emptyStore(reader);
-    world.cleanup();
+    await world.dispose();
   }
 };
 
@@ -522,8 +508,7 @@ describeT2("blob-rclone semantics: faults through Toxiproxy", () => {
       expect(value(await direct.list("meta/v1/events/"))).toHaveLength(2);
     } finally {
       await applyProfile(world.env, "s3", "clear");
-      await emptyStore(direct);
-      world.cleanup();
+      await world.dispose();
     }
   }, 300_000);
 
@@ -549,7 +534,7 @@ describeT2("blob-rclone semantics: faults through Toxiproxy", () => {
             keys.push(`tree/${relative}`);
           }
         }
-        seedFrom(world, world.remote(backend, root), local, "tree");
+        await seedFrom(world, world.remote(backend, root), local, "tree");
         expect(value(await direct.list("tree/")).map((e) => e.key)).toEqual(keys.sort());
 
         await applyProfile(world.env, backend, "latency");
@@ -563,8 +548,7 @@ describeT2("blob-rclone semantics: faults through Toxiproxy", () => {
         expect(value(await store.list("tree/"))).toHaveLength(keys.length);
       } finally {
         await applyProfile(world.env, backend, "clear");
-        await emptyStore(direct);
-        world.cleanup();
+        await world.dispose();
       }
     }, 600_000);
   }
