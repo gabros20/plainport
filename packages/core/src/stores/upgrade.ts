@@ -20,8 +20,9 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
+import { type Failure, type Finding, fail, finding, ok, type Result } from "@plainport/contract";
 import { z } from "zod";
+import { writeAtomic } from "../atomic.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { foldCatalog } from "../catalog/fold.ts";
 import {
@@ -33,7 +34,7 @@ import {
 } from "../catalog/identity.ts";
 import { readEvents, storeEventLog } from "../catalog/log.ts";
 import type { ResolvedConfig } from "../config/schema.ts";
-import type { LocalIo } from "../io.ts";
+import { type LocalIo, systemErrorCode } from "../io.ts";
 import { readBootstrapJournals, readJournals } from "../journal/index.ts";
 import { acquireLock, liveHolder } from "../lock.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -65,6 +66,69 @@ export const UpgradeIntentSchema = z
     description: "meta/v1/upgrade-intent.json: a store upgrade to format 2 under way (Q2)",
   });
 export type UpgradeIntent = z.infer<typeof UpgradeIntentSchema>;
+
+/**
+ * This device's note of an upgrade it started (journal/upgrade/<op>.json), written before the marker and removed once the
+ * marker is gone: what `recover` reads to find the store whose marker a crash left (recoverUpgrades). v0.1.x reads only
+ * journal/<ulid>.json, so it never sees it.
+ */
+export const UpgradeJournalSchema = z
+  .strictObject({
+    v: z.literal(1),
+    op: UlidSchema,
+    kind: z.literal("upgrade"),
+    store: z.strictObject({ name: z.string().min(1), id: UlidSchema }),
+    startedAt: z.iso.datetime(),
+    pid: z.int().positive(),
+    host: z.string().min(1),
+  })
+  .meta({
+    title: "UpgradeJournal",
+    description: "journal/upgrade/<op>.json: a store upgrade this device started",
+  });
+export type UpgradeJournal = z.infer<typeof UpgradeJournalSchema>;
+
+export const upgradeJournalDir = (paths: PlainportPaths): string => join(paths.journalDir, "upgrade");
+
+/** Every upgrade journal on this device, and the files this version cannot read. */
+export const readUpgradeJournals = async (
+  io: LocalIo,
+  paths: PlainportPaths,
+): Promise<{ journals: UpgradeJournal[]; unreadable: string[] }> => {
+  let names: string[];
+  try {
+    names = await io.fs.readdir(upgradeJournalDir(paths));
+  } catch (error) {
+    if (systemErrorCode(error) === "ENOENT") return { journals: [], unreadable: [] };
+    throw error;
+  }
+  const journals: UpgradeJournal[] = [];
+  const unreadable: string[] = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(upgradeJournalDir(paths), name);
+    try {
+      const checked = UpgradeJournalSchema.safeParse(JSON.parse(await io.fs.readText(path)));
+      if (checked.success && `${checked.data.op}.json` === name) journals.push(checked.data);
+      else unreadable.push(path);
+    } catch (error) {
+      if (error instanceof SyntaxError) unreadable.push(path);
+      else if (systemErrorCode(error) !== "ENOENT") throw error;
+    }
+  }
+  return { journals, unreadable };
+};
+
+const removeUpgradeJournals = async (io: LocalIo, paths: PlainportPaths, name: string): Promise<void> => {
+  const read = await readUpgradeJournals(io, paths);
+  for (const journal of read.journals.filter((j) => j.store.name === name)) {
+    try {
+      await io.fs.unlink(join(upgradeJournalDir(paths), `${journal.op}.json`));
+    } catch (error) {
+      if (systemErrorCode(error) !== "ENOENT") throw error;
+    }
+  }
+};
 
 /** The crash seams of an upgrade, in order, after each write. */
 export const UPGRADE_SEAMS = [
@@ -277,7 +341,20 @@ export const upgradeStore = async (
   }
   if (!lock.ok) return lock;
   try {
-    return await upgradeLocked(ports, options, pinned, own);
+    const result = await upgradeLocked(ports, options, pinned, own);
+    // The journal goes once this device's marker is gone (finished, abandoned or cleared); a crash leaves both.
+    const store = config.stores[name];
+    if (store !== undefined) {
+      const reached = await reachStore(io, { paths, env: ports.env, name, store, opener: options.opener });
+      const marker = reached.ok ? await readUpgradeIntent(reached.value.blob) : undefined;
+      if (marker?.ok && (marker.value === undefined || marker.value?.device !== options.device))
+        try {
+          await removeUpgradeJournals(io, paths, name);
+        } catch {
+          // Left for recover, which removes it once it finds no marker.
+        }
+    }
+    return result;
   } finally {
     await lock.value.release();
   }
@@ -359,6 +436,25 @@ const upgradeLocked = async (
       device,
       at: ports.clock().toISOString(),
     };
+    const journal: UpgradeJournal = {
+      v: 1,
+      op: written.op,
+      kind: "upgrade",
+      store: { name, id: pinned },
+      startedAt: written.at,
+      pid: io.proc.pid,
+      host: io.proc.hostname(),
+    };
+    try {
+      await io.fs.mkdirp(upgradeJournalDir(paths));
+      await writeAtomic(
+        io,
+        join(upgradeJournalDir(paths), `${journal.op}.json`),
+        `${JSON.stringify(journal, null, 2)}\n`,
+      );
+    } catch (error) {
+      return writeFailed(error, "writing the upgrade's journal", false, upgradeJournalDir(paths));
+    }
     const put = await blob.put(UPGRADE_INTENT_KEY, new TextEncoder().encode(`${JSON.stringify(written)}\n`));
     if (!put.ok) return put;
     ports.faultAt("upgrade.intent.written");
@@ -447,4 +543,65 @@ export const recoverUpgrade = async (
     outcome: "cleared",
     ...(found.ok && found.value !== null && { format: found.value.format }),
   });
+};
+
+export interface UpgradeRecoveryReport {
+  upgrades: {
+    op: string;
+    store: string;
+    /** cleared or kept as recoverUpgrade says; pending: not settled now, its journal kept (finding says why). */
+    outcome: RecoveredUpgrade["outcome"] | "pending";
+    format?: 1 | 2;
+    finding?: Finding;
+  }[];
+  unreadable: string[];
+}
+
+/**
+ * `recover`'s part for upgrades: each upgrade this device journaled and left (a crash) is settled on its store by
+ * recoverUpgrade, its journal then removed. One whose store cannot be reached, or whose upgrade still runs here, stays
+ * journaled (pending).
+ */
+export const recoverUpgrades = async (
+  ports: Pick<UpgradePorts, "io" | "paths">,
+  device: string,
+  open: (name: string) => Promise<Result<BlobStore>>,
+): Promise<Result<UpgradeRecoveryReport>> => {
+  const { io, paths } = ports;
+  let read: Awaited<ReturnType<typeof readUpgradeJournals>>;
+  try {
+    read = await readUpgradeJournals(io, paths);
+  } catch (error) {
+    return writeFailed(error, "reading the upgrade journals", false, upgradeJournalDir(paths));
+  }
+  const upgrades: UpgradeRecoveryReport["upgrades"] = [];
+  for (const journal of read.journals) {
+    const name = journal.store.name;
+    if ((await liveHolder(io, lockFile(paths, name))) !== undefined) {
+      upgrades.push({
+        op: journal.op,
+        store: name,
+        outcome: "pending",
+        finding: finding("store.locked", {
+          message: `store ${name}'s upgrade ${journal.op} is still running on this device`,
+          fix: "wait for it to finish, then re-run plainport recover",
+        }),
+      });
+      continue;
+    }
+    const blob = await open(name);
+    const settled = blob.ok ? await recoverUpgrade(ports, blob.value, name, device) : blob;
+    if (!settled.ok) {
+      upgrades.push({ op: journal.op, store: name, outcome: "pending", finding: settled.finding });
+      continue;
+    }
+    try {
+      await io.fs.unlink(join(upgradeJournalDir(paths), `${journal.op}.json`));
+    } catch (error) {
+      if (systemErrorCode(error) !== "ENOENT")
+        return writeFailed(error, "removing an upgrade journal", false, upgradeJournalDir(paths));
+    }
+    upgrades.push({ op: journal.op, ...(settled.value ?? { store: name, outcome: "cleared" }) });
+  }
+  return ok({ upgrades, unreadable: read.unreadable });
 };
