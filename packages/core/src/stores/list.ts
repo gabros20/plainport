@@ -1,7 +1,8 @@
 // `plainport store list` (DESIGN.md "Core API" stores.list, Q13: read): every configured store with where it is, which
-// file defines it, the id this device pinned for it (D85), the roots that send snapshots there, and the last `store
-// test` this device recorded for it, when that measurement still holds for how the store is reached now (Q4). It only
-// reads; with a probe it also asks each store whether it answers, still writing nothing.
+// file defines it, the id this device pinned for it (D85), whether its catalog is sealed (the pin, Q10), the roots that
+// send snapshots there, and the last `store test` this device recorded for it, when that measurement still holds for
+// how the store is reached now (Q4). It only reads; with a probe it also asks each store whether it answers, still
+// writing nothing.
 
 import { type Finding, ok, type Result } from "@plainport/contract";
 import { ConfigLoader } from "../config/load.ts";
@@ -25,13 +26,15 @@ export type StoreListing = {
   default: boolean;
   /** The id this device pinned for the name (D85); absent before this device set the store up. */
   id?: string;
+  /** Whether the store's catalog is sealed, as this device pinned it at its first contact (Q10); absent before. */
+  sealed?: boolean;
   /** The roots whose snapshots go here. */
   roots: string[];
   /** The last `store test` here, when its measurement holds for how the store is reached now. */
   lastTest?: StoreTest;
   /** --probe: whether it answered, and what it says it is. */
   probe?:
-    | { reachable: true; format?: 1 | 2; id?: string; pinned: boolean }
+    | { reachable: true; format?: 1 | 2; id?: string; sealed?: boolean; pinned: boolean }
     | { reachable: false; finding: Finding };
 };
 
@@ -77,10 +80,14 @@ export const listStores = async (
       .filter(([, root]) => (root.store ?? config.defaultStore) === name)
       .map(([key]) => key);
     let lastTest: StoreTest | undefined;
+    let sealed: boolean | undefined;
     if (id !== undefined) {
       const state = await readStoreState(io, paths, id, storeFacts(store, paths.home, options.tools));
       if (!state.ok) findings.push(state.finding);
-      else lastTest = state.value.measured?.test;
+      else {
+        lastTest = state.value.measured?.test;
+        if (state.value.seal !== undefined) sealed = state.value.seal.policy === "v1";
+      }
     }
     let probe: StoreListing["probe"];
     if (options.probe !== undefined) {
@@ -88,7 +95,11 @@ export const listStores = async (
       probe = found.reachable
         ? {
             reachable: true,
-            ...(found.descriptor !== null && { format: found.descriptor.format, id: found.descriptor.id }),
+            ...(found.descriptor !== null && {
+              format: found.descriptor.format,
+              id: found.descriptor.id,
+              sealed: found.descriptor.seal === "v1",
+            }),
             pinned: id !== undefined && found.descriptor?.id === id,
           }
         : { reachable: false, finding: found.finding };
@@ -100,6 +111,7 @@ export const listStores = async (
       source: inUser && inManaged ? "both" : inUser ? "config" : "managed",
       default: config.defaultStore === name,
       ...(id !== undefined && { id }),
+      ...(sealed !== undefined && { sealed }),
       roots,
       ...(lastTest !== undefined && { lastTest }),
       ...(probe !== undefined && { probe }),

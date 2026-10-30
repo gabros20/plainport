@@ -4573,7 +4573,7 @@
     {
       "name": "store add",
       "summary": "Set a store up, or adopt one already set up, and record it in managed.toml",
-      "usage": "plainport store add <name> [--kind <value>] [--path <value>] [--host <value>] [--endpoint <value>] [--bucket <value>] [--region <value>] [--secret <value>] [--access-key-id <value>] [--secret-access-key <value>] [--secret-stdin]",
+      "usage": "plainport store add <name> [--kind <value>] [--path <value>] [--host <value>] [--endpoint <value>] [--bucket <value>] [--region <value>] [--secret <value>] [--access-key-id <value>] [--secret-access-key <value>] [--secret-stdin] [--seal] [--no-seal]",
       "risk": "safe_write",
       "dryRun": false,
       "acceptsPlan": false,
@@ -4646,6 +4646,18 @@
           "type": "boolean",
           "multiple": false,
           "summary": "Read the restic password from standard input and save it to the Keychain under --secret"
+        },
+        {
+          "name": "seal",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Seal a new store's catalog (Catalog seal v1, Q10): the default for s3 and sftp; an existing store must already be sealed"
+        },
+        {
+          "name": "no-seal",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Keep a new store's catalog plain: the default for local stores; an existing store must already be plain"
         }
       ],
       "arguments": {
@@ -4709,6 +4721,14 @@
           "secret-stdin": {
             "description": "Read the restic password from standard input and save it to the Keychain under --secret",
             "type": "boolean"
+          },
+          "seal": {
+            "description": "Seal a new store's catalog (Catalog seal v1, Q10): the default for s3 and sftp; an existing store must already be sealed",
+            "type": "boolean"
+          },
+          "no-seal": {
+            "description": "Keep a new store's catalog plain: the default for local stores; an existing store must already be plain",
+            "type": "boolean"
           }
         },
         "required": [
@@ -4751,6 +4771,10 @@
             "type": "string",
             "description": "Where its restic repository lies under the store's root"
           },
+          "sealed": {
+            "type": "boolean",
+            "description": "Its catalog is sealed (Q10), as it publishes and this device pinned"
+          },
           "location": {
             "type": "string"
           },
@@ -4769,6 +4793,7 @@
           "outcome",
           "format",
           "repo",
+          "sealed",
           "location",
           "configChanged",
           "secretSaved"
@@ -4850,6 +4875,10 @@
                   "description": "The id this device pinned for the name (D85)",
                   "type": "string"
                 },
+                "sealed": {
+                  "description": "Its catalog is sealed, as this device pinned it at its first contact (Q10); absent before",
+                  "type": "boolean"
+                },
                 "roots": {
                   "type": "array",
                   "items": {
@@ -4903,6 +4932,10 @@
                         },
                         "id": {
                           "type": "string"
+                        },
+                        "sealed": {
+                          "description": "Its meta/v1/store.json says its catalog is sealed",
+                          "type": "boolean"
                         },
                         "pinned": {
                           "type": "boolean",

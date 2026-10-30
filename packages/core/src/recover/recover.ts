@@ -503,6 +503,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       name: journal.store.name,
       config: loaded.value.config,
       opener: deps.opener,
+      now: clock,
     });
     if (!opened.ok) return opened;
     // The store itself says who it is (meta/v1/store.json), not this device's record of it: a disk swapped or a path
@@ -830,6 +831,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       name: journal.store.name,
       config: loaded.value.config,
       opener: deps.opener,
+      catalog: false,
     });
     if (!opened.ok) return opened;
     return ok({ name: journal.store.name, semantics: opened.value.blob.semantics() });

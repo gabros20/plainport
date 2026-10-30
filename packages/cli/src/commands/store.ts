@@ -1,7 +1,8 @@
 // plainport store add | list | test | upgrade | remove (DESIGN.md "CLI design", "Bootstrap", "Formats and
 // compatibility"; Q2, Q4, Q8, Q13). Each is a thin call into core's stores module:
 //   - add (safe_write) sets a store up through bootstrap, or adopts one already set up, and records it in managed.toml;
-//     --secret-stdin saves its password to the Keychain first. It sends only setup files.
+//     --secret-stdin saves its password to the Keychain first. It sends only setup files. A new s3 or sftp store's
+//     catalog is sealed and a local one's plain unless --seal or --no-seal says otherwise (Q10).
 //   - list (read) shows every configured store; --probe also asks each whether it answers, still writing nothing.
 //   - test (safe_write) writes, reads, lists and deletes one probe key, records what it measured in this device's
 //     record of the store (stores/<id>.json), and lists what bootstraps left behind.
@@ -71,6 +72,14 @@ const addArgs = z.strictObject({
   }),
   "secret-stdin": z.boolean().optional().meta({
     description: "Read the restic password from standard input and save it to the Keychain under --secret",
+  }),
+  seal: z.boolean().optional().meta({
+    description:
+      "Seal a new store's catalog (Catalog seal v1, Q10): the default for s3 and sftp; an existing store must already be sealed",
+  }),
+  "no-seal": z.boolean().optional().meta({
+    description:
+      "Keep a new store's catalog plain: the default for local stores; an existing store must already be plain",
   }),
 });
 
@@ -147,6 +156,9 @@ export const storeAdd = defineCommand({
     }),
     format: z.union([z.literal(1), z.literal(2)]),
     repo: z.string().meta({ description: "Where its restic repository lies under the store's root" }),
+    sealed: z
+      .boolean()
+      .meta({ description: "Its catalog is sealed (Q10), as it publishes and this device pinned" }),
     location: z.string(),
     configChanged: z.boolean().meta({ description: "This run wrote managed.toml" }),
     secretSaved: z.boolean().meta({ description: "This run saved the password to the Keychain" }),
@@ -160,7 +172,7 @@ export const storeAdd = defineCommand({
   ],
   human: (data) =>
     [
-      `store ${data.name} ${data.outcome === "published" ? "set up" : "adopted"}: ${data.id} at ${data.location} (format ${data.format}, repository ${data.repo})`,
+      `store ${data.name} ${data.outcome === "published" ? "set up" : "adopted"}: ${data.id} at ${data.location} (format ${data.format}, repository ${data.repo}, catalog ${data.sealed ? "sealed" : "plain"})`,
       ...(data.secretSaved ? ["password saved to the Keychain"] : []),
       data.configChanged ? "managed.toml updated" : "managed.toml already had it",
     ].join("\n"),
@@ -171,6 +183,13 @@ export const storeAdd = defineCommand({
         finding("usage.invalid", {
           message: `a ${args.kind ?? "local"} store needs ${table.missing.join(", ")}`,
           fix: "plainport help store add",
+        }),
+      );
+    if (args.seal === true && args["no-seal"] === true)
+      return fail(
+        finding("usage.invalid", {
+          message: "--seal and --no-seal ask for opposite things; nothing was written",
+          fix: "pass one of them, or neither for the default (sealed for s3 and sftp, plain for local)",
         }),
       );
     const paths = ctx.paths();
@@ -206,6 +225,8 @@ export const storeAdd = defineCommand({
         wait: (ms) => ctx.sleep(ms),
       },
       ...(secretValue !== undefined && { secretValue }),
+      ...(args.seal === true && { seal: "v1" as const }),
+      ...(args["no-seal"] === true && { seal: "none" as const }),
     });
   },
 });
@@ -218,6 +239,7 @@ const ProbeInfo = z.union([
     reachable: z.literal(true),
     format: z.union([z.literal(1), z.literal(2)]).optional(),
     id: z.string().optional(),
+    sealed: z.boolean().optional().meta({ description: "Its meta/v1/store.json says its catalog is sealed" }),
     pinned: z.boolean().meta({ description: "It carries the id this device pinned for the name" }),
   }),
   z.looseObject({
@@ -253,6 +275,10 @@ export const storeList = defineCommand({
         source: z.enum(["config", "managed", "both"]),
         default: z.boolean(),
         id: z.string().optional().meta({ description: "The id this device pinned for the name (D85)" }),
+        sealed: z.boolean().optional().meta({
+          description:
+            "Its catalog is sealed, as this device pinned it at its first contact (Q10); absent before",
+        }),
         roots: z.array(z.string()),
         lastTest: TestInfo.optional(),
         probe: ProbeInfo.optional(),
@@ -270,7 +296,7 @@ export const storeList = defineCommand({
       ...data.stores.map((s) =>
         [
           `${s.name}${s.default ? " (default)" : ""}  ${s.kind}  ${s.location}`,
-          `  ${s.id === undefined ? "not set up on this device" : `id ${s.id}`}${s.roots.length === 0 ? "" : `; roots ${s.roots.join(", ")}`}`,
+          `  ${s.id === undefined ? "not set up on this device" : `id ${s.id}`}${s.sealed === undefined ? "" : s.sealed ? "; catalog sealed" : "; catalog plain"}${s.roots.length === 0 ? "" : `; roots ${s.roots.join(", ")}`}`,
           ...(s.lastTest === undefined
             ? []
             : [

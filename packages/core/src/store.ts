@@ -39,6 +39,7 @@ import { readRegistry, updateRegistry } from "./registry.ts";
 import type { BootstrapStore } from "./saga/bootstrap.ts";
 import { registeredFolders } from "./saga/project-gate.ts";
 import { storeOverlap } from "./store-overlap.ts";
+import { storeCatalog } from "./stores/seal.ts";
 
 const secretMissing = (name: string, what: string, message: string, fix: string) =>
   fail(finding("store.secret-missing", { message: `store ${name}'s ${what}: ${message}`, fix }));
@@ -678,11 +679,21 @@ export interface ConfiguredStore extends OpenedStore {
 
 /**
  * A store an operation can use: named in config, set up on this device (its id recorded), of a kind this build
- * supports, with its password read. Nothing is reached yet.
+ * supports, with its password read, and its catalog policy (stores/seal.ts): the store's identity is read, its seal
+ * policy checked against this device's pin (pinned at the first contact), and a sealed catalog's key derived. With
+ * `catalog: false` (a caller that reads no catalog) nothing is reached.
  */
 export const openStore = async (
   io: LocalIo,
-  options: { paths: PlainportPaths; env: Env; name: string; config: ResolvedConfig; opener: StoreOpener },
+  options: {
+    paths: PlainportPaths;
+    env: Env;
+    name: string;
+    config: ResolvedConfig;
+    opener: StoreOpener;
+    catalog?: boolean;
+    now?: () => Date;
+  },
 ): Promise<Result<ConfiguredStore>> => {
   const { name, paths } = options;
   const store = options.config.stores[name];
@@ -718,7 +729,16 @@ export const openStore = async (
   if (!secrets.ok) return secrets;
   const opened = await options.opener.open(name, store, secrets.value.password, secrets.value.credentials);
   if (!opened.ok) return opened;
-  return ok({ ...opened.value, name, id, store });
+  if (options.catalog === false) return ok({ ...opened.value, name, id, store });
+  const now = options.now ?? (() => new Date());
+  const catalog = await storeCatalog(
+    io,
+    paths,
+    { ...opened.value, name, id },
+    { pin: true, at: () => now().toISOString() },
+  );
+  if (!catalog.ok) return catalog;
+  return ok({ ...opened.value, catalog: catalog.value, name, id, store });
 };
 
 /**
