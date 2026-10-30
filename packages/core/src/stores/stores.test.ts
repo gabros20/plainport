@@ -169,6 +169,37 @@ describe("store add", () => {
     expect(() => d.managed()).toThrow();
   });
 
+  test("an election that waits out its tie-break (D109's waiting) is store.bootstrap-undecided, exit 6: retry later", async () => {
+    const world = storeWorld();
+    const d = await device(world);
+    const blob = world.blobAt(ARCHIVE());
+    // A rival that stood with a higher id and never decides: this attempt holds the tie-break and waits for it.
+    const rival = ulid(Date.now() + 3_600_000);
+    value(
+      await blob.put(
+        `${STORE_CLAIMS_PREFIX}${rival}.json`,
+        new TextEncoder().encode(`${JSON.stringify({ v: 1, id: rival, decision: "candidate" })}\n`),
+      ),
+    );
+    const refused = failed(await add(d));
+    expect([refused.exitCode, refused.finding.code]).toEqual([6, "store.bootstrap-undecided"]);
+    expect((refused.data as { outcome?: string } | undefined)?.outcome).toBe("waiting");
+    expect(blob.data.has(STORE_IDENTITY_KEY)).toBe(false);
+    expect(value(await readRegistry(io, d.box.paths)).stores).toBeUndefined();
+  });
+
+  test("an offload refuses while the store's upgrade marker stands (Q2)", async () => {
+    const { refuseWhileUpgrading } = await import("./upgrade.ts");
+    const world = storeWorld();
+    const d = await device(world);
+    value(await add(d));
+    const blob = world.blobAt(ARCHIVE());
+    expect((await refuseWhileUpgrading(blob, "archive", "offload")).ok).toBe(true);
+    value(await blob.put(UPGRADE_INTENT_KEY, new TextEncoder().encode("{}\n")));
+    const refused = failed(await refuseWhileUpgrading(blob, "archive", "offload"));
+    expect([refused.exitCode, refused.finding.code]).toEqual([6, "store.not-quiescent"]);
+  });
+
   test("refuses a store whose upgrade marker stands (Q2)", async () => {
     const world = storeWorld();
     const a = await device(world);

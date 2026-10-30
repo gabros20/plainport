@@ -102,6 +102,7 @@ import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { freshStores, type ProtectedStore } from "../store-overlap.ts";
+import { refuseWhileUpgrading } from "../stores/upgrade.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { openSaga, runSaga } from "./journaled.ts";
@@ -474,6 +475,10 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // Q2: an upgrade under way (its upgrade-intent marker stands) is waited out; this is the offload's first read of the
+  // store, so one that cannot be reached fails here, before anything is uploaded.
+  const upgrading = await refuseWhileUpgrading(store.blob, storeName, "offload");
+  if (!upgrading.ok) return upgrading;
 
   // The project's ULID: the registry's, or a new one recorded there, under its lock, so two runs agree on it.
   const registered = await ensureRegistered(
