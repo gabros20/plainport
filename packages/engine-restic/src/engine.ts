@@ -146,11 +146,12 @@ const redactorOf = (secrets: readonly string[]) => {
 };
 
 /**
- * What restic, Go and the system's ssh print when a connection cannot be made or breaks. Not a refused host key or
+ * What restic, Go and the system's ssh print when a connection cannot be made or breaks (a cut SFTP link: ssh's
+ * "Connection to <host> closed by remote host", the sftp client's "connection lost"). Not a refused host key or
  * login ("Host key verification failed", "Permission denied"): those are failures to fix, not an unreachable store.
  */
 const CONNECTION =
-  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|connection closed by foreign host|TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|connection closed by remote host|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
+  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|connection closed by foreign host|TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|closed by remote host|connection lost|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
 const REFUSED_HANDSHAKE =
   /host key verification failed|permission denied \(|too many authentication failures|no \S+ host key is known/i;
 /** restic's line when a backend request failed and it waits to try again. */

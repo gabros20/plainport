@@ -253,6 +253,37 @@ describe("restic engine: a remote repository", () => {
     expect(failure(await engine.list({})).finding.code).toBe("store.unreachable");
   });
 
+  test("an SFTP link cut mid-run (ssh's 'closed by remote host', the sftp client's 'connection lost', then restic's circuit breaker) is store.unreachable (T2, review phase 5)", async () => {
+    const cut = edited(fixture("snapshots"), {
+      exitCode: 1,
+      stdout: "",
+      stderr: [
+        "subprocess ssh: Connection to 127.0.0.1 closed by remote host.",
+        "Load(<key/ce7be18577>, 0, 0) returned error, retrying after 1.078111317s: connection lost",
+        "Load(<key/ce7be18577>, 0, 0) failed: ssh command exited: exit status 255",
+        JSON.stringify({
+          message_type: "exit_error",
+          code: 1,
+          message: "Fatal: circuit breaker open for file <key/ce7be18577>",
+        }),
+        "",
+      ].join("\n"),
+    });
+    const { engine } = remoteSetup([cut]);
+    const result = failure(await engine.list({}));
+    expect([result.finding.code, result.exitCode]).toEqual(["store.unreachable", 9]);
+    // A refused login over the same exit status stays a failure to fix.
+    const login = edited(cut, {
+      stderr: cut.stderr
+        .replace(
+          "Connection to 127.0.0.1 closed by remote host.",
+          "tamas@127.0.0.1: Permission denied (publickey).",
+        )
+        .replace("connection lost", "ssh command exited: exit status 255"),
+    });
+    expect(failure(await remoteSetup([login]).engine.list({})).finding.code).toBe("restic.failed");
+  });
+
   test("'wrong password' after connection retries is the connection, not the password", async () => {
     const retry =
       "Load(<key/1234>) returned error, retrying after 600ms: read tcp 127.0.0.1:1->127.0.0.1:9: read: connection reset by peer";
