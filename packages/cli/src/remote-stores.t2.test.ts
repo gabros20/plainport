@@ -14,7 +14,7 @@
 //
 // Every store lives under a fresh prefix; the SFTP children are run one or two at a time (sshd drops logins past ~10).
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -159,8 +159,11 @@ const journalsOf = (d: RemoteDevice): string[] => {
 beforeAll(async () => {
   rclone = await rclonePath();
 });
-afterAll(async () => {
-  for (const d of devices) await d.cleanup();
+// Each test's devices are removed after it (a detached delete may still be writing into one, so it settles first).
+afterEach(async () => {
+  await Promise.all(devices.splice(0).map((d) => d.cleanup()));
+}, 120_000);
+afterAll(() => {
   if (timings.length > 0) process.stdout.write(`${timings.join("\n")}\n`);
 });
 
