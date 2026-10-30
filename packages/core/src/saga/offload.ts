@@ -48,6 +48,10 @@
 //                                          write was lost (the journal says committed and has none), it is
 //                                          offloadTrashOf(journal), and the folder may already be in it: look in
 //                                          both places. The stub's offloadedAt and bytes are the event's
+//   offload.release.held                   released, its trash held for Q16's conflict grace (recover/held.ts): the
+//                                          checked read, once keepUntil (the grace's deadline) has passed, moves it
+//                                          to release.delete, or keeps it (conflict-retained: no keepUntil); a store
+//                                          that does not answer, or Q21's proof finding data missing, leaves it
 //   offload.release.delete                 released: delete the trash once keepUntil (if any) has passed
 //
 // RECOVERY_NEEDS lists, step by step, the journal fields those rules read; the saga's tests check each is there.
@@ -124,7 +128,14 @@ import {
   registeredFolders,
   withProjectLock,
 } from "./project-gate.ts";
-import { type OffloadConflict, recordBase, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
+import {
+  conflictGraceOf,
+  type OffloadConflict,
+  recordBase,
+  releaseOffload,
+  rootFolderOf,
+  TRASH_DIR,
+} from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
 
@@ -152,6 +163,7 @@ export const OFFLOAD_STEPS = [
   "offload.release.trash",
   "offload.release.moved",
   "offload.release.stub",
+  "offload.release.held",
   "offload.release.delete",
 ] as const;
 export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
@@ -216,6 +228,10 @@ export const OFFLOAD_BRANCHES = {
   firstOffloadOfRoot: { when: "the root has no root-created event yet", reaches: ["offload.root-created"] },
   keepStub: { when: "offload.stub = true (the default)", reaches: ["offload.release.stub-placed"] },
   detached: { when: 'offload.keepLocalFor = "0" (the default)', reaches: ["offload.release.detached"] },
+  held: {
+    when: "offload.conflictGrace above 0 (a remote store's default, Q16): the trash is held for the checked read",
+    reaches: ["offload.release.held"],
+  },
 } as const;
 
 /** What every journal names: the operation, the project and its folder, the store. */
@@ -260,6 +276,7 @@ export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = 
   ],
   "offload.release.moved": [...POLICY, "verified", "event", "trash"],
   "offload.release.stub": [...POLICY, "verified", "event", "trash"],
+  "offload.release.held": [...POLICY, "verified", "event", "trash"],
   "offload.release.delete": [...POLICY, "verified", "event", "trash"],
 };
 
@@ -325,8 +342,12 @@ export interface OffloadOutcome {
   stub?: string;
   /** Where the folder is kept or waits to be deleted; absent when localCopy is deleted (D77). */
   trash?: string;
-  /** keepLocalFor: the trash is kept until then. */
+  /** keepLocalFor: the trash is kept until then; held, the conflict grace's deadline. */
   keepUntil?: string;
+  /** The trash is held for Q16's checked read (offload.conflictGrace): plainport gc deletes it once that read allows. */
+  held?: true;
+  /** Held because the store cannot release a folder (its durability): why, until its profile admits release. */
+  releaseRefused?: Finding;
 }
 
 /** operation.cancelled once the offload is committed: release did not start, and recover finishes it (D52). */
@@ -490,6 +511,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // Q16: how long release holds the trash for the checked read.
+  const grace = conflictGraceOf(loaded.value.config, store.name);
   // A config assertion the measurement contradicts (D111) is said, and the measured value used.
   for (const f of store.findings ?? []) report(f);
   // Q2: an upgrade under way (its upgrade-intent marker stands) is waited out; this is the offload's first read of the
@@ -938,6 +961,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           env: deps.env,
           stores,
           store: { name: store.name, semantics: store.blob.semantics() },
+          grace,
           // F2: the catalog read fresh again right before the rename (Q16).
           reread: catalog,
         },
@@ -945,7 +969,9 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       );
       if (!released.ok) return released;
       phase("release", "end");
-      const { trash, stub, keepUntil, freed } = released.value;
+      const { trash, stub, keepUntil, freed, held, refused } = released.value;
+      // Held because the store cannot release a folder: said now, and by gc and status until it can (Task 17 M7).
+      if (refused !== undefined) deps.log("warn", `${refused.code}: ${refused.message}`);
       return ok({
         op,
         project: ref.address,
@@ -960,6 +986,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         // A deleted local copy's trash is already going, so it is not named (D77).
         ...(freed ? {} : { trash }),
         ...(keepUntil === undefined ? {} : { keepUntil }),
+        ...(held === true ? { held: true as const } : {}),
+        ...(refused === undefined ? {} : { releaseRefused: refused }),
       });
     };
 

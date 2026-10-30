@@ -20,9 +20,12 @@ import { type CanonicalPath, canonicalPath, overlapByIdentity } from "../roots/c
 import { listRoots } from "../roots/roots.ts";
 import { writeFailed } from "./journaled.ts";
 
-/** Steps after which an operation is finished but for deleting its trash: they hold no project back. An onload
- * closes its journal once it is committed and registered, so every onload step holds it back. */
-const RELEASED: ReadonlySet<string> = new Set(["offload.release.delete"]);
+/**
+ * Steps after which an operation is finished but for deleting its trash: they hold no project back (D59). A trash held
+ * for the conflict grace (offload.release.held, Q16) is such a step: resolve, compare, onload and read commands run
+ * while it stands. An onload closes its journal once it is committed and registered, so every onload step holds it back.
+ */
+const RELEASED: ReadonlySet<string> = new Set(["offload.release.held", "offload.release.delete"]);
 
 /** Whether an interrupted operation still holds its project back from a new one. */
 export const holdsProjectBack = (journal: Journal): boolean => !RELEASED.has(journal.step);

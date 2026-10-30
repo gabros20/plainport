@@ -16,6 +16,10 @@
 //   offload.committed .. release.stub       release (releaseOffload: while the folder is in place, the catalog read
 //                                           again (F2: a fork keeps the folder, forked; a store that does not answer,
 //                                           pending), the D51 fingerprint guard, the derived trash)
+//   offload.release.held                    the checked read (recover/held.ts, Q16): once the grace has passed and no
+//                                           fork names the snapshot (and Q21's proof holds), delete the trash as at
+//                                           release.delete; a fork keeps it (conflict-retained); a store that does
+//                                           not answer, pending
 //   offload.release.delete                  delete the trash once keepUntil, if any, has passed
 //   onload.restore.start, onload.restored    roll back (staging removed; the stub stays)
 //   onload.begin (restore mode)             roll back: nothing is staged yet, so a folder there is not this onload's
@@ -100,6 +104,7 @@ import { type ConfiguredStore, openBootstrapStore, openStore } from "../store.ts
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { isUlid, ulid } from "../ulid.ts";
+import { checkHeld, heldStoreOpener, isHeld, openJournalStore } from "./held.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
@@ -186,6 +191,7 @@ export type RecoveryReport = {
  *   commit-check   the journaled event on the store and the operation's own: release; otherwise roll back
  *   release        committed by the journal's word: finish the release (releaseOffload: the catalog read again while
  *                  the folder is in place, F2; D51)
+ *   check-held     a held trash (Q16): the checked read (checkHeld), then delete-trash once it allows the delete
  *   delete-trash   a released offload: delete its trash once keepUntil, if any, has passed
  *   swap-check     swapped (onloadSwapped): finish the onload; otherwise roll back
  *   finish-onload  finish the onload (finishOnload)
@@ -200,6 +206,7 @@ export type RecoveryRule =
   | "fork"
   | "commit-check"
   | "release"
+  | "check-held"
   | "delete-trash"
   | "swap-check"
   | "finish-onload";
@@ -220,6 +227,7 @@ export const OFFLOAD_RECOVERY = {
   "offload.release.trash": "release",
   "offload.release.moved": "release",
   "offload.release.stub": "release",
+  "offload.release.held": "check-held",
   "offload.release.delete": "delete-trash",
 } as const satisfies Record<OffloadStep, RecoveryRule>;
 
@@ -242,6 +250,7 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
   fork: ["forked", "pending"],
   "commit-check": ["rolled-back", "finished", "forked", "diverged-after-commit", "pending"],
   release: ["finished", "forked", "diverged-after-commit", "pending"],
+  "check-held": ["trash-deleted", "trash-kept", "pending"],
   "delete-trash": ["trash-deleted", "trash-kept", "pending"],
   "swap-check": ["rolled-back", "finished", "pending"],
   "finish-onload": ["finished", "pending"],
@@ -311,10 +320,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
   const settled: Settled[] = [];
   for (const group of byProject.values()) {
-    const ordered = [
-      ...group.filter((j) => j.step !== "offload.release.delete"),
-      ...group.filter((j) => j.step === "offload.release.delete"),
-    ];
+    const trashOnly = (j: Journal) => j.step === "offload.release.delete" || isHeld(j);
+    const ordered = [...group.filter((j) => !trashOnly(j)), ...group.filter(trashOnly)];
     settled.push(...(deps.signal?.aborted ? ordered.map(cancelled) : await settleProject(ordered)));
   }
 
@@ -508,36 +515,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
    * which keys the `stored` entry of an event recover writes there (Q11).
    */
   async function storeOf(journal: Journal): Promise<Result<ConfiguredStore & { format: 1 | 2 }>> {
-    const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
-    if (!loaded.ok) return loaded;
-    const opened = await openStore(io, {
-      paths,
-      env: deps.env,
-      name: journal.store.name,
-      config: loaded.value.config,
-      opener: deps.opener,
-      now: clock,
-    });
-    if (!opened.ok) return opened;
-    // The store itself says who it is (meta/v1/store.json), not this device's record of it: a disk swapped or a path
-    // changed since is another store, which recover never writes to or reads a commit from.
-    const identity = await readUsableStore(opened.value.blob);
-    if (!identity.ok) return identity;
-    const found = identity.value?.id ?? null;
-    if (opened.value.id !== journal.store.id || identity.value === null || found !== journal.store.id) {
-      const changed = identityChanged(
-        journal.store.id,
-        found === journal.store.id ? opened.value.id : found,
-        "store",
-      );
-      return withFix(
-        changed,
-        `connect the store the ${journal.kind} ${journal.op} wrote to (stores.${journal.store.name}), then run plainport recover`,
-      );
-    }
-    const fits = policyFits(opened.value.catalog ?? PLAIN_CATALOG, identity.value);
-    if (!fits.ok) return fits;
-    return ok({ ...opened.value, format: identity.value.format });
+    return openJournalStore(
+      { io, paths, env: deps.env, loader: deps.loader, opener: deps.opener, clock },
+      journal,
+    );
   }
 
   /**
@@ -652,6 +633,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         return release(journal, lock);
       case "delete-trash":
         return deleteTrash(journal);
+      case "check-held":
+        return checkHeldTrash(journal);
       case "discard":
       case "fork":
       case "commit-check":
@@ -1046,6 +1029,41 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         writeFailed(error, `removing the journal of ${journal.op}`, true, journalFile(paths, journal.op)),
       );
     }
+  }
+
+  /**
+   * A held trash (Q16): the checked read decides; once it allows the delete the journal is at release.delete, and the
+   * trash goes as any released one (keepLocalFor's deadline included).
+   */
+  async function checkHeldTrash(journal: OffloadJournal): Promise<Settled> {
+    const trash = journal.trash ?? offloadTrashOf(journal);
+    const checked = await checkHeld(
+      {
+        io,
+        paths,
+        clock,
+        faultAt: (point) => host.faultAt(point),
+        log: deps.log,
+        open: heldStoreOpener({
+          io,
+          paths,
+          env: deps.env,
+          loader: deps.loader,
+          opener: deps.opener,
+          clock,
+          openMirror: deps.openMirror,
+          log: deps.log,
+        }),
+      },
+      journal,
+    );
+    if (!checked.ok) return pending(journal, checked, "shelved");
+    const verdict = checked.value;
+    if (verdict.kind === "grace")
+      return { op: { ...entry(journal, "trash-kept", "shelved"), trash, keepUntil: verdict.until } };
+    if (verdict.kind === "conflict")
+      return { op: { ...entry(journal, "trash-kept", "conflicted"), trash, finding: verdict.finding } };
+    return deleteTrash(verdict.journal);
   }
 
   /** A released offload: its trash goes once keepUntil (if any) has passed. */
