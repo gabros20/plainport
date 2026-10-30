@@ -83,3 +83,96 @@ describe("store upgrade: crash rows (Q2)", () => {
     expect(upgradeJournals()).toEqual([]);
   });
 });
+
+describe("store upgrade: a ULID-shaped alias (D104, Q11)", () => {
+  // An M1 alias shaped like a ULID that is not the store's id: a key, never read as an id.
+  const ALIAS = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
+  let other: Sandbox;
+  afterEach(() => other?.cleanupSettled());
+
+  test("events keyed by the alias still read after the upgrade, on its device and from another with another alias", async () => {
+    // Device A: a fresh M1 store named by the alias (store.json v1 before init, as v0.1.x left it).
+    const a = makeSandbox("plainport-alias-a-");
+    try {
+      a.dir("work");
+      a.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+      a.file("work/web/src/main.ts", "export const main = 1;\n");
+      const shared = join(a.home, "disk");
+      const storeId = "01J9Z6K2QF8M3V7XN4T5R6Y1AB";
+      a.file("disk/meta/v1/store.json", `${JSON.stringify({ v: 1, id: storeId })}\n`);
+      const onA = (argv: string[]) => capture(argv, REGISTRY, { ports: sandboxPorts(a.home) });
+      const json = async (argv: string[]) => {
+        const run = await onA([...argv, "--json"]);
+        if (run.code !== 0) throw new Error(`${argv.join(" ")}: ${run.out}${run.err}`);
+        return envelope(run.out).data;
+      };
+      expect(
+        (
+          await json([
+            "init",
+            "--root",
+            "work=~/work",
+            "--store-path",
+            shared,
+            "--store",
+            ALIAS,
+            "--device",
+            "mbp",
+            "--yes",
+          ])
+        ).store,
+      ).toMatchObject({ id: storeId, format: 1 });
+      const first = await json(["offload", "work:web", "--yes"]);
+      const events = () =>
+        readdirSync(join(shared, "meta/v1/events")).map((n) =>
+          JSON.parse(readFileSync(join(shared, "meta/v1/events", n), "utf8")),
+        );
+      const offloaded = () => events().filter((e) => e.type === "offloaded");
+      // Format 1: the alias keys it, for v0.1.1.
+      expect(Object.keys(offloaded()[0].stored)).toEqual([ALIAS]);
+
+      expect(await json(["store", "upgrade", ALIAS, "--others-stopped", "--yes"])).toMatchObject({
+        upgraded: true,
+      });
+      // Read on its device after the upgrade: the head is the alias-keyed snapshot, and it onloads.
+      const status = await json(["status", "work:web"]);
+      expect(status.project?.head ?? status.head).toBe(first.snapshot);
+      await json(["onload", "work:web"]);
+      writeFileSync(join(a.home, "work/web/src/main.ts"), "export const main = 2;\n");
+      const second = await json(["offload", "work:web", "--yes"]);
+      // Format 2: the store's id keys what is written now.
+      const latest = offloaded().find((e) => e.snapshot === second.snapshot);
+      expect(Object.keys(latest.stored)).toEqual([storeId]);
+
+      // Another device, another alias: it reads both events by containment and restores the head.
+      other = makeSandbox("plainport-alias-b-");
+      other.dir("work");
+      const onB = (argv: string[]) => capture(argv, REGISTRY, { ports: sandboxPorts(other.home) });
+      const setup = await onB([
+        "init",
+        "--root",
+        "work=~/work",
+        "--store-path",
+        shared,
+        "--store",
+        "nas",
+        "--device",
+        "mini",
+        "--yes",
+        "--json",
+      ]);
+      expect(setup.code).toBe(0);
+      expect(envelope(setup.out).data.store).toMatchObject({ id: storeId, format: 2 });
+      for (const snapshot of [first.snapshot, second.snapshot]) {
+        const to = join(other.home, `restored-${snapshot}`);
+        const restored = await onB(["restore", "web", "--snapshot", snapshot, "--to", to, "--json"]);
+        expect(restored.code, restored.out).toBe(0);
+        expect(readFileSync(join(to, "src/main.ts"), "utf8")).toBe(
+          snapshot === first.snapshot ? "export const main = 1;\n" : "export const main = 2;\n",
+        );
+      }
+    } finally {
+      await a.cleanupSettled();
+    }
+  });
+});
