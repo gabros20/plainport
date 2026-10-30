@@ -77,15 +77,17 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogEvent } from "../catalog/events.ts";
+import type { CatalogProject } from "../catalog/fold.ts";
 import {
   catalogReader,
   headCheck,
+  leaseAhead,
   namesSnapshot,
   otherRoot,
   rootMismatch,
   storeHolding,
 } from "../catalog/head.ts";
-import { appendEvent, storeEventLog } from "../catalog/log.ts";
+import { appendEvent, eventAt, mirrorEventLog, storeEventLog } from "../catalog/log.ts";
 import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import { storedHere, storedKey } from "../catalog/stored.ts";
@@ -460,6 +462,7 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
+  const strictLeases = loaded.value.config.onload.leases === "strict";
   // The local stores release never moves a folder holding (D83), read again right before the rename (F2).
   // A fresh, clean read: never the loader's last good copy (astra r2 finding 5).
   const stores = (): Promise<Result<ProtectedStore[]>> => freshStores(io, paths, deps.env);
@@ -514,6 +517,31 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     related: nested,
   });
 
+  /**
+   * lease.held when another device holds the project's lease and its onload is not behind this copy (leaseAhead): its
+   * copy and this one now differ, and the first of the two offloaded becomes the head. Where that onload sits is read
+   * from its event in the mirror the catalog read just brought up to the store.
+   */
+  async function leaseHeld(
+    project: CatalogProject | undefined,
+    mirror: BlobStore,
+    strict: boolean,
+  ): Promise<Finding | undefined> {
+    const held = project?.lease ?? null;
+    if (held === null || held.device === device.id) return undefined;
+    const read = await eventAt(mirrorEventLog(mirror), held.event);
+    const opened = read.ok && read.value !== null && "event" in read.value ? read.value.event : undefined;
+    const over = opened?.type === "onloaded" ? (opened.over ?? opened.base) : undefined;
+    const lease = leaseAhead(project, device.id, base, over);
+    if (lease === undefined) return undefined;
+    return finding("lease.held", {
+      message: `${ref.address} is onloaded on device ${lease.device} since ${lease.at}, level with or further along than this copy; ${strict ? "nothing was uploaded" : "if this copy is offloaded first, that one becomes a fork when it is offloaded"}`,
+      fix: strict
+        ? `offload it on that device first, or set onload.leases = "warn" to offload it here anyway`
+        : "offload it on that device first if its copy should be the head",
+    });
+  }
+
   async function offloadLocked(lock: ProjectLock): Promise<Result<OffloadOutcome>> {
     // A registered project inside the folder that is here would be offloaded inside this one (D53).
     const inside = await nestedHere(io, nested);
@@ -560,6 +588,13 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           };
     const early = headCheck(before.value, projectId, base, ref.address, home);
     if (early.kind !== "ok") return fail(early.finding);
+    // Another device's working copy, onloaded further along the chain (Q17: advisory): a warning, and under
+    // leases = "strict" a refusal with exit 8, before anything is uploaded.
+    const lease = await leaseHeld(before.value.projects[projectId], mirror.value, strictLeases);
+    if (lease !== undefined) {
+      if (strictLeases) return fail(lease, 8);
+      report(lease);
+    }
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),

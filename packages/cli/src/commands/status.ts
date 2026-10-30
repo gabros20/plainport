@@ -1,5 +1,5 @@
 import { FindingSchema, ok, ProjectStateSchema } from "@plainport/contract";
-import { PROJECT_CONDITIONS, type ProjectStatus } from "@plainport/core";
+import { PROJECT_CONDITIONS, type ProjectStatus, shortDeviceId } from "@plainport/core";
 import { z } from "zod";
 import { defineCommand } from "../registry.ts";
 import { formatBytes } from "./offload.ts";
@@ -17,7 +17,7 @@ export const ProjectStatusSchema = z
     }),
     conditions: z.array(z.string()).meta({
       description:
-        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's)",
+        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)",
     }),
     dir: z.string().optional().meta({ description: "Its folder on this device" }),
     here: z.boolean().meta({ description: "The folder is on this device" }),
@@ -167,7 +167,7 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
       "lease",
       p.lease === undefined
         ? "none"
-        : `${p.lease.here ? "this device" : `device ${p.lease.device}`} since ${p.lease.at}`,
+        : `${p.lease.here ? "this device" : `device ${shortDeviceId(p.lease.device)}`} since ${p.lease.at}`,
     ),
   );
   lines.push(row("catalog", freshness(p)));
@@ -220,7 +220,7 @@ export const status = defineCommand({
 });
 
 const lsRow = (p: ProjectStatus, width: number): string => {
-  const device = p.lease === undefined ? "-" : p.lease.here ? "here" : p.lease.device.slice(0, 10);
+  const device = p.lease === undefined ? "-" : p.lease.here ? "here" : shortDeviceId(p.lease.device);
   const size = p.bytes === undefined ? "-" : formatBytes(p.bytes);
   const when = p.lastActivity === undefined ? "-" : p.lastActivity.slice(0, 10);
   return `${p.address.padEnd(width)}  ${stateText(p).padEnd(24)}  ${device.padEnd(10)}  ${size.padStart(8)}  ${when}`;
