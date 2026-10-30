@@ -71,10 +71,17 @@ const WHERE: Record<Store["kind"], readonly string[]> = {
   peer: ["device", "path"],
 };
 
-/** Whether two tables for one name describe the same store and the same secrets. */
+/** The settings `store add` does not take, which config may add to a store's table: never a reason to refuse. */
+const CONFIG_ONLY = new Set(["access", "replicateTo", "semantics"]);
+
+/** Whether two tables for one name describe the same store and the same secrets (config-only settings aside). */
 const sameTable = (a: Store, b: Store): boolean => JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
 const sorted = (store: Store): Record<string, unknown> =>
-  Object.fromEntries(Object.entries(store).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)));
+  Object.fromEntries(
+    Object.entries(store)
+      .filter(([key]) => !CONFIG_ONLY.has(key))
+      .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)),
+  );
 
 const describe = (store: Store, home: string): string =>
   `a ${store.kind} store at ${storeLocation(store, home)}`;
@@ -105,13 +112,17 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
       finding("usage.invalid", {
         message: moved
           ? `store ${name} is already configured as ${describe(existing, paths.home)}; plainport never moves a name to another store, so nothing was changed`
-          : `store ${name} is already configured with other settings (its secrets or access); store add does not change a store's settings, so nothing was changed`,
+          : `store ${name} is already configured with other secrets; store add does not change a store's settings, so nothing was changed`,
         fix: moved
           ? `give the new store its own name: plainport store add <new-name> …; to forget ${name} first: plainport store remove ${name} --yes`
           : `edit stores.${name} in ${paths.configFile}, or re-run plainport store add ${name} with the settings it has`,
       }),
     );
   }
+
+  // The store as config resolves it once written: the same table, with what config adds (its semantics assertions,
+  // which the opener reads, Q8).
+  const effective = existing ?? store;
 
   // 2. A local store's folder.
   if (store.kind === "local") {
@@ -144,7 +155,7 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   }
 
   // 4. The store, reached: its identity against this device's pin, and no upgrade under way.
-  const opened = await reachStore(io, { paths, env, name, store, opener: options.opener });
+  const opened = await reachStore(io, { paths, env, name, store: effective, opener: options.opener });
   if (!opened.ok) return opened;
   const reached = bootstrapStoreOf(opened.value);
   if (reached === undefined)
@@ -157,6 +168,12 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
   const registry = await readRegistry(io, paths);
   if (!registry.ok) return registry;
   const pinned = registry.value.stores?.[name];
+  // A new SFTP store's folder is made first: rclone reads a missing one as an unreachable store (never an empty one).
+  // A name pinned here is only ever finished, never made somewhere new (D85).
+  if (store.kind === "sftp" && pinned === undefined && reached.blob.makeRoot !== undefined) {
+    const made = await reached.blob.makeRoot();
+    if (!made.ok) return made;
+  }
   const found = await readStoreDescriptor(reached.blob);
   if (!found.ok) return found;
   if (pinned !== undefined && found.value?.id !== pinned)

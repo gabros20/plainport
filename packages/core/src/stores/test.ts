@@ -204,6 +204,14 @@ export const testStore = async (io: LocalIo, options: TestStoreOptions): Promise
         : "denied";
   }
   const semantics: StoreSemantics = { ...profile, ...found };
+  // What the record keeps: what was measured, here or before, and what the backend documents. An owner's assertion
+  // stays in config, where the opener reads it (Q8), so removing it there is never undone by an old record.
+  const toRecord = Object.fromEntries(
+    Object.entries(semantics).map(([property, held]) => [
+      property,
+      held !== "unknown" && held.evidence === "asserted" ? "unknown" : held,
+    ]),
+  ) as StoreSemantics;
 
   // The repository at the store's published location, with this device's password; it is only listed.
   let repository: StoreTestReport["repository"];
@@ -245,7 +253,7 @@ export const testStore = async (io: LocalIo, options: TestStoreOptions): Promise
   let recorded = false;
   if (recordable) {
     const written = await recordMeasured(io, paths, id, storeFacts(store, paths.home, options.tools), {
-      semantics,
+      semantics: toRecord,
       test: { at, ok: healthy, delete: verdict },
     });
     if (written.ok) recorded = true;
