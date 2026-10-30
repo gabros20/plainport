@@ -85,7 +85,6 @@ describe("schedules: the gate", () => {
     expect(todoSchedules().map((s) => [s.id, s.owner])).toEqual([
       ["S2", 23],
       ["S3", 23],
-      ["S4", 22],
       ["S5", 23],
       ["S7", 25],
       ["S8", 24],

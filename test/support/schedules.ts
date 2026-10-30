@@ -8,12 +8,13 @@
 // in process instead (`runInProcess`), its devices on the semantic fake (test/support/fake-devices.ts).
 
 import { expect } from "bun:test";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { storeEventKey } from "../../packages/core/src/catalog/codec.ts";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
 import { capabilitiesOf, type StoreSemantics } from "../../packages/core/src/ports/blob-store.ts";
 import {
+  type CatalogInvariantSubject,
   catalogInvariantViolations,
   invariantViolations,
 } from "../../packages/core/src/testing/invariants.ts";
@@ -23,7 +24,7 @@ import {
   semanticBlobStore,
 } from "../../packages/core/src/testing/semantic-blob-store.ts";
 import { allEvents, type FakeDevice, fakeDevices } from "./fake-devices.ts";
-import { type Device, type Devices, envelope, expectCode } from "./two-devices.ts";
+import { type Device, type Devices, envelope, expectCode, type Ran } from "./two-devices.ts";
 
 export interface Schedule {
   id: string;
@@ -50,10 +51,14 @@ const projectId = async (world: Devices): Promise<string> => {
   return event.project;
 };
 
-/** Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. */
+/**
+ * Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. `strict` names
+ * the onloads run under onload.leases = "strict", for invariant 5.
+ */
 export const expectInvariants = async (
   world: Devices,
   before: { events: Awaited<ReturnType<Devices["events"]>>; snapshots: readonly string[] },
+  strict: CatalogInvariantSubject["strictOnloads"] = [],
 ): Promise<void> => {
   const id = await projectId(world);
   for (const d of world.devices) {
@@ -72,6 +77,7 @@ export const expectInvariants = async (
       snapshotsBefore: before.snapshots,
       snapshotsNow: await world.snapshots(),
       recorded: world.recorded(),
+      strictOnloads: strict,
     }),
   ).toEqual([]);
 };
@@ -84,6 +90,127 @@ const bothOnloaded = async (world: Devices, a: Device, b: Device): Promise<void>
   expectCode(await b.run(ONLOAD()), 0, `${b.name}: onload`);
   // The default leases ("warn") let the second working copy happen, with lease.held.
   expectCode(await a.run(ONLOAD()), 0, `${a.name}: onload`);
+};
+
+/** Turns a device's leases to "strict" from its next command on (its config.toml gains an [onload] table). */
+export const strictLeases = (d: Device): void =>
+  appendFileSync(d.paths.configFile, '\n[onload]\nleases = "strict"\n');
+
+/** The codes of the findings a --json run streamed before its envelope. */
+export const streamedCodes = (ran: Ran): string[] =>
+  ran.out
+    .trim()
+    .split("\n")
+    .slice(0, -1)
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line) as { type?: string; finding?: { code?: string } };
+        return event.type === "finding" && event.finding?.code !== undefined ? [event.finding.code] : [];
+      } catch {
+        return [];
+      }
+    });
+
+/**
+ * S4: two strict onloads stand at onload.lease-checked together, each having observed no holder at its fresh read, and
+ * both onload (Q17: a lease is advisory). The fold names one holder. The other's strict offload then refuses (lease.held,
+ * exit 8) with nothing uploaded; once its owner turns leases to "warn" it offloads first, and the holder's offload,
+ * verified and standing at its commit meanwhile, forks: both snapshots are kept and nothing is lost.
+ */
+const strictOnloads = async (world: Devices): Promise<void> => {
+  const a = world.device("dev-a");
+  const b = world.device("dev-b");
+  world.project(a);
+  expectCode(await a.run(OFFLOAD()), 0, `${a.name}: the first offload`);
+  await a.settled();
+  strictLeases(a);
+  strictLeases(b);
+  const before = { events: await world.events(), snapshots: await world.snapshots() };
+
+  // Both read the catalog fresh and pass the lease check before either appends its onloaded event.
+  const onloadA = a.start(ONLOAD(), { pauseAt: "onload.lease-checked" });
+  await onloadA.paused();
+  const onloadB = b.start(ONLOAD(), { pauseAt: "onload.lease-checked" });
+  await onloadB.paused();
+  onloadA.resume();
+  onloadB.resume();
+  const [byA, byB] = await Promise.all([onloadA.done, onloadB.done]);
+  // Each device, by its own report: it observed no holder, and onloaded.
+  for (const [d, ran] of [
+    [a, byA],
+    [b, byB],
+  ] as const) {
+    expectCode(ran, 0, `${d.name}: strict onload`);
+    expect({ device: d.name, findings: streamedCodes(ran).filter((c) => c === "lease.held") }).toEqual({
+      device: d.name,
+      findings: [],
+    });
+    expect(await Bun.file(`${d.dir()}/src/main.ts`).exists()).toBe(true);
+  }
+  const ops = [
+    { device: a.id, op: envelope(byA)?.data?.op as string, before: before.events.map((e) => e.id) },
+    { device: b.id, op: envelope(byB)?.data?.op as string, before: before.events.map((e) => e.id) },
+  ];
+
+  // The fold names one holder; each device's status says whose it is.
+  const id = await projectId(world);
+  const lease = foldCatalog(await world.events()).projects[id]?.lease;
+  const holder = lease?.device === a.id ? a : b;
+  const other = holder === a ? b : a;
+  expect([a.id, b.id]).toContain(lease?.device as string);
+  const statusOf = async (d: Device) => {
+    const ran = await d.run(["status", "work:web", "--json"]);
+    expectCode(ran, 0, `${d.name}: status`);
+    return envelope(ran)?.data as { lease?: { device: string; here: boolean }; conditions: string[] };
+  };
+  const seenByHolder = await statusOf(holder);
+  expect([seenByHolder.lease?.here, seenByHolder.conditions.includes("leased-elsewhere")]).toEqual([
+    true,
+    false,
+  ]);
+  const seenByOther = await statusOf(other);
+  expect([seenByOther.lease?.device, seenByOther.lease?.here]).toEqual([holder.id, false]);
+  expect(seenByOther.conditions).toContain("leased-elsewhere");
+  const human = await other.run(["status", "work:web"]);
+  expect(human.out).toContain(`device ${holder.id.slice(0, 10)} since`);
+
+  await Bun.write(`${holder.dir()}/src/held.ts`, "export const held = 1;\n");
+  await Bun.write(`${other.dir()}/src/other.ts`, "export const other = 1;\n");
+  // The non-holding copy's strict offload refuses: nothing uploaded, its folder as it was.
+  const backups = () =>
+    world.recorded().filter((c) => c.tool === "restic" && c.args.includes("backup")).length;
+  const uploaded = backups();
+  const refused = await other.run(OFFLOAD());
+  expectCode(refused, 8, `${other.name}: strict offload of the non-holding copy`);
+  expect(envelope(refused)?.error?.finding?.code).toBe("lease.held");
+  expect(backups()).toBe(uploaded);
+  expect(await Bun.file(`${other.dir()}/src/other.ts`).text()).toBe("export const other = 1;\n");
+
+  // The holder uploads and verifies, and stands at its commit while the other, now under "warn", offloads first.
+  const offloadHolder = holder.start(OFFLOAD(), { pauseAt: "offload.verified" });
+  await offloadHolder.paused();
+  writeFileSync(
+    other.paths.configFile,
+    readFileSync(other.paths.configFile, "utf8").replace('leases = "strict"', 'leases = "warn"'),
+  );
+  const first = await other.run(OFFLOAD());
+  expectCode(first, 0, `${other.name}: offload under warn`);
+  expect(streamedCodes(first)).toContain("lease.held");
+  const committed = envelope(first)?.data;
+  offloadHolder.resume();
+  const second = await offloadHolder.done;
+  expectCode(second, 8, `${holder.name}: offload after the other's commit`);
+  expect(envelope(second)?.error?.finding?.code).toBe("catalog.head-moved");
+  const forked = envelope(second)?.data;
+  expect([forked?.kind, forked?.project]).toEqual(["fork", "work:web"]);
+  // The holder keeps its folder with its edit; the store keeps both snapshots, the project conflicted between them.
+  expect(await Bun.file(`${holder.dir()}/src/held.ts`).text()).toBe("export const held = 1;\n");
+  const project = foldCatalog(await world.events()).projects[id];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual(
+    [committed?.snapshot as string, forked?.snapshot as string].sort(),
+  );
+  await expectInvariants(world, before, ops);
 };
 
 /**
@@ -321,13 +448,13 @@ export const SCHEDULES: readonly Schedule[] = [
   {
     id: "S4",
     title: "strict onloads: two simultaneous strict onloads (Q17)",
-    owner: 22,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a": "may onload: it observed no holder at its fresh read",
       "dev-b":
         "may onload too when it observed none; the fold names one holder, and the race ends at offload in a fork, never a lost update",
     },
+    run: strictOnloads,
   },
   {
     id: "S5",
