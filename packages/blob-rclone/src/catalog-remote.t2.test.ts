@@ -13,7 +13,7 @@ import { loadCatalog } from "../../core/src/catalog/log.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { memoryBlobStore } from "../../core/src/testing/memory-blob-store.ts";
 import { ulid } from "../../core/src/ulid.ts";
-import { type Backend, purgeRoot, seedFrom, t2World } from "./testing/t2.ts";
+import { type Backend, seedFrom, t2World } from "./testing/t2.ts";
 
 const EVENTS = 1_000;
 const idAt = (ms: number) => ulid(ms, (b) => b.fill(0));
@@ -65,7 +65,7 @@ for (const backend of ["s3", "sftp"] as const satisfies readonly Backend[]) {
           const e = event(n);
           writeFileSync(join(local, "events", `${e.id}.json`), encodePlain(e));
         }
-        seedFrom(world, remote, world.sandbox.dir("seed/meta"), "meta");
+        await seedFrom(world, remote, world.sandbox.dir("seed/meta"), "meta");
 
         const mirror = memoryBlobStore({ createIfAbsent: true });
         runs.length = 0;
@@ -88,8 +88,8 @@ for (const backend of ["s3", "sftp"] as const satisfies readonly Backend[]) {
           `catalog remote on ${backend}: first sync of ${EVENTS} events ${Math.round(firstMs)} ms (3 rclone runs), sync with nothing new ${Math.round(secondMs)} ms (2 rclone runs)`,
         );
       } finally {
-        purgeRoot(world, remote);
-        world.cleanup();
+        // The root and everything seeded under it go in one rclone run, then the sandbox.
+        await world.dispose();
       }
     }, 600_000);
   });
