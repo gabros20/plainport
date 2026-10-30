@@ -426,14 +426,81 @@ describe("invariantViolations: per device", () => {
     // A and B both worked on the base; A committed first, B's offload forked it.
     const mine = ulid();
     await w.append(w.event(a, mine, { base }));
-    await w.append(w.event(b, ulid(), { base }));
+    const theirs = ulid();
+    await w.append(w.event(b, theirs, { base }));
     rmSync(w.dir, { recursive: true });
     w.stub(mine);
-    expect(await invariantViolations(w.subject(a))).toEqual([]);
+    // B's fork came after A's release read the catalog: Q16's residual.
+    expect(await invariantViolations(w.subject(a, { unseen: [theirs] }))).toEqual([]);
     // B's view of its own (other) folder: its last operation was its fork, its folder is still there.
     mkdirSync(w.dir);
     rmSync(`${w.dir}.plainport`);
     expect(await invariantViolations(w.subject(b))).toEqual([]);
+  });
+
+  test("invariant 1's grace clause: a deleted copy whose fork its release could have seen is caught (Q16)", async () => {
+    const w = await world();
+    const base = ulid();
+    await w.append(w.event(a, base));
+    const mine = ulid();
+    await w.append(w.event(a, mine, { base }));
+    const theirs = ulid();
+    await w.append(w.event(b, theirs, { base }));
+    rmSync(w.dir, { recursive: true });
+    w.stub(mine);
+    expect(await invariantViolations(w.subject(a))).toEqual([
+      `invariant 1: ${w.dir} was deleted, but ${theirs} forked or rejected its snapshot ${mine} before its release read the catalog (Q16)`,
+    ]);
+    // Still in its trash (held, or kept for keepLocalFor), the copy is not deleted: nothing to judge yet.
+    mkdirSync(join(w.root, ".plainport-trash", mine), { recursive: true });
+    expect((await invariantViolations(w.subject(a))).filter((p) => p.startsWith("invariant 1"))).toEqual([]);
+  });
+
+  test("invariant 1's grace clause: a resolution rejecting a deleted copy's snapshot counts as its fork (Q16)", async () => {
+    const w = await world();
+    const base = ulid();
+    await w.append(w.event(a, base));
+    const mine = ulid();
+    await w.append(w.event(a, mine, { base }));
+    const theirs = ulid();
+    await w.append(w.event(b, theirs, { base }));
+    const resolved = ulid();
+    await w.append({
+      v: 1,
+      id: resolved,
+      op: resolved,
+      type: "resolved",
+      device: b,
+      at: new Date().toISOString(),
+      project: w.projectId,
+      root: w.rootId,
+      path: "web",
+      keep: theirs,
+      over: [mine],
+      supersedes: [],
+    });
+    rmSync(w.dir, { recursive: true });
+    w.stub(mine);
+    expect(await invariantViolations(w.subject(a, { unseen: [theirs] }))).toEqual([
+      `invariant 1: ${w.dir} was deleted, but ${resolved} forked or rejected its snapshot ${mine} before its release read the catalog (Q16)`,
+    ]);
+    expect(await invariantViolations(w.subject(a, { unseen: [theirs, resolved] }))).toEqual([]);
+  });
+
+  test("invariant 1's grace clause: a copy deleted within the store's conflict grace of its commit is caught (Q16)", async () => {
+    const w = await world();
+    const mine = ulid();
+    await w.append(w.event(a, mine));
+    rmSync(w.dir, { recursive: true });
+    w.stub(mine);
+    const store = { ...w.subject(a).store, conflictGraceMs: 15 * 60_000 };
+    const committed = Date.parse(at);
+    expect(await invariantViolations(w.subject(a, { store, now: new Date(committed + 60_000) }))).toEqual([
+      `invariant 1: ${w.dir} was deleted within the conflict grace of its commit at ${at} (Q16)`,
+    ]);
+    expect(
+      await invariantViolations(w.subject(a, { store, now: new Date(committed + 16 * 60_000) })),
+    ).toEqual([]);
   });
 
   test("invariant 2: a stub missing after this device's own offload shelved the project is caught", async () => {
