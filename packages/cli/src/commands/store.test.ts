@@ -131,6 +131,11 @@ describe("store upgrade: a ULID-shaped alias (D104, Q11)", () => {
       // Format 1: the alias keys it, for v0.1.1.
       expect(Object.keys(offloaded()[0].stored)).toEqual([ALIAS]);
 
+      // The offload's detached delete holds a lock until the trash is gone; the upgrade waits for it (Q2's check 1).
+      const trash = join(a.home, "work/.plainport-trash");
+      for (let i = 0; i < 800 && existsSync(trash) && readdirSync(trash).length > 0; i++) await Bun.sleep(25);
+      for (let i = 0; i < 800 && readdirSync(a.paths.journalDir).some((n) => n.endsWith(".json")); i++)
+        await Bun.sleep(25);
       expect(await json(["store", "upgrade", ALIAS, "--others-stopped", "--yes"])).toMatchObject({
         upgraded: true,
       });
