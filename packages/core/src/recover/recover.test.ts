@@ -21,7 +21,7 @@ import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { type CatalogPolicy, encode } from "../catalog/codec.ts";
 import { catalogReader } from "../catalog/head.ts";
-import { parseStoreIdentity } from "../catalog/identity.ts";
+import { encodeStoreIdentityV2, parseStoreIdentity, STORE_IDENTITY_KEY } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
@@ -3450,5 +3450,78 @@ describe("ls merges catalogs by project id (Task 21)", () => {
     const webs = views.projects.filter((p) => p.address === "work:web");
     expect(webs.map((w) => w.conditions)).toEqual([[]]);
     expect(views.stores.map((st) => st.name).sort()).toEqual(["disk", "ssd"]);
+  });
+});
+
+describe("recover: the writer rule on a format-2 store (D104, Q11)", () => {
+  /** The store, as v0.2 sets it up or upgrades it: format 2 under the same id (repo/ stays, as an upgrade leaves it). */
+  let storeId: string;
+  beforeEach(async () => {
+    storeId = value(await readRegistry(testHost(), box.paths)).stores?.ssd as string;
+    store.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id: storeId, repo: "repo", seal: "none" }));
+  });
+
+  test("[stored] an offload keys its event's one stored entry by the store's id, never by the alias", async () => {
+    value(await offloadNow());
+    const [event] = (await storeEvents()).filter((e) => e.type === "offloaded");
+    expect(event?.type === "offloaded" && Object.keys(event.stored)).toEqual([storeId]);
+    await waitJournalsGone();
+    await expectInvariants();
+  });
+
+  test("[stored] the snapshot-discarded event recover writes is keyed by the store's id", async () => {
+    engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/main.ts"), 0o000);
+    await crashOffloadAt("offload.snapshot.discarded");
+    chmodSync(join(dir, "src/main.ts"), 0o644);
+    const journal = onlyJournal<OffloadJournal>();
+    expect(reportOf(await recover(recoverDeps())).operations[0]?.outcome).toBe("rolled-back");
+    const discarded = (await storeEvents()).filter((e) => e.type === "snapshot-discarded");
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0]).toMatchObject({
+      snapshot: journal.op,
+      stored: { [storeId]: journal.discarded?.snapshot },
+    });
+    expect(Object.keys(discarded[0]?.type === "snapshot-discarded" ? discarded[0].stored : {})).toEqual([
+      storeId,
+    ]);
+    await expectLocalUntouched();
+    await expectInvariants();
+  });
+
+  test("[stored] recover's fork event is keyed by the store's id", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try fails" })),
+    };
+    expect((await offloadNow()).ok).toBe(false);
+    const id = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    engine.hooks.duringSnapshot = async () => {
+      engine.hooks.duringSnapshot = undefined;
+      const other = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: other,
+          op: other,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: other,
+          stored: { [storeId]: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    await crashOffloadAt("offload.diverged");
+    const journal = onlyJournal<OffloadJournal>();
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    const fork = (await storeEvents()).find((e) => e.id === journal.event);
+    expect(fork?.type === "offloaded" && fork.stored).toEqual({ [storeId]: journal.verified as string });
+    await expectLocalUntouched();
+    await expectInvariants();
   });
 });

@@ -19,12 +19,7 @@
 
 import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import {
-  ensureStoreIdentity,
-  identityChanged,
-  readStoreDescriptor,
-  readStoreIdentity,
-} from "./catalog/identity.ts";
+import { ensureStoreIdentity, identityChanged, readStoreDescriptor } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
 import { type ProbeOptions, probeDeadline, type Scheduler, withinDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
@@ -606,17 +601,23 @@ export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise
   if (here === undefined) return changed(null);
   const reached = await openWithSecret(io, options);
   if (!reached.ok) return reached;
-  const identity = await readStoreIdentity(reached.value.blob);
+  // Either format: a format-2 store (bootstrap's, Task 19's init) is checked by its id as an M1 one is.
+  const identity = await readStoreDescriptor(reached.value.blob);
   if (!identity.ok) return identity;
-  return identity.value === pinned ? ok(pinned) : changed(identity.value);
+  return identity.value?.id === pinned ? ok(pinned) : changed(identity.value?.id ?? null);
 };
 
-/** Sets a store up (see above): store.unreachable when the folder that should hold it is missing. */
-export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promise<Result<StoreSetup>> => {
+/**
+ * A local store's folder made ready for setup: never in plainport's own holders (D87), never inside or holding a
+ * registered project's folder (D83), its parent there (a mounted disk), and the folder itself made when only it is
+ * missing. Every probe of the path before anything is written has the deadline (D32). store.unreachable when the
+ * folder that should hold it is missing.
+ */
+export const prepareLocalStore = async (
+  io: LocalIo,
+  options: Omit<SetUpOptions, "store" | "opener"> & { store: Extract<Store, { kind: "local" }> },
+): Promise<Result<{ root: string; made: boolean }>> => {
   const { name, store, paths } = options;
-  if (store.kind !== "local") return unsupported(name, store);
-  const pin = await checkStorePin(io, options);
-  if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
   const probe = options.probe ?? {};
   // Never in plainport's own holders, whose folders gc deletes (D87). Every probe of the store's path before anything
@@ -656,6 +657,18 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
       return unreachableAt(name, root, `${root} could not be made (${systemErrorCode(error)})`);
     }
   }
+  return ok({ root, made: folder.value === undefined });
+};
+
+/** Sets a store up (see above): store.unreachable when the folder that should hold it is missing. */
+export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promise<Result<StoreSetup>> => {
+  const { name, store, paths } = options;
+  if (store.kind !== "local") return unsupported(name, store);
+  const pin = await checkStorePin(io, options);
+  if (!pin.ok) return pin;
+  const prepared = await prepareLocalStore(io, { ...options, store });
+  if (!prepared.ok) return prepared;
+  const { root } = prepared.value;
 
   const open = await openWithSecret(io, options);
   if (!open.ok) return open;

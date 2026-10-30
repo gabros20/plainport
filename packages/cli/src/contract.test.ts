@@ -282,7 +282,7 @@ const FAILURES: Record<string, FailureCase[]> = {
       setup: async (home) => {
         await crashOffloadAt(home, "offload.committed");
         const paths = pathsOf(home);
-        for (const name of readdirSync(paths.journalDir)) {
+        for (const name of readdirSync(paths.journalDir).filter((n) => n.endsWith(".json"))) {
           const journal = JSON.parse(readFileSync(join(paths.journalDir, name), "utf8"));
           const held = await acquireLock(testHost(), join(paths.locksDir, `${journal.project.id}.lock`), {
             timeoutMs: 0,
@@ -348,6 +348,38 @@ const FAILURES: Record<string, FailureCase[]> = {
     { argv: ["root", "list", "--dry-run"], exit: 2, code: "usage.dry-run-unsupported", data: false },
   ],
   "root scan": [{ argv: ["root", "scan", "nosuch"], exit: 4, code: "root.not-found", data: false }],
+  "store add": [
+    { argv: ["store", "add", "nas", "--kind", "sftp"], exit: 2, code: "usage.invalid", data: false },
+    {
+      // D85: a name already set up here never moves to another store.
+      argv: ["store", "add", "local", "--path", "~/elsewhere"],
+      exit: 2,
+      code: "usage.invalid",
+      data: false,
+    },
+  ],
+  "store list": [{ argv: ["store", "list", "extra"], exit: 2, code: "usage.invalid", data: false }],
+  "store test": [{ argv: ["store", "test", "nosuch"], exit: 6, code: "store.not-set-up", data: false }],
+  "store upgrade": [
+    { argv: ["store", "upgrade", "local"], exit: 3, code: "risk.needs-yes", data: false },
+    {
+      // An M1 store (format 1) without --others-stopped.
+      argv: ["store", "upgrade", "local", "--yes"],
+      exit: 6,
+      code: "store.not-quiescent",
+      data: false,
+      setup: async (home) => {
+        const file = join(home.home, "store/meta/v1/store.json");
+        const { id } = JSON.parse(readFileSync(file, "utf8"));
+        writeFileSync(file, `${JSON.stringify({ v: 1, id })}\n`);
+        return undefined;
+      },
+    },
+  ],
+  "store remove": [
+    { argv: ["store", "remove", "spare"], exit: 3, code: "risk.needs-yes", data: false },
+    { argv: ["store", "remove", "local", "--yes"], exit: 6, code: "store.in-use", data: false },
+  ],
   version: [{ argv: ["version", "extra"], exit: 2, code: "usage.invalid", data: false }],
 };
 
@@ -525,7 +557,9 @@ describe("version and help", () => {
     for (const heading of ["Projects:", "Recovery and cleanup:", "Roots:", "Setup and info:"])
       expect(help.out).toContain(`\n${heading}\n`);
     // Every command is listed once, under one group.
-    for (const c of REGISTRY) expect(help.out.split(`\n  ${c.name.padEnd(9)}  ${c.risk}`)).toHaveLength(2);
+    const width = Math.max(...REGISTRY.map((c) => c.name.length));
+    for (const c of REGISTRY)
+      expect(help.out.split(`\n  ${c.name.padEnd(width)}  ${c.risk}`)).toHaveLength(2);
     expect(help.out).toContain("plainport help <command>");
     expect(help.out).toContain("plainport help --json");
     expect(help.out).toContain("plainport.json");
@@ -906,6 +940,7 @@ describe("completions", () => {
           "recover",
           "gc",
           "root",
+          "store",
           "version",
         ]);
         expect(complete(REGISTRY, "plainport gc --no")).toEqual(["--now", "--no-input"]);

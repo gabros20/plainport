@@ -65,6 +65,7 @@ import type { PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine } from "../ports/engine.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
+import { refuseWhileUpgrading } from "../stores/upgrade.ts";
 import { ulid } from "../ulid.ts";
 import { withFix, writeFailed } from "./journaled.ts";
 
@@ -320,7 +321,12 @@ export const runBootstrap = (
     const pinned = registry.value.stores?.[target.name];
     const found = await readStoreDescriptor(store.blob);
     if (!found.ok) return found;
-    if (found.value !== null) return adopt(ports, store, target.name, found.value, pinned);
+    if (found.value !== null) {
+      // An upgrade under way (its marker stands) is waited out, never adopted through (Q2).
+      const quiet = await refuseWhileUpgrading(store.blob, target.name, "setting the store up");
+      if (!quiet.ok) return quiet;
+      return adopt(ports, store, target.name, found.value, pinned);
+    }
     if (pinned !== undefined) return pinRefusal(target.name, pinned, null);
 
     const at = ports.clock();

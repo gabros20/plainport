@@ -3,12 +3,19 @@
 // real home folder or a real store; and a runner that captures stdout, stderr and the exit code.
 // Used only by *.test.ts files.
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, join as joinPath } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
 import { ok } from "@plainport/contract";
-import { nodeLocalIo, type StoreOpener, storeRoot } from "@plainport/core";
+import {
+  nodeLocalIo,
+  parseStoreIdentity,
+  readStoreDescriptor,
+  STORE_IDENTITY_KEY,
+  type StoreOpener,
+  storeRoot,
+} from "@plainport/core";
 import { nodePlugin } from "@plainport/eco-node";
 import { z } from "zod";
 import { quietChecks } from "../../core/src/testing/checks.ts";
@@ -55,9 +62,9 @@ const fakeRepositories = new Map<string, FakeRepository>();
 /** Hooks for the fake engine of the store at a folder, for tests that edit files mid-upload or damage a listing. */
 export const fakeEngineHooks = new Map<string, FakeEngineHooks>();
 
-/** The fake repository of the store at this folder (its repo/ inside), made on first use. */
-export const fakeRepositoryAt = (storeFolder: string): FakeRepository => {
-  const key = joinPath(storeFolder, "repo");
+/** The fake repository at `repo` under the store at this folder (repo/ for an M1 store), made on first use. */
+export const fakeRepositoryIn = (storeFolder: string, repo: string): FakeRepository => {
+  const key = joinPath(storeFolder, repo);
   let repository = fakeRepositories.get(key);
   if (repository === undefined) {
     repository = fakeRepository();
@@ -66,15 +73,35 @@ export const fakeRepositoryAt = (storeFolder: string): FakeRepository => {
   return repository;
 };
 
-/** Local stores as the binary opens them, but with the fake engine (T0): events on disk through blob-fs. */
+/**
+ * The fake repository the store at this folder publishes (its store.json's `repo`: repos/<id> for a format-2 store, repo/
+ * for an M1 store or one not set up yet), made on first use.
+ */
+export const fakeRepositoryAt = (storeFolder: string): FakeRepository => {
+  let repo = "repo";
+  try {
+    repo = parseStoreIdentity(readFileSync(joinPath(storeFolder, STORE_IDENTITY_KEY)))?.repo ?? repo;
+  } catch {
+    // No store.json yet: M1's place.
+  }
+  return fakeRepositoryIn(storeFolder, repo);
+};
+
+/**
+ * Local stores as the binary opens them, but with the fake engine (T0): events on disk through blob-fs, the engine
+ * bound to the repository the store's store.json publishes (repo/ for an M1 store), and bootstrap's engines at any
+ * location under the store's folder.
+ */
 export const fakeStores = (home: string): StoreOpener => ({
   open: async (name, store) => {
     if (store.kind !== "local") throw new Error(`fake stores: ${name} is not local`);
     const root = storeRoot(store, home);
-    return ok({
-      blob: fsBlobStore(nodeLocalIo, root),
-      engine: fakeEngine(fakeRepositoryAt(root), fakeEngineHooks.get(root) ?? {}),
-    });
+    const blob = fsBlobStore(nodeLocalIo, root);
+    const found = await readStoreDescriptor(blob);
+    const repo = found.ok && found.value !== null ? found.value.repo : "repo";
+    const engineAt = (at: string) => fakeEngine(fakeRepositoryIn(root, at), fakeEngineHooks.get(root) ?? {});
+    // location and engineAt: what bootstrap needs (Task 18's OpenedStore), given whatever the port declares.
+    return ok({ blob, engine: engineAt(repo), ...{ location: root, engineAt } });
   },
 });
 
@@ -94,6 +121,7 @@ export const fakePorts = (): Ports => ({
   checks: quietChecks,
   plugins: [nodePlugin],
   stores: fakeStores(FAKE_HOME),
+  sleep: async () => {},
 });
 
 /** Ports whose HOME (and cwd) is a test's sandbox, so commands read and write only inside it. */
@@ -310,6 +338,11 @@ const setUpExampleHome = async (
   const shelved = await capture(["offload", "work:clients/acme/api", "--yes"], REGISTRY, { ports });
   if (shelved.code !== 0) {
     throw new Error(`example home setup failed: ${shelved.err}`);
+  }
+  // A second store no root uses, for store remove's example.
+  const spare = await capture(["store", "add", "spare", "--path", "~/spare"], REGISTRY, { ports });
+  if (spare.code !== 0) {
+    throw new Error(`example home setup failed: ${spare.err}`);
   }
   return { home, ports, cleanup: (settleMs) => removeSettled(home, settleMs) };
 };

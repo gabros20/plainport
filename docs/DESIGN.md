@@ -423,9 +423,11 @@ again only after the quiesced cleanup) or `store.root-undecided` (exit 6, re-run
 **Wiring.** The saga runs on the injected ports: the store's blob store, an engine at a location under the store's root
 (`engineAt`), the host's crash seam and a scheduler. Task 18 wires it to the real engine and blob stores, wires
 `recoverBootstraps` into `plainport recover`, and runs the bootstrap crash rows again under a real kill (the subprocess
-variant); Task 19's `store add` and `init` start it. Until then M1's setup path writes format 1 only, and every M1 path
-that reads `store.json` (setup, the catalog, recover) refuses a format-2 store with `store.unsupported` before writing
-anything, since it would bind restic at `repo/` rather than the published `repo`. The crash matrix runs every bootstrap
+variant). `plainport store add` and `plainport init` start it (Task 19, `packages/core/src/stores/add.ts`): a store with
+no `store.json` is set up through it, so every store v0.2 creates is format 2; an M1 store (format 1) is finished by M1's
+setup and stays format 1 until `store upgrade` (Q2); a format-2 store is adopted. Both check the name's pin (D85) and
+make a local store's folder ready (D83, D87) before anything is written, and refuse while the store's
+`upgrade-intent` marker stands (`store.not-quiescent`). The crash matrix runs every bootstrap
 row (`BOOTSTRAP_ROWS`, from the exported steps, seams and branches) in-process, on a store with a proven conditional
 create and on one that elects by the sole-candidate rule, plus the rows that settle to `lost` (another attempt publishes
 while this one's election is open).
@@ -1027,12 +1029,12 @@ The CLI is a thin renderer over the core: it parses arguments, calls one core me
 
 | Command | Risk | Does |
 | --- | --- | --- |
-| `plainport init` | confirm | Pick and name roots from a scan of likely folders, initialise or connect a store, save secrets in Keychain, print the recovery key. |
+| `plainport init` | confirm | Pick and name roots from a scan of likely folders (each with its size, dependency folders left out, two seconds at most per folder, shown as "≥" when cut off, D70), initialise or connect a store (a new one through bootstrap, so format 2), save secrets in Keychain, print the recovery key. Re-pointing a name pinned on this device at a path that cannot be reached is refused and writes nothing (Q15); pointing it at an unplugged disk stays possible through config.toml, checked at use (D68). |
 | `plainport setup agents` | confirm | Symlink plainport's operating skill into each agent's skills folder; a hand-made folder with the same name is reported, never replaced. |
 | `plainport root add \| bind \| unbind \| rename \| scan \| list` | read, safe_write | Manage roots and each device's path for them; `list` only reads, and `scan` registers the projects it finds in this device's `registry.json`. `bind --device mini` runs on the mini over SSH. |
 | `plainport mv <project> <root>:<path>` | safe_write | Re-file a project under another root or relative path; for a shelved project it only updates the catalog. |
 | `plainport device add \| list \| role \| revoke` | read, confirm | Pair a machine over SSH and bind its roots, change its role, or revoke its keys everywhere; `list` only reads. |
-| `plainport store add \| list \| test \| remove` | read, safe_write, confirm | Manage stores. `test` checks reachability, credentials, write access and conditional-write support; `remove` needs `--yes`. |
+| `plainport store add \| list \| test \| upgrade \| remove` | read, safe_write, confirm | Manage stores (Q13). `add` (safe_write) sets a store up through bootstrap, or adopts one already set up, records it in managed.toml under its lock and sends only setup files; `--secret-stdin` saves the password to the Keychain. `list` (read) shows each store, its pin and its last test; `--probe` also asks each whether it answers. `test` (safe_write) writes, reads, lists and deletes one probe key under `meta/v1/store-test/`, records what it measured in this device's `stores/<id>.json` under the facts it measured with, reports `delete: denied \| allowed \| unreachable` (denied is never called append-only, which needs proof across the whole repository, M3), and lists losing bootstrap repositories and contested candidacies with the manual, quiesce-first cleanup. `upgrade` (confirm) moves a format-1 store to format 2 under Q2's quiescence checks (`store.not-quiescent`, `--others-stopped`, a quiet window of 15 minutes by default, `--quiet-window`), with an `upgrade-intent` marker and a `journal/upgrade/<op>.json` that `recover` settles. `remove` (confirm) forgets a store on this device only, its managed.toml table and its pin, and refuses `store.in-use` while a root, an open journal or a setup attempt uses it. |
 | `plainport store replicate <from> <to>` | confirm | Copy snapshots and events to another store, e.g. from the mini to B2. `--schedule` installs the timer once; the timer then runs `restic copy` with an append-only key. |
 | `plainport ls` | read | Projects with root, status, device, size (the head snapshot's, or a never-offloaded folder's own) and last activity. `--root`, `--local`, `--shelved`, `--parked` (M3), `--sort size\|age`. |
 | `plainport status [project]` | read | One project in detail: state, head, lease, git warnings, strippable bytes. |
@@ -1124,8 +1126,11 @@ export interface Plainport {
     resolve(input: string, cwd?: string): Promise<ProjectRef>; // address | suffix | path | "." | stub
   };
   stores: {
-    list(): Promise<StoreView[]>;
-    test(name: string): Promise<StoreHealth>;
+    list(opts?: { probe?: boolean }): Promise<StoreListing[]>;      // read; core listStores
+    test(name: string): Promise<StoreTestReport>;                    // safe_write; core testStore, recorded in stores/<id>.json
+    add(name: string, store: Store): Promise<StoreAdded>;            // safe_write; bootstrap or adopt (addStore)
+    upgrade(name: string, opts: { othersStopped: boolean }): Promise<UpgradeDone>; // confirm (upgradeStore, Q2)
+    remove(name: string): Promise<StoreRemoved>;                     // confirm; local only (removeStore)
   };
   roots: {
     list(): Promise<RootView[]>;                      // each with every device's binding
@@ -1450,11 +1455,11 @@ Every file plainport persists, and every closed value it prints, has a row below
 | `event.resolved` | `resolved` event (Q3), written only to format-2 stores | skipping it, as for any unknown type | v0.1.1 cannot reach a format-2 store, so it never meets one | no, it refuses the store first | `resolve` on a format-1 store refuses with `store upgrade` as the fix | todo: Task 25 |
 | `event.sealed` | sealed event envelope (Q10), format-2 stores that opt in | skipping it as not JSON of a known type, but v0.1.1 refuses the store first | a sealed store cannot be rolled back to v0.1.1 | no | an existing plaintext store is never sealed in place | todo: Task 10 |
 | `store.json.v1` | `meta/v1/store.json` `{v: 1, id}` | parsing it (`StoreIdentity`, strict) | everything works | yes, `init` creates it | stays format 1 and v0.2 writes nothing that v0.1.1 cannot read, until `store upgrade` | tested |
-| `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repo, catalog: {seal}, format: 2}` (Q2), published once by bootstrap's election (Task 8); `schemas/store-identity.json` now accepts either format | refusing it: `store.failed`, the file left as it is, nothing written before the refusal (tested with the real shape bootstrap writes, and v0.2's own format-1 paths refuse it with `store.unsupported`) | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way | no | made by `store upgrade` or by v0.2 for a new store | todo: Task 9 (a store v0.2's `init` creates; bootstrap's shape is tested) |
+| `store.json.v2` | `meta/v1/store.json` `{v: 2, id, repo, catalog: {seal}, format: 2}` (Q2), published once by bootstrap's election (Task 8); `schemas/store-identity.json` now accepts either format | refusing it: `store.failed`, the file left as it is, nothing written before the refusal (tested with the real shape bootstrap writes and with a store v0.2's `init` creates; v0.2 round-trips on it) | a format-2 store cannot be used by v0.1.1; `store upgrade` is one way: it refuses while a paused v0.1.1 holds a lock or lease (`store.not-quiescent`), and with `--others-stopped` a lease-less v0.1.1 first offload paused across it resumes and ends as M1's, its alias-keyed event read by v0.2 (Q2's residual) | no | made by `store upgrade`, or by v0.2's `init` and `store add` for a new store | tested |
 | `root.json` | `meta/v1/root.json` `{v: 1, root}` | parsing it; a second root is refused (`store.root-mismatch`) | everything works | yes, a first offload creates it exclusively | read as is | tested |
 | `root.claims` | `meta/v1/root-claims/<root>.json`, `.publishing`, `.refused`: the root claim's election candidates (Task 8, D99), written by v0.2's first offload of a root even on a format-1 store | never read: v0.1.1 reads only `root.json`, which the election publishes in format 1's shape | the files stay and are ignored; v0.1.1 reads the claim v0.2 published | no: v0.1.1 claims create-only without candidates, and v0.2 reads that claim as a published winner | a store claimed by v0.1.1 keeps its `root.json`; v0.2 writes candidates only for a store with no claim | tested |
 | `store.election` | bootstrap's `repos/<attempt ulid>/` restic repositories and its candidates under `meta/v1/store-claims/` (Q9, Task 8), with Task 6's markers `<id>.publishing` and `<id>.refused` beside each (`schemas/election-record.json`) | never read: v0.1.1 lists neither | the extra folders stay and are ignored, and nothing of v0.1.1's deletes them | no | an M1 store has one repository at `repo/` and is adopted, never re-elected | tested |
-| `store.upgrade-intent` | `meta/v1/upgrade-intent.json` marker (Q2) | never read | ignored; `recover` clears a stale one | no | written and removed by `store upgrade` | todo: Task 19 |
+| `store.upgrade-intent` | `meta/v1/upgrade-intent.json` marker (Q2) `{v: 1, op, store, device, at}`, with this device's `journal/upgrade/<op>.json` beside it | never read: v0.1.1's offload runs past it and leaves it | v0.2's offload and setup (`store add`, `init`'s adoption) refuse with `store.not-quiescent` while it stands; `recover` clears this device's marker a crashed upgrade left | no | written and removed by `store upgrade` | tested |
 | `store.sidecar` | `~/.local/state/plainport/stores/<store id>.json` (Q4), `schemas/store-state.json`, whose measured semantics profile is `schemas/store-semantics.json` (Task 6) | never read, so `registry.json` stays v1 and `scripts/install --rollback` keeps working | ignored | no | created at first contact; measured facts invalidate on endpoint, access kind or tool version change | tested (a rolled-back v0.1.1 offloads, lists and onloads with one present) |
 | `registry.json` | `registry.json` `{v: 1}`, strict | parsing it; a changed shape is `registry.invalid` | everything works | yes | v0.2 keeps it at v 1, so it is shared | tested |
 | `device.json` | `device.json` `{v: 1, id, name}` | parsing it | everything works | yes | read as is | tested |

@@ -822,6 +822,14 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       for (const key of keys) assertBlobKey(key);
       return getMany(newCall(opts), keys);
     },
+    makeRoot: async () => {
+      // S3: a prefix is no folder. SFTP and local: the root's folder, and its parents, as `store add` sets it up.
+      if (remote.type === "s3") return ok(undefined);
+      const ran = await run(newCall(), "mkdir", [remotePath("")]);
+      if (!ran.ok) return ran;
+      if (classifyExit(ran.value.exitCode, ran.value.stderr.text) === "ok") return ok(undefined);
+      return exitFailure(ran.value, "mkdir", "the store's folder could not be made");
+    },
     sweepTemporaries: (olderThanMs) => {
       if (!(olderThanMs >= minSweepAgeMs))
         throw new RangeError(

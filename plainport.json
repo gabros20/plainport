@@ -367,6 +367,19 @@
               "id": {
                 "description": "The id in its meta/v1/store.json, once it is set up",
                 "type": "string"
+              },
+              "format": {
+                "description": "Its store.json format once set up: 2 for a store this init set up, 1 for an M1 store",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "const": 1
+                  },
+                  {
+                    "type": "number",
+                    "const": 2
+                  }
+                ]
               }
             },
             "required": [
@@ -466,7 +479,7 @@
             "--root",
             "work=~/work",
             "--store-path",
-            "/Volumes/Archive/plainport",
+            "~/store",
             "--yes"
           ],
           "summary": "Set up without prompts"
@@ -3648,6 +3661,69 @@
               "additionalProperties": {}
             }
           },
+          "upgrades": {
+            "description": "Store upgrades this device left open (Q2), and what recover settled them to",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "description": "The upgrade's id"
+                },
+                "store": {
+                  "type": "string",
+                  "description": "The store's name in config"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "cleared",
+                    "kept",
+                    "pending"
+                  ],
+                  "description": "cleared: this device's upgrade-intent marker was removed (store.json stays as the upgrade left it: format 2 if it was replaced, else 1). kept: the marker is another device's (or unreadable), left as it is. pending: not settled now (finding says why)"
+                },
+                "format": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "const": 1
+                    },
+                    {
+                      "type": "number",
+                      "const": 2
+                    }
+                  ]
+                },
+                "finding": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "fix": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "op",
+                "store",
+                "outcome"
+              ],
+              "additionalProperties": {}
+            }
+          },
           "unreadable": {
             "type": "array",
             "items": {
@@ -4495,6 +4571,923 @@
       ]
     },
     {
+      "name": "store add",
+      "summary": "Set a store up, or adopt one already set up, and record it in managed.toml",
+      "usage": "plainport store add <name> [--kind <value>] [--path <value>] [--host <value>] [--endpoint <value>] [--bucket <value>] [--region <value>] [--secret <value>] [--access-key-id <value>] [--secret-access-key <value>] [--secret-stdin]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [
+        {
+          "name": "name",
+          "summary": "The store's name in config, e.g. archive",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "kind",
+          "type": "string",
+          "multiple": false,
+          "summary": "local (a folder or disk), sftp or s3; default local"
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "multiple": false,
+          "summary": "local: the folder; sftp: the folder on the host; s3: a prefix inside the bucket (optional)"
+        },
+        {
+          "name": "host",
+          "type": "string",
+          "multiple": false,
+          "summary": "sftp: the host, as ssh knows it"
+        },
+        {
+          "name": "endpoint",
+          "type": "string",
+          "multiple": false,
+          "summary": "s3: the endpoint URL"
+        },
+        {
+          "name": "bucket",
+          "type": "string",
+          "multiple": false,
+          "summary": "s3: the bucket"
+        },
+        {
+          "name": "region",
+          "type": "string",
+          "multiple": false,
+          "summary": "s3: the region, when the endpoint needs one"
+        },
+        {
+          "name": "secret",
+          "type": "string",
+          "multiple": false,
+          "summary": "Where the restic password is: keychain:<service>/<account>, op://…, env:<VARIABLE> or file:<path>; local default env:PLAINPORT_STORE_PASSWORD, with --secret-stdin keychain:plainport/<name>"
+        },
+        {
+          "name": "access-key-id",
+          "type": "string",
+          "multiple": false,
+          "summary": "s3: a reference to the access key id"
+        },
+        {
+          "name": "secret-access-key",
+          "type": "string",
+          "multiple": false,
+          "summary": "s3: a reference to the secret access key"
+        },
+        {
+          "name": "secret-stdin",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Read the restic password from standard input and save it to the Keychain under --secret"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The store's name in config, e.g. archive"
+          },
+          "kind": {
+            "description": "local (a folder or disk), sftp or s3; default local",
+            "type": "string",
+            "enum": [
+              "local",
+              "sftp",
+              "s3"
+            ]
+          },
+          "path": {
+            "description": "local: the folder; sftp: the folder on the host; s3: a prefix inside the bucket (optional)",
+            "type": "string",
+            "minLength": 1
+          },
+          "host": {
+            "description": "sftp: the host, as ssh knows it",
+            "type": "string",
+            "minLength": 1
+          },
+          "endpoint": {
+            "description": "s3: the endpoint URL",
+            "type": "string",
+            "minLength": 1
+          },
+          "bucket": {
+            "description": "s3: the bucket",
+            "type": "string",
+            "minLength": 1
+          },
+          "region": {
+            "description": "s3: the region, when the endpoint needs one",
+            "type": "string",
+            "minLength": 1
+          },
+          "secret": {
+            "description": "Where the restic password is: keychain:<service>/<account>, op://…, env:<VARIABLE> or file:<path>; local default env:PLAINPORT_STORE_PASSWORD, with --secret-stdin keychain:plainport/<name>",
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "access-key-id": {
+            "description": "s3: a reference to the access key id",
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "secret-access-key": {
+            "description": "s3: a reference to the secret access key",
+            "type": "string",
+            "pattern": "^(keychain|se|op|bw|file|env):.+$"
+          },
+          "secret-stdin": {
+            "description": "Read the restic password from standard input and save it to the Keychain under --secret",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "The store's id, from its meta/v1/store.json"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "published",
+              "adopted"
+            ],
+            "description": "published: this run set the store up (won its election); adopted: it was set up already"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 1
+              },
+              {
+                "type": "number",
+                "const": 2
+              }
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "description": "Where its restic repository lies under the store's root"
+          },
+          "location": {
+            "type": "string"
+          },
+          "configChanged": {
+            "type": "boolean",
+            "description": "This run wrote managed.toml"
+          },
+          "secretSaved": {
+            "type": "boolean",
+            "description": "This run saved the password to the Keychain"
+          }
+        },
+        "required": [
+          "name",
+          "id",
+          "outcome",
+          "format",
+          "repo",
+          "location",
+          "configChanged",
+          "secretSaved"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "store",
+            "add",
+            "archive",
+            "--path",
+            "~/Archive"
+          ],
+          "summary": "A local store (a folder, or one on an external disk), its password in PLAINPORT_STORE_PASSWORD; an SFTP store takes --kind sftp --host <host> --path <folder> --secret <ref>, and --secret-stdin saves a typed password to the Keychain"
+        }
+      ]
+    },
+    {
+      "name": "store list",
+      "summary": "Show every configured store, its id on this device and its last test; --probe asks each whether it answers",
+      "usage": "plainport store list [--probe]",
+      "risk": "read",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [],
+      "options": [
+        {
+          "name": "probe",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Also check that each store answers (reads only)"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "probe": {
+            "description": "Also check that each store answers (reads only)",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "stores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "location": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "config",
+                    "managed",
+                    "both"
+                  ]
+                },
+                "default": {
+                  "type": "boolean"
+                },
+                "id": {
+                  "description": "The id this device pinned for the name (D85)",
+                  "type": "string"
+                },
+                "roots": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "lastTest": {
+                  "type": "object",
+                  "properties": {
+                    "at": {
+                      "type": "string"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "delete": {
+                      "type": "string",
+                      "enum": [
+                        "denied",
+                        "allowed",
+                        "unreachable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "at",
+                    "ok"
+                  ],
+                  "additionalProperties": {}
+                },
+                "probe": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "reachable": {
+                          "type": "boolean",
+                          "const": true
+                        },
+                        "format": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "const": 1
+                            },
+                            {
+                              "type": "number",
+                              "const": 2
+                            }
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "pinned": {
+                          "type": "boolean",
+                          "description": "It carries the id this device pinned for the name"
+                        }
+                      },
+                      "required": [
+                        "reachable",
+                        "pinned"
+                      ],
+                      "additionalProperties": {}
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "reachable": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "finding": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "code",
+                            "message"
+                          ],
+                          "additionalProperties": {}
+                        }
+                      },
+                      "required": [
+                        "reachable",
+                        "finding"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "kind",
+                "location",
+                "source",
+                "default",
+                "roots"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "stores",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "store",
+            "list"
+          ],
+          "summary": "List stores"
+        },
+        {
+          "argv": [
+            "store",
+            "list",
+            "--probe"
+          ],
+          "summary": "List stores and check each answers"
+        }
+      ]
+    },
+    {
+      "name": "store test",
+      "summary": "Measure a store with one probe key, record the result on this device, and list setup leftovers",
+      "usage": "plainport store test <name>",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [
+        {
+          "name": "name",
+          "summary": "The store's name in config, e.g. archive",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The store's name in config, e.g. archive"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 1
+              },
+              {
+                "type": "number",
+                "const": 2
+              }
+            ]
+          },
+          "pinned": {
+            "type": "string"
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "delete": {
+            "description": "Whether the probe key could be deleted. denied is not append-only: that needs proof across the whole repository (M3)",
+            "type": "string",
+            "enum": [
+              "denied",
+              "allowed",
+              "unreachable"
+            ]
+          },
+          "semantics": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "unknown"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "value": {},
+                    "evidence": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "evidence"
+                  ],
+                  "additionalProperties": {}
+                }
+              ]
+            },
+            "description": "The profile: measured here, or as stated (Q8)"
+          },
+          "operations": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "eligible": {
+                  "type": "boolean"
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "eligible"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "repository": {
+            "type": "object",
+            "properties": {
+              "opens": {
+                "type": "boolean"
+              },
+              "code": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "opens"
+            ],
+            "additionalProperties": {}
+          },
+          "losing": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "string"
+                },
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "attempt",
+                "keys"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Repositories of setup attempts that did not win"
+          },
+          "contested": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "string"
+                },
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "attempt",
+                "keys"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Candidacies of setup attempts besides the winner"
+          },
+          "cleanup": {
+            "description": "The manual steps that remove them, quiesced first",
+            "type": "string"
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "Written to this device's record of the store"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                  "title": "FindingCode",
+                  "description": "Stable dotted code, e.g. git.unpushed"
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "block"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "fix": {
+                  "description": "The exact next step, e.g. a command to run",
+                  "type": "string",
+                  "minLength": 1
+                },
+                "allowable": {
+                  "type": "boolean",
+                  "description": "May --allow <code> override it?"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "message",
+                "allowable"
+              ],
+              "additionalProperties": {},
+              "title": "Finding"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "location",
+          "reachable",
+          "semantics",
+          "operations",
+          "losing",
+          "contested",
+          "recorded",
+          "ok",
+          "findings"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "store",
+            "test",
+            "local"
+          ],
+          "summary": "Test store local"
+        }
+      ]
+    },
+    {
+      "name": "store upgrade",
+      "summary": "Move a format-1 store to format 2 once it is quiescent (Q2)",
+      "usage": "plainport store upgrade <name> [--others-stopped] [--quiet-window <value>]",
+      "risk": "confirm",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [
+        {
+          "name": "name",
+          "summary": "The store's name in config, e.g. archive",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "others-stopped",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "You attest that no other device runs plainport (detached deletes included) while it upgrades"
+        },
+        {
+          "name": "quiet-window",
+          "type": "string",
+          "multiple": false,
+          "summary": "How long the catalog must show no other device's activity, before and during; default 15m"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The store's name in config, e.g. archive"
+          },
+          "others-stopped": {
+            "description": "You attest that no other device runs plainport (detached deletes included) while it upgrades",
+            "type": "boolean"
+          },
+          "quiet-window": {
+            "description": "How long the catalog must show no other device's activity, before and during; default 15m",
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*[smhdw])$"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "number",
+                "const": 1
+              },
+              {
+                "type": "number",
+                "const": 2
+              }
+            ]
+          },
+          "format": {
+            "type": "number",
+            "const": 2
+          },
+          "upgraded": {
+            "type": "boolean",
+            "description": "This run replaced store.json"
+          },
+          "resumed": {
+            "type": "boolean",
+            "description": "This run finished or cleared this device's earlier upgrade"
+          }
+        },
+        "required": [
+          "name",
+          "id",
+          "from",
+          "format",
+          "upgraded",
+          "resumed"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "store",
+            "upgrade",
+            "local",
+            "--others-stopped",
+            "--yes"
+          ],
+          "summary": "Upgrade store local after stopping plainport on every other device"
+        }
+      ]
+    },
+    {
+      "name": "store remove",
+      "summary": "Forget a store on this device (its managed.toml table and its pin); the store itself is not touched",
+      "usage": "plainport store remove <name>",
+      "risk": "confirm",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "setup",
+      "positionals": [
+        {
+          "name": "name",
+          "summary": "The store's name in config, e.g. archive",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The store's name in config, e.g. archive"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "description": "The id the name was pinned to here, now forgotten",
+            "type": "string"
+          },
+          "removed": {
+            "type": "boolean",
+            "description": "managed.toml no longer defines it"
+          }
+        },
+        "required": [
+          "name",
+          "removed"
+        ],
+        "additionalProperties": {}
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "store",
+            "remove",
+            "spare",
+            "--yes"
+          ],
+          "summary": "Forget store spare on this device (no root may use it)"
+        }
+      ]
+    },
+    {
       "name": "version",
       "summary": "Print plainport's version",
       "usage": "plainport version",
@@ -5220,6 +6213,13 @@
       "summary": "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced"
     },
     {
+      "code": "store.in-use",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "store remove refuses while something on this device still uses the store: a root names it (or takes it as the default store), or an open journal or setup attempt names it; the message lists them, and nothing is changed"
+    },
+    {
       "code": "store.inside-project",
       "severity": "block",
       "allowable": false,
@@ -5239,6 +6239,13 @@
       "allowable": false,
       "exitCode": 11,
       "summary": "Another plainport process on this device is setting this store up, or changing this device's record of it (stores/<store id>.json)"
+    },
+    {
+      "code": "store.not-quiescent",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)"
     },
     {
       "code": "store.not-set-up",

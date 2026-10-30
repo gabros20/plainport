@@ -254,6 +254,12 @@ export interface BlobStore {
    * falls back to one get per key.
    */
   getMany?(keys: readonly string[], opts?: CallOptions): Promise<Result<Map<string, Uint8Array>>>;
+  /**
+   * Optional: makes the store's root folder, where the store has one that reads treat as the store's presence (an SFTP
+   * folder: a missing one is store.unreachable, never an empty store). Setting a store up calls it (`store add`); a
+   * store without such a folder (S3, where a prefix is no folder) leaves it out or does nothing.
+   */
+  makeRoot?(): Promise<Result<void>>;
 }
 
 /** The keys' bytes, in one batch where the store offers one; a key that is not there is left out of the map. */

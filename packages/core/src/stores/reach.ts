@@ -1,0 +1,96 @@
+// Reaching a configured store for `store list --probe`, `store test` and `store add`: its password (and an S3 store's
+// key pair) read from their references (through the opener's providers, within Q14's deadline), then its two layers
+// opened. Nothing is reached
+// until the first call on a layer, and nothing here needs this device to have set the store up.
+
+import { type Finding, fail, finding, type Result } from "@plainport/contract";
+import { readStoreDescriptor, type StoreDescriptor } from "../catalog/identity.ts";
+import type { Store } from "../config/schema.ts";
+import { type ProbeOptions, probeDeadline } from "../deadline.ts";
+import type { LocalIo } from "../io.ts";
+import type { Env, PlainportPaths } from "../paths.ts";
+import type { Engine } from "../ports/engine.ts";
+import type { OpenedStore, StoreOpener } from "../ports/store.ts";
+import type { BootstrapStore } from "../saga/bootstrap.ts";
+import { resolveStoreSecrets, secretProvidersOf } from "../store.ts";
+
+export interface ReachOptions {
+  paths: PlainportPaths;
+  env: Env;
+  name: string;
+  store: Store;
+  opener: StoreOpener;
+  signal?: AbortSignal;
+}
+
+/** The store's two layers, with its password read. */
+export const reachStore = async (io: LocalIo, options: ReachOptions): Promise<Result<OpenedStore>> => {
+  const secrets = await resolveStoreSecrets(
+    io,
+    options.env,
+    options.paths.home,
+    options.name,
+    options.store,
+    {
+      ...secretProvidersOf(options.opener),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    },
+  );
+  if (!secrets.ok) return secrets;
+  return options.opener.open(options.name, options.store, secrets.value.password, secrets.value.credentials);
+};
+
+/**
+ * The store as bootstrap reaches it (DESIGN.md "Bootstrap"): its metadata layer, where it is, and an engine at any
+ * repository location under its root, from what the opener gave (OpenedStore's location and engineAt, Task 18).
+ * Undefined from an opener that cannot set stores up.
+ */
+export const bootstrapStoreOf = (opened: OpenedStore): BootstrapStore | undefined => {
+  const { location, engineAt } = opened as OpenedStore & {
+    location?: string;
+    engineAt?: (repo: string) => Engine;
+  };
+  return location === undefined || engineAt === undefined
+    ? undefined
+    : { blob: opened.blob, location, engineAt: (repo) => engineAt(repo) };
+};
+
+/** What a probe found: the store answered, with its identity file (or none), or it did not, with why. */
+export type Probe =
+  | { reachable: true; descriptor: StoreDescriptor | null }
+  | { reachable: false; finding: Finding };
+
+/**
+ * Reads the store's identity file under the probe deadline (D32), with nothing written: whether the store answers,
+ * and what it says it is. A store that does not answer in time is store.unreachable.
+ */
+export const probeStore = async (
+  io: LocalIo,
+  options: ReachOptions & { probe?: ProbeOptions },
+): Promise<Probe> => {
+  const read = async (): Promise<Result<StoreDescriptor | null>> => {
+    const reached = await reachStore(io, options);
+    if (!reached.ok) return reached;
+    return readStoreDescriptor(reached.value.blob);
+  };
+  const probed = await probeDeadline(read(), options.probe ?? {});
+  if (probed.timedOut)
+    return {
+      reachable: false,
+      finding: finding("store.unreachable", {
+        message: `store ${options.name} did not answer within ${probed.seconds} seconds`,
+        fix: "check the network, the mount or the server, then re-run",
+      }),
+    };
+  const got = probed.value;
+  return got.ok ? { reachable: true, descriptor: got.value } : { reachable: false, finding: got.finding };
+};
+
+/** store.not-set-up for a name config does not define. */
+export const notConfigured = (name: string, configured: readonly string[]): Result<never> =>
+  fail(
+    finding("store.not-set-up", {
+      message: `no store named ${name} is configured${configured.length === 0 ? "" : ` (configured: ${configured.join(", ")})`}`,
+      fix: `plainport store add ${name} --kind <local|sftp|s3> … (plainport help store add)`,
+    }),
+  );
