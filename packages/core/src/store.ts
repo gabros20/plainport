@@ -260,6 +260,8 @@ export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
  * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
  * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
  * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ * keyPairOnly reads the key pair alone (the password comes back empty): what a view needs to read a plain catalog,
+ * or to see that a catalog is sealed, before it asks for the password (D108).
  */
 export const resolveS3Credentials = async (
   io: LocalIo,
@@ -267,7 +269,7 @@ export const resolveS3Credentials = async (
   home: string,
   name: string,
   store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what" | "field"> = {},
+  options: Omit<SecretOptions, "what" | "field"> & { keyPairOnly?: boolean } = {},
 ): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
   const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
   // The budget's end stops the read in flight (a provider's child) as a cancel would.
@@ -275,12 +277,15 @@ export const resolveS3Credentials = async (
   const onAbort = () => stop.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) stop.abort();
-  const reads = [
-    { what: "password", field: "secret", ref: store.secret },
+  const keyPair = [
     { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
     { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
   ] as const;
-  let reading: (typeof reads)[number] = reads[0];
+  const reads =
+    options.keyPairOnly === true
+      ? keyPair
+      : ([{ what: "password", field: "secret", ref: store.secret }, ...keyPair] as const);
+  let reading: (typeof reads)[number] = reads[0] as (typeof reads)[number];
   const all = async (): Promise<Result<string[]>> => {
     const values: string[] = [];
     for (const read of reads) {
@@ -311,7 +316,10 @@ export const resolveS3Credentials = async (
       );
     }
     if (!outcome.value.ok) return outcome.value;
-    const [password, accessKeyId, secretAccessKey] = outcome.value.value as [string, string, string];
+    const values = outcome.value.value;
+    const [password, accessKeyId, secretAccessKey] = (
+      options.keyPairOnly === true ? ["", ...values] : values
+    ) as [string, string, string];
     return ok({ password, accessKeyId, secretAccessKey });
   } finally {
     options.signal?.removeEventListener("abort", onAbort);

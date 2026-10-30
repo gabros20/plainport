@@ -51,13 +51,13 @@ import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { SECRET_DEADLINE_MS } from "../ports/secrets.ts";
-import type { OpenedStore, StoreOpener } from "../ports/store.ts";
+import type { OpenedStore, StoreCredentials, StoreOpener } from "../ports/store.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
-import { resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { resolveS3Credentials, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 import { sealedByPin, storeCatalog } from "../stores/seal.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
@@ -336,8 +336,28 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
           fix: `check the store ${name}, then re-run`,
         }),
       );
+    // An S3 store is read only with its key pair, which a plain catalog needs too: it is read first, within the
+    // deadline, and the repository password only for a sealed catalog (D108).
+    const keyPair: Result<StoreCredentials | undefined> =
+      store.kind === "s3"
+        ? await resolveS3Credentials(io, deps.env, paths.home, name, store, {
+            ...secretProvidersOf(deps.opener),
+            deadlineMs: deadline,
+            scheduler,
+            keyPairOnly: true,
+          }).then((read) =>
+            read.ok
+              ? ok({ accessKeyId: read.value.accessKeyId, secretAccessKey: read.value.secretAccessKey })
+              : read,
+          )
+        : ok(undefined);
     const openWith = async (password: string): Promise<Result<OpenedStore>> => {
-      const opening = await withinDeadline(deps.opener.open(name, store, password), deadline, scheduler);
+      if (!keyPair.ok) return keyPair;
+      const opening = await withinDeadline(
+        deps.opener.open(name, store, password, keyPair.value),
+        deadline,
+        scheduler,
+      );
       return opening.timedOut
         ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
         : opening.value;
