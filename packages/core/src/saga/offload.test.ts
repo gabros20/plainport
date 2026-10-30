@@ -21,7 +21,14 @@ import { fail, finding, ok, type Result, type StreamEvent } from "@plainport/con
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { readStoreIdentity } from "../catalog/identity.ts";
-import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
+import {
+  appendEvent,
+  type CatalogEvent,
+  foldCatalog,
+  mirrorEventLog,
+  readEvents,
+  storeEventLog,
+} from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { PathRefused } from "../guard.ts";
@@ -758,6 +765,77 @@ describe("offload: the head check", () => {
     expect(state?.status).toBe("conflicted");
     expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
     await expectInvariants();
+  });
+});
+
+describe("offload: the project's home store (Q12)", () => {
+  /** This copy came from snapshot `base` of store "old", whose mirror on this device holds it when `mirrored`. */
+  const cameFromOld = async (mirrored: boolean) => {
+    const id = ulid();
+    const rootId = ulid();
+    const oldId = ulid();
+    const base = ulid();
+    const oldMirror = memoryBlobStore({ createIfAbsent: true });
+    if (mirrored)
+      value(
+        await appendEvent(mirrorEventLog(oldMirror), {
+          v: 1,
+          id: ulid(),
+          op: base,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: base,
+          stored: { [oldId]: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          roots: { work: rootId },
+          stores: { ...r.stores, old: oldId },
+          projects: { [id]: { root: "work", path: "web", base, registeredAt: "2026-10-01T00:00:00.000Z" } },
+        },
+      })),
+    );
+    // The old store is offline: only its mirror answers, and the opener is never asked for it.
+    const opened: string[] = [];
+    const over: Partial<OffloadDeps> = {
+      opener: {
+        open: async (name) => {
+          opened.push(name);
+          return { ok: true, value: { blob: store, engine } };
+        },
+      },
+      openMirror: async (storeId) => ({ ok: true, value: storeId === oldId ? oldMirror : mirror }),
+    };
+    return { id, base, over, opened };
+  };
+
+  test("a copy whose base only the offline home store's mirror holds refuses with store.history-elsewhere, naming it", async () => {
+    const { base, over, opened } = await cameFromOld(true);
+    const result = await offload({}, over);
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.history-elsewhere"]);
+    expect(!result.ok && result.finding.message).toContain(base);
+    expect(!result.ok && result.finding.message).toContain("store old");
+    expect(!result.ok && result.finding.fix).toContain("--store old");
+    expect(opened).toEqual(["ssd"]);
+    expect(engine.calls).toHaveLength(0);
+    await expectUntouched();
+  });
+
+  test("a base no store's catalog or mirror holds says the home store is unknown", async () => {
+    const { over } = await cameFromOld(false);
+    const result = await offload({}, over);
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.history-elsewhere"]);
+    expect(!result.ok && result.finding.message).toContain("unknown");
+    await expectUntouched();
   });
 });
 

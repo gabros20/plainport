@@ -172,7 +172,10 @@ export const runRestore = async (deps: RestoreDeps, req: RestoreRequest): Promis
           ref.address,
           {
             what: "nothing was restored",
-            instead: (newest) => `restore that newest snapshot by name: ${command(newest)}`,
+            instead: (newest) =>
+              newest === undefined
+                ? `name the snapshot to restore: ${command("<id>")}`
+                : `restore that newest snapshot by name: ${command(newest)}`,
           },
         );
   if (doubt !== undefined && req.snapshot === undefined) return fail(doubt.finding);

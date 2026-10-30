@@ -19,7 +19,8 @@
 // or running (the open journal's process: running only while it holds the project's lock, so a reused pid never
 // looks running), folder-missing (this device should hold it but its folder is gone), stale and never-synced (the
 // store did not answer), journal-unreadable (a journal this version cannot read names the project, or names none and
-// so may be any project's). Each condition comes with a sentence in `conditionDetails`.
+// so may be any project's), several-stores (the catalogs of two stores hold the project, merged by its id; the view
+// shows its root's store's, else the first's). Each condition comes with a sentence in `conditionDetails`.
 //
 // Views are lazy (loadProjects): the registry, roots, journals and catalogs are read once, for every project, since a
 // name is matched against all of them; a project's own view (its folder's stat, its head's size, its local planning)
@@ -100,6 +101,7 @@ export const PROJECT_CONDITIONS = [
   "seal-key-unavailable",
   "catalog-unreadable",
   "journal-unreadable",
+  "several-stores",
 ] as const;
 export type ProjectCondition = (typeof PROJECT_CONDITIONS)[number];
 
@@ -213,6 +215,8 @@ export type Views = {
 
 interface Read {
   store: string;
+  /** The store's id: one store under two names is one catalog. */
+  id: string;
   stale: boolean;
   syncedAt?: string;
   state: CatalogState;
@@ -244,25 +248,6 @@ const failingStore = (failure: Failure): BlobStore => ({
   stat: async () => failure,
   delete: async () => failure,
 });
-
-/** The mirror, whose writes fail once `abandoned` says its refresh was given up at the deadline. */
-const untilAbandoned = (mirror: BlobStore, abandoned: () => boolean, store: string): BlobStore => {
-  const refused = () =>
-    fail(
-      finding("store.unreachable", {
-        message: `the refresh of store ${store}'s mirror was given up at the deadline; nothing more is written to it`,
-      }),
-    );
-  return {
-    semantics: () => mirror.semantics(),
-    capabilities: () => mirror.capabilities(),
-    get: (key) => mirror.get(key),
-    list: (prefix) => mirror.list(prefix),
-    stat: (key) => mirror.stat(key),
-    put: async (key, data, options) => (abandoned() ? refused() : mirror.put(key, data, options)),
-    delete: async (key) => (abandoned() ? refused() : mirror.delete(key)),
-  };
-};
 
 /** What kept a store from being asked, by the finding that says so: the condition beside stale or never-synced. */
 const CAUSES: Record<string, { condition: ProjectCondition; message: (store: string) => string }> = {
@@ -375,27 +360,15 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         : opened;
     } else {
       // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45). A refresh
-      // abandoned at the deadline writes nothing to the mirror afterwards, while its stale state is read.
-      let abandoned = false;
-      const loading = await withinDeadline(
-        loadCatalog({
-          store: opened.value.blob,
-          mirror: untilAbandoned(mirrorBlob, () => abandoned, name),
-          storeId: id,
-          now,
-          ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
-        }),
-        deadline,
-        scheduler,
-      );
-      abandoned = loading.timedOut;
-      read = loading.timedOut
-        ? await readMirrorCatalog({
-            mirror: mirrorBlob,
-            storeId: id,
-            reason: timedOut(loading.seconds, "store.unreachable", `store ${name}`).finding,
-          })
-        : loading.value;
+      // given up at the deadline writes nothing to the mirror afterwards, while its stale state is read.
+      read = await loadCatalog({
+        store: opened.value.blob,
+        mirror: mirrorBlob,
+        storeId: id,
+        now,
+        ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
+        deadline: { ms: deadline, scheduler, store: name },
+      });
     }
     if (!read.ok) {
       stores.push({ name, id, stale: true, finding: read.finding });
@@ -411,6 +384,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     });
     reads.push({
       store: name,
+      id,
       stale: read.value.stale,
       ...(read.value.syncedAt === undefined ? {} : { syncedAt: read.value.syncedAt }),
       state: read.value.state,
@@ -438,14 +412,20 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
   /** Each project's registry entry, catalog and store read, by id: what its view is built from. */
   const sources = new Map<
     string,
-    { known: KnownProject; entry?: RegistryEntry; catalog?: CatalogProject; read?: Read }
+    { known: KnownProject; entry?: RegistryEntry; catalog?: CatalogProject; read?: Read; elsewhere?: Read[] }
   >();
   for (const id of [...ids].sort()) {
     const entry = registry.value.projects[id];
-    // The store whose catalog holds it, else its root's store, whose staleness it shares.
+    // Catalogs merge by project id: every store whose catalog holds it, a store under two names counted once (by id).
+    const holders: Read[] = [];
+    for (const r of reads)
+      if (r.state.projects[id] !== undefined && !holders.some((h) => h.id === r.id)) holders.push(r);
+    // Its root's store when that holds it, else the first that does, else its root's store, whose staleness it shares.
     const found =
-      reads.find((r) => r.state.projects[id] !== undefined) ??
+      holders.find((r) => r.store === storeOfRoot(entry)) ??
+      holders[0] ??
       reads.find((r) => r.store === storeOfRoot(entry));
+    const elsewhere = holders.filter((r) => r !== found);
     const catalog = found?.state.projects[id];
     const root = entry?.root ?? (catalog === undefined ? "" : (keyOf.get(catalog.root) ?? catalog.root));
     const path = entry?.path ?? catalog?.path ?? "";
@@ -467,6 +447,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       ...(entry === undefined ? {} : { entry }),
       ...(catalog === undefined ? {} : { catalog }),
       ...(found === undefined ? {} : { read: found }),
+      ...(elsewhere.length === 0 ? {} : { elsewhere }),
     });
   }
   const known = [...sources.values()]
@@ -490,12 +471,18 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
   });
 
   async function viewOf(
-    source: { known: KnownProject; entry?: RegistryEntry; catalog?: CatalogProject; read?: Read },
+    source: {
+      known: KnownProject;
+      entry?: RegistryEntry;
+      catalog?: CatalogProject;
+      read?: Read;
+      elsewhere?: Read[];
+    },
     open: Journal[],
     unreadable: string[],
     options: ViewOptions,
   ): Promise<ProjectStatus> {
-    const { known: project, entry, catalog, read } = source;
+    const { known: project, entry, catalog, read, elsewhere } = source;
     const { id, root, path, dir, stub } = project;
     const rootView = roots.get(root);
     const here = dir !== undefined && (await kindAt(io, dir)) === "dir";
@@ -566,6 +553,12 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         "catalog-unreadable",
         `the catalog of store ${unreadStore} could not be read, from the store or this device's mirror`,
         stores.find((st) => st.name === unreadStore)?.finding,
+      );
+    // Before replication a project's history lives in one store (Q12): in two catalogs, the view shows one of them.
+    if (read !== undefined && elsewhere !== undefined)
+      note(
+        "several-stores",
+        `the catalogs of stores ${[read, ...elsewhere].map((r) => r.store).join(" and ")} both hold it; this view shows store ${read.store}'s, and an offload goes only to the store whose catalog holds its copy's snapshot (Q12)`,
       );
     if (unreadable.length > 0)
       note(

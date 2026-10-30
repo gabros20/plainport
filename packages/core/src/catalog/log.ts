@@ -25,8 +25,9 @@ import {
 } from "@plainport/contract";
 import { z } from "zod";
 import { describeIssues } from "../config/toml.ts";
+import { realScheduler, type Scheduler, withinDeadline } from "../deadline.ts";
 import type { PlainportPaths } from "../paths.ts";
-import type { BlobEntry, BlobStore } from "../ports/blob-store.ts";
+import { type BlobEntry, type BlobStore, getMany } from "../ports/blob-store.ts";
 import { isUlid, UlidSchema } from "../ulid.ts";
 import {
   type CatalogPolicy,
@@ -234,10 +235,70 @@ export interface EventsRead {
   tainted: Tainted[];
 }
 
-const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsRead>> => {
+/**
+ * What a read left out, scoped (Task 21, doubt without the clock): an event whose project the read cannot tell, or
+ * cannot authenticate (it does not open, or it is plaintext on a sealed store), makes every head on the store
+ * uncertain; one whose project is known makes that project's head uncertain. Neither is judged by its ULID's time,
+ * which is the writer's clock. Both clear once the event reads.
+ */
+export interface Doubt {
+  /** Events left out that may be any project's, sorted. */
+  store: string[];
+  /** Events left out by the project they are events of, each list sorted; a project with none is absent. */
+  projects: Record<string, string[]>;
+}
+
+/** One event file left out of the fold, and what is known of whose it is. */
+interface LeftOut {
+  id: string;
+  project?: string;
+  /** False for a stored-multiple discard (Q11): what it says is known, and it changes no head. */
+  heads: boolean;
+}
+
+export const NO_DOUBT: Doubt = Object.freeze({ store: [], projects: {} }) as Doubt;
+
+const isEventName = (name: string): boolean => name.endsWith(".json") && isUlid(name.slice(0, -5));
+const idOfPath = (path: string): string | undefined => {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return isEventName(name) ? name.slice(0, -5) : undefined;
+};
+
+/** The file at `key` left out for `skip`; undefined for a file not named as an event, which is no event. */
+const leftOf = (key: string, skip: Skip): LeftOut | undefined => {
+  const id = idOfPath(key);
+  if (id === undefined) return undefined;
+  return {
+    id,
+    ...(skip.project === undefined ? {} : { project: skip.project }),
+    heads: skip.taint?.type !== "snapshot-discarded",
+  };
+};
+
+const doubtOf = (left: readonly (LeftOut | undefined)[]): Doubt => {
+  const store = new Set<string>();
+  const projects = new Map<string, Set<string>>();
+  for (const entry of left) {
+    if (entry === undefined || !entry.heads) continue;
+    if (entry.project === undefined) store.add(entry.id);
+    else projects.set(entry.project, (projects.get(entry.project) ?? new Set()).add(entry.id));
+  }
+  return {
+    store: [...store].sort(compare),
+    projects: Object.fromEntries(
+      [...projects].sort(([a], [b]) => compare(a, b)).map(([p, ids]) => [p, [...ids].sort(compare)]),
+    ),
+  };
+};
+
+const readListed = async (
+  log: EventLog,
+  listed: Listed,
+): Promise<Result<EventsRead & { left: LeftOut[] }>> => {
   const events: CatalogEvent[] = [];
   const findings: Finding[] = [];
   const tainted: Tainted[] = [];
+  const left: LeftOut[] = [];
   for (const { key } of listed.entries) {
     const id = listed.ids.get(key);
     if (id === undefined) {
@@ -251,17 +312,22 @@ const readListed = async (log: EventLog, listed: Listed): Promise<Result<EventsR
     if ("skip" in parsed) {
       findings.push(parsed.skip.finding);
       if (parsed.skip.taint !== undefined) tainted.push(parsed.skip.taint);
+      const out = leftOf(key, parsed.skip);
+      if (out !== undefined) left.push(out);
     } else events.push(parsed.event);
   }
   events.sort((a, b) => compare(a.id, b.id));
-  return ok({ events, findings, tainted });
+  return ok({ events, findings, tainted, left });
 };
 
 /** Every event in the log. A store that cannot be listed or read is a failure, never an empty catalog. */
 export const readEvents = async (log: EventLog): Promise<Result<EventsRead>> => {
   const listed = await listEvents(log);
   if (!listed.ok) return listed;
-  return readListed(log, listed.value);
+  const read = await readListed(log, listed.value);
+  if (!read.ok) return read;
+  const { left: _, ...rest } = read.value;
+  return ok(rest);
 };
 
 /** Event id → size, from a listing. */
@@ -359,8 +425,8 @@ export const uncertainEvents = (findings: readonly Finding[]): string[] => {
   for (const f of findings) {
     if (!SKIP_CODES.includes(f.code)) continue;
     for (const path of f.paths ?? []) {
-      const name = path.slice(path.lastIndexOf("/") + 1);
-      if (name.endsWith(".json") && isUlid(name.slice(0, -5))) ids.add(name.slice(0, -5));
+      const id = idOfPath(path);
+      if (id !== undefined) ids.add(id);
     }
   }
   return [...ids].sort(compare);
@@ -372,6 +438,8 @@ export interface LoadedCatalog {
   findings: Finding[];
   /** uncertainEvents(findings): events left out that may change state (D86). */
   uncertain: string[];
+  /** Those events by whose they are (Task 21): the store's heads, or one project's, are uncertain while they stand. */
+  doubt: Doubt;
   /** The stored-multiple events left out, read from the store just now (Q11); none from the mirror alone. */
   tainted: Tainted[];
   /** Whether a cached fold was reused. */
@@ -391,19 +459,48 @@ export interface LoadedCatalog {
   mirrorFailure?: Finding;
 }
 
+/**
+ * Whose the mirror's left-out events are: a resolution the fold judged invalid is its project's; another file in the
+ * mirror is opened again to say (the mirror holds few, if any, and the cached fold keeps only findings). A file that
+ * cannot say may be any project's.
+ */
+const mirrorLeft = async (mirror: EventLog, findings: readonly Finding[], state: CatalogState) => {
+  const invalid = new Map<string, string>();
+  for (const [project, folded] of Object.entries(state.projects))
+    for (const id of folded.invalid) invalid.set(id, project);
+  const left: LeftOut[] = [];
+  for (const id of uncertainEvents(findings)) {
+    const project = invalid.get(id);
+    if (project !== undefined) {
+      left.push({ id, project, heads: true });
+      continue;
+    }
+    const key = keyOf(mirror, id);
+    const bytes = await mirror.store.get(key);
+    const parsed = bytes.ok && bytes.value !== null ? parseEvent(mirror, key, bytes.value) : undefined;
+    left.push(
+      parsed !== undefined && "skip" in parsed
+        ? (leftOf(key, parsed.skip) ?? { id, heads: true })
+        : { id, heads: true },
+    );
+  }
+  return left;
+};
+
 /** Folds the mirror's listing, through the cache beside it. Cache writes are best effort. */
 const foldMirror = async (
   mirror: EventLog,
   listed: Listed,
   transport: Readonly<Record<string, number>>,
-): Promise<Result<{ state: CatalogState; findings: Finding[]; cached: boolean }>> => {
+): Promise<Result<{ state: CatalogState; findings: Finding[]; left: LeftOut[]; cached: boolean }>> => {
   const digest = digestOf(mirror, listed, transport);
   const count = listed.entries.length;
   const cache = await readJson(mirror.store, MIRROR_STATE_KEY, StateCacheSchema);
   if (!cache.ok) return cache;
   const hit = cache.value;
   if (hit !== undefined && hit.fold === FOLD_VERSION && hit.digest === digest && hit.count === count) {
-    return ok({ state: hit.state, findings: hit.findings, cached: true });
+    const left = await mirrorLeft(mirror, hit.findings, hit.state);
+    return ok({ state: hit.state, findings: hit.findings, left, cached: true });
   }
   const read = await readListed(mirror, listed);
   if (!read.ok) return read;
@@ -411,7 +508,7 @@ const foldMirror = async (
   const findings = [...read.value.findings, ...invalidResolutions(mirror, state)];
   const next: StateCache = { v: 1, fold: FOLD_VERSION, digest, count, state, findings };
   await mirror.store.put(MIRROR_STATE_KEY, encoder.encode(`${JSON.stringify(next)}\n`));
-  return ok({ state, findings, cached: false });
+  return ok({ state, findings, left: await mirrorLeft(mirror, findings, state), cached: false });
 };
 
 /** Which side failed: a store failure decides the outcome, a mirror failure only sends the read to the store. */
@@ -420,23 +517,22 @@ const storeFault = (failure: Failure): Fault => ({ ok: false, side: "store", fai
 const mirrorFault = (failure: Failure): Fault => ({ ok: false, side: "mirror", failure });
 
 /**
- * Opens one store file through the codec and copies the opened event into the mirror, so it is never fetched again
- * while the store file keeps its size. A plain store's copy is its bytes as they are; a torn mirror copy (a prefix of
- * the opened bytes) is completed (D42). The sizes of the store file and of the copy, or why the file was left out.
+ * Opens one store file's bytes through the codec and copies the opened event into the mirror, so it is never fetched
+ * again while the store file keeps its size. A plain store's copy is its bytes as they are; a torn mirror copy (a
+ * prefix of the opened bytes) is completed (D42). The sizes of the store file and of the copy, or why the file was
+ * left out.
  */
 const download = async (
   remote: EventLog,
   mirror: EventLog,
   id: string,
-): Promise<{ ok: true; value: { transport: number; opened: number } | Skip | undefined } | Fault> => {
+  bytes: Uint8Array,
+): Promise<{ ok: true; value: { transport: number; opened: number } | Skip } | Fault> => {
   const key = keyOf(remote, id);
-  const bytes = await remote.store.get(key);
-  if (!bytes.ok) return storeFault(bytes);
-  if (bytes.value === null) return ok(undefined);
-  const parsed = parseEvent(remote, key, bytes.value);
+  const parsed = parseEvent(remote, key, bytes);
   if ("skip" in parsed) return ok(parsed.skip);
   const opened = parsed.opened;
-  const sizes = { transport: bytes.value.length, opened: opened.length };
+  const sizes = { transport: bytes.length, opened: opened.length };
   const target = keyOf(mirror, id);
   const createOnly = mirror.store.capabilities().createIfAbsent;
   const put = await mirror.store.put(target, opened, createOnly ? { ifNotExists: true } : {});
@@ -457,14 +553,17 @@ const download = async (
       `the mirror holds other bytes under its name (${target}); both are kept as they are`,
     ),
     bytes: false,
+    // The store's event read: whose it is, is known.
+    ...("project" in parsed.event ? { project: parsed.event.project } : {}),
   });
 };
 
 /**
- * Brings the mirror up to the store: one listing of each, fetching only files the mirror does not hold under the same
- * name and size and that this version of the reader has not already found to be no event at that size (I7: a list an
- * older or newer reader made is started afresh, and JSON this version cannot use is never on it). It only downloads:
- * a read never writes to a store (D45). Returns the mirror's listing as it stands afterwards.
+ * Brings the mirror up to the store: one listing of each, then one batch read (getMany) of the files the mirror does
+ * not hold under the same name and size and that this version of the reader has not already found to be no event at
+ * that size (I7: a list an older or newer reader made is started afresh, and JSON this version cannot use is never on
+ * it, nor a broken file whose bytes name its project, which is read again until it reads). It only downloads: a read
+ * never writes to a store (D45). Returns the mirror's listing as it stands afterwards.
  */
 const syncDown = async (
   remote: EventLog,
@@ -480,6 +579,7 @@ const syncDown = async (
         copied: number;
         findings: Finding[];
         tainted: Tainted[];
+        left: LeftOut[];
       };
     }
   | Fault
@@ -500,7 +600,8 @@ const syncDown = async (
   const transport: Record<string, number> = {};
   const findings: Finding[] = [];
   const tainted: Tainted[] = [];
-  let copied = 0;
+  const left: LeftOut[] = [];
+  const wanted: [string, number][] = [];
   for (const [id, size] of [...sizesById(theirs.value)].sort(([a], [b]) => compare(a, b))) {
     // Held, and opened from a store file of this size (an M1 mirror records none: its copy's size is the file's).
     if (mirrorSizes.has(id) && (transportBefore[id] ?? mirrorSizes.get(id)) === size) {
@@ -509,21 +610,40 @@ const syncDown = async (
     }
     const before = known[id];
     if (before !== undefined && before.size === size) {
+      // Remembered only when its bytes could not say whose event it is: it may be any project's.
       skippedNow[id] = before;
       findings.push(before.finding);
+      left.push({ id, heads: true });
       continue;
     }
-    const result = await download(remote, mirror, id);
+    wanted.push([id, size]);
+  }
+  // One batch read for everything the mirror lacks (blob-rclone: one copy), never one round trip per file.
+  const fetched =
+    wanted.length === 0
+      ? ok(new Map<string, Uint8Array>())
+      : await getMany(
+          remote.store,
+          wanted.map(([id]) => keyOf(remote, id)),
+        );
+  if (!fetched.ok) return storeFault(fetched);
+  let copied = 0;
+  for (const [id, size] of wanted) {
+    const bytes = fetched.value.get(keyOf(remote, id));
+    if (bytes === undefined) continue; // removed since the listing (a store's own cleanup); nothing to fold
+    const result = await download(remote, mirror, id, bytes);
     if (!result.ok) return result;
-    if (result.value === undefined) continue;
     if ("transport" in result.value) {
       mirrorSizes.set(id, result.value.opened);
       if (result.value.transport !== result.value.opened) transport[id] = result.value.transport;
       copied++;
     } else {
-      if (result.value.bytes) skippedNow[id] = { size, finding: result.value.finding };
-      findings.push(result.value.finding);
-      if (result.value.taint !== undefined) tainted.push(result.value.taint);
+      const skip = result.value;
+      if (skip.bytes && skip.project === undefined) skippedNow[id] = { size, finding: skip.finding };
+      findings.push(skip.finding);
+      if (skip.taint !== undefined) tainted.push(skip.taint);
+      const out = leftOf(keyOf(remote, id), skip);
+      if (out !== undefined) left.push(out);
     }
   }
   const file: MirrorFile = {
@@ -545,7 +665,7 @@ const syncDown = async (
     ids.set(key, id);
   }
   const listed = { entries: [...entries.values()].sort((a, b) => compare(a.key, b.key)), ids };
-  return ok({ listed, transport, copied, findings, tainted });
+  return ok({ listed, transport, copied, findings, tainted, left });
 };
 
 /** Why a store could not be asked at all, as a finding code: the mirror then stands in for it (Task 13). */
@@ -570,12 +690,17 @@ const readOffline = async (
   if (!listed.ok) return listed;
   const folded = await foldMirror(mirror, listed.value, recorded.value?.transport ?? {});
   if (!folded.ok) return folded;
-  const skippedOnStore = Object.values(recorded.value?.skipped ?? {}).map((entry) => entry.finding);
-  const findings = [...skippedOnStore, ...folded.value.findings];
+  // The store's files remembered as no event could not say whose they are. What else the store holds that this
+  // version cannot use (stored-multiple, a type or seal it cannot read) the mirror never holds: offline views cannot
+  // show that doubt, and every write reads the store itself.
+  const remembered = Object.entries(recorded.value?.skipped ?? {});
+  const findings = [...remembered.map(([, entry]) => entry.finding), ...folded.value.findings];
+  const { left, ...fold } = folded.value;
   return ok({
-    ...folded.value,
+    ...fold,
     findings,
     uncertain: uncertainEvents(findings),
+    doubt: doubtOf([...remembered.map(([id]) => ({ id, heads: true })), ...left]),
     tainted: [],
     stale: true,
     source: "mirror",
@@ -596,25 +721,76 @@ export const readMirrorCatalog = (options: {
 }): Promise<Result<LoadedCatalog>> =>
   readOffline(mirrorEventLog(options.mirror), options.storeId, options.reason);
 
+/** The mirror, whose writes fail once `abandoned` says its refresh was given up at the deadline. */
+const untilAbandoned = (mirror: BlobStore, abandoned: () => boolean, store: string): BlobStore => {
+  const refused = () =>
+    fail(
+      finding("store.unreachable", {
+        message: `the refresh of store ${store}'s mirror was given up at the deadline; nothing more is written to it`,
+      }),
+    );
+  return {
+    semantics: () => mirror.semantics(),
+    capabilities: () => mirror.capabilities(),
+    get: (key) => mirror.get(key),
+    list: (prefix) => mirror.list(prefix),
+    stat: (key) => mirror.stat(key),
+    put: async (key, data, options) => (abandoned() ? refused() : mirror.put(key, data, options)),
+    delete: async (key) => (abandoned() ? refused() : mirror.delete(key)),
+  };
+};
+
+export interface CatalogLoadOptions {
+  store: BlobStore;
+  mirror: BlobStore;
+  storeId: string;
+  now: Date;
+  policy?: CatalogPolicy;
+  /**
+   * How long the store may take to answer the whole read (its identity, the listing, the batch read). Past it the
+   * read is given up: it writes nothing more to the mirror, and the mirror's state is returned, stale, with a
+   * store.unreachable that says so. Without one, only the store's own calls bound it.
+   */
+  deadline?: { ms: number; scheduler?: Scheduler; store?: string };
+}
+
 /**
  * The catalog, the one way to read it (D43, D45). It checks the store's identity against `storeId` (what this device
  * recorded for the store: store.identity-changed when it differs), brings this device's mirror up to the store
- * (download only: a read never writes to a store), and folds the mirror's events through the cache beside them.
+ * (download only: a read never writes to a store; one listing and one batch read, within the deadline), and folds the
+ * mirror's events through the cache beside them.
  *
- * - The store unreachable: the mirror's state, marked stale, with the time of its last sync (none if never synced).
+ * - The store unreachable, or past the deadline: the mirror's state, marked stale, with the time of its last sync
+ *   (none if never synced).
  * - The mirror broken (cannot be listed, read or written, or recorded for another store) while the store is
  *   reachable: the store's events are read and folded directly, with the reason in mirrorFailure.
  * - Any other store failure fails the call.
  *
  * The store's events are opened under `policy` (plain when absent); the mirror holds them opened.
  */
-export const loadCatalog = async (options: {
-  store: BlobStore;
-  mirror: BlobStore;
-  storeId: string;
-  now: Date;
-  policy?: CatalogPolicy;
-}): Promise<Result<LoadedCatalog>> => {
+export const loadCatalog = async (options: CatalogLoadOptions): Promise<Result<LoadedCatalog>> => {
+  const { deadline } = options;
+  if (deadline === undefined) return loadOnline(options);
+  let abandoned = false;
+  const name = deadline.store ?? options.storeId;
+  const loading = await withinDeadline(
+    loadOnline({ ...options, mirror: untilAbandoned(options.mirror, () => abandoned, name) }),
+    deadline.ms,
+    deadline.scheduler ?? realScheduler,
+  );
+  abandoned = loading.timedOut;
+  if (!loading.timedOut) return loading.value;
+  return readOffline(
+    mirrorEventLog(options.mirror),
+    options.storeId,
+    finding("store.unreachable", {
+      message: `store ${name} did not answer within ${loading.seconds} seconds`,
+      fix: `check the store ${name}, then re-run`,
+    }),
+  );
+};
+
+const loadOnline = async (options: CatalogLoadOptions): Promise<Result<LoadedCatalog>> => {
   const remote = storeEventLog(options.store, options.policy);
   const mirror = mirrorEventLog(options.mirror);
   const offline = (failure: Failure): Promise<Result<LoadedCatalog>> | Failure =>
@@ -637,10 +813,12 @@ export const loadCatalog = async (options: {
     const folded = await foldMirror(mirror, synced.value.listed, synced.value.transport);
     if (folded.ok) {
       const findings = [...synced.value.findings, ...folded.value.findings];
+      const { left, ...fold } = folded.value;
       return ok({
-        ...folded.value,
+        ...fold,
         findings,
         uncertain: uncertainEvents(findings),
+        doubt: doubtOf([...synced.value.left, ...left]),
         tainted: synced.value.tainted,
         stale: false,
         format,
@@ -656,14 +834,19 @@ export const loadCatalog = async (options: {
     mirrorFailure = synced.failure.finding;
   }
   // The mirror is only a cache: read the store directly.
-  const direct = await readEvents(remote);
+  const listed = await listEvents(remote);
+  const direct = listed.ok ? await readListed(remote, listed.value) : listed;
   if (!direct.ok) return offline(direct);
   const state = foldCatalog(direct.value.events);
+  const invalid = Object.entries(state.projects).flatMap(([project, folded]) =>
+    folded.invalid.map((id) => ({ id, project, heads: true })),
+  );
   const findings = [...direct.value.findings, ...invalidResolutions(remote, state)];
   return ok({
     state,
     findings,
     uncertain: uncertainEvents(findings),
+    doubt: doubtOf([...direct.value.left, ...invalid]),
     tainted: direct.value.tainted,
     cached: false,
     stale: false,
