@@ -52,13 +52,13 @@ import type { HostChecks } from "../ports/checks.ts";
 import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { SECRET_DEADLINE_MS } from "../ports/secrets.ts";
-import type { OpenedStore, StoreOpener } from "../ports/store.ts";
+import type { OpenedStore, StoreCredentials, StoreOpener } from "../ports/store.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
-import { resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
+import { resolveS3KeyPair, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
 
@@ -320,8 +320,29 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
           fix: `check the store ${name}, then re-run`,
         }),
       );
+    // An S3 store opens only with its key pair (review phase 5 M2): read it, and never the restic password here.
+    let credentials: Result<StoreCredentials | undefined> = ok(undefined);
+    if (store.kind === "s3") {
+      const pair = await withinDeadline(
+        resolveS3KeyPair(io, deps.env, paths.home, name, store, {
+          ...secretProvidersOf(deps.opener),
+          deadlineMs: deadline,
+          scheduler,
+        }),
+        deadline,
+        scheduler,
+      );
+      credentials = pair.timedOut
+        ? timedOut(pair.seconds, "store.secret-missing", `the secret provider of store ${name}`)
+        : pair.value;
+    }
     const openWith = async (password: string): Promise<Result<OpenedStore>> => {
-      const opening = await withinDeadline(deps.opener.open(name, store, password), deadline, scheduler);
+      if (!credentials.ok) return credentials;
+      const opening = await withinDeadline(
+        deps.opener.open(name, store, password, credentials.value),
+        deadline,
+        scheduler,
+      );
       return opening.timedOut
         ? timedOut(opening.seconds, "store.secret-missing", `opening store ${name} (its secret provider)`)
         : opening.value;
@@ -359,6 +380,8 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         ? await readMirrorCatalog({ mirror: mirrorBlob, storeId: id, reason: opened.finding })
         : opened;
     } else {
+      // A config assertion the measurement contradicts (D111) is said beside the view.
+      findings.push(...(opened.value.findings ?? []));
       // A mirror that cannot be opened is only a cache: loadCatalog then reads the store directly (D45). A refresh
       // given up at the deadline writes nothing to the mirror afterwards, while its stale state is read.
       read = await loadCatalog({

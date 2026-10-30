@@ -361,6 +361,8 @@ const onloadFlow = async (
   const opened = await openStore(io, { paths, env: deps.env, name: storeName, config, opener: deps.opener });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // A config assertion the measurement contradicts (D111) is said, and the measured value used.
+  for (const f of store.findings ?? []) report(f);
   const mirror = await deps.openMirror(store.id);
   if (!mirror.ok) return mirror;
   const catalog = catalogReader({

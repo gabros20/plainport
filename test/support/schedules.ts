@@ -105,10 +105,12 @@ const okOf = <T>(
 
 /**
  * S6: dev-a commits while the store's listings leave its event out, then dev-b offloads. With `seen` "at-commit" the
- * event is listed while B verifies, so B's fresh read at its commit finds the fork; with "never" it stays unlisted
- * through B's commit, on a store whose profile (UNSEEN) does not admit release, so both commit and keep their folders.
+ * event is listed while B verifies, so B's fresh read at its commit finds the fork. With "never" it stays unlisted
+ * through B's commit, and both commit: release waits on the store's profile, never on visibility. On UNSEEN
+ * (acked-unsynced) neither profile admits release, so both keep their folders with their journals open; on a durable
+ * store (`durable`) both release. Either way both snapshots stay, and the fold shows the fork once A's event lists.
  */
-const delayedVisibility = async (seen: "at-commit" | "never"): Promise<void> => {
+const delayedVisibility = async (seen: "at-commit" | "never", durable = false): Promise<void> => {
   // Listings leave out what was written since the last settle(): A's event is invisible to B until then.
   const fake = semanticBlobStore({ listOmitsRecent: true });
   let profile: StoreSemantics | undefined;
@@ -132,7 +134,9 @@ const delayedVisibility = async (seen: "at-commit" | "never"): Promise<void> => 
       events: await allEvents(store),
       snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
     };
-    if (seen === "never") profile = UNSEEN;
+    if (seen === "never")
+      profile = durable ? { ...UNSEEN, durability: { value: "durable", evidence: "asserted" } } : UNSEEN;
+    const releases = seen === "never" && durable;
 
     // dev-a commits; its event is in the store, and no listing names it yet.
     const byA = await a.offload();
@@ -152,6 +156,10 @@ const delayedVisibility = async (seen: "at-commit" | "never"): Promise<void> => 
         b.engine.hooks.duringListing = undefined;
         store.settle();
       };
+    } else if (releases) {
+      // dev-a: released on a durable store, though no listing names its event yet.
+      expect(okOf(byA).snapshot).toBe(eventA.snapshot);
+      expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
     } else {
       // dev-a: committed, and its folder stays: the profile does not admit release.
       expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([6, "store.semantics-unknown"]);
@@ -161,11 +169,20 @@ const delayedVisibility = async (seen: "at-commit" | "never"): Promise<void> => 
     const byB = await b.offload();
     expect(b.engine.calls).toHaveLength(1); // it uploaded: the head check before the upload passed
     expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual(
-      seen === "at-commit" ? [8, "catalog.head-moved"] : [6, "store.semantics-unknown"],
+      seen === "at-commit"
+        ? [8, "catalog.head-moved"]
+        : releases
+          ? "released"
+          : [6, "store.semantics-unknown"],
     );
-    expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
-    expect(existsSync(`${b.dir()}.plainport`)).toBe(false);
-    if (seen === "never") {
+    if (releases) {
+      // dev-b: released too: its commit could not see A's event, and release does not wait for it.
+      expect(existsSync(`${b.dir()}.plainport`)).toBe(true);
+    } else {
+      expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+      expect(existsSync(`${b.dir()}.plainport`)).toBe(false);
+    }
+    if (seen === "never" && !releases) {
       // Each device keeps its offload journal at the commit, for recover to finish the release once admitted.
       for (const d of [a, b]) {
         const open = readdirSync(d.box.paths.journalDir)
@@ -330,11 +347,12 @@ export const SCHEDULES: readonly Schedule[] = [
     outcomes: {
       "dev-a": "commits; its event is invisible to B's listings for a while",
       "dev-b":
-        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork; while it is not, on a store whose profile does not admit release (lagging listings, writes acknowledged before they are synced), it commits and keeps its folder (store.semantics-unknown) until the event is seen as the fork it is. Both snapshots stay",
+        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release (writes acknowledged before they are synced) each device keeps its folder with its journal open (store.semantics-unknown) until recover finds the profile admits release; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
     },
     runInProcess: async () => {
       await delayedVisibility("at-commit");
       await delayedVisibility("never");
+      await delayedVisibility("never", true);
     },
   },
   {

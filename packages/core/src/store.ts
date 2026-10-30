@@ -260,31 +260,24 @@ export const resolveSecret = async (
 export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
   opener.secrets === undefined ? {} : { providers: opener.secrets };
 
-/**
- * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
- * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
- * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
- */
-export const resolveS3Credentials = async (
+type S3Read = { what: string; field: "secret" | "accessKeyId" | "secretAccessKey"; ref: string };
+
+/** An S3 store's references `reads`, one after another within one Q14 budget for all of them (review phase 4 M5). */
+const resolveS3Refs = async (
   io: LocalIo,
   env: Env,
   home: string,
   name: string,
-  store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what" | "field"> = {},
-): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
+  reads: readonly S3Read[],
+  options: Omit<SecretOptions, "what" | "field">,
+): Promise<Result<string[]>> => {
   const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
   // The budget's end stops the read in flight (a provider's child) as a cancel would.
   const stop = new AbortController();
   const onAbort = () => stop.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) stop.abort();
-  const reads = [
-    { what: "password", field: "secret", ref: store.secret },
-    { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
-    { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
-  ] as const;
-  let reading: (typeof reads)[number] = reads[0];
+  let reading = reads[0] as S3Read;
   const all = async (): Promise<Result<string[]>> => {
     const values: string[] = [];
     for (const read of reads) {
@@ -308,18 +301,65 @@ export const resolveS3Credentials = async (
       return secretMissing(
         name,
         reading.what,
-        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's three secrets share`,
+        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's ${reads.length === 3 ? "three" : "two"} secrets share`,
         provider === "keychain"
           ? "answer the Keychain prompt (or unlock the keychain), then re-run"
           : "check that the provider is reachable and signed in, then re-run",
       );
     }
-    if (!outcome.value.ok) return outcome.value;
-    const [password, accessKeyId, secretAccessKey] = outcome.value.value as [string, string, string];
-    return ok({ password, accessKeyId, secretAccessKey });
+    return outcome.value;
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
   }
+};
+
+const keyPairReads = (store: Extract<Store, { kind: "s3" }>): S3Read[] => [
+  { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
+  { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
+];
+
+/**
+ * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
+ * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
+ * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ */
+export const resolveS3Credentials = async (
+  io: LocalIo,
+  env: Env,
+  home: string,
+  name: string,
+  store: Extract<Store, { kind: "s3" }>,
+  options: Omit<SecretOptions, "what" | "field"> = {},
+): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
+  const read = await resolveS3Refs(
+    io,
+    env,
+    home,
+    name,
+    [{ what: "password", field: "secret", ref: store.secret }, ...keyPairReads(store)],
+    options,
+  );
+  if (!read.ok) return read;
+  const [password, accessKeyId, secretAccessKey] = read.value as [string, string, string];
+  return ok({ password, accessKeyId, secretAccessKey });
+};
+
+/**
+ * An S3 store's key pair alone, within one Q14 budget: what a view needs to read a plain catalog, which needs no
+ * restic password (D108, review phase 5 M2).
+ */
+export const resolveS3KeyPair = async (
+  io: LocalIo,
+  env: Env,
+  home: string,
+  name: string,
+  store: Extract<Store, { kind: "s3" }>,
+  options: Omit<SecretOptions, "what" | "field"> = {},
+): Promise<Result<StoreCredentials>> => {
+  const read = await resolveS3Refs(io, env, home, name, keyPairReads(store), options);
+  if (!read.ok) return read;
+  const [accessKeyId, secretAccessKey] = read.value as [string, string];
+  return ok({ accessKeyId, secretAccessKey });
 };
 
 /**

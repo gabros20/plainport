@@ -75,7 +75,7 @@ for (const backend of ["s3", "sftp"] as const satisfies readonly Backend[]) {
         if (!first.ok) throw new Error(`${first.finding.code}: ${first.finding.message}`);
         expect([first.value.stale, first.value.copied, first.value.findings]).toEqual([false, EVENTS, []]);
         expect(first.value.state.projects[PROJECT]?.head).toBe(idAt(500_000 + EVENTS));
-        // The identity file, then the sync's two: one listing, one batch read.
+        // The identity file (outside the sync), then the sync's two: one listing, one batch read; 3 runs in all (M4).
         expect(runs).toEqual(["cat", "lsjson", "copy"]);
 
         runs.length = 0;

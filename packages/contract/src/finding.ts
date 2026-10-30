@@ -45,7 +45,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, or names its snapshot's location in zero or several stores (stored-multiple, Q11); it is left out of the fold and never changed",
+      "A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, names its snapshot's location in zero or several stores (stored-multiple, Q11), or was listed by the store and not returned by the read; it is left out of the fold and never changed",
   },
   "catalog.head-uncertain": {
     severity: "block",
@@ -564,6 +564,13 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary: "The root has no folder on this device; fix is plainport root bind <root> <path>",
+  },
+  "store.assertion-ignored": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "config.toml asserts a semantics property of a remote store that this device measured otherwise; the measured value is kept, since an assertion only fills what the measurement leaves unknown (D111), and the message names both",
   },
   "store.bootstrap-contested": {
     severity: "block",

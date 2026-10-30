@@ -130,6 +130,12 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.assertion-ignored": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.bootstrap-contested": {
         severity: "block",
         allowable: false,

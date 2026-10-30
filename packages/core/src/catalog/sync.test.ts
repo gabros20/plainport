@@ -2,7 +2,7 @@
 // a deadline past which the read is given up for the mirror's stale state; a write path always reads the store fresh.
 
 import { describe, expect, test } from "bun:test";
-import { ok, type Result } from "@plainport/contract";
+import { fail, finding, ok, type Result } from "@plainport/contract";
 import type { Scheduler } from "../deadline.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-store.ts";
@@ -135,6 +135,34 @@ describe("catalog: the sync over a remote store (Task 21)", () => {
     expect(store.batches.at(-1)).toEqual([storeEventKey(idAt(1051))]);
   });
 
+  test("a listed event the batch read does not return is left out with a finding, and makes the store's heads uncertain (review phase 5 I5)", async () => {
+    const inner = await seeded(3);
+    const store = batching(inner);
+    const missed = storeEventKey(idAt(1003));
+    const getMany = store.getMany as NonNullable<BlobStore["getMany"]>;
+    let omit = true;
+    store.getMany = async (keys) => {
+      const got = await getMany(keys);
+      if (got.ok && omit) got.value.delete(missed);
+      return got;
+    };
+    const mirror = memoryBlobStore();
+    const first = await loadCatalog({ store, mirror, storeId: STORE_ID, now: NOW });
+    if (!first.ok) throw new Error(first.finding.message);
+    expect(first.value.copied).toBe(2);
+    const skipped = first.value.findings.filter((f) => f.code === "catalog.event-skipped");
+    expect(skipped.map((f) => f.message.includes("listed but not read"))).toEqual([true]);
+    expect(first.value.doubt.store).toEqual([idAt(1003)]);
+    // Not remembered: the next sync reads it again, and once it reads the doubt is gone.
+    const recorded = JSON.parse(new TextDecoder().decode(mirror.data.get(MIRROR_FILE_KEY)));
+    expect(recorded.skipped).toEqual({});
+    omit = false;
+    const again = await loadCatalog({ store, mirror, storeId: STORE_ID, now: NOW });
+    if (!again.ok) throw new Error(again.finding.message);
+    expect(again.value.doubt).toEqual({ store: [], projects: {} });
+    expect(again.value.state.projects[idAt(1)]?.head).toBe(idAt(503));
+  });
+
   test("a sync past its deadline is given up: the mirror's state comes back stale, and nothing more is written to it", async () => {
     const inner = await seeded(3);
     const mirror = memoryBlobStore();
@@ -169,6 +197,44 @@ describe("catalog: the sync over a remote store (Task 21)", () => {
     await Bun.sleep(20);
     expect(mirror.calls.put).toBe(0);
     expect(new TextDecoder().decode(mirror.data.get(MIRROR_FILE_KEY))).toBe(before);
+  });
+
+  test("a sync given up at its deadline aborts the store calls it left running (review phase 5 M1)", async () => {
+    const inner = await seeded(3);
+    const signals: AbortSignal[] = [];
+    // A store whose listing never answers by itself; it ends only when its call's signal is aborted.
+    const store: BlobStore = {
+      ...inner,
+      semantics: () => inner.semantics(),
+      capabilities: () => inner.capabilities(),
+      get: (key, opts) => {
+        if (opts?.signal !== undefined) signals.push(opts.signal);
+        return inner.get(key);
+      },
+      list: (_prefix, opts) =>
+        new Promise((resolve) => {
+          if (opts?.signal === undefined) return;
+          signals.push(opts.signal);
+          opts.signal.addEventListener("abort", () =>
+            resolve(fail(finding("process.cancelled", { message: "the listing was cancelled" }))),
+          );
+        }),
+    };
+    const timer = manualScheduler();
+    const reading = loadCatalog({
+      store,
+      mirror: memoryBlobStore(),
+      storeId: STORE_ID,
+      now: NOW,
+      deadline: { ms: 1000, scheduler: timer.scheduler, store: "nas" },
+    });
+    await Bun.sleep(5);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((s) => !s.aborted)).toBe(true);
+    timer.fire();
+    const read = await reading;
+    expect(read.ok && read.value.stale).toBe(true);
+    expect(signals.every((s) => s.aborted)).toBe(true);
   });
 
   test("a write path always reads fresh: a store that does not answer within the deadline refuses, never the mirror", async () => {

@@ -3,10 +3,10 @@
 // always point at the same place. The composition root implements it (blob-fs plus restic in M1; rclone and peer
 // stores follow); tests pass a fake engine.
 
-import type { Result } from "@plainport/contract";
+import type { Finding, Result } from "@plainport/contract";
 import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { Store } from "../config/schema.ts";
-import type { BlobStore } from "./blob-store.ts";
+import type { BlobStore, StoreSemantics } from "./blob-store.ts";
 import type { Engine } from "./engine.ts";
 import type { SecretProviders } from "./secrets.ts";
 
@@ -23,6 +23,8 @@ export interface OpenedStore {
   location?: string;
   /** An engine bound to the repository at `repo` under the store's root, with this password (bootstrap's). */
   engineAt?(repo: string): Engine;
+  /** Warnings about the store's configuration found while opening it (store.assertion-ignored, D111). */
+  findings?: readonly Finding[];
 }
 
 /** An S3 store's key pair, read from its own references (Q7), for the opener to give its two layers. */
@@ -45,4 +47,9 @@ export interface StoreOpener {
     password: string,
     credentials?: StoreCredentials,
   ): Promise<Result<OpenedStore>>;
+  /**
+   * The store's semantics profile alone, from config and this device's measurement: no secret is read and nothing is
+   * reached (recover's release gate, review phase 5 I2). Without it, a caller opens the store with no secret.
+   */
+  profile?(name: string, store: Store): Promise<Result<StoreSemantics>>;
 }

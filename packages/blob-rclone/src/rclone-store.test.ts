@@ -716,6 +716,30 @@ describe("review phase 4 (I2, I3, M1, M2, M6)", () => {
     expect(cancellable.specs).toHaveLength(1);
   });
 
+  test("a call's own signal reaches its run, beside the store's, so a caller's deadline stops the process group (review phase 5 M1)", async () => {
+    const store_ = new AbortController();
+    const { store, specs } = scripted(() => outcome(0, { stdout: "[]" }), { signal: store_.signal });
+    const call = new AbortController();
+    value(await store.list("", { signal: call.signal }));
+    const given = specs[0]?.signal as AbortSignal;
+    expect(given.aborted).toBe(false);
+    call.abort();
+    expect(given.aborted).toBe(true);
+    // The store's own signal still counts for a call that brings one.
+    const other = new AbortController();
+    value(await store.getMany(["meta/v1/a.json"], { signal: other.signal }));
+    const batch = specs.at(-1)?.signal as AbortSignal;
+    store_.abort();
+    expect(batch.aborted).toBe(true);
+    // An aborted call starts nothing.
+    const before = specs.length;
+    expect(await store.list("", { signal: call.signal })).toMatchObject({
+      ok: false,
+      finding: { code: "process.cancelled" },
+    });
+    expect(specs).toHaveLength(before);
+  });
+
   test("a store whose root folder is not there is store.unreachable, never an empty store (M3)", async () => {
     const missing = () => outcome(3, { stderr: "ERROR : error listing: directory not found\n" });
     const { store } = scripted(missing);

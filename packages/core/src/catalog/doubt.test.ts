@@ -207,6 +207,27 @@ describe("catalog: doubt without the clock (Task 21)", () => {
     expect(read.state.projects[PROJECT]?.head).toBe(s2.snapshot);
   });
 
+  test("a torn plain event whose prefix names its project keeps that project's doubt offline (review phase 5 M5)", async () => {
+    const { store, mirror, append, load } = await world();
+    await append(offloaded(head, s1));
+    const s2 = offloaded(idAt(HEAD_MS - 60_000), idAt(HEAD_MS - 60_001), { base: s1 });
+    const whole = encodePlain(CatalogEventSchema.parse(s2));
+    const text = new TextDecoder().decode(whole);
+    const cut = text.indexOf(`"project":"${PROJECT}"`) + `"project":"${PROJECT}"`.length + 4;
+    store.data.set(storeEventKey(s2.id), whole.subarray(0, cut));
+    expect((await load()).doubt).toEqual({ store: [], projects: { [PROJECT]: [s2.id] } });
+    const recorded = JSON.parse(new TextDecoder().decode(mirror.data.get(MIRROR_FILE_KEY)));
+    expect(recorded.skipped[s2.id]?.project).toBe(PROJECT);
+    // Offline, from the mirror: the same project's head is uncertain, and no other.
+    store.failNext("get", "store.unreachable");
+    const offline = await load();
+    expect(offline.stale).toBe(true);
+    expect(offline.doubt).toEqual({ store: [], projects: { [PROJECT]: [s2.id] } });
+    // Remembered with its project, it is still read again on every sync: the completed write clears it.
+    store.data.set(storeEventKey(s2.id), whole);
+    expect((await load()).doubt).toEqual({ store: [], projects: {} });
+  });
+
   test("a torn event cut before its project is remembered as skipped, and taints the store offline too", async () => {
     const { store, mirror, append, load } = await world();
     await append(offloaded(head, s1));

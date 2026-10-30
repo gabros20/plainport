@@ -14,14 +14,14 @@
 // RCLONE_CONFIG_PLAINPORT_ options), and are cut out of everything either says.
 //
 // A remote store's semantics profile (Q8) is what this device measured of it (the sidecar, Q4, while its facts still
-// hold) with what the owner asserts in config (stores.<name>.semantics, evidence `asserted`) over it; anything else is
-// unknown, so an operation the profile does not admit refuses (store.semantics-unknown). A local store's is blob-fs's
+// hold), with what the owner asserts in config (stores.<name>.semantics, evidence `asserted`) filling only what the
+// measurement leaves unknown (D111; a contradicted assertion is a warning); anything else is unknown, so an operation the profile does not admit refuses (store.semantics-unknown). A local store's is blob-fs's
 // own.
 
 import { join } from "node:path";
 import { fsBlobStore } from "@plainport/blob-fs";
 import { PINNED_RCLONE, type RcloneRemote, rcloneBlobStore } from "@plainport/blob-rclone";
-import { fail, finding, ok, type Result } from "@plainport/contract";
+import { type Finding, fail, finding, ok, type Result } from "@plainport/contract";
 import {
   type AssertedSemantics,
   type Env,
@@ -31,6 +31,7 @@ import {
   readRegistry,
   readStoreState,
   resolvePaths,
+  type SemanticProperty,
   type Store,
   type StoreCredentials,
   type StoreFacts,
@@ -74,24 +75,43 @@ export const storeFactsOf = (store: Store, home: string): StoreFacts => ({
   ...(store.kind === "sftp" || store.kind === "s3" ? { rclone: PINNED_RCLONE } : {}),
 });
 
-/** The profile `measured` (or unknown) with each property the owner asserts in config over it, as `asserted`. */
+/**
+ * The profile `measured` (or unknown) with each property the owner asserts in config filled in, as `asserted`, where
+ * the measurement leaves it unknown (D111). A measured value always wins: an assertion that contradicts it is ignored,
+ * with a warning naming both (store.assertion-ignored); one that agrees with it says nothing.
+ */
 export const withAssertions = (
+  name: string,
   measured: StoreSemantics,
   asserted: AssertedSemantics = {},
-): StoreSemantics => {
+): { semantics: StoreSemantics; findings: Finding[] } => {
   const out: Record<string, unknown> = { ...measured };
-  for (const [property, value] of Object.entries(asserted))
-    if (value !== undefined) out[property] = { value, evidence: "asserted" };
-  return out as StoreSemantics;
+  const findings: Finding[] = [];
+  for (const [property, value] of Object.entries(asserted)) {
+    if (value === undefined) continue;
+    const held = measured[property as SemanticProperty];
+    if (held === "unknown" || held.value === "unknown") {
+      out[property] = { value, evidence: "asserted" };
+      continue;
+    }
+    if (held.value === value) continue;
+    findings.push(
+      finding("store.assertion-ignored", {
+        message: `config.toml asserts stores.${name}.semantics.${property} = ${JSON.stringify(value)}, and this device measured ${property} as ${String(held.value)} (${held.evidence}); the measured value is kept`,
+        fix: `remove stores.${name}.semantics.${property} from config.toml; an assertion only fills what the measurement leaves unknown`,
+      }),
+    );
+  }
+  return { semantics: out as StoreSemantics, findings };
 };
 
-/** The remote store's profile: this device's measurement of it while its facts hold, under config's assertions. */
+/** The remote store's profile: this device's measurement of it while its facts hold, with config's assertions. */
 const profileOf = async (
   host: HostPorts,
   paths: PlainportPaths,
   name: string,
   store: RemoteStore,
-): Promise<Result<StoreSemantics>> => {
+): Promise<Result<{ semantics: StoreSemantics; findings: Finding[] }>> => {
   const registry = await readRegistry(host, paths);
   if (!registry.ok) return registry;
   const id = registry.value.stores?.[name];
@@ -101,7 +121,7 @@ const profileOf = async (
     if (!state.ok) return state;
     measured = state.value.measured?.semantics ?? UNKNOWN_SEMANTICS;
   }
-  return ok(withAssertions(measured, store.semantics));
+  return ok(withAssertions(name, measured, store.semantics));
 };
 
 /** The store's place, as engine-restic builds restic's location from it. */
@@ -159,6 +179,14 @@ export interface StoreOpenerOptions {
 export const storeOpener = (host: HostPorts, env: Env, options: StoreOpenerOptions = {}): StoreOpener => ({
   // keychain: and op: references, read through the one runner (Task 15); env: and file: are core's own.
   secrets: secretProviders({ run: (spec) => host.run(spec), env }),
+  profile: async (name, store) => {
+    if (store.kind === "peer") return ok(UNKNOWN_SEMANTICS);
+    const paths = resolvePaths(env);
+    if (!paths.ok) return paths;
+    if (store.kind === "local") return ok(fsBlobStore(host, storeRoot(store, paths.value.home)).semantics());
+    const profile = await profileOf(host, paths.value, name, store);
+    return profile.ok ? ok(profile.value.semantics) : profile;
+  },
   open: async (name, store, password, credentials) => {
     if (store.kind === "peer") {
       return fail(
@@ -202,19 +230,21 @@ export const storeOpener = (host: HostPorts, env: Env, options: StoreOpenerOptio
       });
     };
     let blob: ReturnType<typeof fsBlobStore> | ReturnType<typeof rcloneBlobStore>;
+    let findings: Finding[] = [];
     if (store.kind === "local") blob = fsBlobStore(host, storeRoot(store, paths.value.home));
     else {
       const rclone = await toolPath(host, "rclone", { env });
       if (!rclone.ok) return rclone;
       const semantics = await profileOf(host, paths.value, name, store);
       if (!semantics.ok) return semantics;
+      findings = semantics.value.findings;
       blob = rcloneBlobStore({
         host,
         rclone: rclone.value.path,
         remote: rcloneRemoteOf(store, credentials),
         paths: paths.value,
         env,
-        semantics: semantics.value,
+        semantics: semantics.value.semantics,
       });
     }
     return ok({
@@ -222,6 +252,7 @@ export const storeOpener = (host: HostPorts, env: Env, options: StoreOpenerOptio
       engine: publishedEngine(name, store, blob, engineAt),
       engineAt,
       location: storeLocationOf(store, paths.value.home),
+      ...(findings.length === 0 ? {} : { findings }),
     });
   },
 });

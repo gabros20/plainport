@@ -481,6 +481,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // A config assertion the measurement contradicts (D111) is said, and the measured value used.
+  for (const f of store.findings ?? []) report(f);
 
   // The project's ULID: the registry's, or a new one recorded there, under its lock, so two runs agree on it.
   const registered = await ensureRegistered(

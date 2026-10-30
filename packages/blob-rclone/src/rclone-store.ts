@@ -49,6 +49,7 @@ import {
   assertBlobPrefix,
   type BlobEntry,
   type BlobStore,
+  type CallOptions,
   capabilitiesOf,
   deleteGuard,
   type Env,
@@ -129,7 +130,7 @@ export interface RcloneBlobStoreOptions {
 }
 
 export interface RcloneBlobStore extends BlobStore {
-  getMany(keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>>;
+  getMany(keys: readonly string[], opts?: CallOptions): Promise<Result<Map<string, Uint8Array>>>;
   /**
    * Deletes this adapter's temporaries older than `olderThanMs` (by the time in their name); gc's sweep (D98). A value
    * below minSweepAgeMs is a bug and throws: a younger temporary may be another device's put in flight.
@@ -435,11 +436,19 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       .join("");
   };
 
-  /** One port call: the deadline every rclone run it makes shares. */
+  /** One port call: the deadline every rclone run it makes shares, and what cancels them (the store's, the call's). */
   interface Call {
     deadline: number;
+    signal?: AbortSignal;
   }
-  const newCall = (): Call => ({ deadline: host.clock.now().getTime() + callTimeoutMs });
+  const newCall = (opts: CallOptions = {}): Call => {
+    const signals = [options.signal, opts.signal].filter((s): s is AbortSignal => s !== undefined);
+    const signal = signals.length < 2 ? signals[0] : AbortSignal.any(signals);
+    return {
+      deadline: host.clock.now().getTime() + callTimeoutMs,
+      ...(signal === undefined ? {} : { signal }),
+    };
+  };
 
   const run = async (
     call: Call,
@@ -453,7 +462,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
         "",
         "connect through the system's ssh (the store's ssh option, which checks host keys) or set known_hosts_file, then re-run",
       );
-    if (options.signal?.aborted)
+    if (call.signal?.aborted)
       return fail(
         finding("process.cancelled", {
           message: `rclone ${command} was not started: the store call was cancelled`,
@@ -485,7 +494,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       env,
       idleTimeoutMs: options.idleTimeoutMs ?? 120_000,
       timeoutMs: Math.min(options.timeoutMs ?? 600_000, remaining),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(call.signal === undefined ? {} : { signal: call.signal }),
       ...(how.stdin === undefined ? {} : { stdin: how.stdin }),
       ...(how.capture ? { capture: { maxBytes: 1024 ** 3 } } : {}),
     };
@@ -779,9 +788,9 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   return {
     semantics: () => semantics,
     capabilities: () => capabilitiesOf(semantics),
-    get: (key) => {
+    get: (key, opts) => {
       assertBlobKey(key);
-      return get(newCall(), key);
+      return get(newCall(opts), key);
     },
     put: (key, data, opts: PutOptions = {}) => {
       assertCallerKey(key);
@@ -797,21 +806,21 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
         );
       return put(newCall(), key, data, opts.ifNotExists === true);
     },
-    list: (prefix) => {
+    list: (prefix, opts) => {
       assertBlobPrefix(prefix);
-      return list(newCall(), prefix);
+      return list(newCall(opts), prefix);
     },
-    stat: (key) => {
+    stat: (key, opts) => {
       assertBlobKey(key);
-      return stat(newCall(), key);
+      return stat(newCall(opts), key);
     },
     delete: (key) => {
       assertCallerKey(key);
       return remove(newCall(), key);
     },
-    getMany: (keys) => {
+    getMany: (keys, opts) => {
       for (const key of keys) assertBlobKey(key);
-      return getMany(newCall(), keys);
+      return getMany(newCall(opts), keys);
     },
     sweepTemporaries: (olderThanMs) => {
       if (!(olderThanMs >= minSweepAgeMs))

@@ -39,7 +39,7 @@ import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { SecretProvider } from "../ports/secrets.ts";
-import type { StoreOpener } from "../ports/store.ts";
+import type { StoreCredentials, StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { openSaga } from "../saga/journaled.ts";
@@ -3029,6 +3029,52 @@ describe("views read the mirror first, and resolve a secret only for a sealed ca
     seal: "sealed",
     storeId: parseStoreIdentity(store.data.get("meta/v1/store.json") as Uint8Array)?.id as string,
     key: new Uint8Array(32).fill(7),
+  });
+
+  // Review phase 5 M2 (judgement c): an S3 store opens only with its key pair, so views resolve the pair (never the
+  // restic password, for a plain catalog) within the same deadline.
+  const s3Config = () =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "s3"',
+        'endpoint = "https://s3.example.eu"',
+        'bucket = "plainport"',
+        'secret = "env:PLAINPORT_STORE_PASSWORD"',
+        'accessKeyId = "env:S3_KEY_ID"',
+        'secretAccessKey = "env:S3_SECRET"',
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+  /** Opens as the binary's opener does: an S3 store without its key pair is store.secret-missing. */
+  const pairing = (seen: [string, StoreCredentials | undefined][]): StoreOpener => ({
+    open: async (n, s, password, credentials) => {
+      seen.push([password, credentials]);
+      if (s.kind === "s3" && credentials === undefined)
+        return fail(finding("store.secret-missing", { message: "no key pair" }));
+      return opener.open(n, { kind: "local", path: "~/ssd" }, password);
+    },
+  });
+
+  test("a plain catalog on an S3 store reads live with its key pair and no restic password (review phase 5 M2)", async () => {
+    value(await offloadNow());
+    await web();
+    s3Config();
+    const seen: [string, StoreCredentials | undefined][] = [];
+    const view = await web({
+      opener: pairing(seen),
+      env: { HOME: box.home, PATH, S3_KEY_ID: "key-id", S3_SECRET: "key-secret" },
+    });
+    expect([view.stale, view.conditions]).toEqual([false, []]);
+    expect(seen).toEqual([["", { accessKeyId: "key-id", secretAccessKey: "key-secret" }]]);
+    // Without the pair, the mirror, with secret-unavailable.
+    const without = await web({ opener: pairing([]), env: { HOME: box.home, PATH } });
+    expect([without.stale, without.conditions]).toEqual([true, ["stale", "secret-unavailable"]]);
   });
 
   // Task 15: keychain: and op: references resolve through the providers the opener carries, under the same deadline;

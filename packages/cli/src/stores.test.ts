@@ -166,24 +166,46 @@ describe("the opener: an sftp store", () => {
     });
   });
 
-  test("this device's measurement counts while its facts hold, under config's assertions", async () => {
+  test("a measured value wins over config's assertion, which fills only what the measurement leaves unknown, and a contradiction is a warning naming both (D111)", async () => {
     const env = openerEnv();
     const paths = value(resolvePaths(env));
     const { host } = recordingHost();
     mkdirSync(paths.stateDir, { recursive: true });
     writeFileSync(paths.registryFile, `${JSON.stringify({ v: 1, projects: {}, stores: { nas: ID } })}\n`);
     const facts = storeFactsOf(store, paths.home);
-    value(await recordMeasured(host, paths, ID, facts, { semantics: SFTP_OPENSSH_PROFILE }));
+    const partly = { ...SFTP_OPENSSH_PROFILE, listComplete: "unknown" as const };
+    value(await recordMeasured(host, paths, ID, facts, { semantics: partly }));
     const opened = value(
-      await storeOpener(host, env).open("nas", { ...store, semantics: { durability: "durable" } }, "pw"),
+      await storeOpener(host, env).open(
+        "nas",
+        { ...store, semantics: { durability: "durable", listComplete: true, readAfterWrite: true } },
+        "pw",
+      ),
     );
+    // durability stays measured (acked-unsynced); listComplete, unknown to the measurement, is the owner's.
     expect(opened.blob.semantics()).toEqual({
       ...SFTP_OPENSSH_PROFILE,
+      listComplete: { value: true, evidence: "asserted" },
+    });
+    // The assertion that agrees with the measurement says nothing; the one that contradicts it is a warning.
+    expect(opened.findings?.map((f) => [f.code, f.severity])).toEqual([["store.assertion-ignored", "warn"]]);
+    const said = opened.findings?.[0]?.message ?? "";
+    expect(said).toContain("stores.nas.semantics.durability");
+    expect(said).toContain("durable");
+    expect(said).toContain("acked-unsynced (measured)");
+    // Moved to another host: the measurement no longer holds, and the assertions fill the profile.
+    const moved = value(
+      await storeOpener(host, env).open(
+        "nas",
+        { ...store, host: "nas2", semantics: { durability: "durable" } },
+        "pw",
+      ),
+    );
+    expect(moved.blob.semantics()).toEqual({
+      ...UNKNOWN_SEMANTICS,
       durability: { value: "durable", evidence: "asserted" },
     });
-    // Moved to another host: the measurement no longer holds.
-    const moved = value(await storeOpener(host, env).open("nas", { ...store, host: "nas2" }, "pw"));
-    expect(moved.blob.semantics()).toEqual(UNKNOWN_SEMANTICS);
+    expect(moved.findings ?? []).toEqual([]);
   });
 });
 
@@ -198,6 +220,18 @@ describe("the opener: an s3 store", () => {
     accessKeyId: "env:KEY_ID",
     secretAccessKey: "env:SECRET_KEY",
   };
+
+  test("the profile alone needs no secret and reaches nothing: recover's release gate (review phase 5 I2)", async () => {
+    const { host, calls } = recordingHost();
+    const profile = storeOpener(host, openerEnv()).profile;
+    if (profile === undefined) throw new Error("the binary's opener gives the profile alone");
+    // No key pair, no password: an open would refuse (store.secret-missing); the profile does not need them.
+    expect(value(await profile("b2", { ...store, semantics: { durability: "durable" } }))).toEqual({
+      ...UNKNOWN_SEMANTICS,
+      durability: { value: "durable", evidence: "asserted" },
+    });
+    expect(calls).toEqual([]);
+  });
 
   test("the key pair reaches restic and rclone in their environment only; both address <bucket>/<path>", async () => {
     const password = makeCanary("password");

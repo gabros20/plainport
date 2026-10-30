@@ -2799,6 +2799,12 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
     expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.semantics-unknown"]);
     expect(result.ok ? "" : result.finding.message).toContain("committed");
     expect(result.ok ? "" : result.finding.message).toContain("durability is acked-unsynced (measured)");
+    // A measured property cannot be asserted away (D111), and this build has no held release: the fix says so,
+    // and promises no post-grace proof (review phase 5, judgement a).
+    const fix = result.ok ? "" : (result.finding.fix ?? "");
+    expect(fix).not.toContain("Q21");
+    expect(fix).not.toContain("semantics.durability");
+    expect(fix).toContain("not in this build");
     // Committed: the snapshot is the head on the store.
     expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
     // Kept: the folder as it was, no stub, no trash.
@@ -2814,11 +2820,81 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
     await offload({}, { opener: profiled("acked-unsynced") });
     const held = await recoverWith(profiled("acked-unsynced"));
     expect(held.ok ? "" : held.finding.code).toBe("store.semantics-unknown");
+    // A property the measurement left unknown is the owner's to assert: then the fix names its key.
+    const unknown = await recoverWith({
+      ...profiled("acked-unsynced"),
+      profile: async () => ok({ ...store.semantics(), durability: "unknown" }),
+    });
+    expect(unknown.ok ? "" : unknown.finding.fix).toContain('stores.nas.semantics.durability = "durable"');
     expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
     expect((await readJournals(testHost(), box.paths)).journals).toHaveLength(1);
 
     const done = value(await recoverWith(profiled("durable")));
     expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
     expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+  });
+
+  test("recover keeps the folder when the journal's store is no longer the configured one: the gate fails closed (review phase 5 I1)", async () => {
+    const id = value(await readStoreIdentity(store)) ?? "";
+    const other = "01JC0000000000000000000000";
+    const configs: [string, string[], string][] = [
+      // The store taken out of config.
+      ["removed", ["version = 1", "[roots.work]", 'on = { mbp = "~/work" }'], id],
+      // Another store given its name.
+      ["another id", NAS, other],
+      // The name pointed at a local folder: not the store the offload committed to.
+      ["now local", [...NAS.slice(0, 3), 'kind = "local"', 'path = "~/elsewhere"', ...NAS.slice(7)], other],
+    ];
+    await offload({}, { opener: profiled("acked-unsynced") });
+    for (const [what, config, pinned] of configs) {
+      box.file(".config/plainport/config.toml", config.join("\n"));
+      value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: pinned } })));
+      const held = await recoverWith(profiled("durable"));
+      expect([what, held.ok ? "released" : held.finding.code]).toEqual([what, "store.not-set-up"]);
+      expect(held.ok ? "" : held.finding.message).toContain(id);
+      expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+      expect((await readJournals(testHost(), box.paths)).journals.map((j) => j.step)).toEqual([
+        "offload.committed",
+      ]);
+    }
+  });
+
+  test("recover's gate reads the opener's profile, which needs no secret, not an opened store's (review phase 5 I2)", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    // Opened with its secrets the store says acked-unsynced; its profile alone, from config and the measurement,
+    // says durable. The gate asks the profile.
+    const opener: StoreOpener = {
+      ...profiled("acked-unsynced"),
+      profile: async () =>
+        ok({ ...store.semantics(), durability: { value: "durable", evidence: "asserted" } }),
+    };
+    const done = value(await recoverWith(opener));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+  });
+
+  test("a release past the rename is finished without the gate or the store's secrets (review phase 5 I2)", async () => {
+    const crashed = offload(
+      {},
+      { opener: profiled("durable"), host: testHost({ faults: { at: "offload.release.stub" } }) },
+    );
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+    // Neither the profile (it no longer admits release) nor a secret is needed to finish what has moved.
+    const failing: StoreOpener = {
+      open: async () => fail(finding("store.secret-missing", { message: "no secret in a cron recover" })),
+    };
+    const done = await recover({
+      host: testHost(),
+      paths: box.paths,
+      device,
+      env: { HOME: box.home, PATH },
+      loader: new ConfigLoader(testHost(), box.paths),
+      opener: failing,
+      openMirror: async () => ({ ok: true, value: mirror }),
+      log: () => {},
+    });
+    expect(value(done).operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
   });
 });

@@ -349,9 +349,14 @@ export const MirrorFileSchema = z
     fold: z.int().positive(),
     lastSyncedAt: z.iso.datetime(),
     /** Store files whose bytes are no event (torn, not JSON), by event id: not fetched again while their size is the
-     * same and the reader is the same version, and reported each time. A file this version cannot use although it is
-     * JSON (a type or schema it does not know) is never listed here: it is read again on every sync. */
-    skipped: z.record(z.string(), z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema })),
+     * same and the reader is the same version, and reported each time. One whose bytes name its project (D110) keeps
+     * that project, so an offline view keeps its doubt to that project (review phase 5 M5), and is read again on every
+     * sync. A file this version cannot use although it is JSON (a type or schema it does not know) is never listed
+     * here: it is read again on every sync. */
+    skipped: z.record(
+      z.string(),
+      z.strictObject({ size: z.int().nonnegative(), finding: FindingSchema, project: UlidSchema.optional() }),
+    ),
     /** The size of the store file each mirrored event was opened from, by event id: the mirror holds opened bytes,
      * so a sealed store's files differ in size from their copies. A file is fetched again when its size on the store
      * is not this one, and the fold cache's digest is taken over these sizes. Recorded only where it differs from the
@@ -562,7 +567,8 @@ const download = async (
  * Brings the mirror up to the store: one listing of each, then one batch read (getMany) of the files the mirror does
  * not hold under the same name and size and that this version of the reader has not already found to be no event at
  * that size (I7: a list an older or newer reader made is started afresh, and JSON this version cannot use is never on
- * it, nor a broken file whose bytes name its project, which is read again until it reads). It only downloads: a read
+ * it; a broken file whose bytes name its project is on it with that project, and read again until it reads). A file
+ * listed and not returned by the batch read is left out with a finding, and makes every head uncertain (I5). It only downloads: a read
  * never writes to a store (D45). Returns the mirror's listing as it stands afterwards.
  */
 const syncDown = async (
@@ -609,7 +615,8 @@ const syncDown = async (
       continue;
     }
     const before = known[id];
-    if (before !== undefined && before.size === size) {
+    // One that names its project is read again until it reads (a torn write its writer completes).
+    if (before !== undefined && before.size === size && before.project === undefined) {
       // Remembered only when its bytes could not say whose event it is: it may be any project's.
       skippedNow[id] = before;
       findings.push(before.finding);
@@ -630,7 +637,18 @@ const syncDown = async (
   let copied = 0;
   for (const [id, size] of wanted) {
     const bytes = fetched.value.get(keyOf(remote, id));
-    if (bytes === undefined) continue; // removed since the listing (a store's own cleanup); nothing to fold
+    if (bytes === undefined) {
+      // Listed, and not read: events are never deleted, so it is there and unread (a listing ahead of its reads, or a
+      // copy that missed it). It may be any project's: every head on the store is uncertain until a sync reads it.
+      findings.push(
+        skipped(
+          keyOf(remote, id),
+          "the store listed it but the batch read did not return it (listed but not read)",
+        ),
+      );
+      left.push({ id, heads: true });
+      continue;
+    }
     const result = await download(remote, mirror, id, bytes);
     if (!result.ok) return result;
     if ("transport" in result.value) {
@@ -639,7 +657,12 @@ const syncDown = async (
       copied++;
     } else {
       const skip = result.value;
-      if (skip.bytes && skip.project === undefined) skippedNow[id] = { size, finding: skip.finding };
+      if (skip.bytes)
+        skippedNow[id] = {
+          size,
+          finding: skip.finding,
+          ...(skip.project === undefined ? {} : { project: skip.project }),
+        };
       findings.push(skip.finding);
       if (skip.taint !== undefined) tainted.push(skip.taint);
       const out = leftOf(keyOf(remote, id), skip);
@@ -690,7 +713,8 @@ const readOffline = async (
   if (!listed.ok) return listed;
   const folded = await foldMirror(mirror, listed.value, recorded.value?.transport ?? {});
   if (!folded.ok) return folded;
-  // The store's files remembered as no event could not say whose they are. What else the store holds that this
+  // The store's files remembered as no event: each taints the project its bytes name, or every head when they name
+  // none (D110). What else the store holds that this
   // version cannot use (stored-multiple, a type or seal it cannot read) the mirror never holds: offline views cannot
   // show that doubt, and every write reads the store itself.
   const remembered = Object.entries(recorded.value?.skipped ?? {});
@@ -700,7 +724,14 @@ const readOffline = async (
     ...fold,
     findings,
     uncertain: uncertainEvents(findings),
-    doubt: doubtOf([...remembered.map(([id]) => ({ id, heads: true })), ...left]),
+    doubt: doubtOf([
+      ...remembered.map(([id, entry]) => ({
+        id,
+        heads: true,
+        ...(entry.project === undefined ? {} : { project: entry.project }),
+      })),
+      ...left,
+    ]),
     tainted: [],
     stale: true,
     source: "mirror",
@@ -740,6 +771,23 @@ const untilAbandoned = (mirror: BlobStore, abandoned: () => boolean, store: stri
   };
 };
 
+/** The store, each of whose reads carries `signal`. */
+const cancelledBy = (store: BlobStore, signal: AbortSignal): BlobStore => ({
+  semantics: () => store.semantics(),
+  capabilities: () => store.capabilities(),
+  get: (key) => store.get(key, { signal }),
+  list: (prefix) => store.list(prefix, { signal }),
+  stat: (key) => store.stat(key, { signal }),
+  put: (key, data, opts) => store.put(key, data, opts),
+  delete: (key) => store.delete(key),
+  ...(store.getMany === undefined
+    ? {}
+    : {
+        getMany: (keys: readonly string[]) =>
+          (store.getMany as NonNullable<BlobStore["getMany"]>)(keys, { signal }),
+      }),
+});
+
 export interface CatalogLoadOptions {
   store: BlobStore;
   mirror: BlobStore;
@@ -773,12 +821,19 @@ export const loadCatalog = async (options: CatalogLoadOptions): Promise<Result<L
   if (deadline === undefined) return loadOnline(options);
   let abandoned = false;
   const name = deadline.store ?? options.storeId;
+  // Giving up stops the store's reads in flight too (a remote store's child process group), not only the wait (M1).
+  const stop = new AbortController();
   const loading = await withinDeadline(
-    loadOnline({ ...options, mirror: untilAbandoned(options.mirror, () => abandoned, name) }),
+    loadOnline({
+      ...options,
+      store: cancelledBy(options.store, stop.signal),
+      mirror: untilAbandoned(options.mirror, () => abandoned, name),
+    }),
     deadline.ms,
     deadline.scheduler ?? realScheduler,
   );
   abandoned = loading.timedOut;
+  if (loading.timedOut) stop.abort();
   if (!loading.timedOut) return loading.value;
   return readOffline(
     mirrorEventLog(options.mirror),

@@ -72,6 +72,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { readRegistry } from "../registry.ts";
 import { type RecoveredBootstrap, recoverBootstraps } from "../saga/bootstrap.ts";
 import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
 import type { OffloadStep } from "../saga/offload.ts";
@@ -83,7 +84,13 @@ import {
   registeredFolders,
   withProjectLock,
 } from "../saga/project-gate.ts";
-import { type OffloadConflict, offloadTrashOf, releaseOffload, rootFolderOf } from "../saga/release.ts";
+import {
+  type OffloadConflict,
+  offloadTrashOf,
+  releaseMoved,
+  releaseOffload,
+  rootFolderOf,
+} from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
 import { type ConfiguredStore, openBootstrapStore, openStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
@@ -815,24 +822,38 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
 
   /**
    * The store's profile, which release checks before the folder moves: a remote store's, from its opener (config and
-   * this device's measurement; nothing is reached). A local store has every property, so it is not opened.
+   * this device's measurement; no secret is read and nothing is reached, I2). A local store has every property, so it
+   * is not asked. Once the folder has moved no gate applies. The gate fails closed (I1): a journal whose store config
+   * no longer names, or names for another store (another id pinned), is pending, its folder kept.
    */
   async function releaseStore(
     journal: OffloadJournal,
   ): Promise<Result<{ name: string; semantics: StoreSemantics } | undefined>> {
+    if (releaseMoved(journal)) return ok(undefined);
+    const { name, id } = journal.store;
     const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
     if (!loaded.ok) return loaded;
-    const configured = loaded.value.config.stores[journal.store.name];
-    if (configured === undefined || configured.kind === "local") return ok(undefined);
-    const opened = await openStore(io, {
-      paths,
-      env: deps.env,
-      name: journal.store.name,
-      config: loaded.value.config,
-      opener: deps.opener,
-    });
+    const registry = await readRegistry(io, paths);
+    if (!registry.ok) return registry;
+    const configured = loaded.value.config.stores[name];
+    const pinned = registry.value.stores?.[name];
+    if (configured === undefined || pinned !== id) {
+      return fail(
+        finding("store.not-set-up", {
+          message: `the offload ${journal.op} of ${journal.project.address} committed to store ${name} (id ${id}), and ${configured === undefined ? `no store named ${name} is configured now` : `the store this device knows as ${name} is ${pinned === undefined ? "not set up" : `another one (id ${pinned})`}`}; its folder was kept`,
+          fix: `point stores.${name} in config.toml back at the store with id ${id}, then run plainport recover`,
+          paths: [journal.project.dir],
+        }),
+      );
+    }
+    if (configured.kind === "local") return ok(undefined);
+    if (deps.opener.profile !== undefined) {
+      const profile = await deps.opener.profile(name, configured);
+      return profile.ok ? ok({ name, semantics: profile.value }) : profile;
+    }
+    const opened = await deps.opener.open(name, configured, "");
     if (!opened.ok) return opened;
-    return ok({ name: journal.store.name, semantics: opened.value.blob.semantics() });
+    return ok({ name, semantics: opened.value.blob.semantics() });
   }
 
   /** Finishes a committed offload's release, as the live saga does (releaseOffload, D51). */
