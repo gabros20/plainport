@@ -10,7 +10,7 @@
 // claimed. Otherwise the suite waits for visibility: the fixture's settle() when it has one (the fakes), else
 // polling within a bound.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, test as bunTest, describe, expect } from "bun:test";
 import {
   type BlobEntry,
   type BlobStore,
@@ -120,6 +120,12 @@ export interface ContractOptions extends SemanticProbeOptions {
    * seconds on a slow volume, such as the exFAT disk image on a CI runner.
    */
   probeTimeout?: number;
+  /**
+   * How long every other case, and the fixture's make and cleanup around it, is given (milliseconds; default bun's
+   * 5 s). A remote store pays a connection per call (an SFTP put through ssh is two), and the listing case makes ten
+   * calls: on a CI runner that is more than 5 s, and a case cut by its timeout has its running rclone killed.
+   */
+  testTimeout?: number;
 }
 
 const PUBLICATION_PROBE_BYTES = 256 * 1024;
@@ -271,6 +277,9 @@ export const blobStoreContract = (
   options: ContractOptions,
 ): void => {
   describe(`${name}: BlobStore contract`, () => {
+    // Every case gets the fixture's budget unless it names its own.
+    const test = (title: string, fn: Parameters<typeof bunTest>[1], timeout = options.testTimeout) =>
+      bunTest(title, fn, timeout);
     let fixture: BlobStoreFixture;
     let store: BlobStore;
     let raw: boolean;
@@ -283,10 +292,10 @@ export const blobStoreContract = (
       raw = semanticValue(semantics.readAfterWrite) === true;
       law = semanticValue(semantics.listAfterWrite) === true;
       conditional = semanticValue(semantics.conditionalCreate) === true;
-    });
+    }, options.testTimeout);
     afterEach(async () => {
       await fixture.cleanup();
-    });
+    }, options.testTimeout);
 
     /** A read after a write: at once where the profile promises it, else once the write shows. */
     const read = async (key: string, done: (seen: Uint8Array | null) => boolean) =>
