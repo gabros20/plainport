@@ -23,7 +23,7 @@ import {
   semanticBlobStore,
 } from "../../packages/core/src/testing/semantic-blob-store.ts";
 import { allEvents, type FakeDevice, fakeDevices } from "./fake-devices.ts";
-import { type Device, type Devices, envelope, expectCode } from "./two-devices.ts";
+import { type Device, type Devices, envelope, expectCode, type Ran } from "./two-devices.ts";
 
 export interface Schedule {
   id: string;
@@ -50,15 +50,20 @@ const projectId = async (world: Devices): Promise<string> => {
   return event.project;
 };
 
-/** Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. */
+/**
+ * Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. `unseen`
+ * names, by device, the events its release's catalog read could not have seen (Q16's residual).
+ */
 export const expectInvariants = async (
   world: Devices,
   before: { events: Awaited<ReturnType<Devices["events"]>>; snapshots: readonly string[] },
+  unseen: Readonly<Record<string, readonly string[]>> = {},
 ): Promise<void> => {
   const id = await projectId(world);
   for (const d of world.devices) {
     await d.settled();
-    expect({ device: d.name, problems: await invariantViolations(await d.subject(id)) }).toEqual({
+    const subject = { ...(await d.subject(id)), unseen: unseen[d.name] ?? [] };
+    expect({ device: d.name, problems: await invariantViolations(subject) }).toEqual({
       device: d.name,
       problems: [],
     });
@@ -85,6 +90,31 @@ const bothOnloaded = async (world: Devices, a: Device, b: Device): Promise<void>
   // The default leases ("warn") let the second working copy happen, with lease.held.
   expectCode(await a.run(ONLOAD()), 0, `${a.name}: onload`);
 };
+
+/** The id of the offloaded event `d` wrote for `snapshot`. */
+const eventOf = async (world: Devices, d: Device, snapshot: string): Promise<string> => {
+  const event = (await world.events()).find(
+    (e) => e.type === "offloaded" && e.snapshot === snapshot && e.device === d.id,
+  );
+  if (event === undefined) throw new Error(`${d.name} wrote no offloaded event for ${snapshot}`);
+  return event.id;
+};
+
+/** A device's registry entry for the web project: its base is the snapshot its copy is on. */
+const baseOf = (d: Device): string | undefined => {
+  const registry = JSON.parse(readFileSync(d.paths.registryFile, "utf8")) as {
+    projects: Record<string, { path: string; base?: string }>;
+  };
+  return Object.values(registry.projects).find((e) => e.path === "web")?.base;
+};
+
+/** The offload journals open on a device's disk. */
+const openJournals = (journalDir: string): { kind: string; step: string }[] =>
+  existsSync(journalDir)
+    ? readdirSync(journalDir)
+        .filter((f) => f.endsWith(".json"))
+        .map((f) => JSON.parse(readFileSync(join(journalDir, f), "utf8")) as { kind: string; step: string })
+    : [];
 
 /**
  * A profile without list-after-write whose acknowledged writes may not be synced (SFTP's, measured, Task 17), so it
@@ -228,6 +258,9 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
           store: { name: "ssd", blob: store, engine: d.engine },
           ...(d.released === undefined ? {} : { released: d.released }),
           stripped: ["node_modules"],
+          // What each release read could not see (Q16): B's event came after A's release, and A's was not listed yet
+          // when B's release read the catalog.
+          unseen: d === a ? (ofB === undefined ? [] : [ofB.id]) : [eventA.id],
         }),
       }).toEqual({ device: d.name, problems: [] });
     }
@@ -242,6 +275,122 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
   } finally {
     for (const d of [a, b]) await d.box.cleanupSettled();
   }
+};
+
+/**
+ * S5: dev-a's offloaded event lands and its acknowledgement is lost, while dev-b uploads. dev-a never heard: its
+ * journal stays at commit.start with its folder untouched. dev-b's commit sees dev-a's event like any other and keeps
+ * its snapshot as a fork (F1). dev-a's recover finds its own event on the store, so it committed, and its re-read sees
+ * dev-b's fork: its folder stays on its own snapshot (F2).
+ */
+const lostAcknowledgement = async (): Promise<void> => {
+  const store = semanticBlobStore();
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    okOf(await a.offload());
+    for (let i = 0; i < 400 && existsSync(join(a.box.home, "work/.plainport-trash")); i++)
+      await Bun.sleep(25);
+    okOf(await b.onload());
+    okOf(await a.onload());
+    writeFileSync(join(a.dir(), "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+    const before = {
+      events: await allEvents(store),
+      snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+    };
+
+    // dev-b uploads; meanwhile dev-a's append lands and its acknowledgement is lost.
+    let byA: Awaited<ReturnType<FakeDevice["offload"]>> | undefined;
+    b.engine.hooks.duringSnapshot = async () => {
+      b.engine.hooks.duringSnapshot = undefined;
+      store.loseAckNext();
+      byA = await a.offload();
+    };
+    const byB = await b.offload();
+    // dev-a: never heard; its journal stays at commit.start, its folder as it was, no stub.
+    expect(byA === undefined || byA.ok ? "heard" : [byA.exitCode, byA.finding.code]).toEqual([
+      9,
+      "store.unreachable",
+    ]);
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.commit.start"]);
+    expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+    const eventA = (await allEvents(store)).find(
+      (e) => e.type === "offloaded" && e.device === a.device.id && !before.events.some((x) => x.id === e.id),
+    );
+    if (eventA?.type !== "offloaded") throw new Error("dev-a's event did not land");
+    // dev-b: sees dev-a's event at its commit like any other: a fork (F1), its folder kept on its own snapshot.
+    expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const forkB = byB.ok ? undefined : (byB.data as { kind: string; detail?: string; snapshot: string });
+    expect([forkB?.kind, forkB?.detail]).toEqual(["fork", undefined]);
+    expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+    expect((await b.entry())?.base).toBe(forkB?.snapshot);
+
+    // dev-a's recover finds its event, so the offload committed; its re-read sees dev-b's fork (F2).
+    const recovered = await a.recover();
+    const report = (recovered.ok ? recovered.value : recovered.data) as {
+      operations: { step: string; outcome: string; state: string; snapshot: string }[];
+    };
+    expect(report.operations.map((o) => [o.step, o.outcome, o.state])).toEqual([
+      ["offload.commit.start", "forked", "conflicted"],
+    ]);
+    expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+    expect((await a.entry())?.base).toBe(eventA.snapshot);
+    expect(openJournals(a.box.paths.journalDir)).toEqual([]);
+    const project = foldCatalog(await allEvents(store)).projects[eventA.project];
+    expect(project?.conflicts.flat().sort()).toEqual([eventA.snapshot, forkB?.snapshot as string].sort());
+
+    for (const d of [a, b])
+      expect({
+        device: d.name,
+        problems: await invariantViolations({
+          now: new Date(),
+          paths: d.box.paths,
+          device: d.device.id,
+          project: { id: eventA.project, dir: d.dir() },
+          roots: [join(d.box.home, "work")],
+          store: { name: "ssd", blob: store, engine: d.engine },
+          stripped: ["node_modules"],
+        }),
+      }).toEqual({ device: d.name, problems: [] });
+    expect(
+      catalogInvariantViolations({
+        events: await allEvents(store),
+        eventsBefore: before.events,
+        snapshotsBefore: before.snapshots,
+        snapshotsNow: a.engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/** Both devices' offloads, each with an edit of its own, about to race. */
+const editBoth = async (a: Device, b: Device) => {
+  await Bun.write(`${a.dir()}/src/a.ts`, "export const a = 1;\n");
+  await Bun.write(`${b.dir()}/src/b.ts`, "export const b = 1;\n");
+};
+
+/** exit 8's data, kind fork after the commit (F2): the folder kept with its edit, no stub, its base its snapshot. */
+const expectKeptAfterCommit = async (d: Device, ran: Ran, edit: string) => {
+  expectCode(ran, 8, `${d.name}: offload`);
+  expect(envelope(ran)?.error?.finding?.code).toBe("catalog.head-moved");
+  const data = envelope(ran)?.data;
+  expect([data?.exitCode, data?.kind, data?.detail, data?.project]).toEqual([
+    8,
+    "fork",
+    "after-commit",
+    "work:web",
+  ]);
+  expect(await Bun.file(`${d.dir()}/src/${edit}.ts`).text()).toBe(`export const ${edit} = 1;\n`);
+  expect(await Bun.file(`${d.dir()}.plainport`).exists()).toBe(false);
+  expect(baseOf(d)).toBe(data?.snapshot as string);
+  expect(openJournals(d.paths.journalDir)).toEqual([]);
+  return data?.snapshot as string;
 };
 
 export const SCHEDULES: readonly Schedule[] = [
@@ -292,30 +441,86 @@ export const SCHEDULES: readonly Schedule[] = [
       expect(project?.conflicts.flat().sort()).toEqual(
         [committed?.snapshot as string, forked?.snapshot as string].sort(),
       );
-      await expectInvariants(world, before);
+      // dev-b's fork was appended after dev-a's release read the catalog: Q16's residual for dev-a.
+      await expectInvariants(world, before, {
+        "dev-a": [await eventOf(world, b, forked?.snapshot as string)],
+      });
     },
   },
   {
     id: "S2",
     title: "both checked: both pass the head check, then both append",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "the first to append commits; it keeps its folder if it sees the fork at its re-read, else releases it",
+        "the first to append commits; it keeps its folder if it sees the fork at its re-read (here: dev-b appends before it), else releases it. Kept: exit 8, kind fork, detail after-commit, no stub, its base its own snapshot, its journal closed",
       "dev-b":
-        "the second sees the fork at its commit or re-read and keeps its folder; both snapshots are kept",
+        "the second appends too, having passed its head check, and sees the fork at its re-read: exit 8, kind fork, detail after-commit; it keeps its folder on its own snapshot. Both snapshots are kept and the project is conflicted",
+    },
+    run: async (world) => {
+      const a = world.device("dev-a");
+      const b = world.device("dev-b");
+      await bothOnloaded(world, a, b);
+      const before = { events: await world.events(), snapshots: await world.snapshots() };
+      await editBoth(a, b);
+
+      // dev-b passes its commit's head check and stands there; dev-a passes its own, appends, and stands committed.
+      const offloadB = b.start(OFFLOAD(), { pauseAt: "offload.head-checked" });
+      await offloadB.paused();
+      const offloadA = a.start(OFFLOAD(), { pauseAt: "offload.committed" });
+      await offloadA.paused();
+      // dev-b appends now; its re-read sees dev-a's commit. Then dev-a's re-read sees dev-b's.
+      offloadB.resume();
+      const byB = await offloadB.done;
+      offloadA.resume();
+      const byA = await offloadA.done;
+
+      const snapA = await expectKeptAfterCommit(a, byA, "a");
+      const snapB = await expectKeptAfterCommit(b, byB, "b");
+      const project = foldCatalog(await world.events()).projects[await projectId(world)];
+      expect(project?.status).toBe("conflicted");
+      expect(project?.conflicts.flat().sort()).toEqual([snapA, snapB].sort());
+      await expectInvariants(world, before);
     },
   },
   {
     id: "S3",
     title: "asymmetric: A appends and releases before B appends (Q16's residual)",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "releases its folder; on a remote store the trash is held for the conflict grace and kept as conflict-retained once B's fork names it",
-      "dev-b": "forks and keeps its folder; both snapshots stay in the store and the catalog",
+        "reaches F3: its re-read sees no fork, so it releases its folder and its stub names its snapshot; on a remote store the trash is held for the conflict grace and kept as conflict-retained once B's fork names it (Task 24)",
+      "dev-b":
+        "passed its head check before A appended, so it appends too and sees the fork at its re-read (F2): exit 8, kind fork, detail after-commit; it keeps its folder on its own snapshot. Both snapshots stay in the store and the catalog",
+    },
+    run: async (world) => {
+      const a = world.device("dev-a");
+      const b = world.device("dev-b");
+      await bothOnloaded(world, a, b);
+      const before = { events: await world.events(), snapshots: await world.snapshots() };
+      await editBoth(a, b);
+
+      // dev-b passes its commit's head check and stands there while dev-a offloads to its end.
+      const offloadB = b.start(OFFLOAD(), { pauseAt: "offload.head-checked" });
+      await offloadB.paused();
+      const byA = await a.run(OFFLOAD());
+      expectCode(byA, 0, "dev-a: offload");
+      const released = envelope(byA)?.data;
+      await a.settled();
+      offloadB.resume();
+      const byB = await offloadB.done;
+
+      // dev-a: F3, released.
+      expect(await Bun.file(a.dir()).exists()).toBe(false);
+      expect((await Bun.file(`${a.dir()}.plainport`).json()).snapshot).toBe(released?.snapshot);
+      expect(baseOf(a)).toBe(released?.snapshot as string);
+      // dev-b: F2, kept.
+      const snapB = await expectKeptAfterCommit(b, byB, "b");
+      const project = foldCatalog(await world.events()).projects[await projectId(world)];
+      expect(project?.status).toBe("conflicted");
+      expect(project?.conflicts.flat().sort()).toEqual([released?.snapshot as string, snapB].sort());
+      // dev-b's event came after dev-a's release read the catalog: Q16's residual for dev-a.
+      await expectInvariants(world, before, { "dev-a": [await eventOf(world, b, snapB)] });
     },
   },
   {
@@ -332,13 +537,14 @@ export const SCHEDULES: readonly Schedule[] = [
   {
     id: "S5",
     title: "lost acknowledgement at the event append",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "its append landed but it never heard so: the journal stays, and recover finds the event and goes on",
-      "dev-b": "sees A's event like any other and forks or keeps going as the head says",
+        "its append landed but it never heard so: the journal stays at commit.start with the folder as it was, and recover finds the event and goes on; here its re-read sees dev-b's fork, so the folder stays on its own snapshot (F2)",
+      "dev-b":
+        "sees A's event like any other and forks or keeps going as the head says; here its commit's head check finds it, so its snapshot is kept as a fork and its folder stays (F1)",
     },
+    runInProcess: lostAcknowledgement,
   },
   {
     id: "S6",

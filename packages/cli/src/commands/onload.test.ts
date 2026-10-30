@@ -325,6 +325,11 @@ describe("onload: the command", () => {
       if (event.type !== "offloaded" || event.snapshot !== snapshot) continue;
       edit(event);
       writeFileSync(join(folder, name), `${JSON.stringify(event)}\n`);
+      // The edit stands for an event its writer wrote so: this device's mirror (which the offload's release read
+      // filled) never held another copy of it, or the read would keep both and leave it out (a mirror clash).
+      for (const id of existsSync(box.paths.cacheDir) ? readdirSync(box.paths.cacheDir) : [])
+        if (existsSync(join(box.paths.cacheDir, id, "events", name)))
+          rmSync(join(box.paths.cacheDir, id, "events", name));
       return event;
     }
     throw new Error(`no offloaded event of ${snapshot}`);

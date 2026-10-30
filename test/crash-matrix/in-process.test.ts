@@ -107,10 +107,23 @@ const sealedFor = (store: MemoryBlobStore): CatalogPolicy => {
   return { seal: "sealed", storeId: identity.id, key: new Uint8Array(32).fill(5) };
 };
 
+/** While set, every store call fails with store.unreachable: a store down (the re-read rows). */
+let storeDown = false;
+const reachable = (blob: MemoryBlobStore): MemoryBlobStore => {
+  const gone = () => Promise.resolve(fail(finding("store.unreachable", { message: "the store is down" })));
+  return {
+    ...blob,
+    get: (key) => (storeDown ? gone() : blob.get(key)),
+    list: (prefix) => (storeDown ? gone() : blob.list(prefix)),
+    stat: (key) => (storeDown ? gone() : blob.stat(key)),
+    put: (key, data, opts) => (storeDown ? gone() : blob.put(key, data, opts)),
+  };
+};
+
 const opener: StoreOpener = {
   open: async () => ({
     ok: true,
-    value: { blob: store, engine, ...(catalog === undefined ? {} : { catalog }) },
+    value: { blob: reachable(store), engine, ...(catalog === undefined ? {} : { catalog }) },
   }),
 };
 
@@ -154,6 +167,8 @@ beforeEach(async () => {
   released = undefined;
   heldDelete = undefined;
   catalog = undefined;
+  storeDown = false;
+  unseen = undefined;
   reference = hashTree(dir);
 });
 
@@ -409,12 +424,16 @@ const rowTest = (row: Row) => async () => {
   else expect(problems).toEqual([]);
 };
 
+/** Events the crashed release's catalog read could not have seen (Q16's residual), for invariant 1. */
+let unseen: string[] | undefined;
+
 const world = (): World => ({
   paths: box.paths,
   device: device.id,
   dir,
   root: join(box.home, "work"),
   store: { name: "ssd", blob: store, engine, ...(catalog === undefined ? {} : { catalog }) },
+  ...(unseen === undefined ? {} : { unseen }),
 });
 
 // A sealed store's catalog (Task 11): at every boundary where recover decides from the store's events whether the
@@ -536,6 +555,102 @@ describe("crash matrix, in-process: a lost onload.swap.start write (N3)", () => 
     expect(problems).toEqual([]);
     expect(existsSync(`${dir}.plainport`)).toBe(false);
     expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+  }, 30_000);
+});
+
+// The release's catalog read (M2 Task 23, the fork table's F2 and F3): killed between the re-read and the rename, the
+// store unreachable at the re-read, and a lost release.moved write. Recover decides from the world: a folder still in
+// place is read again (a fork keeps it, F2), one already in the trash is never moved back (F3).
+describe("crash matrix, in-process: the release's re-read (forks)", () => {
+  /** Another copy's first offload of the project: with this one's, two first offloads are a fork. */
+  const forkNow = async () => {
+    const id = (await projectId()) as string;
+    const registry = await readRegistry(testHost(), box.paths);
+    const rootId = registry.ok ? (registry.value.roots?.work as string) : "";
+    const s = ulid();
+    const appended = await appendEvent(storeEventLog(store, catalog), {
+      v: 1,
+      id: s,
+      op: s,
+      type: "offloaded",
+      device: ulid(),
+      at: new Date().toISOString(),
+      project: id,
+      root: rootId,
+      path: "web",
+      snapshot: s,
+      stored: { ssd: "c".repeat(64) },
+      stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+    });
+    if (!appended.ok) throw new Error(appended.finding.message);
+    return s;
+  };
+
+  test("offload.release.reread · killed between the re-read and the rename, then a fork: recover keeps the folder (F2)", async () => {
+    const row = plainRowAt("offload.release.reread");
+    const { problems, crashedOp } = await runRow(row, {
+      crash: async (r) => {
+        await crashOffload(r);
+        await forkNow();
+      },
+    });
+    expect(problems).toEqual([]);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    const registry = await readRegistry(testHost(), box.paths);
+    expect(registry.ok ? registry.value.projects[(await projectId()) as string]?.base : undefined).toBe(
+      crashedOp,
+    );
+  }, 30_000);
+
+  test("offload.release.trash · the store unreachable at the re-read: nothing moves, recover waits, then releases", async () => {
+    const row = plainRowAt("offload.release.trash");
+    const { problems } = await runRow(row, {
+      crash: async () => {
+        const real = testHost({
+          faults: {
+            onStep: (step) => {
+              capture(step);
+              if (step === "offload.release.trash") storeDown = true;
+            },
+          },
+        });
+        const ran = await runOffload(offloadDeps(real), { project: await ref() });
+        expect(ran.ok ? "released" : [ran.exitCode, ran.finding.code]).toEqual([9, "store.unreachable"]);
+        expect(existsSync(join(dir, "src"))).toBe(true);
+        // Recover with the store still down: pending, the folder never moved.
+        const held = reportOf(await recover(recoverDeps()));
+        expect(held.operations.map((o) => [o.step, o.outcome])).toEqual([
+          ["offload.release.trash", "pending"],
+        ]);
+        expect(existsSync(join(dir, "src"))).toBe(true);
+        storeDown = false;
+      },
+    });
+    expect(problems).toEqual([]);
+  }, 30_000);
+
+  test("offload.release.renamed · release.moved lost, then a fork: recover goes on from the trash (F3)", async () => {
+    const row = plainRowAt("offload.release.renamed");
+    const { problems } = await runRow(row, {
+      crash: async (r) => {
+        await crashOffload(r);
+        unseen = [await forkNow()];
+      },
+    });
+    expect(problems).toEqual([]);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+  }, 30_000);
+
+  test("offload.release.trash · the rename not done, then a fork: the re-read decides F2", async () => {
+    const row = plainRowAt("offload.release.trash");
+    const { problems } = await runRow(row, {
+      crash: async (r) => {
+        await crashOffload(r);
+        await forkNow();
+      },
+    });
+    expect(problems).toEqual([]);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
   }, 30_000);
 });
 

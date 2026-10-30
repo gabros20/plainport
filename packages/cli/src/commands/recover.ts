@@ -45,9 +45,15 @@ const RecoveredSchema = z.looseObject({
   keepUntil: z.string().optional(),
   finding: FindingDataSchema.optional(),
   conflict: z
-    .looseObject({ kind: z.enum(["fork", "diverged-after-commit"]) })
+    .looseObject({
+      kind: z.enum(["fork", "diverged-after-commit"]),
+      detail: z.enum(["after-commit"]).optional(),
+    })
     .optional()
-    .meta({ description: "diverged-after-commit: exit 8's data, as offload gives it (D52)" }),
+    .meta({
+      description:
+        "diverged-after-commit, and forked after the commit (kind fork, detail after-commit): exit 8's data, as offload gives it (D52, Q6)",
+    }),
 });
 
 const RecoveredBootstrapSchema = z.looseObject({

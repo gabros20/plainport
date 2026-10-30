@@ -17,7 +17,7 @@ export const ProjectStatusSchema = z
     }),
     conditions: z.array(z.string()).meta({
       description:
-        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's)",
+        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again)",
     }),
     dir: z.string().optional().meta({ description: "Its folder on this device" }),
     here: z.boolean().meta({ description: "The folder is on this device" }),

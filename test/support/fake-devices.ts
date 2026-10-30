@@ -3,12 +3,16 @@
 // is its own sandboxed home, device id, config, registry and event mirror; all share the fake store and one fake
 // restic repository (each device's engine has its own hooks, so a test can act while one device uploads).
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import { type Device, ensureDevice } from "../../packages/core/src/device.ts";
+import type { HostPorts } from "../../packages/core/src/ports/host.ts";
 import type { StoreOpener } from "../../packages/core/src/ports/store.ts";
+import { type RecoverDeps, recover } from "../../packages/core/src/recover/recover.ts";
+import { type RegistryEntry, readRegistry } from "../../packages/core/src/registry.ts";
 import { resolveProject } from "../../packages/core/src/roots/address.ts";
 import { type OffloadDeps, runOffload } from "../../packages/core/src/saga/offload.ts";
 import { type OnloadDeps, runOnload } from "../../packages/core/src/saga/onload.ts";
@@ -25,6 +29,15 @@ import { nodePlugin } from "../../packages/eco-node/src/index.ts";
 
 const PATH = process.env.PATH ?? "/usr/bin:/bin";
 
+/**
+ * One run's crash seams: `at` throws an InjectedFault there (a crash), `onStep` sees every step and seam as it is
+ * reached (synchronously, so a test can change the store's bytes between two steps).
+ */
+export interface RunFaults {
+  at?: string;
+  onStep?: (step: string) => void;
+}
+
 export interface FakeDevice {
   name: string;
   box: Sandbox;
@@ -35,8 +48,11 @@ export interface FakeDevice {
   released?: TreeCapture;
   /** The project folder at `path` in this device's root. */
   dir(path?: string): string;
-  offload(path?: string): ReturnType<typeof runOffload>;
+  offload(path?: string, faults?: RunFaults): ReturnType<typeof runOffload>;
   onload(path?: string): ReturnType<typeof runOnload>;
+  recover(faults?: RunFaults): ReturnType<typeof recover>;
+  /** This device's registry entry for the project at `path`. */
+  entry(path?: string): Promise<RegistryEntry | undefined>;
 }
 
 /** Devices on `store`, each set up with `init`'s steps: its device id, its config, the store recorded by its id. */
@@ -79,14 +95,19 @@ export const fakeDevices = async (
     });
     if (!setUp.ok) throw new Error(setUp.finding.message);
     const device: Partial<FakeDevice> = {};
-    // Invariant 1's reference: the folder as it stood when release began.
-    const host = testHost({
-      faults: {
-        onStep: (step) => {
-          if (step === "offload.release.trash") device.released = captureTree(join(box.home, "work", "web"));
+    // Invariant 1's reference: the folder as it stood when release began (by the live run or by recover).
+    const hostFor = (faults: RunFaults = {}): HostPorts =>
+      testHost({
+        faults: {
+          ...(faults.at === undefined ? {} : { at: faults.at }),
+          onStep: (step) => {
+            const web = join(box.home, "work", "web");
+            if (step === "offload.release.trash" && existsSync(web)) device.released = captureTree(web);
+            faults.onStep?.(step);
+          },
         },
-      },
-    });
+      });
+    const host = hostFor();
     const common = {
       host,
       paths: box.paths,
@@ -109,6 +130,10 @@ export const fakeDevices = async (
     };
     const offloadDeps: OffloadDeps = { ...common, checks: quietChecks, plugins: [nodePlugin] };
     const onloadDeps: OnloadDeps = { ...common, plugins: [nodePlugin] };
+    const recoverDeps = (faults?: RunFaults): RecoverDeps => {
+      const { emit: _, ...rest } = common;
+      return { ...rest, host: hostFor(faults) };
+    };
     devices.push(
       Object.assign(device, {
         name,
@@ -117,8 +142,17 @@ export const fakeDevices = async (
         engine,
         mirror,
         dir: (path = "web") => join(box.home, "work", path),
-        offload: async (path = "web") => runOffload(offloadDeps, { project: await ref(path) }),
+        offload: async (path = "web", faults?: RunFaults) =>
+          runOffload(faults === undefined ? offloadDeps : { ...offloadDeps, host: hostFor(faults) }, {
+            project: await ref(path),
+          }),
         onload: async (path = "web") => runOnload(onloadDeps, { project: await ref(path), hydrate: false }),
+        recover: (faults?: RunFaults) => recover(recoverDeps(faults)),
+        entry: async (path = "web") => {
+          const registry = await readRegistry(testHost(), box.paths);
+          if (!registry.ok) throw new Error(registry.finding.message);
+          return Object.values(registry.value.projects).find((e) => e.path === path);
+        },
       }) as FakeDevice,
     );
   }

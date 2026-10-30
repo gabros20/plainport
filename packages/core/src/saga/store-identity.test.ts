@@ -282,6 +282,8 @@ describe("store identity: a snapshot is located on the store its event was read 
     // As v0.1.1 on a device that called the store `local` wrote it: M1-shaped, its key no alias of this device.
     const event = await offloadedOf(done.snapshot);
     rewrite({ ...event, stored: { local: event.stored.ssd as string } });
+    // v0.1.1 wrote it so: this device's mirror (which the offload's release read filled) never held another copy.
+    mbp.mirror.data.clear();
     value(await onload(mbp));
     expect(mainOf(mbp)).toContain("legacy");
   });
