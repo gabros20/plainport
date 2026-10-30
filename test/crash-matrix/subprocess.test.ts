@@ -36,6 +36,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { localStores } from "../../packages/cli/src/stores.ts";
+import { parseStoreIdentity } from "../../packages/core/src/catalog/identity.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import type { RecoveryReport } from "../../packages/core/src/recover/recover.ts";
 import { captureTree, namesIn, type TreeCapture } from "../../packages/core/src/testing/invariants.ts";
@@ -650,6 +651,13 @@ const ended = (pid: number): boolean => {
   return ps.exitCode === 0 && ps.stdout.toString().trim().startsWith("Z");
 };
 
+/** The repository folder the store at ~/ssd publishes in its store.json. */
+const repositoryOf = (home: string): string => {
+  const identity = parseStoreIdentity(readFileSync(join(home, "ssd/meta/v1/store.json")));
+  if (identity === undefined) throw new Error("the store's store.json is not a store identity");
+  return identity.repo;
+};
+
 const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
   let leftover = { packs: 0, locks: 0, snapshots: -1 };
   const problems = await runRow(plainRowAt(MATRIX_POINTS.upload), {
@@ -659,7 +667,8 @@ const uploadCrashRow = async (mode: "mid-upload" | "committed") => {
         writeFileSync(join(r.dir, "data/blob.bin"), randomBytes(40 * 1024 * 1024));
         r.noteEdit("data/blob.bin");
       }
-      const repo = join(r.box.home, "ssd/repo");
+      // The repository the store publishes: repo/ on an M1 store, repos/<attempt> on one bootstrap set up (Task 19).
+      const repo = join(r.box.home, "ssd", repositoryOf(r.box.home));
       const count = () => ({
         packs: countFiles(join(repo, "data")),
         locks: countFiles(join(repo, "locks")),
