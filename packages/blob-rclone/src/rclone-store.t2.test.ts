@@ -78,13 +78,21 @@ for (const kind of ["s3", "sftp"] as const) {
       return {
         store,
         cleanup: async () => {
-          for (const { key } of value(await store.list(""))) value(await store.delete(key));
-          sandbox.cleanup();
+          try {
+            for (const { key } of value(await store.list(""))) value(await store.delete(key));
+          } finally {
+            sandbox.cleanup();
+          }
         },
       };
     };
 
-    blobStoreContract(`rclone-${kind}, unmeasured`, make, { eligibility: READ_ONLY, probeTimeout: 60_000 });
+    // Each call is an rclone run (an SFTP one a connection): the listing case took 3.6 s on CI, close to bun's 5 s.
+    blobStoreContract(`rclone-${kind}, unmeasured`, make, {
+      eligibility: READ_ONLY,
+      probeTimeout: 60_000,
+      testTimeout: 60_000,
+    });
 
     test("a missing key is null beside others and under no folder; an empty value round-trips", async () => {
       const { store, cleanup } = await make();
