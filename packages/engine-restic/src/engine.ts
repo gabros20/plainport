@@ -150,7 +150,7 @@ const redactorOf = (secrets: readonly string[]) => {
  * login ("Host key verification failed", "Permission denied"): those are failures to fix, not an unreachable store.
  */
 const CONNECTION =
-  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|connection closed by remote host|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
+  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|connection closed by foreign host|TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|connection closed by remote host|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
 const REFUSED_HANDSHAKE =
   /host key verification failed|permission denied \(|too many authentication failures|no \S+ host key is known/i;
 /** restic's line when a backend request failed and it waits to try again. */
@@ -366,6 +366,10 @@ export const resticEngine = (options: ResticEngineOptions): Engine => {
             },
           }),
     });
+    // A key that could not be loaded over a failing connection reads to restic as "wrong password or no key found"
+    // (exit 12): after connection retries, it is the connection, never the password.
+    if (result.ok && result.value.exitCode === 12 && streak.last !== undefined)
+      return unreachable(`${redact(streak.said ?? "")} (restic then reported no key it could open)`);
     if (stop.signal.aborted && !ctx?.signal?.aborted)
       return unreachable(
         `${redact(streak.said ?? "")} (still failing after ${Math.round(unreachableAfterMs / 1000)} seconds of retries)`,

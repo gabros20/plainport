@@ -88,6 +88,27 @@ describe("recover: store setups left open", () => {
     expect(await d.recorded()).toBeUndefined();
   });
 
+  test("an attempt holding the tie-break that waits out its budget (`waiting`, D109) is pending: store.bootstrap-undecided, exit 6", async () => {
+    const w = bootstrapWorld();
+    worlds.push(w);
+    const d = w.device("pw", { faults: { at: "bootstrap.candidacy.written" } });
+    await expect(d.run()).rejects.toBeInstanceOf(InjectedFault);
+    // Another device's candidacy with a higher id stands and never refuses: this attempt holds the tie-break and waits.
+    const rival = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    await w.store.put(
+      `meta/v1/store-claims/${rival}.json`,
+      new TextEncoder().encode(`${JSON.stringify({ v: 1, id: rival, decision: "candidate" })}\n`),
+    );
+    const result = await recoverOn(w, d);
+    expect(result.ok ? "" : [result.exitCode, result.finding.code]).toEqual([6, "store.bootstrap-undecided"]);
+    const report = (result.ok ? undefined : result.data) as { bootstraps: { outcome: string }[] } | undefined;
+    expect(report?.bootstraps.map((b) => b.outcome)).toEqual(["pending"]);
+    // Nothing published, nothing refused by this attempt, and its journal stays for a re-run with its id.
+    expect(w.store.data.has("meta/v1/store.json")).toBe(false);
+    expect([...w.store.data.keys()].filter((k) => k.endsWith(".refused"))).toEqual([]);
+    expect(await d.journals()).toHaveLength(1);
+  });
+
   test("a store config no longer names is pending, and recover fails with its finding", async () => {
     const w = bootstrapWorld();
     worlds.push(w);
