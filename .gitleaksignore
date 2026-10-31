@@ -1,3 +1,6 @@
 # gitleaks fingerprints judged false positives (ADR-0021); each names one finding in one commit, nothing wider.
 # cc4b5c8: Task 19's T2 test reads the S3 secret key from a test env variable; no key in the source.
 cc4b5c8f49aca134ef3031713f16ae6fd0fe9623:packages/cli/src/store-commands.t2.test.ts:generic-api-key:145
+# 64ecced, bfaa3dd: Task 27's crash-matrix T2 helpers read the S3 secret key from a test env variable; no key in the source.
+64ecced87ddbf3db414eca609476abe5d0c1cc70:test/crash-matrix/bootstrap-checks.ts:generic-api-key:42
+bfaa3dd3d4e81c0137360511290305053ab4ba82:test/crash-matrix/remote.t2.test.ts:generic-api-key:149
