@@ -10,7 +10,7 @@
 // The stores' properties are asserted in config.toml (the opener reads them, Q8), as Task 18's T2 does, until a
 // measurement exists; with an assertion taken out, the opener reads the measured property instead.
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import {
   ConfigLoader,
   readRegistry,
@@ -27,7 +27,7 @@ import {
   type StoreSpec,
   value,
 } from "../../../test/support/remote-device.ts";
-import { describeT2 } from "../../../test/tiers.ts";
+import { beforeAllT2, describeT2 } from "../../../test/tiers.ts";
 import { rclonePath } from "../../blob-rclone/src/testing/t2.ts";
 import { testHost } from "../../core/src/testing/host.ts";
 import { storeFactsOf, storeOpener } from "./stores.ts";
@@ -76,7 +76,7 @@ const addArgs = (d: RemoteDevice, spec: StoreSpec): string[] =>
         "env:T18_S3_SECRET_KEY",
       ];
 
-beforeAll(async () => {
+beforeAllT2(async () => {
   rclone = await rclonePath();
 });
 afterAll(async () => {

@@ -14,7 +14,7 @@
 //
 // Every store lives under a fresh prefix; the SFTP children are run one or two at a time (sshd drops logins past ~10).
 
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -40,7 +40,7 @@ import {
   type StoreSpec,
   value,
 } from "../../../test/support/remote-device.ts";
-import { describeT2 } from "../../../test/tiers.ts";
+import { beforeAllT2, describeT2 } from "../../../test/tiers.ts";
 import { rclonePath } from "../../blob-rclone/src/testing/t2.ts";
 import { releaseWhenReady } from "../../core/src/testing/barrier.ts";
 import { testHost } from "../../core/src/testing/host.ts";
@@ -156,7 +156,7 @@ const journalsOf = (d: RemoteDevice): string[] => {
   return [...new Bun.Glob("*.json").scanSync(dir)];
 };
 
-beforeAll(async () => {
+beforeAllT2(async () => {
   rclone = await rclonePath();
 });
 // Each test's devices are removed after it (a detached delete may still be writing into one, so it settles first).
