@@ -60,6 +60,7 @@ import {
   makeProjectTemplate,
   type ProjectTemplate,
   type TreeHash,
+  treeDiff,
 } from "./fixture.ts";
 import {
   ALL_ROWS,
@@ -219,13 +220,15 @@ const onloadDeps = (host: HostPorts): OnloadDeps => ({
   log: () => {},
 });
 
-const recoverDeps = (): RecoverDeps => {
+/** recover's dependencies; `secret: false` leaves the store's password out of its environment (a locked provider). */
+const recoverDeps = (options: { secret?: boolean } = {}): RecoverDeps => {
   const host = testHost({ faults: { onStep: capture } });
+  const { PLAINPORT_STORE_PASSWORD: _, ...withoutSecret } = env();
   return {
     host,
     paths: box.paths,
     device,
-    env: env(),
+    env: options.secret === false ? withoutSecret : env(),
     loader: new ConfigLoader(host, box.paths),
     opener,
     openMirror: async () => ({ ok: true, value: mirror }),
@@ -682,6 +685,75 @@ describe("crash matrix, in-process: the release's re-read (forks)", () => {
     });
     expect(problems).toEqual([]);
     expect(existsSync(`${dir}.plainport`)).toBe(false);
+  }, 30_000);
+});
+
+// Carried from phase 6 (the board's notes from int-p5 and int-p6): behaviours pinned by a row each.
+describe("crash matrix, in-process: carried from phase 6", () => {
+  const unchanged = () => expect(treeDiff(reference, hashTree(dir))).toEqual([]);
+
+  // Release reads the store's catalog again while the folder stands (F2), and the stub takes the offloaded event's
+  // facts from the mirror, else from the store (recover's eventFacts): both open the store, and opening it reads its
+  // secret. A provider that cannot give it (a locked Keychain, a variable not set) leaves the operation pending with
+  // the folder in place, whether or not the mirror holds the event; once it can, recover finishes the release.
+  for (const mirrored of [true, false])
+    test(`offload.committed · the store's secret unreadable, the event ${mirrored ? "in" : "not in"} the mirror: pending with the folder kept, then finished`, async () => {
+      const { problems } = await runRow(plainRowAt("offload.committed"), {
+        crash: async (row) => {
+          await crashOffload(row);
+          if (!mirrored) mirror.data.clear();
+          const locked = reportOf(await recover(recoverDeps({ secret: false })));
+          expect(locked.operations.map((o) => [o.step, o.outcome, o.finding?.code])).toEqual([
+            ["offload.committed", "pending", "store.secret-missing"],
+          ]);
+          unchanged();
+          expect(existsSync(`${dir}.plainport`)).toBe(false);
+        },
+      });
+      expect(problems).toEqual([]);
+    }, 30_000);
+
+  // At offload.snapshot.done and offload.verified, recover searches the store for the operation's event (D50) and waits
+  // on one it cannot open, unless the event's id says it was made before the operation began (review r2 #3): an id
+  // starts with its time, as the operation's does. A clock stepped back between the operation's start and its commit
+  // gives the commit an earlier id, so its own event, when this device cannot open it, is taken for an older one, and
+  // the operation rolls back. Pinned: the folder stays as it was, nothing is lost, the event stays on the store,
+  // skipped by every reader; without the step back the operation waits (pending, catalog.seal-failed).
+  /** Crashes after the append with the commit.start write lost, the event moved to an id `offsetMs` from now. */
+  const lostCommitWithUnopenedEvent = async (offsetMs: number) => {
+    catalog = sealedFor(store);
+    await crashOffload(plainRowAt("offload.commit.appended"));
+    const [op] = [...journalSteps(box.paths).keys()];
+    const file = join(box.paths.journalDir, `${op}.json`);
+    const { event, ...journal } = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, `${JSON.stringify({ ...journal, step: "offload.verified" }, null, 2)}\n`);
+    // The event's sealed bytes are bound to their key, so under another id this device cannot open them.
+    const key = `meta/v1/events/${event}.json`;
+    const bytes = store.data.get(key) as Uint8Array;
+    expect(looksSealed(bytes)).toBe(true);
+    store.data.delete(key);
+    store.data.set(`meta/v1/events/${ulid(Date.now() + offsetMs)}.json`, bytes);
+    mirror.data.clear();
+  };
+
+  test("offload.verified · the clock stepped back before the commit, its event unopenable here: rolled back, the folder kept", async () => {
+    const { problems, crashedOp } = await runRow(plainRowAt("offload.verified"), {
+      crash: () => lostCommitWithUnopenedEvent(-3_600_000),
+    });
+    expect(problems).toEqual([]);
+    unchanged();
+    expect(crashedOp).toBeDefined();
+  }, 30_000);
+
+  test("offload.verified · the same event with an id after the operation's start: pending, the folder kept", async () => {
+    await lostCommitWithUnopenedEvent(3_600_000);
+    const report = reportOf(await recover(recoverDeps()));
+    expect(report.operations.map((o) => [o.step, o.outcome, o.finding?.code])).toEqual([
+      ["offload.verified", "pending", "catalog.seal-failed"],
+    ]);
+    unchanged();
+    // The journal stays for a later recover; this test's sandbox goes now.
+    for (const op of journalSteps(box.paths).keys()) rmSync(join(box.paths.journalDir, `${op}.json`));
   }, 30_000);
 });
 
