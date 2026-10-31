@@ -4,7 +4,7 @@
 // and stderr and the returned outcome, and present only in captured stdout when the child exited 0. pgrep checks that
 // no process is left in any group the runner started. T1: real processes (ADR-0018).
 
-import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,9 +29,16 @@ const grouping: Spawner = {
   signalGroup: (pgid, signal) => posixSpawner.signalGroup(pgid, signal),
 };
 const recorded = recordArgv(grouping);
-/** The folder the host's guard protects, standing in for the real home. */
-const protectedRoot = realpathSync(mkdtempSync(join(tmpdir(), "plainport-sensitive-home-")));
-const host = createMacosHost({ spawner: recorded.spawner, guard: { refuse: [protectedRoot], readOnly: [] } });
+/**
+ * The folder the host's guard protects, standing in for the real home, and the host guarding it: made by beforeAll, since
+ * a folder made at module scope would leak when a name filter skips every test here (its afterAll never runs).
+ */
+let protectedRoot = "";
+let host: ReturnType<typeof createMacosHost>;
+beforeAll(() => {
+  protectedRoot = realpathSync(mkdtempSync(join(tmpdir(), "plainport-sensitive-home-")));
+  host = createMacosHost({ spawner: recorded.spawner, guard: { refuse: [protectedRoot], readOnly: [] } });
+});
 let dir: string;
 
 const members = (pgid: number): string[] => {
@@ -42,7 +49,9 @@ const members = (pgid: number): string[] => {
   return found.stdout.toString().split("\n").filter(Boolean);
 };
 
-afterAll(() => rmSync(protectedRoot, { recursive: true, force: true }));
+afterAll(() => {
+  if (protectedRoot !== "") rmSync(protectedRoot, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), "plainport-sensitive-")));

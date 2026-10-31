@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   cpSync,
@@ -16,9 +16,9 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
+import { lazyTempDir } from "../test/lazy-temp.ts";
 import { describeT1 } from "../test/tiers.ts";
 import {
   dirtyFromStatus,
@@ -33,12 +33,11 @@ import {
   versionName,
 } from "./install.ts";
 
-const scratch = mkdtempSync(join(tmpdir(), "plainport-install-test-"));
-afterAll(() => removeInstall(scratch));
+const scratch = lazyTempDir("plainport-install-test-", (dir) => removeInstall(dir));
 
 let prefixes = 0;
 /** A prefix of its own for each test, so no test depends on another's install. */
-const fresh = (): string => join(scratch, `prefix-${++prefixes}`);
+const fresh = (): string => join(scratch(), `prefix-${++prefixes}`);
 
 const stageFake =
   (text: string) =>
@@ -217,7 +216,7 @@ describe("installVersion and rollback", () => {
 
   /** A folder outside the install whose modes must never change: it, a 700 folder in it, and a file. */
   const outside = (): { dir: string; modes: () => number[] } => {
-    const dir = mkdtempSync(join(scratch, "outside-"));
+    const dir = mkdtempSync(join(scratch(), "outside-"));
     mkdirSync(join(dir, "private"));
     chmodSync(join(dir, "private"), 0o700);
     writeFileSync(join(dir, "private", "key"), "secret-ish");
@@ -438,7 +437,7 @@ const script = join(import.meta.dir, "install");
 describe("scripts/install, expected failures", () => {
   const run = (args: string[], path: string) => {
     const ran = Bun.spawnSync([script, ...args], {
-      env: { PATH: path, HOME: join(scratch, "home") },
+      env: { PATH: path, HOME: join(scratch(), "home") },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -461,7 +460,7 @@ describe("scripts/install, expected failures", () => {
   });
 
   test("missing tools name fetch-tools", async () => {
-    const ran = run(["--prefix", fresh(), "--tools", join(scratch, "no-tools")], withBun);
+    const ran = run(["--prefix", fresh(), "--tools", join(scratch(), "no-tools")], withBun);
     expect(ran.code).toBe(1);
     expect(ran.err).toContain("bun scripts/fetch-tools.ts");
   });
@@ -512,20 +511,24 @@ const pinnedCheckout = (dir: string, pinned: string): string => {
 // Each test has its own prefix and install, so they hold in any order or alone. They install from a copy of this
 // checkout pinned at a -dev VERSION, so two installs are two builds and the release commit runs them unchanged.
 describeT1("scripts/install end to end", () => {
-  const top = mkdtempSync(join(scratch, "e2e-"));
   const version = "0.0.1-dev";
+  // Made by beforeAll: folders made at describe scope would leak when a name filter skips these tests.
+  let top = "";
+  let tools = "";
+  const env = { PATH: "/usr/bin:/bin", HOME: "" };
   let script = "";
   beforeAll(() => {
+    top = mkdtempSync(join(scratch(), "e2e-"));
+    tools = join(top, "tools");
+    mkdirSync(tools, { recursive: true });
+    for (const name of ["restic", "rclone"]) {
+      writeFileSync(join(tools, name), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(tools, name), 0o755);
+    }
+    env.HOME = join(top, "home");
+    mkdirSync(env.HOME, { recursive: true });
     script = join(pinnedCheckout(join(top, "checkout"), version), "scripts/install");
   });
-  const tools = join(top, "tools");
-  mkdirSync(tools, { recursive: true });
-  for (const name of ["restic", "rclone"]) {
-    writeFileSync(join(tools, name), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(tools, name), 0o755);
-  }
-  const env = { PATH: "/usr/bin:/bin", HOME: join(top, "home") };
-  mkdirSync(env.HOME, { recursive: true });
   const install = (prefix: string, ...args: string[]) => {
     const ran = Bun.spawnSync([script, "--prefix", prefix, "--tools", tools, ...args], {
       env: { ...env, PATH: `${join(process.execPath, "..")}:/usr/bin:/bin` },
