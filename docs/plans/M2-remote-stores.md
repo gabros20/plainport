@@ -1848,6 +1848,9 @@ bootstrap rows.
   - at every bootstrap step.
 - `recover` runs once with the store still down (pending, nothing deleted) and once with it back.
 - `PLAINPORT_CRASH_MATRIX_DAMAGE=1` still fails every row on every store kind.
+- **Carried from phase 6 (int-p6, review r1):**
+  - F2's base write has no crash seam of its own. Its failure handling is fixed and tested: a failed write keeps the journal at `release.trash`, and recover writes the base again. A seam needs a new `OFFLOAD_BRANCHES` entry, an after-commit fork, with setups in both matrix variants. Add it here, with its rows.
+  - A rejected-line copy's `next` is still `offload` even when the folder has not changed since its rejected snapshot (review r1 M10, second half). Telling "unchanged" apart needs a stored fingerprint of the base snapshot, in the registry or the event, which is a format decision for the owner. Until then the view cannot point to onloading the kept head instead.
 
 ### Tests first
 The matrix is the test; new rows come from the exports.
