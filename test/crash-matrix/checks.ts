@@ -145,7 +145,16 @@ export interface Settlement {
 }
 
 /** Every problem with a settled row; none means it passed. */
-export const rowProblems = async (row: Row, world: World, s: Settlement): Promise<string[]> => {
+export const rowProblems = async (row: Row, world: World, s: Settlement): Promise<string[]> => [
+  ...settlementProblems(row, s),
+  ...(await worldProblems(row, world, s)),
+];
+
+/**
+ * recover's part: it found the journal at the step the crash left (the row's step) and settled it with an outcome its
+ * rule allows, never leaving it or another operation pending; a second recover found nothing to do.
+ */
+export const settlementProblems = (row: Row, s: Settlement): string[] => {
   const problems: string[] = [];
 
   // The step the crash left, and recover's outcome for it.
@@ -185,6 +194,16 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     problems.push(
       `a second recover found work: ${s.again.operations.map((o) => `${o.op} ${o.step} ${o.outcome}`).join("; ")}`,
     );
+  return problems;
+};
+
+/** The world's part: invariants 1–6, and no work lost (the folder, or the head that holds it). */
+export const worldProblems = async (
+  row: Pick<Row, "saga">,
+  world: World,
+  s: Pick<Settlement, "reference" | "released" | "seen" | "projectId">,
+): Promise<string[]> => {
+  const problems: string[] = [];
 
   // Invariants 1–3.
   problems.push(

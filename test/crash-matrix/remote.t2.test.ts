@@ -13,25 +13,19 @@
 // recover, and every row must then report it.
 
 import { afterAll, describe, expect } from "bun:test";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
-import { storeOpener } from "../../packages/cli/src/stores.ts";
-import { STORE_CLAIMS_PREFIX, STORE_IDENTITY_KEY } from "../../packages/core/src/catalog/identity.ts";
-import { ConfigLoader } from "../../packages/core/src/config/load.ts";
-import type { BootstrapRecoveryOutcome } from "../../packages/core/src/saga/bootstrap.ts";
-import { testHost } from "../../packages/host-macos/src/testing.ts";
+import { STORE_CLAIMS_PREFIX } from "../../packages/core/src/catalog/identity.ts";
 import { loadTestEnv } from "../../scripts/testenv.ts";
 import { macOnlyTests, onMac } from "../platform.ts";
 import type { RemoteKind } from "../support/remote-device.ts";
 import { beforeAllT2, describeT2 } from "../tiers.ts";
+import { damageBootstrap, expected, rawBlob, record, settledProblems } from "./bootstrap-checks.ts";
 import { DAMAGE_MODE, damage } from "./checks.ts";
 import {
   crashAt,
-  envelopeOf,
   type Harness,
   inRow,
   killed,
   makeHarness,
-  PASSWORD,
   type RowRun,
   remoteKind,
   removeHarness,
@@ -120,56 +114,6 @@ describeT2("crash matrix, SIGKILL subprocess on remote stores", () => {
     });
 });
 
-// --- Bootstrap ---------------------------------------------------------------------------------------------------
-
-/** What recovery must settle the row to: before the candidacy nothing is published; a rival makes it contested. */
-const expected = (row: BootstrapRow): BootstrapRecoveryOutcome =>
-  row.scenario === "rival"
-    ? "contested"
-    : row.step === "bootstrap.begin" || row.step === "bootstrap.initialised"
-      ? "rolled-back"
-      : "published";
-
-const record = (id: string, decision: string) =>
-  new TextEncoder().encode(`${JSON.stringify({ v: 1, id, decision })}\n`);
-
-/** The row's store before it is set up: its metadata layer through the binary's own opener, for the rival's files. */
-const rawBlob = async (r: RowRun) => {
-  const host = testHost();
-  const env = r.env();
-  const loaded = await new ConfigLoader(host, r.box.paths).load({ env });
-  if (!loaded.ok) throw new Error(loaded.finding.message);
-  const store = loaded.value.config.stores[r.kind.store];
-  if (store === undefined) throw new Error("no remote store in the row's config");
-  const opened = await storeOpener(host, env).open(
-    r.kind.store,
-    store,
-    PASSWORD,
-    store.kind === "s3"
-      ? { accessKeyId: env.T18_S3_KEY_ID as string, secretAccessKey: env.T18_S3_SECRET_KEY as string }
-      : undefined,
-  );
-  if (!opened.ok) throw new Error(`${opened.finding.code}: ${opened.finding.message}`);
-  return opened.value.blob;
-};
-
-const registryStores = (r: RowRun): Record<string, string> => {
-  if (!existsSync(r.box.paths.registryFile)) return {};
-  return (r.registry() as { stores?: Record<string, string> }).stores ?? {};
-};
-
-const journalNames = (r: RowRun): string[] =>
-  existsSync(r.box.paths.journalDir)
-    ? readdirSync(r.box.paths.journalDir).filter((name) => name.endsWith(".json"))
-    : [];
-
-/** The damage mode's harm to a settled bootstrap: the pin it left taken away, or one it never made written. */
-const damageBootstrap = (r: RowRun, published: boolean) => {
-  const registry = existsSync(r.box.paths.registryFile) ? r.registry() : { v: 1, projects: {} };
-  registry.stores = published ? {} : { [r.kind.store]: "01ZZZZZZZZZZZZZZZZZZZZZZZZ" };
-  writeFileSync(r.box.paths.registryFile, `${JSON.stringify(registry, null, 2)}\n`);
-};
-
 const bootstrapWork = async (r: RowRun, row: BootstrapRow): Promise<string[]> => {
   await r.init({ add: false });
   const problems: string[] = [];
@@ -195,41 +139,7 @@ const bootstrapWork = async (r: RowRun, row: BootstrapRow): Promise<string[]> =>
   if (!(row.outcomes as readonly string[]).includes(want))
     problems.push(`${want} is not an outcome rule ${row.rule} allows (${row.outcomes.join(", ")})`);
   if (DAMAGE_MODE) damageBootstrap(r, want === "published");
-
-  const identity = await blob.get(STORE_IDENTITY_KEY);
-  if (!identity.ok) return [...problems, `the store's identity cannot be read: ${identity.finding.message}`];
-  const published =
-    identity.value === null
-      ? undefined
-      : (JSON.parse(new TextDecoder().decode(identity.value)) as { id: string; repo: string });
-  const pinned = registryStores(r)[r.kind.store];
-  if (want === "published") {
-    if (published?.id !== attempt || pinned !== attempt)
-      problems.push(`published ${published?.id}, pinned ${pinned}, not the attempt ${attempt}`);
-    else {
-      // The published repository is this attempt's, and it opens with this device's password.
-      const listed = await (await r.world()).store.engine.list({ noLock: true });
-      if (!listed.ok) problems.push(`the published repository does not open: ${listed.finding.code}`);
-    }
-  } else if (published !== undefined || pinned !== undefined)
-    problems.push(`${want}, yet published ${published?.id}, pinned ${pinned}`);
-  if (want === "rolled-back") {
-    const claims = await blob.list(`${STORE_CLAIMS_PREFIX}${attempt}`);
-    if (!claims.ok || claims.value.length > 0)
-      problems.push(`rolled back, yet the attempt's claims are on the store: ${JSON.stringify(claims)}`);
-  }
-  if (journalNames(r).some((name) => name.startsWith(attempt)))
-    problems.push("the bootstrap journal is still there");
-  const again = await r.recoverRun();
-  if ((again.report.bootstraps as unknown[]).length !== 0 || again.report.operations.length !== 0)
-    problems.push(`a second recover had work to do: ${again.ran.out}`);
-  // Rolled back, the store is as if the attempt never ran: a retry sets it up.
-  if (want === "rolled-back" && !DAMAGE_MODE) {
-    const retry = await r.run(r.addArgs());
-    const outcome = envelopeOf(retry)?.data?.outcome;
-    if (retry.code !== 0 || outcome !== "published")
-      problems.push(`a retry after the rollback did not publish: ${retry.err}${retry.out}`);
-  }
+  problems.push(...(await settledProblems(r, blob, attempt, want)));
   return problems;
 };
 
