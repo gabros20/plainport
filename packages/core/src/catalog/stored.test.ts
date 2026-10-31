@@ -109,12 +109,17 @@ describe("stored: events read from a store (Q11)", () => {
       await loadCatalog({ store, mirror: memoryBlobStore(), storeId: idAt(900), now: NOW }),
     );
     expect(loaded.format).toBe(1);
-    // A format-2 store is told apart by its descriptor; the M1 read paths refuse it until its repository is wired.
+    // A format-2 store is told apart by its descriptor, which the catalog's read path takes as it is (Task 18: the
+    // opener binds the engine to the repository it names).
     const two = memoryBlobStore();
     two.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id: idAt(901), repo: "repo", seal: "none" }));
     expect(value(await readStoreDescriptor(two))?.format).toBe(2);
-    const usable = await readUsableStore(two);
-    expect(usable.ok ? "ok" : usable.finding.code).toBe("store.unsupported");
+    expect(value(await readUsableStore(two))).toEqual({
+      format: 2,
+      id: idAt(901),
+      repo: "repo",
+      seal: "none",
+    });
   });
 
   test("[stored] local and sftp access to the same store (D68) give one id, and one location", async () => {

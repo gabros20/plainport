@@ -663,18 +663,25 @@ describe("catalog: a fold that left out events is uncertain (D86)", () => {
     }
   });
 
-  test("a known snapshot a readable event names, or a file not named as an event, leaves the head certain", async () => {
+  test("another project's skipped event, or a file not named as an event, leaves the head certain", async () => {
     const store = await initStore();
     const mirror = memoryBlobStore();
     await appendEvent(storeEventLog(store), offloaded(1));
     await appendEvent(storeEventLog(store), { ...offloaded(2), base: offloaded(1).snapshot });
-    store.data.set(`meta/v1/events/${ids(3)}.json`, encode("{bad"));
+    // An event of another project this version cannot use: its project is known, so only that one is uncertain.
+    const other = idAt(77);
+    store.data.set(
+      `meta/v1/events/${ids(3)}.json`,
+      encode({ v: 1, id: ids(3), type: "merged", project: other, at: "2026-10-03T12:00:00.000Z" }),
+    );
     const read = await load(store, mirror);
     expect(read.uncertain).toEqual([ids(3)]);
-    const state = { ...read.state, uncertain: read.uncertain };
-    const said = { what: "nothing was restored", instead: (newest: string) => `restore ${newest}` };
+    expect(read.doubt).toEqual({ store: [], projects: { [other]: [ids(3)] } });
+    const state = { ...read.state, uncertain: read.uncertain, doubt: read.doubt };
+    const said = { what: "nothing was restored", instead: (newest?: string) => `restore ${newest}` };
     expect(headUncertain(state, PROJECT, [known, offloaded(1).snapshot], "work:web", said)).toBeUndefined();
     expect(headUncertain(state, PROJECT, [undefined], "work:web", said)).toBeUndefined();
+    expect(headUncertain(state, other, [], "work:api", said)).toBeDefined();
     store.data.delete(`meta/v1/events/${ids(3)}.json`);
     mirror.data.set("events/notes.txt", encode("not an event"));
     const stray = await load(store, mirror);

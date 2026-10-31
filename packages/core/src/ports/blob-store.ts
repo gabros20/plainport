@@ -197,7 +197,8 @@ const DOING: Record<StoreOperation, string> = {
   release: "release a folder after an offload",
 };
 
-const describeProperty = (semantics: StoreSemantics, p: SemanticProperty): string => {
+/** A property as a message names it: its value and evidence, or that it is unknown. */
+export const describeProperty = (semantics: StoreSemantics, p: SemanticProperty): string => {
   const value = semantics[p];
   return value === "unknown" ? `${p} is unknown` : `${p} is ${String(value.value)} (${value.evidence})`;
 };
@@ -219,13 +220,22 @@ export const requireEligible = (
   );
 };
 
+/**
+ * What a read may carry: a signal that cancels it, so a caller that gives up (a deadline) stops the work in flight (a
+ * remote store's child process group), not only stops waiting for it (review phase 5 M1). A store that does its reads
+ * in process may ignore it.
+ */
+export interface CallOptions {
+  signal?: AbortSignal;
+}
+
 export interface BlobStore {
   /** What the store guarantees (Q8). */
   semantics(): StoreSemantics;
   /** Derived from semantics() (capabilitiesOf); kept for its callers. */
   capabilities(): BlobCapabilities;
   /** The key's bytes, or null when there is no such key. */
-  get(key: string): Promise<Result<Uint8Array | null>>;
+  get(key: string, opts?: CallOptions): Promise<Result<Uint8Array | null>>;
   /**
    * Writes the key. A replacing write is whole: a reader sees the old bytes or the new ones, never a part. A
    * create-only write is whole where the store can link or rename into place; where it cannot (blob-fs on exFAT or
@@ -234,8 +244,8 @@ export interface BlobStore {
    */
   put(key: string, data: Uint8Array, opts?: PutOptions): Promise<Result<{ etag?: string }>>;
   /** Every key starting with `prefix` (which may be ""), sorted by key. */
-  list(prefix: string): Promise<Result<BlobEntry[]>>;
-  stat(key: string): Promise<Result<{ size: number; etag?: string } | null>>;
+  list(prefix: string, opts?: CallOptions): Promise<Result<BlobEntry[]>>;
+  stat(key: string, opts?: CallOptions): Promise<Result<{ size: number; etag?: string } | null>>;
   /** Removes the key; a key that is not there is not an error. */
   delete(key: string): Promise<Result<void>>;
   /**
@@ -243,18 +253,25 @@ export interface BlobStore {
    * (blob-rclone: one `copy`). A key that is not there is left out of the map. Callers use getMany() below, which
    * falls back to one get per key.
    */
-  getMany?(keys: readonly string[]): Promise<Result<Map<string, Uint8Array>>>;
+  getMany?(keys: readonly string[], opts?: CallOptions): Promise<Result<Map<string, Uint8Array>>>;
+  /**
+   * Optional: makes the store's root folder, where the store has one that reads treat as the store's presence (an SFTP
+   * folder: a missing one is store.unreachable, never an empty store). Setting a store up calls it (`store add`); a
+   * store without such a folder (S3, where a prefix is no folder) leaves it out or does nothing.
+   */
+  makeRoot?(): Promise<Result<void>>;
 }
 
 /** The keys' bytes, in one batch where the store offers one; a key that is not there is left out of the map. */
 export const getMany = async (
   store: BlobStore,
   keys: readonly string[],
+  opts?: CallOptions,
 ): Promise<Result<Map<string, Uint8Array>>> => {
-  if (store.getMany !== undefined) return store.getMany(keys);
+  if (store.getMany !== undefined) return store.getMany(keys, opts);
   const got = new Map<string, Uint8Array>();
   for (const key of new Set(keys)) {
-    const one = await store.get(key);
+    const one = await store.get(key, opts);
     if (!one.ok) return one;
     if (one.value !== null) got.set(key, one.value);
   }

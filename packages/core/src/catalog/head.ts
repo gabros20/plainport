@@ -3,20 +3,32 @@
 // a write), whether the project's head is still the snapshot this working copy came from, and whether the store
 // serves another root (ADR-0010, D48). Offload uses it now; onload's lease check reads the same head.
 //
-// A fold that left out an event it could not read or use is not known to be whole (D86): when the snapshot this
-// device knows of a project (its stub's, its registry entry's base) is named by no readable event, the head the fold
-// shows may be older than one that exists, so a head-dependent default refuses with catalog.head-uncertain. The way on
-// is that newest known snapshot, named with --snapshot: its restic snapshot is found by its op tag (unfoldedSnapshot),
-// so onload restores it and removes its stub as usual; any other snapshot is refused while the doubt stands.
+// A fold that left out an event it could not read or use is not known to be whole (D86), and the event's ULID says
+// nothing about whether it is newer than the head: its time is its writer's clock, which may run slow (Task 21,
+// astra's Important 6). So an event left out that may be any project's (its project cannot be told or, on a sealed
+// store, authenticated) makes every head on the store uncertain, and one whose project is known makes that project's
+// head uncertain, whatever this device knows; a head-dependent default then refuses with catalog.head-uncertain. The
+// way on is an explicit --snapshot: the newest snapshot this device knows that no readable event names (its stub's,
+// its registry entry's base), when there is one, and only that one; its restic snapshot is found by its op tag
+// (unfoldedSnapshot), so onload restores it and removes its stub as usual. The doubt clears when the event reads.
+//
+// A project's home store (Q12): before replication (M3) a project's history lives in one store. An offload or onload
+// whose store's catalog does not name the snapshot this copy came from refuses with store.history-elsewhere, naming
+// the store whose catalog this device's mirror shows holding it (stores by id; a mirror stands in for an offline
+// store), never starting a second history elsewhere.
 
 import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
+import type { Scheduler } from "../deadline.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { Engine, RunContext } from "../ports/engine.ts";
 import type { ProjectRegistry } from "../registry.ts";
 import type { Stub } from "../stub.ts";
 import type { CatalogPolicy } from "./codec.ts";
-import type { CatalogProject, CatalogState } from "./fold.ts";
-import { loadCatalog, type Tainted } from "./log.ts";
+import { type CatalogProject, type CatalogState, compare } from "./fold.ts";
+import { type Doubt, loadCatalog, readMirrorCatalog, type Tainted } from "./log.ts";
+
+/** How long a write's catalog read may take (one listing and one batch read) before the store counts as unreachable. */
+export const WRITE_SYNC_DEADLINE_MS = 120_000;
 
 /**
  * A catalog read for writing: the fold, the events it left out that may change state (D86), and the store's format,
@@ -26,6 +38,8 @@ export type CatalogRead = CatalogState & {
   uncertain: readonly string[];
   /** The stored-multiple events left out (Q11): their projects' heads are uncertain whatever this device knows. */
   tainted: readonly Tainted[];
+  /** The events left out by whose they are (Task 21). */
+  doubt: Doubt;
   format: 1 | 2;
 };
 
@@ -46,14 +60,23 @@ export const catalogReader =
     policy?: CatalogPolicy;
     now(): Date;
     report(finding: Finding): void;
+    /** WRITE_SYNC_DEADLINE_MS on the real timers unless a test says otherwise. */
+    deadlineMs?: number;
+    scheduler?: Scheduler;
   }): (() => Promise<Result<CatalogRead>>) =>
   async () => {
+    // Always fresh: a write reads the store itself, never the mirror's state alone.
     const read = await loadCatalog({
       store: options.store,
       mirror: options.mirror,
       storeId: options.storeId,
       now: options.now(),
       ...(options.policy === undefined ? {} : { policy: options.policy }),
+      deadline: {
+        ms: options.deadlineMs ?? WRITE_SYNC_DEADLINE_MS,
+        store: options.storeName,
+        ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
+      },
     });
     if (!read.ok) return read;
     if (read.value.stale)
@@ -66,6 +89,7 @@ export const catalogReader =
       ...read.value.state,
       uncertain: read.value.uncertain,
       tainted: read.value.tainted,
+      doubt: read.value.doubt,
       format: read.value.format ?? 1,
     });
   };
@@ -79,24 +103,37 @@ const named = (project: CatalogProject | undefined, snapshot: string): boolean =
 
 export interface HeadDoubt {
   finding: Finding;
-  /** The newest snapshot this device knows that no readable event names: the one --snapshot may restore. */
-  newest: string;
+  /**
+   * The newest snapshot this device knows that no readable event names, or that a stored-multiple event names: the
+   * one --snapshot may restore. Absent when there is none: then any snapshot named with --snapshot may be.
+   */
+  newest?: string;
 }
 
+/** A read as the doubt rule takes it: `doubt` when the read scoped it, else every event in `uncertain` taints all. */
+type Doubted = CatalogState & { uncertain?: readonly string[]; tainted?: readonly Tainted[]; doubt?: Doubt };
+
+/** The events left out that may change project `id`'s head: those that may be any project's, and its own. */
+const doubtFor = (read: Doubted, id: string): string[] => {
+  const doubt = read.doubt ?? { store: [...(read.uncertain ?? [])], projects: {} };
+  return [...new Set([...doubt.store, ...(doubt.projects[id] ?? [])])].sort(compare);
+};
+
 /**
- * catalog.head-uncertain (D86) when the read left out events that may change state and a snapshot this device knows
- * of the project (`known`: its stub's, its registry entry's base) is named by none of the readable ones; else
- * undefined. `said.what` says what was not done ("nothing was restored"), `said.instead` the way on, given the
- * newest such snapshot.
+ * catalog.head-uncertain (D86, Task 21) when the read left out an event that may change project `id`'s head: one that
+ * may be any project's, or one of its own, whatever its ULID's time; else undefined. `known` are the snapshots this
+ * device knows of the project (its stub's, its registry entry's base): the newest of them no readable event names
+ * is the one --snapshot may restore. `said.what` says what was not done ("nothing was restored"), `said.instead` the
+ * way on, given that newest snapshot when there is one.
  */
 export const headUncertain = (
-  read: CatalogState & { uncertain?: readonly string[]; tainted?: readonly Tainted[] },
+  read: Doubted,
   id: string,
   known: readonly (string | undefined)[],
   address: string,
-  said: { what: string; instead: (newest: string) => string },
+  said: { what: string; instead: (newest?: string) => string },
 ): HeadDoubt | undefined => {
-  const uncertain = read.uncertain ?? [];
+  const uncertain = doubtFor(read, id);
   if (uncertain.length === 0) return undefined;
   const project = read.projects[id];
   const unnamed = [
@@ -111,20 +148,74 @@ export const headUncertain = (
     ),
   ].sort();
   const newest = [...unnamed, ...hidden].sort().at(-1);
-  if (newest === undefined) return undefined;
   const latest = project?.head ?? null;
-  const knows =
+  const events = `${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")})`;
+  const message =
     unnamed.length > 0
-      ? `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names`
-      : `an event the catalog cannot use names snapshot ${hidden.join(" and ")} of ${address} in several stores (stored-multiple)`;
+      ? `this device knows snapshot ${unnamed.join(" and ")} of ${address}, which no readable catalog event names, and the catalog left out ${events}; its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`
+      : hidden.length > 0
+        ? `an event the catalog cannot use names snapshot ${hidden.join(" and ")} of ${address} in several stores (stored-multiple), and the catalog left out ${events}; its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`
+        : `the catalog left out ${events}, which may name a newer snapshot of ${address} whatever their ids' times say (a writer's clock may run slow); its head${latest === null ? "" : ` ${latest}`} may not be the newest, so ${said.what}`;
   return {
-    newest,
+    ...(newest === undefined ? {} : { newest }),
     finding: finding("catalog.head-uncertain", {
-      message: `${knows}, and the catalog left out ${plural(uncertain.length, "event")} it could not read or use (${uncertain.join(", ")}); its head${latest === null ? "" : ` ${latest}`} may be older than the newest snapshot, so ${said.what}`,
+      message,
       fix: `${said.instead(newest)}; or upgrade plainport if a newer version wrote ${uncertain.length === 1 ? "that event" : "those events"}`,
     }),
   };
 };
+
+/** Whether the store's catalog names `snapshot` of project `id` (Q12): it holds this copy's history. */
+export const namesSnapshot = (state: CatalogState, id: string, snapshot: string): boolean =>
+  named(state.projects[id], snapshot);
+
+/**
+ * The store whose catalog holds `snapshot` of project `id`, by this device's mirrors (Q12): each store this device set
+ * up, by id (a store under two names is one), other than `exclude`, read from its mirror alone, so an offline store
+ * still answers. Its name, or undefined when no mirror holds it.
+ */
+export const storeHolding = async (options: {
+  /** Store name → id (registry.json's stores). */
+  stores: Readonly<Record<string, string>>;
+  exclude: string;
+  id: string;
+  snapshot: string;
+  openMirror(storeId: string): Promise<Result<BlobStore>>;
+}): Promise<string | undefined> => {
+  const seen = new Set<string>([options.exclude]);
+  for (const [name, storeId] of Object.entries(options.stores).sort(([a], [b]) => compare(a, b))) {
+    if (seen.has(storeId)) continue;
+    seen.add(storeId);
+    const mirror = await options.openMirror(storeId);
+    if (!mirror.ok) continue;
+    const read = await readMirrorCatalog({
+      mirror: mirror.value,
+      storeId,
+      reason: finding("store.unreachable", {
+        message: `store ${name} was read from this device's mirror only`,
+      }),
+    });
+    if (read.ok && read.value.state.projects[options.id]?.snapshots[options.snapshot] !== undefined)
+      return name;
+  }
+  return undefined;
+};
+
+/** store.history-elsewhere (Q12): `store`'s catalog does not name the snapshot this copy came from. */
+export const historyElsewhere = (options: {
+  store: string;
+  address: string;
+  snapshot: string;
+  holder: string | undefined;
+  what: string;
+}): Finding =>
+  finding("store.history-elsewhere", {
+    message: `this copy of ${options.address} came from snapshot ${options.snapshot}, which store ${options.store}'s catalog does not name: the project's history is in ${options.holder === undefined ? "a store this device cannot tell (unknown)" : `store ${options.holder}`}, and a second history is never started elsewhere (Q12); ${options.what}`,
+    fix:
+      options.holder === undefined
+        ? `connect the store that holds snapshot ${options.snapshot}, and name it with --store <name>`
+        : `use the project's home store: --store ${options.holder}, or set the root's store back to ${options.holder}`,
+  });
 
 /**
  * The restic ids a project's skipped stored-multiple discards name (Q11): never restored by tag, as a readable discard
@@ -220,20 +311,36 @@ export const recordedProject = (options: {
 
 export type HeadCheck = { kind: "ok" } | { kind: "moved" | "incomplete"; finding: Finding };
 
-/** The catalog's view of the head this working copy should offload on top of; a refusal when it is not that. */
+/**
+ * The catalog's view of the head this working copy should offload on top of; a refusal when it is not that. With
+ * `home` (Q12), a base the catalog does not name at all is store.history-elsewhere, naming `home.holder`.
+ */
 export const headCheck = (
-  state: CatalogState & { uncertain?: readonly string[] },
+  state: Doubted,
   id: string,
   base: string | undefined,
   address: string,
+  home?: { store: string; holder: string | undefined },
 ): HeadCheck => {
-  // A fold that may lack the event naming this copy's base cannot say whether the head moved (D86).
+  // A fold that may lack an event of this project cannot say whether the head moved (D86, Task 21).
   const uncertain = headUncertain(state, id, [base], address, {
     what: "nothing was offloaded",
     instead: () => "keep this folder as it is until the catalog reads whole",
   });
   if (uncertain !== undefined) return { kind: "incomplete", finding: uncertain.finding };
   const project = state.projects[id];
+  if (home !== undefined && base !== undefined && !named(project, base)) {
+    return {
+      kind: "incomplete",
+      finding: historyElsewhere({
+        store: home.store,
+        address,
+        snapshot: base,
+        holder: home.holder,
+        what: "nothing was offloaded",
+      }),
+    };
+  }
   const kept = project !== undefined && (project.heads.length > 0 || project.conflicts.length > 0);
   if (project !== undefined && project.missing.length > 0) {
     return {

@@ -4,6 +4,7 @@ export const packageName = "@plainport/core";
 export { TEMP_SUFFIX, tempPathFor } from "./atomic.ts";
 export { type BootMark, fromThisBoot, readBootSession, SAME_BOOT_MS } from "./boot.ts";
 export * from "./catalog/index.ts";
+export { deriveSealKey, keyId, masterKeyMaterial } from "./catalog/seal.ts";
 export * from "./config/index.ts";
 export {
   abandonedCalls,
@@ -66,6 +67,7 @@ export * from "./scan/index.ts";
 export { posixDeleteTrash, posixSpawner } from "./spawner.ts";
 export * from "./status/projects.ts";
 export * from "./store.ts";
+export * from "./stores/index.ts";
 export * from "./stores-state.ts";
 export * from "./stub.ts";
 export * from "./tools.ts";

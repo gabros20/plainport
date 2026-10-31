@@ -10,10 +10,13 @@ export {
   projectAt,
 } from "./boundary.ts";
 export {
+  folderSize,
   LIKELY_ROOTS,
   type RootCandidate,
   rootCandidates,
   rootKeyFrom,
+  SIZE_BUDGET_MS,
+  SIZE_SKIPPED,
   type SkippedCandidate,
 } from "./candidates.ts";
 export { type CanonicalPath, canonicalPath, overlapByIdentity, overlapOf } from "./canonical.ts";

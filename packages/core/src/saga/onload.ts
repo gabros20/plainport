@@ -63,7 +63,10 @@ import {
   catalogReader,
   type HeadDoubt,
   headUncertain,
+  historyElsewhere,
+  namesSnapshot,
   recordedProject,
+  storeHolding,
   taintedDiscards,
   unfoldedSnapshot,
 } from "../catalog/head.ts";
@@ -355,9 +358,18 @@ const onloadFlow = async (
       }),
     );
   }
-  const opened = await openStore(io, { paths, env: deps.env, name: storeName, config, opener: deps.opener });
+  const opened = await openStore(io, {
+    paths,
+    env: deps.env,
+    name: storeName,
+    config,
+    opener: deps.opener,
+    now: clock,
+  });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // A config assertion the measurement contradicts (D111) is said, and the measured value used.
+  for (const f of store.findings ?? []) report(f);
   const mirror = await deps.openMirror(store.id);
   if (!mirror.ok) return mirror;
   const catalog = catalogReader({
@@ -438,7 +450,32 @@ const onloadFlow = async (
     // A newer snapshot this device knows of that no readable event names (D86): only that snapshot, asked for by name,
     // goes on; it is found in the repository by its op tag, restored, and its stub removed as usual.
     const doubt = doubtOf(state.value);
-    if (doubt !== undefined && req.snapshot !== doubt.newest) return fail(doubt.finding);
+    if (
+      doubt !== undefined &&
+      (doubt.newest === undefined ? req.snapshot === undefined : req.snapshot !== doubt.newest)
+    )
+      return fail(doubt.finding);
+    // The project's home store (Q12): a default onload from a store whose catalog does not name the snapshot this
+    // device knows (its stub's, its registry entry's base) would hand back another history's head.
+    const unnamed = doubt === undefined && req.snapshot === undefined ? elsewhere(state.value) : undefined;
+    if (unnamed !== undefined) {
+      const holder = await storeHolding({
+        stores: registered.ok ? (registered.value.stores ?? {}) : {},
+        exclude: store.id,
+        id,
+        snapshot: unnamed,
+        openMirror: deps.openMirror,
+      });
+      return fail(
+        historyElsewhere({
+          store: store.name,
+          address: ref.address,
+          snapshot: unnamed,
+          holder,
+          what: "nothing was restored",
+        }),
+      );
+    }
     // No readable event names the project at all (its first offload's event unreadable): the snapshot named is restored
     // by this device's own records of the project (D88).
     const folded = state.value.projects[id];
@@ -878,17 +915,28 @@ const onloadFlow = async (
     return hydrate(result.value, stripped);
   }
 
-  /** catalog.head-uncertain when the read may lack the event naming the stub's or the registry's snapshot (D86). */
-  function doubtOf(read: CatalogRead): HeadDoubt | undefined {
-    const known = [
+  /** The snapshots this device knows of the project: its stub's, its registry entry's base. */
+  function knownSnapshots(): (string | undefined)[] {
+    return [
       stub?.ok ? stub.value.snapshot : undefined,
       registered.ok ? registered.value.projects[id]?.base : undefined,
     ];
-    return headUncertain(read, id, known, ref.address, {
+  }
+
+  /** catalog.head-uncertain when the read left out an event that may change the project's head (D86, Task 21). */
+  function doubtOf(read: CatalogRead): HeadDoubt | undefined {
+    return headUncertain(read, id, knownSnapshots(), ref.address, {
       what: "nothing was restored",
       instead: (newest) =>
-        `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
+        newest === undefined
+          ? `name the snapshot to restore: plainport onload ${shellWord(ref.address)} --snapshot <id> (plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads one side by side first)`
+          : `restore that newest snapshot by name: plainport onload ${shellWord(ref.address)} --snapshot ${newest}`,
     });
+  }
+
+  /** A snapshot this device knows of the project that the store's catalog does not name at all (Q12). */
+  function elsewhere(read: CatalogRead): string | undefined {
+    return knownSnapshots().find((s): s is string => s !== undefined && !namesSnapshot(read, id, s));
   }
 
   /** The project as the stub and registry.json record it, when no readable event names it (D88). */
@@ -1186,7 +1234,11 @@ const onloadFlow = async (
         ),
       );
     const doubtNow = doubtOf(fresh.value);
-    if (doubtNow !== undefined && journal.snapshot !== doubtNow.newest)
+    // Under doubt only an explicit --snapshot goes on: the newest this device knows, when there is one (Task 21).
+    if (
+      doubtNow !== undefined &&
+      (doubtNow.newest === undefined ? req.snapshot === undefined : journal.snapshot !== doubtNow.newest)
+    )
       return saga.keep(fail(doubtNow.finding));
     const project = fresh.value.projects[id];
     const head =

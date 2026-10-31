@@ -373,7 +373,7 @@ describe("bootstrap: adopting a published store", () => {
     const device = w.device("m1");
     const puts = w.store.calls.put;
     const adopted = done(await device.run());
-    expect(adopted).toEqual({ outcome: "adopted", id, repo: "repo", format: 1 });
+    expect(adopted).toEqual({ outcome: "adopted", id, repo: "repo", format: 1, seal: "none" });
     expect(w.store.calls.put).toBe(puts);
     expect(w.store.data.get(STORE_IDENTITY_KEY)).toEqual(v1);
     expect(keysUnder(w.store, STORE_CLAIMS_PREFIX)).toEqual([]);

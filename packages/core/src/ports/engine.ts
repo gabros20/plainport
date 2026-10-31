@@ -3,8 +3,8 @@
 //
 // As DESIGN.md's sketch says (run decision D27): every call returns a Result (AGENTS.md rule 7), and an engine is
 // bound to one repository and its secret when it is made, so `init` takes neither. `entries` streams: a listing
-// of hundreds of thousands of entries is handed over one by one, never held whole (fix r1 I3). `stream`, `forget`
-// and `prune` arrive in M5.
+// of hundreds of thousands of entries is handed over one by one, never held whole (fix r1 I3). `catalogKey` gives a
+// sealed store's catalog key (M2 Task 20). `stream`, `forget` and `prune` arrive in M5.
 
 import type { Failure, Ok, PlainportEvent, Result } from "@plainport/contract";
 
@@ -124,8 +124,14 @@ export interface Engine {
     input: SnapshotInput,
     ctx: RunContext,
   ): Promise<Ok<{ id: string; stats: SnapshotStats }> | SnapshotFailure>;
-  /** Snapshots carrying every tag in the filter. */
-  list(filter: { tags?: readonly string[] }, ctx?: RunContext): Promise<Result<SnapshotInfo[]>>;
+  /**
+   * Snapshots carrying every tag in the filter. noLock: a probe that only opens the repository (adopting a store)
+   * takes no lock on it, so it writes nothing there.
+   */
+  list(
+    filter: { tags?: readonly string[]; noLock?: boolean },
+    ctx?: RunContext,
+  ): Promise<Result<SnapshotInfo[]>>;
   /**
    * Hands every entry of a snapshot below its root to onEntry, one at a time (symlinks last, once their targets
    * are known). What onEntry received counts only when the Result is ok: a listing that cannot be shown whole
@@ -147,4 +153,17 @@ export interface Engine {
   ): Promise<Result<RestoreStats>>;
   /** Integrity: a damaged repository is an ok Result whose report is not ok. */
   check(options?: { readDataSubset?: string }, ctx?: RunContext): Promise<Result<CheckReport>>;
+  /**
+   * The store's catalog key (DESIGN.md "Catalog seal v1"): derived from the repository's master key, with the store's
+   * id as the salt. Only the derived key and its id leave the engine; the master key is read in the runner's
+   * sensitive mode and never reaches a message, an event or the caller. Every password of one repository gives the
+   * same key. Reading it takes no lock and writes nothing.
+   */
+  catalogKey(storeId: string, ctx?: RunContext): Promise<Result<CatalogKey>>;
+}
+
+/** A store's catalog key, 32 bytes, and its key id (Catalog seal v1). */
+export interface CatalogKey {
+  key: Uint8Array;
+  kid: string;
 }

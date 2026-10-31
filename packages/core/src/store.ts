@@ -19,12 +19,13 @@
 
 import { dirname } from "node:path";
 import { fail, finding, ok, type Result } from "@plainport/contract";
-import { ensureStoreIdentity, identityChanged, readStoreIdentity } from "./catalog/identity.ts";
+import { ensureStoreIdentity, identityChanged, readStoreDescriptor } from "./catalog/identity.ts";
 import { DEFAULT_LOCAL_SECRET, type ResolvedConfig, type Store } from "./config/schema.ts";
 import { type ProbeOptions, probeDeadline, type Scheduler, withinDeadline } from "./deadline.ts";
 import { notReserved } from "./holder.ts";
 import { type LocalIo, systemErrorCode } from "./io.ts";
 import { type Env, expandHome, type PlainportPaths } from "./paths.ts";
+import type { Engine } from "./ports/engine.ts";
 import {
   parseSecretRef,
   SECRET_DEADLINE_MS,
@@ -33,10 +34,12 @@ import {
   type SecretProviders,
   secretSchemeOf,
 } from "./ports/secrets.ts";
-import type { OpenedStore, StoreOpener } from "./ports/store.ts";
+import type { OpenedStore, StoreCredentials, StoreOpener } from "./ports/store.ts";
 import { readRegistry, updateRegistry } from "./registry.ts";
+import type { BootstrapStore } from "./saga/bootstrap.ts";
 import { registeredFolders } from "./saga/project-gate.ts";
 import { storeOverlap } from "./store-overlap.ts";
+import { storeCatalog } from "./stores/seal.ts";
 
 const secretMissing = (name: string, what: string, message: string, fix: string) =>
   fail(finding("store.secret-missing", { message: `store ${name}'s ${what}: ${message}`, fix }));
@@ -257,6 +260,8 @@ export const secretProvidersOf = (opener: StoreOpener): SecretOptions =>
  * An S3 store's secrets (Q7): its repository password and its key pair, each through its own reference, read one
  * after another within one Q14 budget for all three (review phase 4 M5), so an open fails within 30 seconds, not 90.
  * Temporary session credentials are not supported in M2: AWS_SESSION_TOKEN is never read, and nothing here takes one.
+ * keyPairOnly reads the key pair alone (the password comes back empty): what a view needs to read a plain catalog,
+ * or to see that a catalog is sealed, before it asks for the password (D108).
  */
 export const resolveS3Credentials = async (
   io: LocalIo,
@@ -264,7 +269,7 @@ export const resolveS3Credentials = async (
   home: string,
   name: string,
   store: Extract<Store, { kind: "s3" }>,
-  options: Omit<SecretOptions, "what" | "field"> = {},
+  options: Omit<SecretOptions, "what" | "field"> & { keyPairOnly?: boolean } = {},
 ): Promise<Result<{ password: string; accessKeyId: string; secretAccessKey: string }>> => {
   const deadlineMs = options.deadlineMs ?? SECRET_DEADLINE_MS;
   // The budget's end stops the read in flight (a provider's child) as a cancel would.
@@ -272,12 +277,15 @@ export const resolveS3Credentials = async (
   const onAbort = () => stop.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) stop.abort();
-  const reads = [
-    { what: "password", field: "secret", ref: store.secret },
+  const keyPair = [
     { what: "access key id", field: "accessKeyId", ref: store.accessKeyId },
     { what: "secret access key", field: "secretAccessKey", ref: store.secretAccessKey },
   ] as const;
-  let reading: (typeof reads)[number] = reads[0];
+  const reads =
+    options.keyPairOnly === true
+      ? keyPair
+      : ([{ what: "password", field: "secret", ref: store.secret }, ...keyPair] as const);
+  let reading: (typeof reads)[number] = reads[0] as (typeof reads)[number];
   const all = async (): Promise<Result<string[]>> => {
     const values: string[] = [];
     for (const read of reads) {
@@ -301,31 +309,135 @@ export const resolveS3Credentials = async (
       return secretMissing(
         name,
         reading.what,
-        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's three secrets share`,
+        `the ${provider} provider did not answer within the ${outcome.seconds} seconds the store's ${reads.length === 3 ? "three" : "two"} secrets share`,
         provider === "keychain"
           ? "answer the Keychain prompt (or unlock the keychain), then re-run"
           : "check that the provider is reachable and signed in, then re-run",
       );
     }
     if (!outcome.value.ok) return outcome.value;
-    const [password, accessKeyId, secretAccessKey] = outcome.value.value as [string, string, string];
+    const values = outcome.value.value;
+    const [password, accessKeyId, secretAccessKey] = (
+      options.keyPairOnly === true ? ["", ...values] : values
+    ) as [string, string, string];
     return ok({ password, accessKeyId, secretAccessKey });
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
   }
 };
 
+/**
+ * What opening a store needs from its references: the restic password, and an S3 store's key pair (resolveS3Credentials,
+ * one Q14 budget for the three).
+ */
+export const resolveStoreSecrets = async (
+  io: LocalIo,
+  env: Env,
+  home: string,
+  name: string,
+  store: Store,
+  options: Omit<SecretOptions, "what" | "field"> = {},
+): Promise<Result<{ password: string; credentials?: StoreCredentials }>> => {
+  if (store.kind === "s3") {
+    const read = await resolveS3Credentials(io, env, home, name, store, options);
+    if (!read.ok) return read;
+    const { password, ...credentials } = read.value;
+    return ok({ password, credentials });
+  }
+  const password = await resolveSecret(io, env, home, name, secretRefOf(store), options);
+  return password.ok ? ok({ password: password.value }) : password;
+};
+
 /** The folder a local store lives in, absolute. */
 export const storeRoot = (store: Extract<Store, { kind: "local" }>, home: string): string =>
   expandHome(store.path, home, home);
 
-const unsupported = (name: string, store: Store) =>
+const unsupported = (name: string, store: Store, what = "local stores only (M1)") =>
   fail(
     finding("store.unsupported", {
-      message: `store ${name} is a ${store.kind} store; this build uses local stores only (M1)`,
+      message: `store ${name} is a ${store.kind} store; this build ${store.kind === "peer" ? "uses local, sftp and s3 stores; peer stores arrive with M3" : `sets up ${what}`}`,
       fix: `point the root at a local store (an external disk), e.g. plainport init --store-path <path> --store <name> --yes`,
     }),
   );
+
+/** Where a store is, as its config says, for messages and bootstrap's journal: never a secret. */
+export const storeLocationOf = (store: Store, home: string): string => {
+  switch (store.kind) {
+    case "local":
+      return storeRoot(store, home);
+    case "sftp":
+      return `sftp:${store.host}:${store.path}`;
+    case "s3":
+      return `s3:${store.endpoint.replace(/\/+$/, "")}/${store.bucket}${store.path === undefined ? "" : `/${store.path}`}`;
+    case "peer":
+      return `peer:${store.device}:${store.path}`;
+  }
+};
+
+/**
+ * The engine bound to the repository the store publishes (DESIGN.md "Layout on every store"): `repo` for a format-1
+ * store, the `repo` its store.json names for format 2. It reads store.json on its first call (and again after a
+ * failed read), never before: opening reaches nothing. A store without a store.json is an M1 local store not set up
+ * yet (`repo`), or, remote, a store that is not set up (store.not-set-up).
+ */
+export const publishedEngine = (
+  name: string,
+  store: Store,
+  blob: OpenedStore["blob"],
+  engineAt: (repo: string) => Engine,
+): Engine => {
+  let bound: Promise<Result<Engine>> | undefined;
+  const resolve = async (): Promise<Result<Engine>> => {
+    const found = await readStoreDescriptor(blob);
+    if (!found.ok) return found;
+    if (found.value !== null) return ok(engineAt(found.value.repo));
+    if (store.kind === "local") return ok(engineAt("repo"));
+    return fail(
+      finding("store.not-set-up", {
+        message: `store ${name} has no meta/v1/store.json, so it is not set up and has no repository to use`,
+        fix: "set the store up first from a device that can (plainport init --yes sets up the stores config names)",
+      }),
+    );
+  };
+  const engine = (): Promise<Result<Engine>> => {
+    bound ??= resolve().then((result) => {
+      if (!result.ok) bound = undefined;
+      return result;
+    });
+    return bound;
+  };
+  return {
+    id: engineAt("repo").id,
+    init: async (ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.init(ctx) : e;
+    },
+    snapshot: async (input, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.snapshot(input, ctx) : e;
+    },
+    list: async (filter, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.list(filter, ctx) : e;
+    },
+    entries: async (snapshot, onEntry, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.entries(snapshot, onEntry, ctx) : e;
+    },
+    restore: async (snapshot, target, ctx, options) => {
+      const e = await engine();
+      return e.ok ? e.value.restore(snapshot, target, ctx, options) : e;
+    },
+    check: async (options, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.check(options, ctx) : e;
+    },
+    catalogKey: async (storeId, ctx) => {
+      const e = await engine();
+      return e.ok ? e.value.catalogKey(storeId, ctx) : e;
+    },
+  };
+};
 
 export interface StoreSetup {
   id: string;
@@ -422,16 +534,16 @@ const storeFolder = async (
 };
 
 const openWithSecret = async (io: LocalIo, options: SetUpOptions): Promise<Result<OpenedStore>> => {
-  const password = await resolveSecret(
+  const secrets = await resolveStoreSecrets(
     io,
     options.env,
     options.paths.home,
     options.name,
-    secretRefOf(options.store),
+    options.store,
     secretProvidersOf(options.opener),
   );
-  if (!password.ok) return password;
-  return options.opener.open(options.name, options.store, password.value);
+  if (!secrets.ok) return secrets;
+  return options.opener.open(options.name, options.store, secrets.value.password, secrets.value.credentials);
 };
 
 /**
@@ -462,17 +574,23 @@ export const checkStorePin = async (io: LocalIo, options: SetUpOptions): Promise
   if (here === undefined) return changed(null);
   const reached = await openWithSecret(io, options);
   if (!reached.ok) return reached;
-  const identity = await readStoreIdentity(reached.value.blob);
+  // Either format: a format-2 store (bootstrap's, Task 19's init) is checked by its id as an M1 one is.
+  const identity = await readStoreDescriptor(reached.value.blob);
   if (!identity.ok) return identity;
-  return identity.value === pinned ? ok(pinned) : changed(identity.value);
+  return identity.value?.id === pinned ? ok(pinned) : changed(identity.value?.id ?? null);
 };
 
-/** Sets a store up (see above): store.unreachable when the folder that should hold it is missing. */
-export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promise<Result<StoreSetup>> => {
+/**
+ * A local store's folder made ready for setup: never in plainport's own holders (D87), never inside or holding a
+ * registered project's folder (D83), its parent there (a mounted disk), and the folder itself made when only it is
+ * missing. Every probe of the path before anything is written has the deadline (D32). store.unreachable when the
+ * folder that should hold it is missing.
+ */
+export const prepareLocalStore = async (
+  io: LocalIo,
+  options: Omit<SetUpOptions, "store" | "opener"> & { store: Extract<Store, { kind: "local" }> },
+): Promise<Result<{ root: string; made: boolean }>> => {
   const { name, store, paths } = options;
-  if (store.kind !== "local") return unsupported(name, store);
-  const pin = await checkStorePin(io, options);
-  if (!pin.ok) return pin;
   const root = storeRoot(store, paths.home);
   const probe = options.probe ?? {};
   // Never in plainport's own holders, whose folders gc deletes (D87). Every probe of the store's path before anything
@@ -512,6 +630,18 @@ export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promi
       return unreachableAt(name, root, `${root} could not be made (${systemErrorCode(error)})`);
     }
   }
+  return ok({ root, made: folder.value === undefined });
+};
+
+/** Sets a store up (see above): store.unreachable when the folder that should hold it is missing. */
+export const setUpStore = async (io: LocalIo, options: SetUpStoreOptions): Promise<Result<StoreSetup>> => {
+  const { name, store, paths } = options;
+  if (store.kind !== "local") return unsupported(name, store);
+  const pin = await checkStorePin(io, options);
+  if (!pin.ok) return pin;
+  const prepared = await prepareLocalStore(io, { ...options, store });
+  if (!prepared.ok) return prepared;
+  const { root } = prepared.value;
 
   const open = await openWithSecret(io, options);
   if (!open.ok) return open;
@@ -557,11 +687,21 @@ export interface ConfiguredStore extends OpenedStore {
 
 /**
  * A store an operation can use: named in config, set up on this device (its id recorded), of a kind this build
- * supports, with its password read. Nothing is reached yet.
+ * supports, with its password read, and its catalog policy (stores/seal.ts): the store's identity is read, its seal
+ * policy checked against this device's pin (pinned at the first contact), and a sealed catalog's key derived. With
+ * `catalog: false` (a caller that reads no catalog) nothing is reached.
  */
 export const openStore = async (
   io: LocalIo,
-  options: { paths: PlainportPaths; env: Env; name: string; config: ResolvedConfig; opener: StoreOpener },
+  options: {
+    paths: PlainportPaths;
+    env: Env;
+    name: string;
+    config: ResolvedConfig;
+    opener: StoreOpener;
+    catalog?: boolean;
+    now?: () => Date;
+  },
 ): Promise<Result<ConfiguredStore>> => {
   const { name, paths } = options;
   const store = options.config.stores[name];
@@ -574,28 +714,72 @@ export const openStore = async (
       }),
     );
   }
-  if (store.kind !== "local") return unsupported(name, store);
+  if (store.kind === "peer") return unsupported(name, store);
   const registry = await readRegistry(io, paths);
   if (!registry.ok) return registry;
   const id = registry.value.stores?.[name];
   if (id === undefined) {
     return fail(
       finding("store.not-set-up", {
-        message: `store ${name} at ${store.path} is configured but this device has not set it up (no id recorded in ${paths.registryFile})`,
+        message: `store ${name} at ${storeLocationOf(store, paths.home)} is configured but this device has not set it up (no id recorded in ${paths.registryFile})`,
         fix: "plainport init --yes sets up the stores already configured",
       }),
     );
   }
-  const password = await resolveSecret(
+  const secrets = await resolveStoreSecrets(
     io,
     options.env,
     paths.home,
     name,
-    secretRefOf(store),
+    store,
     secretProvidersOf(options.opener),
   );
-  if (!password.ok) return password;
-  const opened = await options.opener.open(name, store, password.value);
+  if (!secrets.ok) return secrets;
+  const opened = await options.opener.open(name, store, secrets.value.password, secrets.value.credentials);
   if (!opened.ok) return opened;
-  return ok({ ...opened.value, name, id, store });
+  if (options.catalog === false) return ok({ ...opened.value, name, id, store });
+  const now = options.now ?? (() => new Date());
+  const catalog = await storeCatalog(
+    io,
+    paths,
+    { ...opened.value, name, id },
+    { pin: true, at: () => now().toISOString() },
+  );
+  if (!catalog.ok) return catalog;
+  return ok({ ...opened.value, catalog: catalog.value, name, id, store });
+};
+
+/**
+ * The store `name` as bootstrap sets it up or recovers it (saga/bootstrap.ts): its metadata layer, its location, and
+ * engines at any repository under its root, with this device's password (and key pair). Nothing is reached yet.
+ */
+export const openBootstrapStore = async (
+  io: LocalIo,
+  options: { paths: PlainportPaths; env: Env; name: string; config: ResolvedConfig; opener: StoreOpener },
+): Promise<Result<BootstrapStore>> => {
+  const { name, paths } = options;
+  const store = options.config.stores[name];
+  if (store === undefined)
+    return fail(
+      finding("store.not-set-up", {
+        message: `no store named ${name} is configured`,
+        fix: `add stores.${name} to config.toml, then re-run`,
+      }),
+    );
+  if (store.kind === "peer") return unsupported(name, store);
+  const secrets = await resolveStoreSecrets(
+    io,
+    options.env,
+    paths.home,
+    name,
+    store,
+    secretProvidersOf(options.opener),
+  );
+  if (!secrets.ok) return secrets;
+  const opened = await options.opener.open(name, store, secrets.value.password, secrets.value.credentials);
+  if (!opened.ok) return opened;
+  const { blob, engineAt, location } = opened.value;
+  if (engineAt === undefined || location === undefined)
+    return unsupported(name, store, "stores through an opener that can set them up");
+  return ok({ blob, location, engineAt: (repo) => engineAt(repo) });
 };

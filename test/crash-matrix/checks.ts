@@ -14,6 +14,7 @@ import { basename, join } from "node:path";
 import type { CatalogPolicy } from "../../packages/core/src/catalog/codec.ts";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
+import { storedHere } from "../../packages/core/src/catalog/stored.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
 import type { BlobStore } from "../../packages/core/src/ports/blob-store.ts";
 import type { Engine } from "../../packages/core/src/ports/engine.ts";
@@ -232,7 +233,8 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     } catch {}
     const head = project?.head ?? undefined;
     const event = events.find((e) => e.type === "offloaded" && e.snapshot === head);
-    const stored = event?.type === "offloaded" ? event.stored[world.store.name] : undefined;
+    // The event's one stored entry (Q11): keyed by the store's id on a format-2 store, by its alias on format 1.
+    const stored = event?.type === "offloaded" ? storedHere(event.stored) : undefined;
     if (stub === undefined || head === undefined || stub !== head || stored === undefined)
       problems.push(`the folder is gone, but no stub names a stored head (stub ${stub}, head ${head})`);
     else {
@@ -299,7 +301,7 @@ export const laterHeadProblems = async (
   const project = projectId === undefined ? undefined : foldCatalog(events).projects[projectId];
   const head = project?.head ?? undefined;
   const event = events.find((e) => e.type === "offloaded" && e.snapshot === head);
-  const stored = event?.type === "offloaded" ? event.stored[world.store.name] : undefined;
+  const stored = event?.type === "offloaded" ? storedHere(event.stored) : undefined;
   if (head === undefined || head === crashedOp || stored === undefined || tagged.some((t) => t.id === stored))
     return [...problems, `the later offload is not the head (head ${head}, crashed ${crashedOp})`];
   if (!listed.value.some((s) => s.id === stored))

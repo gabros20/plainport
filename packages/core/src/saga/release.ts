@@ -10,6 +10,13 @@
 // offload.diverged-after-commit (exit 8, D51, D52). The lock is read before that scan, so the rename follows the
 // scan at once. A fingerprint of another kind than this build's (D53) is never compared: the folder is kept.
 //
+// The folder is moved only onto a store whose semantics profile admits release (DESIGN.md "Remote stores: consistency
+// and publication": commit and durability = durable, or acked-unsynced with Q21's post-grace proof). A committed offload
+// on any other store keeps its folder and its journal at the commit, and ends with store.semantics-unknown naming the
+// property: recover releases it once the profile admits it (an owner's assertion in config of what the measurement
+// leaves unknown, D111). This open journal is interim: Task 24's held trash and post-grace proof replace it before
+// the M2 tag (review phase 5, judgement a).
+//
 // Each stage checks whether it is done before doing it (the folder at its place or already in the trash, the stub
 // placed or ours already, the registry, the detached delete), and a journal step already reached is not written
 // again, so recover can call it from any journal step from commit.start on (m1). Each effect is followed by a crash
@@ -22,6 +29,7 @@ import { makeInHolder } from "../holder.ts";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
+import { describeProperty, eligibility, type StoreSemantics } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
@@ -63,6 +71,11 @@ export interface ReleaseContext {
   stores(): Promise<Result<readonly ProtectedStore[]>>;
   /** The offload's saga, committed: its journal says what to release and how. */
   saga: Saga<OffloadJournal>;
+  /**
+   * The store's semantics profile, and its name in config: the folder is moved only when the profile admits release.
+   * Absent, release is not checked (callers that release from a store already checked).
+   */
+  store?: { name: string; semantics: StoreSemantics };
   clock(): Date;
   log(level: "warn", message: string): void;
 }
@@ -106,6 +119,10 @@ const RELEASE_ORDER = [
 ] as const;
 type ReleaseStep = (typeof RELEASE_ORDER)[number];
 
+/** Whether the release has reached its rename: from there on the folder has moved, and no gate applies (I2). */
+export const releaseMoved = (journal: OffloadJournal): boolean =>
+  RELEASE_ORDER.indexOf(journal.step as ReleaseStep) >= RELEASE_ORDER.indexOf("offload.release.trash");
+
 const exists = async (rc: ReleaseContext, path: string): Promise<boolean> => {
   try {
     await rc.host.fs.lstat(path);
@@ -145,6 +162,30 @@ export const releaseOffload = async (
   const moved = join(trash, basename(folder));
   const reached = (step: ReleaseStep): boolean =>
     RELEASE_ORDER.indexOf(journal.step as ReleaseStep) >= RELEASE_ORDER.indexOf(step);
+  // Nothing has moved yet: a store whose profile does not admit release keeps the folder (see above).
+  if (rc.store !== undefined && !reached("offload.release.trash")) {
+    const { name, semantics } = rc.store;
+    const verdict = eligibility("release", semantics);
+    if (!verdict.eligible) {
+      const lacks = verdict.missing.map((p) => describeProperty(semantics, p)).join("; ");
+      // Only what the measurement leaves unknown is the owner's to assert (D111); a measured value stands.
+      const assertable = verdict.missing.filter((p) => {
+        const held = semantics[p];
+        return held === "unknown" || held.value === "unknown";
+      });
+      const assertion =
+        assertable.length === 0
+          ? ""
+          : `If the store does keep what it acknowledged, assert it in config.toml (${assertable.map((p) => (p === "durability" ? `stores.${name}.semantics.durability = "durable"` : `stores.${name}.semantics.${p}`)).join(", ")}), then run plainport recover to finish the release. `;
+      return fail(
+        finding("store.semantics-unknown", {
+          message: `the offload of ${project.address} is committed as snapshot ${op}, and its folder was kept: the store ${name} cannot release a folder after an offload (its ${lacks})`,
+          fix: `nothing is lost: the snapshot is on the store and the folder is as it was. ${assertion}Otherwise keep the folder: the held release for such a store is not in this build, so this offload's journal stays open and plainport recover reports it as pending`,
+          paths: [folder],
+        }),
+      );
+    }
+  }
   /** Journals the step unless the journal is there already. */
   const advance = (step: ReleaseStep, change: Partial<OffloadJournal> = {}): Promise<Result<void>> =>
     reached(step) ? Promise.resolve(ok(undefined)) : saga.step(step, change);

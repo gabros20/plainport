@@ -5,6 +5,8 @@ export { configJsonSchemas } from "./json-schema.ts";
 export { ConfigLoader, envLayer, type LoadedConfig, type LoadOptions, PROJECT_FILE } from "./load.ts";
 export { MANAGED_HEADER, type ManagedOptions, type ManagedUpdate, updateManaged } from "./managed.ts";
 export {
+  type AssertedSemantics,
+  AssertedSemanticsSchema,
   type ConfigLayer,
   ConfigLayerSchema,
   DEFAULT_LOCAL_SECRET,

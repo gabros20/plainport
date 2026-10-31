@@ -18,6 +18,7 @@ _plainport_names() {
         'recover:Settle interrupted operations: roll back what had not committed, finish what had'
         'gc:Delete released trash past its keepLocalFor deadline; --now deletes it early'
         'root:root commands'
+        'store:store commands'
         'version:Print plainport'\''s version'
     )
   elif (( $# == 1 )); then
@@ -28,6 +29,14 @@ _plainport_names() {
         'bind:Point a root at its folder on this device'
         'list:Show every root, its folder on each device and its state here'
         'scan:List and register the project folders under a root; offload takes an unregistered one as it is'
+      ) ;;
+    store)
+      names=(
+        'add:Set a store up, or adopt one already set up, and record it in managed.toml'
+        'list:Show every configured store, its id on this device and its last test; --probe asks each whether it answers'
+        'test:Measure a store with one probe key, record the result on this device, and list setup leftovers'
+        'upgrade:Move a format-1 store to format 2 once it is quiescent (Q2)'
+        'remove:Forget a store on this device (its managed.toml table and its pin); the store itself is not touched'
       ) ;;
     esac
   fi
@@ -43,7 +52,7 @@ _plainport() {
     [[ ${words[i]} == -* ]] || typed+=("${words[i]}")
   done
   local cmd='' used=0
-  if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
+  if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan'|'store add'|'store list'|'store test'|'store upgrade'|'store remove') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
   if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|recover|gc|version) cmd=${typed[1]}; used=1 ;; esac; fi
   case "$cmd" in
     'help') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
@@ -61,6 +70,11 @@ _plainport() {
     'root bind') opts=(--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root list') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root scan') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store add') opts=(--kind --path --host --endpoint --bucket --region --secret --access-key-id --secret-access-key --secret-stdin --seal --no-seal --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store list') opts=(--probe --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store test') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store upgrade') opts=(--others-stopped --quiet-window --clear-marker --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store remove') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'version') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     *) opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help --version) ;;
   esac

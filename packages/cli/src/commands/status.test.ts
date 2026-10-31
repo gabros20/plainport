@@ -105,12 +105,11 @@ const expectInvariants = async (path = "web") =>
     }),
   ).toEqual([]);
 
+/** The projects' journals: `<op>.json` files (store setups keep theirs in journal/bootstrap/, closed by then). */
+const journalFiles = () => readdirSync(box.paths.journalDir).filter((n) => n.endsWith(".json"));
+
 const settle = async () => {
-  for (
-    let i = 0;
-    i < 400 && existsSync(box.paths.journalDir) && readdirSync(box.paths.journalDir).length > 0;
-    i++
-  )
+  for (let i = 0; i < 400 && existsSync(box.paths.journalDir) && journalFiles().length > 0; i++)
     await Bun.sleep(25);
 };
 
@@ -277,7 +276,7 @@ describe("housekeeping at the start of any command (D59)", () => {
   test("an interrupted operation is named on stderr with plainport recover; ls still runs", async () => {
     await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
     // The injected crash left this live process's pid: a killed one would be gone.
-    const [name] = readdirSync(box.paths.journalDir);
+    const [name] = journalFiles();
     const path = join(box.paths.journalDir, name as string);
     writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), pid: 99_999_999 }));
     const run = await cli(["ls"]);
@@ -293,12 +292,12 @@ describe("housekeeping at the start of any command (D59)", () => {
     await cli(["offload", "work:api", "--yes"]);
     expect(readdirSync(join(box.home, "work/.plainport-trash"))).toHaveLength(1);
     const later = new Date(NOW.getTime() + 2 * 3_600_000);
-    const journal = readdirSync(box.paths.journalDir);
+    const journal = journalFiles();
     for (const argv of [["ls"], ["status", "work:api"], ["offload", "work:web", "--dry-run"]]) {
       expect((await cli(argv, {}, later)).code).toBe(0);
       await Bun.sleep(100);
       expect(readdirSync(join(box.home, "work/.plainport-trash"))).toHaveLength(1);
-      expect(readdirSync(box.paths.journalDir)).toEqual(journal);
+      expect(journalFiles()).toEqual(journal);
     }
     await cli(["root", "scan", "work"], {}, later);
     // The detached delete removes the trash, then the trash holder it left empty (agent smoke).
@@ -560,7 +559,7 @@ describe("status and ls: fix wave q1 (lazy views, the view model in core)", () =
     expect(local).toMatchObject({ gitWarnings: expect.any(Array), strippableBytes: expect.any(Number) });
     expect(local.next).toBeUndefined();
     await cli(["offload", "work:web", "--yes"], { at: "offload.committed" });
-    const [name] = readdirSync(box.paths.journalDir).filter((n) => {
+    const [name] = journalFiles().filter((n) => {
       const j = JSON.parse(readFileSync(join(box.paths.journalDir, n), "utf8"));
       return j.project.address === "work:web";
     });

@@ -68,6 +68,11 @@ export interface Ports {
   plugins: readonly EcosystemPlugin[];
   /** Opens a store from config: its catalog events and its engine (blob-fs and restic in M1). */
   stores: StoreOpener;
+  /** Reads all of standard input (store add --secret-stdin); absent when the command has none to read. */
+  stdin?: () => Promise<string>;
+  /** Waits (an election's re-reads, store upgrade's quiet window), ending early when `signal` aborts; a timer when
+   * absent. Tests pass one that returns at once. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Ctrl-C's AbortSignal for the command (interrupt.ts); tests pass one to stop a saga. */
   cancellation?: { readonly signal: AbortSignal; hold(): () => void };
 }
@@ -110,6 +115,10 @@ export interface CommandContext {
   checks: HostChecks;
   plugins: readonly EcosystemPlugin[];
   stores: StoreOpener;
+  /** Reads all of standard input; undefined when there is none to read (store add --secret-stdin). */
+  stdin: (() => Promise<string>) | undefined;
+  /** Waits `ms`, or until the command is cancelled, whichever comes first. */
+  sleep(ms: number): Promise<void>;
   /** Aborted by Ctrl-C. A command that stops at its own safe points holds it (hold()) while it runs. */
   signal: AbortSignal;
   /** Marks the command as one that stops at its safe points when signalled; call the result when it ends. */

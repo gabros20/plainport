@@ -3,10 +3,11 @@
 
 # Candidates for the next word of a command name, given the name's words typed so far.
 _plainport_names() {
-  if [[ $# -eq 0 ]]; then echo 'help init ls status offload onload hydrate dehydrate restore recover gc root version'; return; fi
+  if [[ $# -eq 0 ]]; then echo 'help init ls status offload onload hydrate dehydrate restore recover gc root store version'; return; fi
   if [[ $# -eq 1 ]]; then
     case "$1" in
     root) echo 'add bind list scan' ;;
+    store) echo 'add list test upgrade remove' ;;
     esac
   fi
 }
@@ -21,7 +22,7 @@ _plainport() {
   done
   local cmd="" used=0
   if [[ ${#typed[@]} -ge 2 ]]; then
-    case "${typed[0]} ${typed[1]}" in 'root add'|'root bind'|'root list'|'root scan') cmd="${typed[0]} ${typed[1]}"; used=2 ;; esac
+    case "${typed[0]} ${typed[1]}" in 'root add'|'root bind'|'root list'|'root scan'|'store add'|'store list'|'store test'|'store upgrade'|'store remove') cmd="${typed[0]} ${typed[1]}"; used=2 ;; esac
   fi
   if [[ -z $cmd && ${#typed[@]} -ge 1 ]]; then
     case "${typed[0]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|recover|gc|version) cmd="${typed[0]}"; used=1 ;; esac
@@ -43,6 +44,11 @@ _plainport() {
     'root bind') opts='--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root list') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root scan') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store add') opts='--kind --path --host --endpoint --bucket --region --secret --access-key-id --secret-access-key --secret-stdin --seal --no-seal --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store list') opts='--probe --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store test') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store upgrade') opts='--others-stopped --quiet-window --clear-marker --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'store remove') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'version') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
   esac; fi
   if [[ $cur == -* ]]; then

@@ -1519,7 +1519,7 @@ and onload preflights, and the multi-store merge in `status/projects.ts`.
 - Negative clock skew, equal timestamps, and a damaged event that sorts before the readable head: each refuses.
 - An unreadable sealed event of unknown project taints the store; a known project's taints only that project.
 - `history-elsewhere`, with the home store offline.
-- T2: a 1,000-event sync starts two rclone processes, and the time is recorded.
+- T2: a 1,000-event sync starts two rclone processes (one listing, one batch read), and the time is recorded. The read's identity check (`meta/v1/store.json`, one `cat`) sits outside the sync, so a first read runs three in all and a read with nothing new two (review phase 5 M4).
 - S6 green.
 
 ### Verification
@@ -1667,6 +1667,10 @@ Rules around the table:
 - The `conflict-retained` state appears in views.
 - This task turns on schedule S8 (D87 with remote aliases). S3 is extended: B's append within the grace keeps A's
   trash.
+- **Replaces Task 18's interim refusal before the M2 tag (review phase 5, judgement a).** Until this task lands, an
+  offload on a store whose profile does not admit release keeps its folder and leaves its journal open at
+  `offload.committed` (`store.semantics-unknown`, exit 6; `recover` keeps it pending). This task must replace that
+  with the held state above. No v0.2 tag ships while that journal is held open.
 
 ### Tests first
 - Every row of the table, asserted by device.

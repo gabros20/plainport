@@ -26,6 +26,7 @@ import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import { looksSealed } from "../../packages/core/src/catalog/seal.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
 import { UNKNOWN_SEMANTICS } from "../../packages/core/src/ports/blob-store.ts";
 import { InjectedFault } from "../../packages/core/src/ports/host.ts";
@@ -51,7 +52,16 @@ import { settleJournals } from "../crash-matrix/checks.ts";
 import { hashTree, makeProjectTemplate, type TreeHash, treeDiff } from "../crash-matrix/fixture.ts";
 import { describeT1Mac } from "../tiers.ts";
 import { currentBinary, released, releasedBinary, toolsCopy } from "./binaries.ts";
-import { type Binaries, envelope, expectOk, PASSWORD, type Ran, treeDigest, World } from "./world.ts";
+import {
+  type Binaries,
+  envelope,
+  expectOk,
+  findingCodes,
+  PASSWORD,
+  type Ran,
+  treeDigest,
+  World,
+} from "./world.ts";
 
 const offloadArgs = ["offload", "work:web", "--yes", "--json"];
 const onloadArgs = ["onload", "work:web", "--no-hydrate", "--json"];
@@ -670,7 +680,7 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
-  test("[store.json.v2] v0.1.1 refuses the store.json v2 bootstrap writes (the real shape) before it writes anything, and v0.2's M1 paths refuse it too", async () => {
+  test("[store.json.v2] v0.1.1 refuses the store.json v2 bootstrap writes (the real shape) before it writes anything, and v0.2's init adopts it", async () => {
     await scenario(async (w) => {
       const done = (await bootstrapIn(w, w.box.paths)) as { ok: boolean; value?: BootstrapDone };
       expect(done.ok && done.value?.outcome).toBe("published");
@@ -688,9 +698,10 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
         expect(treeDigest(w.store), `old ${args[0]} wrote to the store`).toBe(before);
         expect(existsSync(join(w.store, "repo")), `old ${args[0]} made repo/`).toBe(false);
       }
+      // v0.2's init adopts it (Task 19): its repository opens with the password, and nothing is written to the store.
       const current = await w.current(w.initArgs);
-      expect(current.code, "current init").not.toBe(0);
-      expect(`${current.out}${current.err}`, "current init").toContain("store.unsupported");
+      expectOk(current, "current init");
+      expect(envelope(current)?.data).toMatchObject({ store: { id, format: 2 } });
       expect(treeDigest(w.store), "current init wrote to the store").toBe(before);
     });
   }, 300_000);
@@ -786,14 +797,173 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
+  test("[store.json.v2] a store v0.2's init creates is format 2 (the real shape): v0.2 round-trips on it, and v0.1.1 refuses it before it writes anything", async () => {
+    await scenario(async (w) => {
+      const init = await w.current(w.initArgs);
+      expectOk(init, "current init");
+      const published = JSON.parse(readFileSync(join(w.store, "meta/v1/store.json"), "utf8"));
+      const id = published.id as string;
+      expect(published).toEqual({ v: 2, id, repo: `repos/${id}`, catalog: { seal: "none" }, format: 2 });
+      expect(existsSync(join(w.store, "repos", id, "config"))).toBe(true);
+      expect(existsSync(join(w.store, "repo"))).toBe(false);
+      expectOk(await w.current(offloadArgs), "current offload");
+      await settleJournals(w.box.paths);
+      expectOk(await w.current(onloadArgs), "current onload");
+      expect(sameAsReference(w)).toEqual([]);
+      const before = treeDigest(w.store);
+      const project = hashTree(w.dir);
+      for (const args of [offloadArgs, w.initArgs, ["ls", "--json"]]) {
+        const ran = await w.old(args);
+        if (args[0] !== "ls") expect(ran.code, `old ${args[0]}`).toBe(1);
+        expect(`${ran.out}${ran.err}`, `old ${args[0]}`).toContain("store.failed");
+        expect(treeDigest(w.store), `old ${args[0]} wrote to the store`).toBe(before);
+        expect(treeDiff(hashTree(w.dir), project), `old ${args[0]} touched the project`).toEqual([]);
+      }
+    });
+  }, 300_000);
+
+  test("[event.sealed][store.json.v2] a store v0.2 sets up with --seal holds only sealed events: v0.2 round-trips on it, and v0.1.1 refuses the store before it reads or writes anything", async () => {
+    await scenario(async (w) => {
+      const added = await w.current(["store", "add", "local", "--path", "~/ssd", "--seal", "--json"]);
+      expectOk(added, "current store add --seal");
+      expect(envelope(added)?.data).toMatchObject({ outcome: "published", sealed: true });
+      expectOk(await w.current(w.initArgs), "current init");
+      const published = JSON.parse(readFileSync(join(w.store, "meta/v1/store.json"), "utf8"));
+      expect(published.catalog).toEqual({ seal: "v1" });
+      expectOk(await w.current(offloadArgs), "current offload");
+      await settleJournals(w.box.paths);
+      const events = readdirSync(join(w.store, "meta/v1/events")).map((f) =>
+        readFileSync(join(w.store, "meta/v1/events", f)),
+      );
+      expect(events.length).toBeGreaterThan(0);
+      expect(events.every((bytes) => looksSealed(bytes))).toBe(true);
+      expectOk(await w.current(onloadArgs), "current onload");
+      expect(sameAsReference(w)).toEqual([]);
+      expectOk(await w.current(offloadArgs), "current offload again");
+      await settleJournals(w.box.paths);
+      const before = treeDigest(w.store);
+      for (const args of [onloadArgs, w.initArgs, ["ls", "--json"]]) {
+        const ran = await w.old(args);
+        if (args[0] !== "ls") expect(ran.code, `old ${args[0]}`).toBe(1);
+        expect(`${ran.out}${ran.err}`, `old ${args[0]}`).toContain("store.failed");
+        expect(`${ran.out}${ran.err}`, `old ${args[0]}`).not.toContain("catalog.event-skipped");
+        expect(treeDigest(w.store), `old ${args[0]} wrote to the store`).toBe(before);
+      }
+      expectOk(await w.current(onloadArgs), "current onload after v0.1.1");
+      expect(sameAsReference(w)).toEqual([]);
+    });
+  }, 300_000);
+
+  test("[store.upgrade-intent] the upgrade-intent marker blocks a v0.2 offload and setup, and v0.1.1 ignores it", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const id = JSON.parse(readFileSync(join(w.store, "meta/v1/store.json"), "utf8")).id as string;
+      const marker = join(w.store, "meta/v1/upgrade-intent.json");
+      const text = `${JSON.stringify({ v: 1, op: "01J9Z6K2QF8M3V7XN4T5R6Y1AB", store: id, device: "01J9Z6K2QF8M3V7XN4T5R6Y1AC", at: new Date().toISOString() })}\n`;
+      writeFileSync(marker, text);
+      const offload = await w.current(offloadArgs);
+      expect(offload.code, "current offload").toBe(6);
+      expect(findingCodes(offload)).toContain("store.not-quiescent");
+      const setup = await w.current(["store", "add", "again", "--path", "~/ssd", "--json"]);
+      expect(setup.code, "current store add").toBe(6);
+      expect(findingCodes(setup)).toContain("store.not-quiescent");
+      expect(existsSync(w.dir)).toBe(true);
+      // v0.1.1 never reads it: its offload runs as M1's, and leaves the marker as it is.
+      expectOk(await w.old(offloadArgs), "old offload");
+      await settleJournals(w.box.paths);
+      expect(readFileSync(marker, "utf8")).toBe(text);
+      expect(eventTypes(w)).toContain("offloaded");
+    });
+  }, 300_000);
+
+  test("[store.json.v2][store.upgrade-intent] store upgrade refuses (store.not-quiescent) while a paused v0.1.1 holds a lease", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      expectOk(await w.old(offloadArgs), "old offload");
+      await settleJournals(w.box.paths);
+      const identity = join(w.store, "meta/v1/store.json");
+      const before = readFileSync(identity, "utf8");
+      // v0.1.1's onload, paused after it appended its onloaded event (the lease) and before it closed.
+      const ran = await w.old(onloadArgs, { PLAINPORT_TEST_PAUSE_AT: "onload.committed" }, async () => {
+        const upgrade = await w.current(["store", "upgrade", "local", "--others-stopped", "--yes", "--json"]);
+        expect(upgrade.code, "current store upgrade").toBe(6);
+        expect(findingCodes(upgrade)).toContain("store.not-quiescent");
+        expect(readFileSync(identity, "utf8")).toBe(before);
+        expect(existsSync(join(w.store, "meta/v1/upgrade-intent.json"))).toBe(false);
+      });
+      expectOk(ran, "old onload resumed");
+      expect(sameAsReference(w)).toEqual([]);
+    });
+  }, 300_000);
+
+  test("[store.json.v2][store.upgrade-intent] store upgrade with --others-stopped proceeds past a paused lease-less first offload, whose resumed event v0.2 reads", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      // Another device (its own home) on the same M1 store, running v0.1.1: a first offload, which holds no lease.
+      const other = new World(bins);
+      try {
+        expectOk(
+          await other.old([
+            "init",
+            "--root",
+            `work=${other.root}`,
+            "--store-path",
+            w.store,
+            "--device",
+            "mini",
+            "--yes",
+            "--json",
+          ]),
+          "other old init",
+        );
+        let upgraded: Ran | undefined;
+        const ran = await other.old(
+          offloadArgs,
+          { PLAINPORT_TEST_PAUSE_AT: "offload.commit.start" },
+          async () => {
+            // What it wrote before the pause is outside a one-second window by now; the owner attests the rest.
+            await Bun.sleep(1_500);
+            upgraded = await w.current([
+              "store",
+              "upgrade",
+              "local",
+              "--others-stopped",
+              "--quiet-window",
+              "1s",
+              "--yes",
+              "--json",
+            ]);
+          },
+        );
+        expectOk(upgraded as Ran, "current store upgrade");
+        expect(envelope(upgraded as Ran)?.data).toMatchObject({ from: 1, format: 2, upgraded: true });
+        expect(JSON.parse(readFileSync(join(w.store, "meta/v1/store.json"), "utf8")).format).toBe(2);
+        // Q2's residual: whatever the resumed v0.1.1 offload did, v0.2 reads the store without skipping anything.
+        await settleJournals(other.box.paths);
+        const ls = await w.current(["ls", "--json"]);
+        expectOk(ls, "current ls");
+        expect(ls.err).not.toContain(SKIPPED);
+        // It resumes past the upgrade (v0.1.1 does not read store.json again at its commit) and ends as M1's: its event
+        // is M1-shaped, keyed by its alias, and v0.2 reads it by containment.
+        expectOk(ran, "other old offload resumed");
+        expect(eventTypes(w)).toContain("offloaded");
+        const shelved = await w.current(["ls", "--json"]);
+        expect(shelved.err).not.toContain(SKIPPED);
+        const events = readdirSync(join(w.store, "meta/v1/events")).map((f) =>
+          JSON.parse(readFileSync(join(w.store, "meta/v1/events", f), "utf8")),
+        );
+        expect(events.filter((e) => e.type === "offloaded").map((e) => Object.keys(e.stored))).toEqual([
+          ["local"],
+        ]);
+      } finally {
+        await other.cleanup();
+      }
+    });
+  }, 300_000);
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
-  test.todo("[store.json.v2] Task 9: a store v0.2 creates is format 2 and v0.1.1 refuses it (the real shape)", () => {});
-  test.todo("[store.upgrade-intent] Task 19: the upgrade-intent marker blocks a v0.2 offload and bootstrap, and v0.1.1 ignores it", () => {});
-  test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade refuses (store.not-quiescent) while a paused v0.1.1 holds a lease", () => {});
-  test.todo("[store.json.v2][store.upgrade-intent] Task 19: store upgrade with --others-stopped proceeds past a paused lease-less first offload, whose resumed event v0.2 reads", () => {});
   test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
-  test.todo("[event.sealed] Tasks 10, 20: a sealed event on a format-2 store is not read by v0.1.1, which refuses the store first", () => {});
   test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
   test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
   test.todo("[value.offload-kind] Task 23: a fork after the commit keeps kind fork and adds detail after-commit", () => {});

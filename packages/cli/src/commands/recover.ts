@@ -4,14 +4,18 @@
 // deadline, and `gc --now` (confirm) before it; restore writes a snapshot side by side into a free path.
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { ok, ProjectStateSchema } from "@plainport/contract";
+import { failWith, finding, ok, ProjectStateSchema, type Result } from "@plainport/contract";
 import {
+  BOOTSTRAP_RECOVERY_OUTCOMES,
   ConfigLoader,
   collectTrash,
   expandHome,
+  openStore,
   RECOVERY_OUTCOMES,
   recover as recoverJournals,
+  recoverUpgrades,
   runRestore,
+  type UpgradeRecoveryReport,
 } from "@plainport/core";
 import { z } from "zod";
 import { defineCommand } from "../registry.ts";
@@ -46,6 +50,37 @@ const RecoveredSchema = z.looseObject({
     .meta({ description: "diverged-after-commit: exit 8's data, as offload gives it (D52)" }),
 });
 
+const RecoveredBootstrapSchema = z.looseObject({
+  attempt: z.string().meta({ description: "The setup attempt's id (a ULID)" }),
+  store: z.string().meta({ description: "The store's name in config" }),
+  step: z.string().meta({ description: "The journal step recover found" }),
+  outcome: z.enum(BOOTSTRAP_RECOVERY_OUTCOMES).meta({
+    description:
+      "published: this attempt's store.json is on the store and its id recorded here. lost: another attempt published first. contested: no attempt won and every visible one refuses. rolled-back: its candidacy never reached the store, so nothing was published. pending: not settled now (finding says why)",
+  }),
+  id: z.string().optional().meta({ description: "published, lost: the published store's id" }),
+  finding: FindingDataSchema.optional(),
+});
+
+const RecoveredUpgradeSchema = z.looseObject({
+  op: z.string().meta({ description: "The upgrade's id" }),
+  store: z.string().meta({ description: "The store's name in config" }),
+  outcome: z.enum(["cleared", "kept", "pending"]).meta({
+    description:
+      "cleared: this device's upgrade-intent marker was removed (store.json stays as the upgrade left it: format 2 if it was replaced, else 1). kept: the marker is another device's (or unreadable), left as it is. pending: not settled now (finding says why)",
+  }),
+  format: z.union([z.literal(1), z.literal(2)]).optional(),
+  finding: FindingDataSchema.optional(),
+});
+
+const BOOTSTRAP_TEXT: Record<(typeof BOOTSTRAP_RECOVERY_OUTCOMES)[number], string> = {
+  published: "published; the store is set up",
+  lost: "lost: another attempt set the store up first",
+  contested: "contested: no attempt won",
+  "rolled-back": "rolled back; nothing was published",
+  pending: "not settled now",
+};
+
 const OUTCOME_TEXT: Record<(typeof RECOVERY_OUTCOMES)[number], string> = {
   "rolled-back": "rolled back; nothing local had changed",
   finished: "finished",
@@ -54,6 +89,33 @@ const OUTCOME_TEXT: Record<(typeof RECOVERY_OUTCOMES)[number], string> = {
   "trash-deleted": "its trash was deleted",
   "trash-kept": "its trash is kept",
   pending: "not settled now",
+};
+
+/** recover's report with the upgrades it settled; a pending or unreadable upgrade makes an ok report exit 6. */
+const withUpgrades = <T extends { unreadable: string[] }>(
+  recovered: Result<T>,
+  upgraded: Result<UpgradeRecoveryReport>,
+): Result<T & { upgrades?: UpgradeRecoveryReport["upgrades"] }> => {
+  if (!upgraded.ok) return recovered.ok ? failWith(upgraded.finding, recovered.value) : recovered;
+  const extra = upgraded.value.upgrades.length === 0 ? {} : { upgrades: upgraded.value.upgrades };
+  const add = (data: T) => ({
+    ...data,
+    ...extra,
+    unreadable: [...data.unreadable, ...upgraded.value.unreadable],
+  });
+  if (!recovered.ok)
+    return recovered.data === undefined ? recovered : { ...recovered, data: add(recovered.data as T) };
+  const pending =
+    upgraded.value.upgrades.some((u) => u.outcome === "pending") || upgraded.value.unreadable.length > 0;
+  return pending
+    ? failWith(
+        finding("journal.pending", {
+          message: "a store upgrade this device left could not be settled now; its journal stays",
+          fix: "see the upgrade's finding in the report, then re-run plainport recover",
+        }),
+        add(recovered.value),
+      )
+    : ok(add(recovered.value));
 };
 
 export const recover = defineCommand({
@@ -68,6 +130,14 @@ export const recover = defineCommand({
   output: z
     .looseObject({
       operations: z.array(RecoveredSchema),
+      bootstraps: z
+        .array(RecoveredBootstrapSchema)
+        .optional()
+        .meta({ description: "Store setups this device left open, and what recover settled them to" }),
+      upgrades: z
+        .array(RecoveredUpgradeSchema)
+        .optional()
+        .meta({ description: "Store upgrades this device left open (Q2), and what recover settled them to" }),
       unreadable: z
         .array(z.string())
         .meta({ description: "Journal files this version cannot read: never touched" }),
@@ -78,7 +148,10 @@ export const recover = defineCommand({
     }),
   examples: [{ argv: ["recover"], summary: "Settle whatever was interrupted on this device" }],
   human: (data) =>
-    data.operations.length === 0 && data.unreadable.length === 0
+    data.operations.length === 0 &&
+    (data.bootstraps ?? []).length === 0 &&
+    (data.upgrades ?? []).length === 0 &&
+    data.unreadable.length === 0
       ? "nothing to recover"
       : [
           ...data.operations.map(
@@ -86,6 +159,14 @@ export const recover = defineCommand({
               `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${OUTCOME_TEXT[o.outcome]}${
                 o.keepUntil === undefined || o.outcome !== "trash-kept" ? "" : ` until ${o.keepUntil}`
               }${o.finding === undefined || o.outcome === "diverged-after-commit" ? "" : ` (${o.finding.code}: ${o.finding.message})`}; now ${o.state}`,
+          ),
+          ...(data.bootstraps ?? []).map(
+            (b) =>
+              `setup ${b.attempt} of store ${b.store} (stopped at ${b.step}): ${BOOTSTRAP_TEXT[b.outcome]}${b.id === undefined ? "" : ` (${b.id})`}${b.finding === undefined || b.outcome === "lost" ? "" : ` (${b.finding.code}: ${b.finding.message})`}`,
+          ),
+          ...(data.upgrades ?? []).map(
+            (u) =>
+              `upgrade ${u.op} of store ${u.store}: ${u.outcome === "cleared" ? `its marker was removed; the store is format ${u.format ?? "unchanged"}` : u.outcome === "kept" ? "the marker is not this device's; left as it is" : "not settled now"}${u.finding === undefined ? "" : ` (${u.finding.code}: ${u.finding.message})`}`,
           ),
           ...data.unreadable.map((u) => `${u}: a journal this version cannot read; left as it is`),
         ].join("\n"),
@@ -95,7 +176,22 @@ export const recover = defineCommand({
     const { paths, device } = local.value;
     const release = ctx.holdSignal();
     try {
-      return await recoverJournals({
+      // Upgrades first (Q2): a marker a crashed `store upgrade` left on a store is cleared before anything else.
+      const loader = new ConfigLoader(ctx.io, paths);
+      const upgraded = await recoverUpgrades({ io: ctx.io, paths }, device.id, async (name) => {
+        const loaded = await loader.load({ env: ctx.env });
+        if (!loaded.ok) return loaded;
+        const opened = await openStore(ctx.io, {
+          paths,
+          env: ctx.env,
+          name,
+          config: loaded.value.config,
+          opener: ctx.stores,
+          catalog: false,
+        });
+        return opened.ok ? ok(opened.value.blob) : opened;
+      });
+      const recovered = await recoverJournals({
         host: ctx.system,
         paths,
         device,
@@ -106,7 +202,9 @@ export const recover = defineCommand({
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
         signal: ctx.signal,
+        wait: (ms) => ctx.system.clock.sleep(ms),
       });
+      return withUpgrades(recovered, upgraded);
     } finally {
       release();
     }

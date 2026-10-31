@@ -13,6 +13,10 @@
 //   reach release only through Q21's post-grace proof (R2-6).
 
 import type { StoreSemantics } from "@plainport/core";
+import lock from "../../../tools.lock.json" with { type: "json" };
+
+/** The rclone version this plainport bundles, which the profiles below were measured with. */
+export const PINNED_RCLONE = lock.tools.rclone.version;
 
 /** The S3 store on T2: SeaweedFS 4.48 behind rclone's S3 backend. */
 export const SEAWEEDFS_PROFILE: StoreSemantics = Object.freeze<StoreSemantics>({
