@@ -13,6 +13,7 @@ import type { BlobStore } from "../ports/blob-store.ts";
 import { InjectedFault } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import {
+  type BootstrapDevice,
   type BootstrapWorld,
   bootstrapWorld,
   keysUnder,
@@ -95,12 +96,79 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
     delete: s.scheduleFunction(inner.delete.bind(inner)),
   });
 
+  // restic.wrong-password: a device whose first read of store.json comes after the other published adopts instead of
+  // standing, and its password does not open the winner's repository ("Adopting a store").
   const ALLOWED = [
     "published",
     "store.bootstrap-lost",
     "store.bootstrap-contested",
     "store.bootstrap-undecided",
+    "restic.wrong-password",
   ];
+  const outcomeOf = (r: Result<BootstrapDone>): string => (r.ok ? r.value.outcome : r.finding.code);
+
+  /**
+   * Checks a race's results against the protocol, settles what was left open with each device's recovery, and checks
+   * the store: at most one repository published, reached only by its owner, except for an adopting device's probe.
+   */
+  const checkRace = async (
+    w: BootstrapWorld,
+    devices: BootstrapDevice[],
+    results: Result<BootstrapDone>[],
+    route: string,
+  ) => {
+    // Every schedule ends in an outcome the protocol allows, never an unexpected failure.
+    for (const r of results) {
+      const seen = outcomeOf(r);
+      expect(ALLOWED).toContain(seen);
+      reached[route]?.add(seen);
+    }
+    // A device refused by the published repository's password adopted: it ran no attempt and recorded nothing.
+    const adopters = devices.filter(
+      (_, i) => outcomeOf(results[i] as Result<BootstrapDone>) === "restic.wrong-password",
+    );
+    for (const d of adopters) {
+      expect(failed(results[devices.indexOf(d)] as Result<BootstrapDone>).finding.fix).toContain(
+        "another password",
+      );
+      expect([...w.repos.values()].filter((repo) => repo.password === d.password)).toEqual([]);
+      expect(await d.recorded()).toBeUndefined();
+    }
+    // Whatever was left open is settled by each device's recovery (same attempt id), then nothing more runs.
+    for (const d of devices) d.target.blob = w.store;
+    for (let round = 0; round < 2; round++) for (const d of devices) await d.recover();
+    // Settled: nothing injects a fault after the race, so every attempt is decided by now.
+    for (const d of devices) expect(await d.journals()).toEqual([]);
+
+    const published = publishedStore(w.store);
+    const won = results.flatMap((r) => (r.ok && r.value.outcome === "published" ? [r.value.id] : []));
+    expect(won.length).toBeLessThanOrEqual(1);
+    const recorded = await Promise.all(devices.map((d) => d.recorded()));
+    const recorders = recorded.filter((id) => id !== undefined);
+    expect(recorders.length).toBeLessThanOrEqual(1);
+    if (published === undefined) {
+      expect(recorders).toEqual([]);
+      expect(adopters).toEqual([]);
+      // Liveness (D109): with every attempt that stood refused, a re-run of the setup is a new attempt and wins.
+      const fresh = done(await w.device("pw-c").run());
+      expect(fresh.outcome).toBe("published");
+      return;
+    }
+    // One repository is published, and only the device that initialised it ever reached it, but for an adopting
+    // device's lock-free probe, which its password does not pass.
+    const winner = published.id as string;
+    expect(published.repo).toBe(`repos/${winner}`);
+    if (won.length === 1) expect(won[0]).toBe(winner);
+    for (const id of recorders) expect(id).toBe(winner);
+    const repo = w.repos.get(`repos/${winner}`);
+    expect(repo?.initialized).toBe(true);
+    const owner = repo?.password;
+    const probes = new Set(adopters.map((d) => d.password));
+    for (const a of repo?.access ?? [])
+      if (a.password !== owner) expect([a.method, probes.has(a.password ?? "")]).toEqual(["list", true]);
+    for (const r of results)
+      if (!r.ok && r.finding.code === "store.bootstrap-lost") expect(r.finding.message).toContain(winner);
+  };
   const reached: Record<string, Set<string>> = {
     "conditional create": new Set(),
     "sole candidate": new Set(),
@@ -163,48 +231,36 @@ describe("bootstrap: simultaneous initialisers (Q9, R2-7)", () => {
             const devices = ["pw-a", "pw-b"].map((pw) => w.device(pw));
             for (const d of devices) d.target.blob = meeting();
             const results = await s.waitFor(Promise.all(devices.map((d) => d.run())));
-            // Every schedule ends in an outcome the protocol allows, never an unexpected failure.
-            for (const r of results) {
-              const seen = r.ok ? r.value.outcome : r.finding.code;
-              expect(ALLOWED).toContain(seen);
-              reached[route]?.add(seen);
-            }
-            // Whatever was left open is settled by each device's recovery (same attempt id), then nothing more runs.
-            for (const d of devices) d.target.blob = w.store;
-            for (let round = 0; round < 2; round++) for (const d of devices) await d.recover();
-            // Settled: nothing injects a fault after the race, so every attempt is decided by now.
-            for (const d of devices) expect(await d.journals()).toEqual([]);
-
-            const published = publishedStore(w.store);
-            const won = results.flatMap((r) => (r.ok && r.value.outcome === "published" ? [r.value.id] : []));
-            expect(won.length).toBeLessThanOrEqual(1);
-            const recorded = await Promise.all(devices.map((d) => d.recorded()));
-            const recorders = recorded.filter((id) => id !== undefined);
-            expect(recorders.length).toBeLessThanOrEqual(1);
-            if (published === undefined) {
-              expect(recorders).toEqual([]);
-              // Liveness (D109): with every attempt that stood refused, a re-run of the setup is a new attempt and wins.
-              const fresh = done(await w.device("pw-c").run());
-              expect(fresh.outcome).toBe("published");
-              return;
-            }
-            // One repository is published, and only the device that initialised it ever reached it.
-            const winner = published.id as string;
-            expect(published.repo).toBe(`repos/${winner}`);
-            if (won.length === 1) expect(won[0]).toBe(winner);
-            for (const id of recorders) expect(id).toBe(winner);
-            const repo = w.repos.get(`repos/${winner}`);
-            expect(repo?.initialized).toBe(true);
-            const owner = repo?.password;
-            expect(new Set(repo?.access.map((a) => a.password))).toEqual(new Set([owner]));
-            for (const r of results)
-              if (!r.ok && r.finding.code === "store.bootstrap-lost")
-                expect(r.finding.message).toContain(winner);
+            await checkRace(w, devices, results, route);
           },
         ),
         { numRuns: RUNS },
       );
     }, 60_000);
+
+    // CI seed 1305083047 (path 29): the scheduler held the second device's first read of store.json until the first had
+    // published, so it adopted, and its password did not open the winner's repository.
+    test(`${route}: a device whose first read comes after the other published is refused by the winner's password, and nothing else changes`, async () => {
+      const w = world(options);
+      const [a, b] = ["pw-a", "pw-b"].map((pw) => w.device(pw)) as [BootstrapDevice, BootstrapDevice];
+      let published: () => void = () => {};
+      const first = new Promise<void>((resolve) => {
+        published = resolve;
+      });
+      b.target.blob = {
+        ...w.store,
+        get: async (key) => {
+          await first;
+          return w.store.get(key);
+        },
+      };
+      const late = b.run();
+      const won = await a.run();
+      published();
+      const results = [won, await late];
+      expect(results.map(outcomeOf)).toEqual(["published", "restic.wrong-password"]);
+      await checkRace(w, [a, b], results, route);
+    });
   }
 
   /** Lists wait until both candidacies are written: every candidate is seen by both. */

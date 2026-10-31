@@ -6,7 +6,7 @@
 // Below its tier a suite is skipped. At its tier, a T2 or T3 suite whose environment is missing fails, naming the
 // command to run: it never skips silently.
 
-import { describe, test } from "bun:test";
+import { beforeAll, describe, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
@@ -111,6 +111,15 @@ export const describeT1Mac = (name: string, fn: () => void): void => {
 
 /** A suite that needs the T2 containers (`scripts/testenv up`). Its name starts with "[t2]". */
 export const describeT2 = (name: string, fn: () => void): void => describeGated(2, name, fn);
+
+/**
+ * A file-level beforeAll for a file's T2 suites, registered only when they run. A top-level beforeAll runs even when
+ * every suite in the file is skipped, so set-up that needs `.tools/` or the containers (the pinned rclone) goes here,
+ * and T0 never needs a pinned binary.
+ */
+export const beforeAllT2 = (fn: () => unknown, timeoutMs?: number): void => {
+  if (environmentGate(2).run) beforeAll(fn, timeoutMs);
+};
 
 /** A suite that needs the T3 buckets and hosts. Its name starts with "[t3]". */
 export const describeT3 = (name: string, fn: () => void): void => describeGated(3, name, fn);
