@@ -9,7 +9,8 @@
 // - A kill (SIGKILL) at each bootstrap step or seam, then `plainport recover`, settles to published or rolled back,
 //   with the store, the registry and the journals agreeing.
 // - A single-device round trip, offload then onload, is byte-identical (Task 3's comparison) with the store's
-//   durability asserted; without the assertion the offload commits and keeps its folder.
+//   durability asserted; without the assertion the offload commits and holds its trash (Task 24), and onload
+//   renames it back.
 // - A cut mid-upload fails before the commit, and invariants 1 to 3 hold.
 //
 // Every store lives under a fresh prefix; the SFTP children are run one or two at a time (sshd drops logins past ~10).
@@ -343,7 +344,11 @@ describeT2("remote stores: a single-device remote round trip", () => {
         prefix: freshPrefix("trip"),
         semantics: assertedProfile(kind, "durable"),
       };
-      d.configure({ [STORE]: spec }, { store: STORE, extra: ["[onload]", "hydrate = false"] });
+      // No conflict grace (Q16): a durable store then releases as M1 did, and the trash goes at once.
+      d.configure(
+        { [STORE]: spec },
+        { store: STORE, extra: ["[onload]", "hydrate = false", "[offload]", 'conflictGrace = "0"'] },
+      );
       d.makeRoot(spec);
       let started = performance.now();
       await bootstrapHere(d);
@@ -369,7 +374,7 @@ describeT2("remote stores: a single-device remote round trip", () => {
     }, 600_000);
   }
 
-  test("remote round trip on sftp without the durability assertion: the offload commits and keeps its folder", async () => {
+  test("remote round trip on sftp without the durability assertion: the offload commits and holds its trash; onload renames it back", async () => {
     const d = await device("kept-pw");
     const spec: StoreSpec = { kind: "sftp", prefix: freshPrefix("kept") };
     d.configure({ [STORE]: spec }, { store: STORE, extra: ["[onload]", "hydrate = false"] });
@@ -378,18 +383,30 @@ describeT2("remote stores: a single-device remote round trip", () => {
     const dir = makeProject(d);
     const before = hashTree(dir, []);
     const off = await d.cli(["offload", "work:web", "--yes", "--json"]);
-    expect(off.code).toBe(6);
-    const refused = (
-      envelope(off.out) as unknown as { error: { finding: { code: string; message: string } } }
-    ).error.finding;
-    expect(refused.code).toBe("store.semantics-unknown");
-    expect(refused.message).toContain("durability is acked-unsynced (asserted)");
-    expect(compareTrees(before, hashTree(dir, []))).toEqual([]);
-    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(off.code).toBe(0);
+    const data = envelope(off.out).data as {
+      op: string;
+      localCopy: string;
+      held?: boolean;
+      keepUntil?: string;
+    };
+    // acked-unsynced: held for the remote store's grace (Task 24), until the checked read and Q21's proof.
+    expect([data.localCopy, data.held]).toEqual(["kept", true]);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    const trash = join(d.box.home, "work/.plainport-trash", data.op, "web");
+    expect(compareTrees(before, hashTree(trash, []))).toEqual([]);
     // Committed: the store holds the offloaded event.
     const store = await opened(d);
     const events = value(await store.blob.list("meta/v1/events/"));
     expect(events.length).toBeGreaterThan(0);
+    // gc within the grace keeps it; onload of the head renames it back, byte-identical.
+    const gc = await d.cli(["gc", "--json"]);
+    expect(gc.code).toBe(0);
+    expect(existsSync(trash)).toBe(true);
+    const back = await d.cli(["onload", "work:web", "--json"]);
+    expect(back.code).toBe(0);
+    expect(envelope(back.out).data).toMatchObject({ snapshot: data.op, restored: "reuse" });
+    expect(compareTrees(before, hashTree(dir, []))).toEqual([]);
   }, 600_000);
 });
 

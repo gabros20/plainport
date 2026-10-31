@@ -465,6 +465,75 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     }
   }, 300_000);
 
+  test("[journal.held][config.keys] real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now and housekeeping; v0.2 accepts offload.conflictGrace", async () => {
+    for (const held of ["grace", "conflict-retained"] as const) {
+      await scenario(async (w) => {
+        expectOk(await w.old(w.initArgs), "old init");
+        // v0.2 reads the key v0.1.1 refuses (the refusal is tested below), and holds its trash with it.
+        appendFileSync(
+          w.box.paths.configFile,
+          `\n[offload]\nconflictGrace = "${held === "grace" ? "15m" : "2s"}"\n`,
+        );
+        const offloaded = await w.current(offloadArgs);
+        expectOk(offloaded, "current offload");
+        const [op] = trashes(w);
+        const [name] = journals(w);
+        if (op === undefined || name === undefined) throw new Error("no held trash");
+        const journal = join(w.box.paths.journalDir, name);
+        const trash = join(trashDir(w), op);
+        if (held === "conflict-retained") {
+          // Another first offload of the project: a fork naming the held snapshot. Past the grace, v0.2's gc reads it.
+          const registry = registryOf(w);
+          const [id] = Object.keys(registry.projects);
+          const s = ulid();
+          const appended = await appendEvent(storeEventLog(fsBlobStore(testHost(), w.store)), {
+            v: 1,
+            id: s,
+            op: s,
+            type: "offloaded",
+            device: ulid(),
+            at: new Date().toISOString(),
+            project: id as string,
+            root: registry.roots.work,
+            path: "web",
+            snapshot: s,
+            stored: { ssd: "c".repeat(64) },
+            stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+          });
+          if (!appended.ok) throw new Error(appended.finding.message);
+          await Bun.sleep(2_100);
+          expectOk(await w.current(["gc", "--json"]), "current gc");
+        }
+        const parsed = JSON.parse(readFileSync(journal, "utf8"));
+        expect([parsed.step, parsed.keepUntil === undefined ? "conflict-retained" : "grace"]).toEqual([
+          "offload.release.held",
+          held,
+        ]);
+        // v0.1.1 must take the config without the key: a rollback removes the lines.
+        writeFileSync(
+          w.box.paths.configFile,
+          readFileSync(w.box.paths.configFile, "utf8").replace(
+            /\n\[offload\]\nconflictGrace = "[^"]+"\n/,
+            "\n",
+          ),
+        );
+        for (const args of [
+          ["recover", "--json"],
+          ["gc", "--json"],
+          ["gc", "--now", "--yes", "--json"],
+          // a write command: its housekeeping hands a due trash to a detached delete
+          ["root", "scan", "work", "--json"],
+        ]) {
+          await w.old(args);
+          const went = await goneAfter(join(trash, "web"), 2000);
+          const where = `${held}: after old ${args.slice(0, 2).join(" ")}`;
+          expect(went, where).toBeUndefined();
+          expect(existsSync(journal), where).toBe(true);
+        }
+      });
+    }
+  }, 300_000);
+
   test("[config.keys][managed.toml] v0.1.1 refuses configuration keys it does not know, so a rollback means removing them", async () => {
     await scenario(async (w) => {
       expectOk(await w.old(w.initArgs), "old init");
@@ -989,6 +1058,4 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
   test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
-  test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
-  test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
 });
