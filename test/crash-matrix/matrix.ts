@@ -44,7 +44,8 @@ export type OnloadBranch = keyof typeof ONLOAD_BRANCHES;
 /**
  * How a branch is reached, which each variant must state for every branch:
  * - plain: the plain run already takes it (the default config, a first offload); its points are plain rows.
- * - exclusive: only a run set up for it reaches its points (an unreadable file, a moved head, a kept trash).
+ * - exclusive: only a run set up for it reaches its points (an unreadable file, a moved head, a fork after the
+ *   commit, a kept trash).
  * - again: the run reaches its points a second time (a retry); rows crash at that second time.
  * - resumed: a second run reaches them after a first one crashed (an onload taken over); rows crash the second run.
  */
@@ -57,6 +58,7 @@ export const OFFLOAD_BRANCH_KINDS = {
   firstOffloadOfRoot: "plain",
   keepStub: "plain",
   detached: "plain",
+  forkedAfterCommit: "exclusive",
   held: "exclusive",
 } as const satisfies Record<OffloadBranch, BranchKind>;
 

@@ -109,12 +109,19 @@ const sealedFor = (store: MemoryBlobStore): CatalogPolicy => {
 
 /** While set, every store call fails with store.unreachable: a store down (the re-read rows). */
 let storeDown = false;
+/** Run once before the next listing of the store, then cleared: another copy acting just before a catalog read. */
+let beforeNextList: (() => Promise<unknown>) | undefined;
 const reachable = (blob: MemoryBlobStore): MemoryBlobStore => {
   const gone = () => Promise.resolve(fail(finding("store.unreachable", { message: "the store is down" })));
   return {
     ...blob,
     get: (key) => (storeDown ? gone() : blob.get(key)),
-    list: (prefix) => (storeDown ? gone() : blob.list(prefix)),
+    list: async (prefix) => {
+      const hook = beforeNextList;
+      beforeNextList = undefined;
+      await hook?.();
+      return storeDown ? gone() : blob.list(prefix);
+    },
     stat: (key) => (storeDown ? gone() : blob.stat(key)),
     put: (key, data, opts) => (storeDown ? gone() : blob.put(key, data, opts)),
   };
@@ -168,6 +175,8 @@ beforeEach(async () => {
   heldDelete = undefined;
   catalog = undefined;
   storeDown = false;
+  beforeNextList = undefined;
+  forkAfterCommit = false;
   unseen = undefined;
   reference = hashTree(dir);
 });
@@ -246,11 +255,46 @@ const projectId = async (): Promise<string | undefined> => {
   return Object.entries(registry.value.projects).find(([, e]) => e.path === "web")?.[0];
 };
 
+/** Another copy's first offload of the project: with this one's, two first offloads are a fork. */
+const forkNow = async () => {
+  const id = (await projectId()) as string;
+  const registry = await readRegistry(testHost(), box.paths);
+  const rootId = registry.ok ? (registry.value.roots?.work as string) : "";
+  const s = ulid();
+  const appended = await appendEvent(storeEventLog(store, catalog), {
+    v: 1,
+    id: s,
+    op: s,
+    type: "offloaded",
+    device: ulid(),
+    at: new Date().toISOString(),
+    project: id,
+    root: rootId,
+    path: "web",
+    snapshot: s,
+    stored: { ssd: "c".repeat(64) },
+    stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+  });
+  if (!appended.ok) throw new Error(appended.finding.message);
+  return s;
+};
+
 /** The detached delete a crash at MATRIX_POINTS.raced started, held until the crash has been looked at. */
 let heldDelete: (() => Promise<unknown>) | undefined;
 
+/** Set by the forkedAfterCommit setup: once the commit is journaled, another copy's first offload forks the project. */
+let forkAfterCommit = false;
+
 const offload = async (faults: { at?: string; occurrence?: number } = {}) => {
-  const real = testHost({ faults: { ...faults, onStep: capture } });
+  const onStep = (step: string) => {
+    capture(step);
+    // The commit's head check passed; release's catalog read is the next listing of the store (F2).
+    if (step === "offload.committed" && forkAfterCommit) {
+      forkAfterCommit = false;
+      beforeNextList = forkNow;
+    }
+  };
+  const real = testHost({ faults: { ...faults, onStep } });
   // Past the detached delete's start the real delete races the test: on a fast disk it removes the journal before
   // the crash is read. So for that crash it is held, reported as started, and run once the crash has been read.
   const host: HostPorts =
@@ -341,6 +385,11 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
       writeFileSync(join(dir, "notes/todo.txt"), "edited during the upload\n");
       noteEdit("notes/todo.txt");
     };
+    await crashOffload(row);
+  },
+  forkedAfterCommit: async (row) => {
+    // Another copy's first offload lands after the commit's head check, before release reads the catalog again (F2).
+    forkAfterCommit = true;
     await crashOffload(row);
   },
   held: async (row) => {
@@ -568,30 +617,6 @@ describe("crash matrix, in-process: a lost onload.swap.start write (N3)", () => 
 // store unreachable at the re-read, and a lost release.moved write. Recover decides from the world: a folder still in
 // place is read again (a fork keeps it, F2), one already in the trash is never moved back (F3).
 describe("crash matrix, in-process: the release's re-read (forks)", () => {
-  /** Another copy's first offload of the project: with this one's, two first offloads are a fork. */
-  const forkNow = async () => {
-    const id = (await projectId()) as string;
-    const registry = await readRegistry(testHost(), box.paths);
-    const rootId = registry.ok ? (registry.value.roots?.work as string) : "";
-    const s = ulid();
-    const appended = await appendEvent(storeEventLog(store, catalog), {
-      v: 1,
-      id: s,
-      op: s,
-      type: "offloaded",
-      device: ulid(),
-      at: new Date().toISOString(),
-      project: id,
-      root: rootId,
-      path: "web",
-      snapshot: s,
-      stored: { ssd: "c".repeat(64) },
-      stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
-    });
-    if (!appended.ok) throw new Error(appended.finding.message);
-    return s;
-  };
-
   test("offload.release.reread · killed between the re-read and the rename, then a fork: recover keeps the folder (F2)", async () => {
     const row = plainRowAt("offload.release.reread");
     const { problems, crashedOp } = await runRow(row, {
