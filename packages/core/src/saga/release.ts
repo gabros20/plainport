@@ -513,14 +513,13 @@ export const releaseOffload = async (
 
   // Stage 4, the hold (Q16): with a conflict grace, or a profile that cannot release without Q21's proof, the trash
   // waits at offload.release.held for the checked read (recover/held.ts), and no delete starts here.
+  // A journal already at release.delete has left the hold (or never needed it): the delete goes on below.
   const grace = rc.grace ?? 0;
-  const proofNeeded =
-    rc.store !== undefined && !canRelease(rc.store.semantics).eligible && !reached("offload.release.held");
-  if (reached("offload.release.held") || grace > 0 || proofNeeded) {
-    const keepUntil = reached("offload.release.held")
-      ? journal.keepUntil
-      : graceDeadline(journal, grace, rc.clock());
-    if (!reached("offload.release.held")) {
+  const atHeld = journal.step === "offload.release.held";
+  const proofNeeded = rc.store !== undefined && !canRelease(rc.store.semantics).eligible;
+  if (atHeld || (!reached("offload.release.delete") && (grace > 0 || proofNeeded))) {
+    const keepUntil = atHeld ? journal.keepUntil : graceDeadline(journal, grace, rc.clock());
+    if (!atHeld) {
       const held = await saga.step("offload.release.held", keepUntil === undefined ? {} : { keepUntil });
       if (!held.ok) return held;
     }

@@ -3,7 +3,7 @@
 // is its own sandboxed home, device id, config, registry and event mirror; all share the fake store and one fake
 // restic repository (each device's engine has its own hooks, so a test can act while one device uploads).
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
@@ -11,7 +11,9 @@ import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import { type Device, ensureDevice } from "../../packages/core/src/device.ts";
 import type { HostPorts } from "../../packages/core/src/ports/host.ts";
 import type { StoreOpener } from "../../packages/core/src/ports/store.ts";
+import { heldStoreOpener } from "../../packages/core/src/recover/held.ts";
 import { type RecoverDeps, recover } from "../../packages/core/src/recover/recover.ts";
+import { collectTrash, housekeeping, type TrashDeps } from "../../packages/core/src/recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../../packages/core/src/registry.ts";
 import { resolveProject } from "../../packages/core/src/roots/address.ts";
 import { type OffloadDeps, runOffload } from "../../packages/core/src/saga/offload.ts";
@@ -50,7 +52,14 @@ export interface FakeDevice {
   dir(path?: string): string;
   offload(path?: string, faults?: RunFaults): ReturnType<typeof runOffload>;
   onload(path?: string): ReturnType<typeof runOnload>;
-  recover(faults?: RunFaults): ReturnType<typeof recover>;
+  /** recover, on the host's clock or `now` (a stepped clock: deadlines are compared with it). */
+  recover(faults?: RunFaults, now?: () => Date): ReturnType<typeof recover>;
+  /** gc (--now with `early`), with the checked read of a held trash (Q16), on `now`'s clock. */
+  gc(options?: { early?: boolean; now?: () => Date; faults?: RunFaults }): ReturnType<typeof collectTrash>;
+  /** A write command's housekeeping (deleteDue), or a read command's, with the checked read, on `now`'s clock. */
+  housekeeping(options?: { deleteDue?: boolean; now?: () => Date }): ReturnType<typeof housekeeping>;
+  /** Appends lines to this device's config.toml. */
+  configure(lines: string): void;
   /** This device's registry entry for the project at `path`. */
   entry(path?: string): Promise<RegistryEntry | undefined>;
 }
@@ -130,9 +139,30 @@ export const fakeDevices = async (
     };
     const offloadDeps: OffloadDeps = { ...common, checks: quietChecks, plugins: [nodePlugin] };
     const onloadDeps: OnloadDeps = { ...common, plugins: [nodePlugin] };
-    const recoverDeps = (faults?: RunFaults): RecoverDeps => {
+    const recoverDeps = (faults?: RunFaults, now?: () => Date): RecoverDeps => {
       const { emit: _, ...rest } = common;
-      return { ...rest, host: hostFor(faults) };
+      return { ...rest, host: hostFor(faults), ...(now === undefined ? {} : { now }) };
+    };
+    const trashDeps = (now?: () => Date, faults?: RunFaults): TrashDeps => {
+      const clock = now ?? (() => new Date());
+      const h = hostFor(faults);
+      return {
+        host: h,
+        paths: box.paths,
+        env,
+        log: () => {},
+        now: clock,
+        held: heldStoreOpener({
+          io: h,
+          paths: box.paths,
+          env,
+          loader: new ConfigLoader(testHost(), box.paths),
+          opener,
+          clock,
+          openMirror: async () => ({ ok: true as const, value: mirror }),
+          log: () => {},
+        }),
+      };
     };
     devices.push(
       Object.assign(device, {
@@ -147,7 +177,15 @@ export const fakeDevices = async (
             project: await ref(path),
           }),
         onload: async (path = "web") => runOnload(onloadDeps, { project: await ref(path), hydrate: false }),
-        recover: (faults?: RunFaults) => recover(recoverDeps(faults)),
+        recover: (faults?: RunFaults, now?: () => Date) => recover(recoverDeps(faults, now)),
+        gc: (options: { early?: boolean; now?: () => Date; faults?: RunFaults } = {}) =>
+          collectTrash(trashDeps(options.now, options.faults), { early: options.early === true }),
+        housekeeping: (options: { deleteDue?: boolean; now?: () => Date } = {}) =>
+          housekeeping(trashDeps(options.now), { deleteDue: options.deleteDue !== false }),
+        configure: (lines: string) => {
+          const file = join(box.home, ".config/plainport/config.toml");
+          writeFileSync(file, `${readFileSync(file, "utf8")}\n${lines}\n`);
+        },
         entry: async (path = "web") => {
           const registry = await readRegistry(testHost(), box.paths);
           if (!registry.ok) throw new Error(registry.finding.message);

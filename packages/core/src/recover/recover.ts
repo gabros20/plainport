@@ -91,6 +91,7 @@ import {
   withProjectLock,
 } from "../saga/project-gate.ts";
 import {
+  conflictGraceOf,
   type OffloadConflict,
   offloadTrashOf,
   recordBase,
@@ -851,6 +852,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const needsStub = journal.release?.stub === true && journal.step !== "offload.release.stub";
     const gate = await releaseStore(journal);
     if (!gate.ok) return pending(journal, gate);
+    // Q16: the store's conflict grace, from config as it reads now (no secret is needed for it).
+    const config = await deps.loader.load({ env: deps.env, root: journal.project.root });
+    if (!config.ok) return pending(journal, config);
+    const grace = conflictGraceOf(config.value.config, journal.store.name);
     let facts = { at: journal.updatedAt, bytes: 0 };
     if (needsStub) {
       const read = await eventFacts(journal);
@@ -875,6 +880,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         // finding 5): a configuration that reads only as its last good copy moves nothing.
         stores: () => freshStores(io, paths, deps.env),
         ...(gate.value === undefined ? {} : { store: gate.value }),
+        grace,
         // Recover reads the store again before the rename, as the live run does (F2): never released unread.
         reread: async () => {
           const read = await rereadFor(journal);
