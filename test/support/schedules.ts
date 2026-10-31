@@ -824,6 +824,83 @@ const resolutionWhilePending = async (): Promise<void> => {
   }
 };
 
+/**
+ * S9 (phase-6 review r2 I1): dev-a's offload to a store that is not durable, with offload.conflictGrace = "0", dies
+ * right after its rename (offload.release.moved). Recover's release reads the store's profile as the live run does,
+ * so the trash is held for Q21's proof (raised to the 15-minute floor, D115), never handed straight to the delete.
+ * dev-b, meanwhile, sees dev-a's event and snapshot like any other.
+ */
+const crashPastRename = async (durability: "acked-unsynced" | "unknown"): Promise<void> => {
+  const store = semanticBlobStore({ durability });
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.configure('[offload]\nconflictGrace = "0"');
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    let died = false;
+    try {
+      await a.offload("web", { at: "offload.release.moved" });
+    } catch {
+      died = true;
+    }
+    expect(died).toBe(true);
+    const [op] = openJournals(a.box.paths.journalDir).map((j) => (j as { op?: string }).op as string);
+    okOf(await a.recover());
+    // dev-a: the trash is held (its folder in the trash, its stub written), not deleted, through a gc a second later.
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
+    await a.gc({ now: () => new Date(Date.now() + 1_000) });
+    expect(existsSync(join(a.box.home, "work/.plainport-trash", op as string, "web/src/main.ts"))).toBe(true);
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(true);
+    // dev-b: the event and the snapshot are there; it onloads them.
+    okOf(await b.onload());
+    expect(readFileSync(join(b.dir(), "src/main.ts"), "utf8")).toBe("export const main = 0;\n");
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S10 (phase-6 review r2 I2): dev-a offloads P, onloads it back, and offloads A1 from P with its trash held. dev-b's
+ * copy is still on the grandparent; it offloads with --fork (D114), a fork made from that older base. The fold groups
+ * the fork as [P, B1], but A1 is a live tip beside B1: dev-a's checked read sees the snapshot contested and keeps the
+ * trash conflict-retained, past the grace.
+ */
+const forkFromGrandparent = async (): Promise<void> => {
+  const store = semanticBlobStore();
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    okOf(await a.offload());
+    for (let i = 0; i < 400 && existsSync(join(a.box.home, "work/.plainport-trash")); i++)
+      await Bun.sleep(25);
+    okOf(await b.onload());
+    okOf(await a.onload());
+    for (const d of [a, b]) d.configure('[offload]\nconflictGrace = "15m"');
+    writeFileSync(join(a.dir(), "src/p.ts"), "export const p = 1;\n");
+    okOf(await a.offload());
+    okOf(await a.onload());
+    writeFileSync(join(a.dir(), "src/a1.ts"), "export const a1 = 1;\n");
+    const a1 = okOf(await a.offload()).snapshot;
+    writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+    const byB = await b.offload("web", undefined, { fork: true });
+    expect(byB.ok ? "released" : byB.finding.code).toBe("catalog.head-moved");
+    const events = await allEvents(store);
+    const id = events.find((e) => e.type === "offloaded")?.project as string;
+    const project = foldCatalog(events).projects[id];
+    expect(project?.heads).toContain(a1);
+    expect(project?.conflicts.flat()).not.toContain(a1);
+    // dev-a: past the grace, gc keeps the trash, conflict-retained; dev-b: its fork is kept, its folder stays.
+    const gc = await a.gc({ now: () => new Date(Date.now() + 16 * 60_000) });
+    expect(gc.ok ? gc.value.deleted : []).toEqual([]);
+    expect(existsSync(join(a.box.home, "work/.plainport-trash", a1, "web/src/a1.ts"))).toBe(true);
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
+    expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
 /** Both devices' offloads, each with an edit of its own, about to race. */
 const editBoth = async (a: Device, b: Device) => {
   await Bun.write(`${a.dir()}/src/a.ts`, "export const a = 1;\n");
@@ -1072,6 +1149,31 @@ export const SCHEDULES: readonly Schedule[] = [
       "dev-b": "sees every event and snapshot it saw before; a recorder on the store shows no delete",
     },
     runInProcess: aliasUnderStripped,
+  },
+  {
+    id: "S9",
+    title: "a crash past the rename on a store that is not durable, with conflictGrace 0 (review r2 I1)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "its recover reads the store's profile and holds the trash for Q21's proof (the 15-minute floor, D115), as the live run does; a gc a second later keeps it",
+      "dev-b": "sees dev-a's event and snapshot like any other, and onloads them",
+    },
+    runInProcess: async () => {
+      await crashPastRename("acked-unsynced");
+      await crashPastRename("unknown");
+    },
+  },
+  {
+    id: "S10",
+    title: "a fork from an older base while a held trash's snapshot is a live tip (review r2 I2)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "its A1 is a live tip beside dev-b's fork, though the fold groups that fork with P: its checked read sees A1 contested and keeps the trash conflict-retained past the grace",
+      "dev-b": "its copy on the grandparent forks with --fork (D114): kept, its folder stays",
+    },
+    runInProcess: forkFromGrandparent,
   },
 ];
 

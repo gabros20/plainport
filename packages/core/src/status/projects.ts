@@ -32,7 +32,7 @@
 import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok, shellWord } from "@plainport/contract";
-import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
+import { type CatalogProject, type CatalogState, contested } from "../catalog/fold.ts";
 import { readStoreDescriptor } from "../catalog/identity.ts";
 import {
   eventAt,
@@ -707,7 +707,9 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     for (const j of open) {
       if (j.kind !== "offload" || holdsProjectBack(j)) continue;
       const at = j.trash ?? offloadTrashOf(j as OffloadJournal);
-      const forked = catalog?.conflicts.some((f) => f.includes(j.op)) === true;
+      const forked =
+        catalog !== undefined &&
+        (catalog.conflicts.some((f) => f.includes(j.op)) || contested(catalog, j.op));
       const held = isHeld(j)
         ? conflictRetained(j) || forked
           ? ("conflict-retained" as const)

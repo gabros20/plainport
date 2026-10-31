@@ -29,6 +29,7 @@
 
 import { basename, dirname, join } from "node:path";
 import { type Finding, fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { contested } from "../catalog/fold.ts";
 import { type CatalogRead, headUncertain } from "../catalog/head.ts";
 import { DEFAULT_CONFLICT_GRACE, type ResolvedConfig } from "../config/schema.ts";
 import { readDevice } from "../device.ts";
@@ -202,7 +203,7 @@ export const forkAfterCommit = (
   const state = read.projects[project.id];
   if (state === undefined) return ok(undefined);
   if (state.rejected.includes(op)) return ok("rejected");
-  if (state.conflicts.some((fork) => fork.includes(op))) return ok("forked");
+  if (state.conflicts.some((fork) => fork.includes(op)) || contested(state, op)) return ok("forked");
   if (state.snapshots[op] === undefined) {
     const sibling = Object.entries(state.snapshots).some(
       ([snapshot, made]) =>

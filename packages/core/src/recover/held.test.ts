@@ -363,6 +363,36 @@ describe("held(grace) → held(conflict): the checked read finds a fork naming t
   });
 });
 
+describe("held(conflict): a fork from an older base still names the held snapshot (review r2 I2)", () => {
+  test("A offloads P, then A1 from P (held); B's copy on the grandparent forks with --fork: A1's trash is conflict-retained", async () => {
+    const w = await world();
+    // P: A's first offload with the grace, then its trash reused by onload, so A's copy is on P.
+    const p = await heldOffload(w);
+    value(await w.a.onload());
+    expect((await w.a.entry())?.base).toBe(p);
+    writeFileSync(join(w.a.dir(), "src/a1.ts"), "export const a1 = 1;\n");
+    const a1 = value(await w.a.offload()).snapshot;
+    // B is still on the grandparent: its offload is behind the head, so it forks with --fork (D114), base Q.
+    const byB = await w.b.offload("web", undefined, { fork: true });
+    expect(byB.ok ? "released" : byB.finding.code).toBe("catalog.head-moved");
+    const bSnap = (byB.ok ? "" : (byB.data as { snapshot: string }).snapshot) as string;
+    const project = await foldOf(w);
+    // The fold groups the fork by base: [P, B1], not A1; yet A1 is a live tip beside B1.
+    expect(project?.conflicts.flat()).not.toContain(a1);
+    expect([...(project?.heads ?? [])].sort()).toEqual([a1, bSnap].sort());
+    // The view and every entrance keep A1's trash.
+    expect((await viewOf(w))?.trash.map((t) => [t.op, t.held])).toEqual([[a1, "conflict-retained"]]);
+    const gc = reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) }));
+    expect(gc.deleted).toEqual([]);
+    expect(rowOf(w.a, a1)).toEqual({
+      folder: false,
+      trash: true,
+      stub: true,
+      journals: [["offload.release.held", "none"]],
+    });
+  });
+});
+
 describe("held(conflict) → held(grace) → …: a resolution settles the fork", () => {
   test("resolve --keep of the retained snapshot, allowed with the held journal open: a fresh deadline, and onload renames the trash back", async () => {
     const w = await world();
