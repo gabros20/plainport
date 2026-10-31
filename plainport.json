@@ -4083,6 +4083,7 @@
             "description": "The store whose catalog holds it"
           },
           "keep": {
+            "description": "The snapshot this resolution keeps; with nothing to resolve, present only when it is the head (the requested one is not echoed when it differs)",
             "type": "string"
           },
           "outcome": {
@@ -4094,11 +4095,35 @@
             "description": "resolved: a resolved event was appended. nothing-to-resolve: the project is not conflicted and has one live tip, so nothing was written (a re-run of a resolve that landed ends here)"
           },
           "head": {
-            "description": "The head now: keep once resolved; the one live tip with nothing to resolve",
+            "description": "The head the store's catalog shows now, read again after the append: keep once the resolution settles it; null while the project is still conflicted (a competing resolution from another device) or when the read again failed; the one live tip with nothing to resolve",
             "type": [
               "string",
               "null"
             ]
+          },
+          "conflicted": {
+            "description": "resolved: whether the project is still conflicted by the read after the append; absent when that read failed",
+            "type": "boolean"
+          },
+          "heldRejected": {
+            "description": "resolved: this device's held trash whose snapshot the resolution rejects; it is deleted after its fresh conflict grace, and plainport restore --snapshot reads the snapshot",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "snapshot",
+                "trash"
+              ],
+              "additionalProperties": {}
+            }
           },
           "event": {
             "description": "resolved: the resolved event's id",
@@ -4123,7 +4148,6 @@
           "op",
           "project",
           "store",
-          "keep",
           "outcome",
           "head"
         ],

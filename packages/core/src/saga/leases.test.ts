@@ -187,7 +187,7 @@ describe("leases across two devices (Q17)", () => {
     expect(project?.conflicts.flat().sort()).toEqual([byA.value.snapshot, data.snapshot].sort());
   });
 
-  test("a copy behind the head says so in its view, and its next step is offload --fork --yes", async () => {
+  test("a copy behind the head says so in its view, and its next step is offload --fork (no --yes: confirm, M7)", async () => {
     const { a, b } = await world();
     expect((await a.onload()).ok).toBe(true);
     expect((await b.onload()).ok).toBe(true);
@@ -195,6 +195,6 @@ describe("leases across two devices (Q17)", () => {
     expect((await a.offload()).ok).toBe(true);
     const view = await b.view();
     expect(view?.conditions).toContain("head-moved");
-    expect(view?.next?.command).toBe("plainport offload work:web --fork --yes");
+    expect(view?.next?.command).toBe("plainport offload work:web --fork");
   });
 });

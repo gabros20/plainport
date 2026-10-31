@@ -33,15 +33,29 @@ export const resolveConflict = defineCommand({
       op: z.string(),
       project: z.string().meta({ description: "root:path" }),
       store: z.string().meta({ description: "The store whose catalog holds it" }),
-      keep: z.string(),
+      keep: z.string().optional().meta({
+        description:
+          "The snapshot this resolution keeps; with nothing to resolve, present only when it is the head (the requested one is not echoed when it differs)",
+      }),
       outcome: z.enum(["resolved", "nothing-to-resolve"]).meta({
         description:
           "resolved: a resolved event was appended. nothing-to-resolve: the project is not conflicted and has one live tip, so nothing was written (a re-run of a resolve that landed ends here)",
       }),
-      head: z
-        .string()
-        .nullable()
-        .meta({ description: "The head now: keep once resolved; the one live tip with nothing to resolve" }),
+      head: z.string().nullable().meta({
+        description:
+          "The head the store's catalog shows now, read again after the append: keep once the resolution settles it; null while the project is still conflicted (a competing resolution from another device) or when the read again failed; the one live tip with nothing to resolve",
+      }),
+      conflicted: z.boolean().optional().meta({
+        description:
+          "resolved: whether the project is still conflicted by the read after the append; absent when that read failed",
+      }),
+      heldRejected: z
+        .array(z.looseObject({ snapshot: z.string(), trash: z.string() }))
+        .optional()
+        .meta({
+          description:
+            "resolved: this device's held trash whose snapshot the resolution rejects; it is deleted after its fresh conflict grace, and plainport restore --snapshot reads the snapshot",
+        }),
       event: z.string().optional().meta({ description: "resolved: the resolved event's id" }),
       over: z.array(z.string()).optional().meta({
         description:
@@ -63,7 +77,18 @@ export const resolveConflict = defineCommand({
   human: (data) =>
     data.outcome === "nothing-to-resolve"
       ? `nothing to resolve: ${data.project} is not conflicted${data.head === null ? "" : `; its head is ${data.head}`}`
-      : `resolved ${data.project}: kept ${data.keep} over ${(data.over ?? []).join(", ")}${(data.supersedes ?? []).length === 0 ? "" : `, replacing resolution ${(data.supersedes ?? []).join(", ")}`}; the others stay in store ${data.store}, readable with plainport restore --snapshot`,
+      : [
+          `resolved ${data.project}: kept ${data.keep} over ${(data.over ?? []).join(", ")}${(data.supersedes ?? []).length === 0 ? "" : `, replacing resolution ${(data.supersedes ?? []).join(", ")}`}; the others stay in store ${data.store}, readable with plainport restore --snapshot`,
+          ...(data.conflicted === true
+            ? [
+                "still conflicted: another resolution competes with this one; plainport status lists the live tips",
+              ]
+            : []),
+          ...(data.heldRejected ?? []).map(
+            (h) =>
+              `held      ${h.trash} (snapshot ${h.snapshot}) is rejected: deleted after its conflict grace; plainport restore --snapshot ${h.snapshot} reads it`,
+          ),
+        ].join("\n"),
   handler: async (args, ctx) => {
     const known = await knownProjects(ctx);
     if (!known.ok) return known;

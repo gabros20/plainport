@@ -3,7 +3,7 @@
 // it writes is judged by Task 12's fold (R2-2): valid, complete and active once written.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Result } from "@plainport/contract";
 import { allEvents, type FakeDevice, fakeDevices } from "../../../../test/support/fake-devices.ts";
@@ -191,6 +191,76 @@ describe("resolve: the gate and the rules", () => {
     const done = value(await w.b.resolve(w.base));
     expect([done.outcome, done.head, done.event]).toEqual(["nothing-to-resolve", w.base, undefined]);
     expect(await resolvedEvents(w)).toEqual([]);
+    // A requested snapshot that is not the head is not echoed as kept (review r2 M5).
+    const other = value(await w.b.resolve("01JZZZZZZZZZZZZZZZZZZZZZZZ"));
+    expect([other.outcome, other.keep, other.head]).toEqual(["nothing-to-resolve", undefined, w.base]);
+  });
+
+  test("a copy here on no live tip: copy-here's fix is offload --fork, and the fork then resolves (D114)", async () => {
+    const store = racing(semanticBlobStore());
+    devices = await fakeDevices(store, ["dev-a", "dev-b", "dev-c"], { format: 2 });
+    const [a, b, c] = devices as [FakeDevice, FakeDevice, FakeDevice];
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    value(await a.offload());
+    await settled(a);
+    for (const d of [b, c, a]) value(await d.onload());
+    for (const d of [a, b, c])
+      writeFileSync(join(d.dir(), `src/${d.name}.ts`), `export const x = "${d.name}";\n`);
+    // dev-a and dev-b fork; dev-c's copy stays on the first snapshot, which is no live tip.
+    a.engine.hooks.duringSnapshot = async () => {
+      a.engine.hooks.duringSnapshot = undefined;
+      value(await b.offload());
+    };
+    const byA = await a.offload();
+    const aSnap = (byA.ok ? undefined : (byA.data as OffloadConflict))?.snapshot as string;
+    const refused = await c.resolve(aSnap);
+    expect(refused.ok ? "resolved" : refused.finding.code).toBe("resolve.copy-here");
+    expect(refused.ok ? "" : refused.finding.fix).toContain("plainport offload work:web --fork --yes");
+    // Following the fix: the copy becomes a fork, a live tip, and resolve keeps it.
+    const forked = await c.offload("web", undefined, { fork: true });
+    expect(forked.ok ? "released" : forked.finding.code).toBe("catalog.head-moved");
+    const cSnap = (forked.ok ? undefined : (forked.data as OffloadConflict))?.snapshot as string;
+    expect((await c.entry())?.base).toBe(cSnap);
+    const done = value(await c.resolve(cSnap));
+    expect([done.outcome, done.keep, done.head, done.conflicted]).toEqual(["resolved", cSnap, cSnap, false]);
+    expect(readFileSync(join(c.dir(), "src/dev-c.ts"), "utf8")).toBe('export const x = "dev-c";\n');
+  });
+
+  test("resolve runs alongside a held journal of the project, and names the held trash it rejects (M7)", async () => {
+    const w = await world();
+    w.a.configure('[offload]\nconflictGrace = "15m"');
+    // dev-b offloads during dev-a's upload: dev-a forks; then dev-a onloads nothing, dev-b's copy is shelved. Instead:
+    // dev-a offloads with the grace first (its trash held), then dev-b's copy forks with --fork.
+    const held = value(await w.a.offload());
+    expect(held.held).toBe(true);
+    const byB = await w.b.offload("web", undefined, { fork: true });
+    expect(byB.ok ? "released" : byB.finding.code).toBe("catalog.head-moved");
+    const bSnap = (byB.ok ? undefined : (byB.data as OffloadConflict))?.snapshot as string;
+    expect(journalsOf(w.a).map((j) => j.step)).toEqual(["offload.release.held"]);
+    // dev-a holds no working copy (its folder is in the held trash): it resolves keeping dev-b's, past its own journal.
+    const done = value(await w.a.resolve(bSnap));
+    expect([done.outcome, done.head, done.over]).toEqual(["resolved", bSnap, [held.snapshot]]);
+    expect(done.heldRejected?.map((h) => h.snapshot)).toEqual([held.snapshot]);
+    expect(journalsOf(w.a).map((j) => j.step)).toEqual(["offload.release.held"]);
+  });
+
+  test("a copy whose root is not mounted cannot be told apart from none: resolve refuses (root.path-missing)", async () => {
+    const w = await world();
+    const { bSnap } = await fork(w);
+    const root = join(w.a.box.home, "work");
+    const away = join(w.a.box.home, "work-away");
+    renameSync(root, away);
+    try {
+      const refused = await w.a.resolve(bSnap);
+      expect(refused.ok ? "resolved" : [refused.exitCode, refused.finding.code]).toEqual([
+        6,
+        "root.path-missing",
+      ]);
+      expect(await resolvedEvents(w)).toEqual([]);
+    } finally {
+      renameSync(away, root);
+    }
   });
 
   test("a format-1 store refuses with store upgrade as the fix, and writes nothing", async () => {
@@ -281,6 +351,8 @@ describe("resolve: the gate and the rules", () => {
     const byA = value(await w.a.resolve(aSnap));
     w.store.hook.beforePut = undefined;
     expect(byA.supersedes).toEqual([]);
+    // Read again after its append: still conflicted, so no head is reported (review r2 M5).
+    expect([byA.head, byA.conflicted]).toEqual([null, true]);
     const project = await foldOf(w);
     expect(project?.status).toBe("conflicted");
     expect(project?.head).toBeNull();
@@ -324,9 +396,9 @@ describe("resolve: the gate and the rules", () => {
       expect(h.bytes).toBeGreaterThan(0);
       expect(Date.parse(h.at)).not.toBeNaN();
     }
-    expect(view?.next?.command).toBe(`plainport resolve work:web --keep ${aSnap} --yes`);
+    expect(view?.next?.command).toBe(`plainport resolve work:web --keep ${aSnap}`);
     // dev-b holds no copy: the next step names the command, the snapshot left to choose.
-    expect((await viewsOf(w.b))?.next?.command).toBe("plainport resolve work:web --keep <snapshot> --yes");
+    expect((await viewsOf(w.b))?.next?.command).toBe("plainport resolve work:web --keep <snapshot>");
     // Once resolved, no heads list.
     await expectValid(w, value(await w.a.resolve(aSnap)));
     expect((await viewsOf(w.a))?.heads).toBeUndefined();

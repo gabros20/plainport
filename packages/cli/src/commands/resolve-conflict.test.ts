@@ -102,7 +102,7 @@ describe("plainport resolve (CLI)", () => {
       files: 3,
       here: false,
     });
-    expect(view.next.command).toBe("plainport resolve work:web --keep <snapshot> --yes");
+    expect(view.next.command).toBe("plainport resolve work:web --keep <snapshot>");
     const human = await cli(["status", "work:web"]);
     expect(human.out).toContain(`tip      ${theirs} · device `);
 

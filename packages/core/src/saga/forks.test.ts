@@ -482,7 +482,7 @@ describe("forks F2: a resolution elsewhere while this device's journal is pendin
     );
     const view = views.projects.find((p) => p.address === "work:web");
     expect(view?.conditions).toContain("rejected-line");
-    expect(view?.next?.command).toBe("plainport offload work:web --yes");
+    expect(view?.next?.command).toBe("plainport offload work:web");
     await expectInvariants(w);
 
     // Its next offload is live work on the rejected line: uploaded, and a fork at the commit (F1) that conflicts again.

@@ -817,6 +817,10 @@ export const projectViews = async (deps: ViewDeps, options: ViewOptions = {}): P
   return ok({ projects, stores, findings, unreadableJournals });
 };
 
+/** A next step that is a confirm command never carries --yes (review r2 M7): run, it asks, or prints the re-run. */
+const CONFIRM =
+  "; it is a confirm command: it asks first, and without a terminal prints the command to re-run with --yes";
+
 /** What to do next for a project in this view, when anything is to be done. */
 export const nextStep = (p: ProjectStatus): { command: string; reason: string } | undefined => {
   const address = shellWord(p.address);
@@ -829,18 +833,18 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     };
   if (p.conditions.includes("diverged-after-commit"))
     return {
-      command: `plainport offload ${address} --yes`,
-      reason: `keep working in the folder; the next offload builds on snapshot ${p.head}`,
+      command: `plainport offload ${address}`,
+      reason: `keep working in the folder; the next offload builds on snapshot ${p.head}${CONFIRM}`,
     };
   if (p.conditions.includes("rejected-line"))
     return {
-      command: `plainport offload ${address} --yes`,
-      reason: `a resolution rejected snapshot ${p.base}, which this copy is on: the offload keeps its work as live work, which conflicts again and can then be resolved`,
+      command: `plainport offload ${address}`,
+      reason: `a resolution rejected snapshot ${p.base}, which this copy is on: the offload keeps its work as live work, which conflicts again and can then be resolved${CONFIRM}`,
     };
   if (p.conditions.includes("head-moved"))
     return {
-      command: `plainport offload ${address} --fork --yes`,
-      reason: `another copy was offloaded since this one came: this uploads it as a fork, so the project is conflicted and compare can show the two copies side by side (D114)`,
+      command: `plainport offload ${address} --fork`,
+      reason: `another copy was offloaded since this one came: this uploads it as a fork, so the project is conflicted and compare can show the two copies side by side (D114)${CONFIRM}`,
     };
   if (p.conditions.includes("incomplete"))
     return {
@@ -850,16 +854,26 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     };
   if (p.state === "conflicted") {
     const mine = p.heads?.find((h) => h.here);
+    // A copy here on no live tip reaches the conflict only as a fork of its own (D114).
+    if (
+      mine === undefined &&
+      p.here &&
+      p.base !== undefined &&
+      !(p.heads ?? []).some((h) => h.snapshot === p.base)
+    )
+      return {
+        command: `plainport offload ${address} --fork`,
+        reason: `the catalog holds a fork, and this copy is on snapshot ${p.base}, which is no live tip: this uploads it as a fork, a live tip resolve can keep (D114)${CONFIRM}`,
+      };
+    // Which tip to keep is a choice: compare and status show the copies; resolve, a confirm command, takes no --yes here.
     return mine !== undefined
       ? {
-          command: `plainport resolve ${address} --keep ${mine.snapshot} --yes`,
-          reason:
-            "the catalog holds a fork, and this device's copy is on one of its live tips: resolving keeps that one over the others (heads lists them; restore --snapshot reads any side by side)",
+          command: `plainport resolve ${address} --keep ${mine.snapshot}`,
+          reason: `the catalog holds a fork, and this device's copy is on one of its live tips: resolving keeps that one over the others; plainport compare ${address} shows the others beside it first (heads lists them)${CONFIRM}`,
         }
       : {
-          command: `plainport resolve ${address} --keep <snapshot> --yes`,
-          reason:
-            "the catalog holds a fork: keep one of its live tips (heads lists each one's device, time and size; restore --snapshot reads any side by side)",
+          command: `plainport resolve ${address} --keep <snapshot>`,
+          reason: `the catalog holds a fork: keep one of its live tips (heads lists each one's device, time and size; plainport status ${address} shows them, restore --snapshot reads any side by side)${CONFIRM}`,
         };
   }
   const refused = p.trash.find((t) => t.refused !== undefined && !t.deleting);

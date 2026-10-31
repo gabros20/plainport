@@ -38,6 +38,7 @@ import { resolveRootId } from "../catalog/roots.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import type { Device } from "../device.ts";
 import type { LocalIo } from "../io.ts";
+import { type OffloadJournal, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
@@ -48,6 +49,7 @@ import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub } from "../stub.ts";
 import { ulid } from "../ulid.ts";
 import { registeredFolders, withProjectLock } from "./project-gate.ts";
+import { offloadTrashOf, rootFolderOf } from "./release.ts";
 import { kindAt, unreadable } from "./restore-tree.ts";
 
 export interface ResolveDeps {
@@ -78,11 +80,23 @@ export type ResolveOutcome = {
   /** root:path. */
   project: string;
   store: string;
-  keep: string;
+  /** The snapshot this resolution keeps; absent when there was nothing to resolve and it is not the head. */
+  keep?: string;
   /** resolved: this run appended a resolved event. nothing-to-resolve: not conflicted, one live tip; nothing written. */
   outcome: "resolved" | "nothing-to-resolve";
-  /** The head now: `keep` once resolved; the one live tip when there was nothing to resolve. */
+  /**
+   * The head the store's catalog shows now, read again after the append (review r2 M5): `keep` once the resolution
+   * settles the project, null while it is still conflicted (another device's resolution competes, S7) or when the read
+   * again failed; the one live tip when there was nothing to resolve.
+   */
   head: string | null;
+  /** resolved: whether the project is still conflicted by the read after the append; absent when it failed. */
+  conflicted?: boolean;
+  /**
+   * resolved: this device's held trash (offload.release.held) whose snapshot this resolution rejects: deleted after
+   * its fresh grace, as a rejected snapshot's trash is; plainport restore --snapshot reads the snapshot (review r2 M7).
+   */
+  heldRejected?: { snapshot: string; trash: string }[];
   /** resolved: the resolved event's id. */
   event?: string;
   /** resolved: the snapshots it rejects. */
@@ -207,7 +221,7 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
         op,
         project: ref.address,
         store: store.name,
-        keep,
+        ...(project.head === keep ? { keep } : {}),
         outcome: "nothing-to-resolve" as const,
         head: project.head,
       });
@@ -273,18 +287,40 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
         fix: `${appended.finding.fix === undefined ? "" : `${appended.finding.fix}; then `}re-run ${command(keep)}: if this event landed, the re-run finds nothing to resolve`,
       });
     phase("commit", "end");
+    // The head as the store shows it now: a competing resolution (S7) leaves the project conflicted (M5).
+    const after = await reader();
+    if (!after.ok)
+      deps.log("warn", `the catalog could not be read again after the resolution: ${after.finding.message}`);
+    const now = after.ok ? after.value.projects[projectId] : undefined;
+    const held = await heldRejectedHere(over);
     return ok({
       op,
       project: ref.address,
       store: store.name,
       keep,
       outcome: "resolved" as const,
-      head: keep,
+      head: now?.head ?? null,
+      ...(now === undefined ? {} : { conflicted: now.status === "conflicted" }),
       event,
       over,
       supersedes,
+      ...(held.length === 0 ? {} : { heldRejected: held }),
     });
   });
+
+  /** This device's held trash of the project whose snapshot `over` rejects: it goes after its fresh grace (M7). */
+  async function heldRejectedHere(over: readonly string[]): Promise<{ snapshot: string; trash: string }[]> {
+    const read = await readJournals(io, paths);
+    return read.journals
+      .filter(
+        (j): j is OffloadJournal =>
+          j.kind === "offload" &&
+          j.step === "offload.release.held" &&
+          j.project.id === projectId &&
+          over.includes(j.op),
+      )
+      .map((j) => ({ snapshot: j.op, trash: j.trash ?? offloadTrashOf(j) }));
+  }
 
   function needsUpgrade(): Failure {
     return fail(
@@ -329,15 +365,34 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
         "whether this device holds a working copy is unknown; nothing was resolved",
       );
     }
+    if (there === undefined && base !== undefined) {
+      // A root that is away cannot say whether a copy is there: refuse rather than reject the line it may be on.
+      const root = rootFolderOf(ref.path, folder);
+      let rootThere: string | undefined;
+      try {
+        rootThere = await kindAt(io, root);
+      } catch {
+        rootThere = undefined;
+      }
+      if (rootThere !== "dir")
+        return fail(
+          finding("root.path-missing", {
+            message: `the root of ${ref.address} (${root}) is not mounted here, so whether this device holds a working copy on snapshot ${base} cannot be told; nothing was resolved`,
+            fix: `mount the volume ${root} lives on and re-run, or run the resolve on a device that holds no working copy of ${ref.address}`,
+            paths: [root],
+          }),
+        );
+    }
     if (there !== "dir" || base === keep) return undefined;
     const tip = base !== undefined && heads.includes(base) ? base : undefined;
+    const here = `or offload this copy here first (plainport offload ${shellWord(ref.address)} --yes), then re-run ${command(keep)}`;
     return fail(
       finding("resolve.copy-here", {
         message: `this device holds a working copy of ${ref.address} at ${folder}, on snapshot ${base ?? "none (never offloaded)"}, and keeping ${keep} would reject the line it is on; while a copy is here, --keep names the copy's own snapshot`,
         fix:
           tip !== undefined
-            ? `${command(tip)} keeps this copy's snapshot; to keep ${keep}, run that resolve on a device that holds no working copy of ${ref.address}, or on the one whose copy is on ${keep}`
-            : `this copy is on no live tip: keep it as it is and run ${command(keep)} on a device that holds no working copy of ${ref.address}; this copy's next offload is then live work on top of the kept line's history, which conflicts again`,
+            ? `${command(tip)} keeps this copy's snapshot; to keep ${keep}, run that resolve on a device that holds no working copy of ${ref.address}, or on the one whose copy is on ${keep}, ${here}`
+            : `this copy is on no live tip: plainport offload ${shellWord(ref.address)} --fork --yes keeps it as a fork, a live tip that resolve --keep can name (D114); or run ${command(keep)} on a device that holds no working copy of ${ref.address}`,
         paths: [folder],
       }),
     );

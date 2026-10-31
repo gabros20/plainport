@@ -255,7 +255,7 @@ const holderFirst = async (world: Devices): Promise<void> => {
   expect(envelope(refused)?.error?.finding?.fix).toContain("plainport offload work:web --fork --yes");
   expect(backups(world)).toBe(uploaded);
   expect((await other.run(["status", "work:web", "--json"])).out).toContain(
-    '"command":"plainport offload work:web --fork --yes"',
+    '"command":"plainport offload work:web --fork"',
   );
 
   const kept = await other.run(["offload", "work:web", "--fork", "--yes", "--json"]);
@@ -279,6 +279,44 @@ const holderFirst = async (world: Devices): Promise<void> => {
     `${other.name}: compare --clean`,
   );
   await expectInvariants(world, before, { strict });
+};
+
+/**
+ * S4c: the same gap under leases = "warn" (the default): two working copies whose offloads do not overlap. The first
+ * offload commits; the second copy is behind the head, refused with catalog.head-moved before anything is uploaded,
+ * and offload --fork --yes keeps it as a fork (D114), so the project is conflicted and compare reaches the other copy.
+ */
+const warnNoOverlap = async (world: Devices): Promise<void> => {
+  const a = world.device("dev-a");
+  const b = world.device("dev-b");
+  await bothOnloaded(world, a, b);
+  const before = { events: await world.events(), snapshots: await world.snapshots() };
+  await editBoth(a, b);
+  const first = await a.run(OFFLOAD());
+  expectCode(first, 0, `${a.name}: the first offload`);
+  const committed = envelope(first)?.data?.snapshot as string;
+  await a.settled();
+  const uploaded = backups(world);
+  const refused = await b.run(OFFLOAD());
+  expectCode(refused, 8, `${b.name}: offload behind the head`);
+  expect(envelope(refused)?.error?.finding?.code).toBe("catalog.head-moved");
+  expect(envelope(refused)?.error?.finding?.fix).toContain("plainport offload work:web --fork --yes");
+  expect(backups(world)).toBe(uploaded);
+  const kept = await b.run(["offload", "work:web", "--fork", "--yes", "--json"]);
+  expectCode(kept, 8, `${b.name}: offload --fork`);
+  const forked = envelope(kept)?.data;
+  expect([forked?.kind, forked?.project]).toEqual(["fork", "work:web"]);
+  expect(await Bun.file(`${b.dir()}/src/b.ts`).text()).toBe("export const b = 1;\n");
+  expect(baseOf(b)).toBe(forked?.snapshot as string);
+  const project = foldCatalog(await world.events()).projects[await projectId(world)];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual([committed, forked?.snapshot as string].sort());
+  const compared = await b.run(["compare", "work:web", "--json"]);
+  expectCode(compared, 0, `${b.name}: compare`);
+  const sets = (envelope(compared)?.data?.sets ?? []) as { snapshot: string }[];
+  expect(sets.map((x) => x.snapshot)).toEqual([committed]);
+  expectCode(await b.run(["compare", "work:web", "--clean", "--json"]), 0, `${b.name}: compare --clean`);
+  await expectInvariants(world, before);
 };
 
 /**
@@ -1093,6 +1131,17 @@ export const SCHEDULES: readonly Schedule[] = [
         "the other copy's offload is refused with catalog.head-moved before anything is uploaded, its fix naming offload --fork --yes; with --fork it is uploaded and kept as a fork, its folder on its own snapshot, the project conflicted with both snapshots kept, and compare reaches the other copy",
     },
     run: holderFirst,
+  },
+  {
+    id: "S4c",
+    title: "under warn, two offloads that do not overlap: the second copy forks with --fork (D114)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a": "offloads first; its snapshot is the head and its folder is released",
+      "dev-b":
+        "its offload is behind the head: refused with catalog.head-moved before anything is uploaded, its fix naming offload --fork --yes; with --fork it is kept as a fork, its folder on its own snapshot, the project conflicted, and compare reaches dev-a's copy",
+    },
+    run: warnNoOverlap,
   },
   {
     id: "S5",
