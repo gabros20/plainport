@@ -2,7 +2,8 @@
 // keyed by the store's id (D45), never by this device's name for it, so two names for one store share it. v0.1 never
 // reads it, which keeps registry.json at v1 and `scripts/install --rollback` working.
 //
-// It holds the catalog's seal policy as this device first saw it (the pin, Q10), and what was measured of the store:
+// It holds the catalog's seal policy as this device first saw it (the pin, Q10), with the key id of a sealed catalog
+// once this device first derived its key (M2 Task 20: a later key with another id fails closed), and what was measured of the store:
 // its semantics profile with each property's evidence (Q8) and the last `store test`, together with the facts they
 // were measured against (the endpoint, how the store is reached, the restic and rclone versions). A measurement holds
 // only for those facts: reading with facts that differ in any way leaves `measured` out, and the next record replaces
@@ -49,7 +50,17 @@ export const StoreStateSchema = z
     /** The store's id (its meta/v1/store.json); the file is stores/<id>.json. */
     store: UlidSchema,
     /** The catalog's seal policy as this device first saw it (Q10); a store that later shows another is refused. */
-    seal: z.strictObject({ policy: SealPolicySchema, at: z.iso.datetime() }).optional(),
+    seal: z
+      .strictObject({
+        policy: SealPolicySchema,
+        at: z.iso.datetime(),
+        /** A sealed catalog's key id (Catalog seal v1), from the first key this device derived for it. */
+        kid: z
+          .string()
+          .regex(/^[0-9a-f]{16}$/)
+          .optional(),
+      })
+      .optional(),
     /** What was measured, with the facts it holds for. */
     measured: z
       .strictObject({
@@ -132,12 +143,15 @@ export const readStoreState = async (
   return ok(rest);
 };
 
+/** What this device pinned of a store's catalog seal (Q10). */
+export type SealPin = NonNullable<StoreState["seal"]>;
+
 /** The seal policy pinned for the store, undefined before the first contact; needs no facts (the pin never expires). */
 export const readStoreSeal = async (
   io: LocalIo,
   paths: PlainportPaths,
   storeId: string,
-): Promise<Result<{ policy: SealPolicy; at: string } | undefined>> => {
+): Promise<Result<SealPin | undefined>> => {
   const read = await readFile(io, storeStateFile(paths, storeId), storeId);
   return read.ok ? ok(read.value.seal) : read;
 };
@@ -224,16 +238,25 @@ export const recordMeasured = (
     return ok({ ...current, measured: { ...held, facts, ...found } });
   });
 
-/** The seal policy pinned for the store: the one already pinned, else `policy`, pinned now at `at`. */
+/**
+ * The seal policy pinned for the store: the one already pinned, else `policy`, pinned now at `at`. A sealed catalog's
+ * key id is pinned the first time one is given for the policy pinned; a pin is never changed otherwise, so the caller
+ * compares what comes back with what it found.
+ */
 export const pinSeal = async (
   io: LocalIo,
   paths: PlainportPaths,
   storeId: string,
   policy: SealPolicy,
   at: string,
-): Promise<Result<{ policy: SealPolicy; at: string }>> => {
-  const written = await updateStoreState(io, paths, storeId, (current) =>
-    ok(current.seal === undefined ? { ...current, seal: { policy, at } } : current),
-  );
-  return written.ok ? ok(written.value.seal ?? { policy, at }) : written;
+  kid?: string,
+): Promise<Result<SealPin>> => {
+  const fresh: SealPin = { policy, at, ...(kid === undefined ? {} : { kid }) };
+  const written = await updateStoreState(io, paths, storeId, (current) => {
+    if (current.seal === undefined) return ok({ ...current, seal: fresh });
+    if (kid !== undefined && current.seal.kid === undefined && current.seal.policy === policy)
+      return ok({ ...current, seal: { ...current.seal, kid } });
+    return ok(current);
+  });
+  return written.ok ? ok(written.value.seal ?? fresh) : written;
 };

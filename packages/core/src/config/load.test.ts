@@ -278,6 +278,64 @@ describe("config: precedence", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("an asserted semantics property the store's kind cannot honour is config.invalid, naming the key and the value it allows (review phase 5 I3)", async () => {
+    const sftp = '[stores.nas]\nkind = "sftp"\nhost = "nas.local"\npath = "/p"\nsecret = "env:PW"';
+    const s3 =
+      '[stores.b2]\nkind = "s3"\nendpoint = "https://e.example"\nbucket = "b"\nsecret = "env:PW"\naccessKeyId = "env:K"\nsecretAccessKey = "env:S"';
+    const cases = [
+      [sftp, 'publication = "atomic-put"', "stores.nas.semantics.publication", "temp-then-rename"],
+      [sftp, 'publication = "in-place"', "stores.nas.semantics.publication", "temp-then-rename"],
+      [sftp, "conditionalCreate = true", "stores.nas.semantics.conditionalCreate", "false"],
+      [s3, 'publication = "temp-then-rename"', "stores.b2.semantics.publication", "atomic-put"],
+    ] as const;
+    for (const [store, line, key, allowed] of cases) {
+      write(paths.configFile, `${store}\n[${key.split(".").slice(0, 3).join(".")}]\n${line}\n`);
+      const result = await new ConfigLoader(io, paths).load({ env: {} });
+      expect(result.ok ? "ok" : [result.finding.code, result.finding.message]).toEqual([
+        "config.invalid",
+        expect.stringContaining(key),
+      ]);
+      if (!result.ok) expect(result.finding.message).toContain(allowed);
+    }
+    for (const [store, line] of [
+      [sftp, 'publication = "temp-then-rename"\nconditionalCreate = false'],
+      [s3, 'publication = "atomic-put"\nconditionalCreate = true'],
+    ] as const) {
+      const name = store.startsWith("[stores.nas]") ? "nas" : "b2";
+      write(paths.configFile, `${store}\n[stores.${name}.semantics]\n${line}\n`);
+      expect((await new ConfigLoader(io, paths).load({ env: {} })).ok).toBe(true);
+    }
+  });
+
+  test("an sftp host that ssh would read as an option, or that holds whitespace, is config.invalid (review phase 5 M6)", async () => {
+    for (const host of ["-oProxyCommand=touch /tmp/x", "nas local", "nas\tlocal", "-p"]) {
+      write(
+        paths.configFile,
+        `[stores.nas]\nkind = "sftp"\nhost = ${JSON.stringify(host)}\npath = "/p"\nsecret = "env:PW"\n`,
+      );
+      const result = await new ConfigLoader(io, paths).load({ env: {} });
+      expect(result.ok ? "ok" : result.finding.message, host).toContain("stores.nas.host");
+    }
+    write(
+      paths.configFile,
+      '[stores.nas]\nkind = "sftp"\nhost = "tamas@nas-1.local"\npath = "/p"\nsecret = "env:PW"\n',
+    );
+    expect((await new ConfigLoader(io, paths).load({ env: {} })).ok).toBe(true);
+  });
+
+  test("an s3 endpoint with a user name or password in it is config.invalid; the key pair goes in its references (review phase 5 M6)", async () => {
+    const rest = 'bucket = "b"\nsecret = "env:PW"\naccessKeyId = "env:K"\nsecretAccessKey = "env:S"';
+    for (const endpoint of ["https://KEY:SECRET@s3.example", "https://KEY@s3.example"]) {
+      write(paths.configFile, `[stores.b2]\nkind = "s3"\nendpoint = "${endpoint}"\n${rest}\n`);
+      const result = await new ConfigLoader(io, paths).load({ env: {} });
+      expect(result.ok ? "ok" : result.finding.message, endpoint).toContain("stores.b2.endpoint");
+      if (!result.ok) {
+        expect(result.finding.message).toContain("accessKeyId");
+        expect(result.finding.message).not.toContain("SECRET");
+      }
+    }
+  });
+
   test("--config or PLAINPORT_CONFIG naming a missing file is not found (exit 4); a missing default is fine", async () => {
     const result = await new ConfigLoader(
       io,

@@ -130,6 +130,12 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.key-exists": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
+      "store.assertion-ignored": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.bootstrap-contested": {
         severity: "block",
         allowable: false,
@@ -149,6 +155,12 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.history-elsewhere": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.root-contested": {
         severity: "block",
         allowable: false,
@@ -268,6 +280,13 @@ describe("findings", () => {
       "plan.stale": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "project.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "store.not-set-up": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "store.in-use": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "store.not-quiescent": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.root-mismatch": {
         severity: "block",
         allowable: false,

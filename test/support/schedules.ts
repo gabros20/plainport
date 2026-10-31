@@ -4,14 +4,25 @@
 //
 // A schedule whose feature is not built yet has no `run`: schedules.test.ts registers it as a test.todo naming its
 // owner, the task that turns it on, and the gate test fails while any remains. A task turning one on writes its run
-// here and removes its owner.
+// here and removes its owner. A schedule a binary on a local store cannot stage (a store whose listings lag, S6) runs
+// in process instead (`runInProcess`), its devices on the semantic fake (test/support/fake-devices.ts).
 
 import { expect } from "bun:test";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { storeEventKey } from "../../packages/core/src/catalog/codec.ts";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
+import { capabilitiesOf, type StoreSemantics } from "../../packages/core/src/ports/blob-store.ts";
 import {
   catalogInvariantViolations,
   invariantViolations,
 } from "../../packages/core/src/testing/invariants.ts";
+import { MEMORY_SEMANTICS } from "../../packages/core/src/testing/memory-blob-store.ts";
+import {
+  type SemanticBlobStore,
+  semanticBlobStore,
+} from "../../packages/core/src/testing/semantic-blob-store.ts";
+import { allEvents, type FakeDevice, fakeDevices } from "./fake-devices.ts";
 import { type Device, type Devices, envelope, expectCode } from "./two-devices.ts";
 
 export interface Schedule {
@@ -25,6 +36,8 @@ export interface Schedule {
   outcomes: Readonly<Record<string, string>>;
   /** The schedule itself, asserting each outcome; absent while it is a todo. */
   run?: (world: Devices) => Promise<void>;
+  /** The schedule in process, on the semantic fake, when a binary on a local store cannot stage it. */
+  runInProcess?: () => Promise<void>;
 }
 
 const OFFLOAD = (path = "web") => ["offload", `work:${path}`, "--yes", "--json"];
@@ -71,6 +84,164 @@ const bothOnloaded = async (world: Devices, a: Device, b: Device): Promise<void>
   expectCode(await b.run(ONLOAD()), 0, `${b.name}: onload`);
   // The default leases ("warn") let the second working copy happen, with lease.held.
   expectCode(await a.run(ONLOAD()), 0, `${a.name}: onload`);
+};
+
+/**
+ * A profile without list-after-write whose acknowledged writes may not be synced (SFTP's, measured, Task 17), so it
+ * does not admit release: listings lag, and a conditional create still elects (a root claim needs one).
+ */
+const UNSEEN: StoreSemantics = {
+  ...MEMORY_SEMANTICS,
+  listAfterWrite: { value: false, evidence: "asserted" },
+  durability: { value: "acked-unsynced", evidence: "asserted" },
+};
+
+const okOf = <T>(
+  r: { ok: true; value: T } | { ok: false; finding: { code: string; message: string } },
+): T => {
+  if (!r.ok) throw new Error(`${r.finding.code}: ${r.finding.message}`);
+  return r.value;
+};
+
+/**
+ * S6: dev-a commits while the store's listings leave its event out, then dev-b offloads. With `seen` "at-commit" the
+ * event is listed while B verifies, so B's fresh read at its commit finds the fork. With "never" it stays unlisted
+ * through B's commit, and both commit: release waits on the store's profile, never on visibility. On UNSEEN
+ * (acked-unsynced) neither profile admits release, so both keep their folders with their journals open; on a durable
+ * store (`durable`) both release. Either way both snapshots stay, and the fold shows the fork once A's event lists.
+ */
+const delayedVisibility = async (seen: "at-commit" | "never", durable = false): Promise<void> => {
+  // Listings leave out what was written since the last settle(): A's event is invisible to B until then.
+  const fake = semanticBlobStore({ listOmitsRecent: true });
+  let profile: StoreSemantics | undefined;
+  const store: SemanticBlobStore = {
+    ...fake,
+    semantics: () => profile ?? fake.semantics(),
+    capabilities: () => (profile === undefined ? fake.capabilities() : capabilitiesOf(profile)),
+  };
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    okOf(await a.offload());
+    store.settle();
+    okOf(await b.onload());
+    okOf(await a.onload());
+    store.settle();
+    writeFileSync(join(a.dir(), "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+    const before = {
+      events: await allEvents(store),
+      snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+    };
+    if (seen === "never")
+      profile = durable ? { ...UNSEEN, durability: { value: "durable", evidence: "asserted" } } : UNSEEN;
+    const releases = seen === "never" && durable;
+
+    // dev-a commits; its event is in the store, and no listing names it yet.
+    const byA = await a.offload();
+    const eventA = (await allEvents(store)).find(
+      (e) => e.type === "offloaded" && e.device === a.device.id && !before.events.some((x) => x.id === e.id),
+    );
+    if (eventA?.type !== "offloaded")
+      throw new Error(`dev-a committed no offloaded event: ${JSON.stringify(byA)}`);
+    const listed = await store.list("meta/v1/events/");
+    expect(listed.ok && listed.value.some((e) => e.key === storeEventKey(eventA.id))).toBe(false);
+    if (seen === "at-commit") {
+      // dev-a, on its disk: released, its stub names its snapshot.
+      expect(okOf(byA).snapshot).toBe(eventA.snapshot);
+      expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
+      // dev-b: the event is listed while it verifies, after its head check before the upload.
+      b.engine.hooks.duringListing = () => {
+        b.engine.hooks.duringListing = undefined;
+        store.settle();
+      };
+    } else if (releases) {
+      // dev-a: released on a durable store, though no listing names its event yet.
+      expect(okOf(byA).snapshot).toBe(eventA.snapshot);
+      expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
+    } else {
+      // dev-a: committed, and its folder stays: the profile does not admit release.
+      expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([6, "store.semantics-unknown"]);
+      expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+      expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+    }
+    const byB = await b.offload();
+    expect(b.engine.calls).toHaveLength(1); // it uploaded: the head check before the upload passed
+    expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual(
+      seen === "at-commit"
+        ? [8, "catalog.head-moved"]
+        : releases
+          ? "released"
+          : [6, "store.semantics-unknown"],
+    );
+    if (releases) {
+      // dev-b: released too: its commit could not see A's event, and release does not wait for it.
+      expect(existsSync(`${b.dir()}.plainport`)).toBe(true);
+    } else {
+      expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+      expect(existsSync(`${b.dir()}.plainport`)).toBe(false);
+    }
+    if (seen === "never" && !releases) {
+      // Each device keeps its offload journal at the commit, for recover to finish the release once admitted.
+      for (const d of [a, b]) {
+        const open = readdirSync(d.box.paths.journalDir)
+          .filter((f) => f.endsWith(".json"))
+          .map(
+            (f) =>
+              JSON.parse(readFileSync(join(d.box.paths.journalDir, f), "utf8")) as {
+                kind: string;
+                step: string;
+              },
+          );
+        expect({ device: d.name, open: open.map((j) => j.kind) }).toEqual({
+          device: d.name,
+          open: ["offload"],
+        });
+      }
+    }
+
+    // Once the event is seen: both snapshots kept, the project conflicted between them.
+    store.settle();
+    const events = await allEvents(store);
+    // dev-b never offloaded before: its one offloaded event is its own.
+    const ofB = events.find((e) => e.type === "offloaded" && e.device === b.device.id);
+    const id = eventA.project;
+    const project = foldCatalog(events).projects[id];
+    expect(project?.status).toBe("conflicted");
+    expect(project?.conflicts.flat().sort()).toEqual(
+      [eventA.snapshot, ofB?.type === "offloaded" ? ofB.snapshot : ""].sort(),
+    );
+
+    // Invariants 1–3 on each device, 4–6 on the store.
+    for (const d of [a, b]) {
+      for (let i = 0; i < 400 && existsSync(join(d.box.home, "work/.plainport-trash")); i++)
+        await Bun.sleep(25);
+      expect({
+        device: d.name,
+        problems: await invariantViolations({
+          now: new Date(),
+          paths: d.box.paths,
+          device: d.device.id,
+          project: { id, dir: d.dir() },
+          roots: [join(d.box.home, "work")],
+          store: { name: "ssd", blob: store, engine: d.engine },
+          ...(d.released === undefined ? {} : { released: d.released }),
+          stripped: ["node_modules"],
+        }),
+      }).toEqual({ device: d.name, problems: [] });
+    }
+    expect(
+      catalogInvariantViolations({
+        events,
+        eventsBefore: before.events,
+        snapshotsBefore: before.snapshots,
+        snapshotsNow: a.engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
 };
 
 export const SCHEDULES: readonly Schedule[] = [
@@ -172,12 +343,16 @@ export const SCHEDULES: readonly Schedule[] = [
   {
     id: "S6",
     title: "delayed visibility of the other's event (fake store)",
-    owner: 21,
     devices: ["dev-a", "dev-b"],
     outcomes: {
-      "dev-a": "commits; its event is invisible to B for a while",
+      "dev-a": "commits; its event is invisible to B's listings for a while",
       "dev-b":
-        "on a store whose profile does not admit release without visibility, keeps its folder until the event is seen",
+        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release (writes acknowledged before they are synced) each device keeps its folder with its journal open (store.semantics-unknown) until recover finds the profile admits release; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
+    },
+    runInProcess: async () => {
+      await delayedVisibility("at-commit");
+      await delayedVisibility("never");
+      await delayedVisibility("never", true);
     },
   },
   {
@@ -205,4 +380,5 @@ export const SCHEDULES: readonly Schedule[] = [
 ];
 
 /** The schedules still waiting for their owner. */
-export const todoSchedules = (): Schedule[] => SCHEDULES.filter((s) => s.run === undefined);
+export const todoSchedules = (): Schedule[] =>
+  SCHEDULES.filter((s) => s.run === undefined && s.runInProcess === undefined);

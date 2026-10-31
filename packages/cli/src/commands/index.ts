@@ -8,6 +8,7 @@ import { dehydrate, hydrate, onload } from "./onload.ts";
 import { gc, recover, restore } from "./recover.ts";
 import { rootAdd, rootBind, rootList, rootScan } from "./root.ts";
 import { ls, status } from "./status.ts";
+import { storeAdd, storeList, storeRemove, storeTest, storeUpgrade } from "./store.ts";
 import { version } from "./version.ts";
 
 export const REGISTRY: Registry = [
@@ -26,5 +27,10 @@ export const REGISTRY: Registry = [
   rootBind,
   rootList,
   rootScan,
+  storeAdd,
+  storeList,
+  storeTest,
+  storeUpgrade,
+  storeRemove,
   version,
 ];

@@ -20,7 +20,15 @@ import { join } from "node:path";
 import { fail, finding, ok, type Result, type StreamEvent } from "@plainport/contract";
 import { macOnlyTests } from "../../../../test/platform.ts";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
-import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
+import { readStoreIdentity } from "../catalog/identity.ts";
+import {
+  appendEvent,
+  type CatalogEvent,
+  foldCatalog,
+  mirrorEventLog,
+  readEvents,
+  storeEventLog,
+} from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { PathRefused } from "../guard.ts";
@@ -30,6 +38,7 @@ import { listPlans, savePlan } from "../plan/store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
+import { recover } from "../recover/recover.ts";
 import { type RegistryEntry, readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { includedFingerprint, scanTree } from "../scan/walk.ts";
@@ -756,6 +765,77 @@ describe("offload: the head check", () => {
     expect(state?.status).toBe("conflicted");
     expect((await readJournals(testHost(), box.paths)).journals).toEqual([]);
     await expectInvariants();
+  });
+});
+
+describe("offload: the project's home store (Q12)", () => {
+  /** This copy came from snapshot `base` of store "old", whose mirror on this device holds it when `mirrored`. */
+  const cameFromOld = async (mirrored: boolean) => {
+    const id = ulid();
+    const rootId = ulid();
+    const oldId = ulid();
+    const base = ulid();
+    const oldMirror = memoryBlobStore({ createIfAbsent: true });
+    if (mirrored)
+      value(
+        await appendEvent(mirrorEventLog(oldMirror), {
+          v: 1,
+          id: ulid(),
+          op: base,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: base,
+          stored: { [oldId]: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: {
+          ...r,
+          roots: { work: rootId },
+          stores: { ...r.stores, old: oldId },
+          projects: { [id]: { root: "work", path: "web", base, registeredAt: "2026-10-01T00:00:00.000Z" } },
+        },
+      })),
+    );
+    // The old store is offline: only its mirror answers, and the opener is never asked for it.
+    const opened: string[] = [];
+    const over: Partial<OffloadDeps> = {
+      opener: {
+        open: async (name) => {
+          opened.push(name);
+          return { ok: true, value: { blob: store, engine } };
+        },
+      },
+      openMirror: async (storeId) => ({ ok: true, value: storeId === oldId ? oldMirror : mirror }),
+    };
+    return { id, base, over, opened };
+  };
+
+  test("a copy whose base only the offline home store's mirror holds refuses with store.history-elsewhere, naming it", async () => {
+    const { base, over, opened } = await cameFromOld(true);
+    const result = await offload({}, over);
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.history-elsewhere"]);
+    expect(!result.ok && result.finding.message).toContain(base);
+    expect(!result.ok && result.finding.message).toContain("store old");
+    expect(!result.ok && result.finding.fix).toContain("--store old");
+    expect(opened).toEqual(["ssd"]);
+    expect(engine.calls).toHaveLength(0);
+    await expectUntouched();
+  });
+
+  test("a base no store's catalog or mirror holds says the home store is unknown", async () => {
+    const { over } = await cameFromOld(false);
+    const result = await offload({}, over);
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.history-elsewhere"]);
+    expect(!result.ok && result.finding.message).toContain("unknown");
+    await expectUntouched();
   });
 });
 
@@ -2662,5 +2742,159 @@ describe("offload: a store inside the project is never offloaded with it (D83)",
     });
     expect(result.ok ? 0 : result.finding.code).toBe("store.inside-project");
     expect(existsSync(join(dir, ".store"))).toBe(false);
+  });
+});
+
+describe("offload: a store whose profile does not admit release (M2 Task 18)", () => {
+  // An SFTP-like store: everything a commit needs, but acknowledged writes are not synced (acked-unsynced), so release
+  // needs Q21's post-grace proof (Task 24). Until then the offload commits and keeps the folder.
+  const NAS = [
+    "version = 1",
+    'defaultStore = "nas"',
+    "[stores.nas]",
+    'kind = "sftp"',
+    'host = "nas"',
+    'path = "/volume1/plainport"',
+    'secret = "env:PLAINPORT_STORE_PASSWORD"',
+    "[roots.work]",
+    'store = "nas"',
+    'on = { mbp = "~/work" }',
+  ];
+  const profiled = (durability: "acked-unsynced" | "durable"): StoreOpener => ({
+    open: async () => ({
+      ok: true,
+      value: {
+        blob: {
+          ...store,
+          semantics: () => ({
+            ...store.semantics(),
+            durability: { value: durability, evidence: "measured" },
+          }),
+        },
+        engine,
+      },
+    }),
+  });
+
+  beforeEach(async () => {
+    box.file(".config/plainport/config.toml", NAS.join("\n"));
+    const id = value(await readStoreIdentity(store));
+    value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: id ?? "" } })));
+  });
+
+  const recoverWith = (opener: StoreOpener) =>
+    recover({
+      host: testHost(),
+      paths: box.paths,
+      device,
+      env: { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" },
+      loader: new ConfigLoader(testHost(), box.paths),
+      opener,
+      openMirror: async () => ({ ok: true, value: mirror }),
+      log: () => {},
+    });
+
+  test("the offload commits, keeps the folder and its journal, and says why release was refused", async () => {
+    const result = await offload({}, { opener: profiled("acked-unsynced") });
+    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.semantics-unknown"]);
+    expect(result.ok ? "" : result.finding.message).toContain("committed");
+    expect(result.ok ? "" : result.finding.message).toContain("durability is acked-unsynced (measured)");
+    // A measured property cannot be asserted away (D111), and this build has no held release: the fix says so,
+    // and promises no post-grace proof (review phase 5, judgement a).
+    const fix = result.ok ? "" : (result.finding.fix ?? "");
+    expect(fix).not.toContain("Q21");
+    expect(fix).not.toContain("semantics.durability");
+    expect(fix).toContain("not in this build");
+    // Committed: the snapshot is the head on the store.
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
+    // Kept: the folder as it was, no stub, no trash.
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect(existsSync(join(dir, "node_modules/dep/index.js"))).toBe(true);
+    expect(existsSync(`${dir}.plainport`)).toBe(false);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
+    const journals = (await readJournals(testHost(), box.paths)).journals;
+    expect(journals.map((j) => j.step)).toEqual(["offload.committed"]);
+  });
+
+  test("recover keeps it pending on that profile, and finishes the release once the profile admits it", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    const held = await recoverWith(profiled("acked-unsynced"));
+    expect(held.ok ? "" : held.finding.code).toBe("store.semantics-unknown");
+    // A property the measurement left unknown is the owner's to assert: then the fix names its key.
+    const unknown = await recoverWith({
+      ...profiled("acked-unsynced"),
+      profile: async () => ok({ ...store.semantics(), durability: "unknown" }),
+    });
+    expect(unknown.ok ? "" : unknown.finding.fix).toContain('stores.nas.semantics.durability = "durable"');
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+    expect((await readJournals(testHost(), box.paths)).journals).toHaveLength(1);
+
+    const done = value(await recoverWith(profiled("durable")));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+  });
+
+  test("recover keeps the folder when the journal's store is no longer the configured one: the gate fails closed (review phase 5 I1)", async () => {
+    const id = value(await readStoreIdentity(store)) ?? "";
+    const other = "01JC0000000000000000000000";
+    const configs: [string, string[], string][] = [
+      // The store taken out of config.
+      ["removed", ["version = 1", "[roots.work]", 'on = { mbp = "~/work" }'], id],
+      // Another store given its name.
+      ["another id", NAS, other],
+      // The name pointed at a local folder: not the store the offload committed to.
+      ["now local", [...NAS.slice(0, 3), 'kind = "local"', 'path = "~/elsewhere"', ...NAS.slice(7)], other],
+    ];
+    await offload({}, { opener: profiled("acked-unsynced") });
+    for (const [what, config, pinned] of configs) {
+      box.file(".config/plainport/config.toml", config.join("\n"));
+      value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: pinned } })));
+      const held = await recoverWith(profiled("durable"));
+      expect([what, held.ok ? "released" : held.finding.code]).toEqual([what, "store.not-set-up"]);
+      expect(held.ok ? "" : held.finding.message).toContain(id);
+      expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
+      expect((await readJournals(testHost(), box.paths)).journals.map((j) => j.step)).toEqual([
+        "offload.committed",
+      ]);
+    }
+  });
+
+  test("recover's gate reads the opener's profile, which needs no secret, not an opened store's (review phase 5 I2)", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    // Opened with its secrets the store says acked-unsynced; its profile alone, from config and the measurement,
+    // says durable. The gate asks the profile.
+    const opener: StoreOpener = {
+      ...profiled("acked-unsynced"),
+      profile: async () =>
+        ok({ ...store.semantics(), durability: { value: "durable", evidence: "asserted" } }),
+    };
+    const done = value(await recoverWith(opener));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+  });
+
+  test("a release past the rename is finished without the gate or the store's secrets (review phase 5 I2)", async () => {
+    const crashed = offload(
+      {},
+      { opener: profiled("durable"), host: testHost({ faults: { at: "offload.release.stub" } }) },
+    );
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+    // Neither the profile (it no longer admits release) nor a secret is needed to finish what has moved.
+    const failing: StoreOpener = {
+      open: async () => fail(finding("store.secret-missing", { message: "no secret in a cron recover" })),
+    };
+    const done = await recover({
+      host: testHost(),
+      paths: box.paths,
+      device,
+      env: { HOME: box.home, PATH },
+      loader: new ConfigLoader(testHost(), box.paths),
+      opener: failing,
+      openMirror: async () => ({ ok: true, value: mirror }),
+      log: () => {},
+    });
+    expect(value(done).operations.map((o) => o.outcome)).toEqual(["finished"]);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
   });
 });

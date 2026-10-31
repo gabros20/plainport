@@ -7,6 +7,7 @@
 // with built-in defaults are complete.
 
 import { z } from "zod";
+import { CancellationSchema, DurabilitySchema, PublicationSchema } from "../ports/blob-store.ts";
 import { parseSecretRef } from "../ports/secrets.ts";
 
 /** "0", or a whole number with a unit: 30s, 15m, 24h, 7d, 2w. */
@@ -81,31 +82,94 @@ const LocalStore = z.strictObject({
   secret: SecretRefSchema.optional(),
   ...storeShared,
 });
-const SftpStore = z.strictObject({
-  kind: z.literal("sftp"),
-  host: Name,
-  path: z.string().min(1),
-  secret: SecretRefSchema,
-  ...storeShared,
-});
+/**
+ * What the owner asserts of a remote store (Q8): each property given here is in the store's semantics profile with
+ * evidence `asserted`, over what `store test` measured. A property left out keeps its measured value, or unknown.
+ */
+export const AssertedSemanticsSchema = z
+  .strictObject({
+    readAfterWrite: z.boolean(),
+    listAfterWrite: z.boolean(),
+    listComplete: z.boolean(),
+    publication: PublicationSchema,
+    conditionalCreate: z.boolean(),
+    durability: DurabilitySchema,
+    cancellation: CancellationSchema,
+  })
+  .partial();
+export type AssertedSemantics = z.infer<typeof AssertedSemanticsSchema>;
+
+/**
+ * What a remote store's adapter can honour of an assertion (review phase 5 I3): rclone publishes by temp-then-rename
+ * over SFTP and by atomic put on S3, and creates a key only if absent on S3 alone. An assertion past that is
+ * config.invalid, never a throw when the store opens.
+ */
+const honoured =
+  (kind: "sftp" | "s3") => (store: { semantics?: AssertedSemantics }, ctx: z.RefinementCtx) => {
+    const publication = kind === "sftp" ? "temp-then-rename" : "atomic-put";
+    const asserted = store.semantics;
+    if (asserted?.publication !== undefined && asserted.publication !== publication)
+      ctx.addIssue({
+        code: "custom",
+        path: ["semantics", "publication"],
+        message: `an ${kind} store publishes by ${publication}; assert that, or leave the key out`,
+      });
+    if (kind === "sftp" && asserted?.conditionalCreate === true)
+      ctx.addIssue({
+        code: "custom",
+        path: ["semantics", "conditionalCreate"],
+        message: "an sftp store cannot create a key only if it is absent; assert false, or leave the key out",
+      });
+  };
+
+/**
+ * An ssh destination (user@host or a Host alias): never one ssh would read as an option (a leading -) and no
+ * whitespace, since it is placed in restic's sftp.command and rclone's ssh option (review phase 5 M6).
+ */
+const SshHost = z
+  .string()
+  .regex(/^[^-\s]\S*$/, "an ssh host or user@host, without a leading - or whitespace");
+/** An S3 endpoint URL with no user name or password in it: it reaches restic's argv and bootstrap's journal (M6). */
+const S3Endpoint = z.url().refine((url) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.username === "" && parsed.password === "";
+  } catch {
+    return true;
+  }
+}, "an endpoint without a user name or password; the key pair goes in accessKeyId and secretAccessKey, as references");
+
+const SftpStore = z
+  .strictObject({
+    kind: z.literal("sftp"),
+    host: SshHost,
+    path: z.string().min(1),
+    secret: SecretRefSchema,
+    semantics: AssertedSemanticsSchema.optional(),
+    ...storeShared,
+  })
+  .superRefine(honoured("sftp"));
 /**
  * An S3 bucket (Q7): three separate references, the restic repository's password and the key pair, plus an optional
  * region and a prefix inside the bucket. Temporary session credentials (AWS_SESSION_TOKEN) are not supported in M2.
  */
-const S3Store = z.strictObject({
-  kind: z.literal("s3"),
-  endpoint: z.url(),
-  bucket: Name,
-  secret: SecretRefSchema,
-  accessKeyId: CheckedSecretRefSchema,
-  secretAccessKey: CheckedSecretRefSchema,
-  region: Name.optional(),
-  path: z
-    .string()
-    .regex(/^[^/](.*[^/])?$/, "a prefix inside the bucket, without a leading or trailing /")
-    .optional(),
-  ...storeShared,
-});
+const S3Store = z
+  .strictObject({
+    kind: z.literal("s3"),
+    endpoint: S3Endpoint,
+    bucket: Name,
+    secret: SecretRefSchema,
+    accessKeyId: CheckedSecretRefSchema,
+    secretAccessKey: CheckedSecretRefSchema,
+    region: Name.optional(),
+    path: z
+      .string()
+      .regex(/^[^/](.*[^/])?$/, "a prefix inside the bucket, without a leading or trailing /")
+      .optional(),
+    semantics: AssertedSemanticsSchema.optional(),
+    ...storeShared,
+  })
+  .superRefine(honoured("s3"));
 const PeerStore = z.strictObject({
   kind: z.literal("peer"),
   device: Name,
@@ -120,14 +184,15 @@ const StoreLayerSchema = z
   .strictObject({
     kind: z.enum(["local", "sftp", "s3", "peer"]),
     path: z.string().min(1),
-    host: Name,
-    endpoint: z.url(),
+    host: SshHost,
+    endpoint: S3Endpoint,
     bucket: Name,
     secret: SecretRefSchema,
     accessKeyId: CheckedSecretRefSchema,
     secretAccessKey: CheckedSecretRefSchema,
     region: Name,
     device: Name,
+    semantics: AssertedSemanticsSchema,
     ...storeShared,
   })
   .partial();

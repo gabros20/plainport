@@ -16,6 +16,7 @@ import {
   displayPath,
   ensureDevice,
   expandHome,
+  type InitSetUp,
   type RootCandidate,
   type RootChange,
   RootKeySchema,
@@ -23,14 +24,14 @@ import {
   rootCandidates,
   rootKeyFrom,
   SecretRefSchema,
-  type StoreSetup,
-  setUpStore,
+  setUpForInit,
   ulid,
   writeRoots,
 } from "@plainport/core";
 import { z } from "zod";
 import { type CommandContext, defineCommand } from "../registry.ts";
 import { FindingsSchema, findingLines } from "./local.ts";
+import { formatBytes } from "./offload.ts";
 
 const ROOT_FORM = "<key>=<path>";
 const DEFAULT_STORE = "local";
@@ -55,6 +56,9 @@ const problemOf = (schema: z.ZodType, value: string): string | undefined => {
 };
 
 type Root = { key: string; path: string };
+
+/** A candidate's size as init shows it (D70): "≥" when the walk ran out of its budget. */
+const sizeOf = (c: RootCandidate): string => `${c.complete ? "" : "≥ "}${formatBytes(c.bytes)}`;
 
 const parseRoots = (values: readonly string[]): Result<Root[]> => {
   const roots: Root[] = [];
@@ -86,7 +90,7 @@ const askRoots = async (ctx: CommandContext, candidates: RootCandidate[]): Promi
       options: candidates.map((c) => ({
         value: c.path,
         label: displayPath(c.path, home),
-        hint: `${c.projects} project${c.projects === 1 ? "" : "s"}`,
+        hint: `${c.projects} project${c.projects === 1 ? "" : "s"}, ${sizeOf(c)}`,
       })),
     });
     if (answer === undefined) return undefined;
@@ -155,6 +159,13 @@ export const init = defineCommand({
           .string()
           .optional()
           .meta({ description: "The id in its meta/v1/store.json, once it is set up" }),
+        format: z
+          .union([z.literal(1), z.literal(2)])
+          .optional()
+          .meta({
+            description:
+              "Its store.json format once set up: 2 for a store this init set up, 1 for an M1 store",
+          }),
       })
       .optional(),
     files: z.looseObject({ config: z.string(), managed: z.string(), device: z.string() }),
@@ -165,7 +176,7 @@ export const init = defineCommand({
   }),
   examples: [
     {
-      argv: ["init", "--root", "work=~/work", "--store-path", "/Volumes/Archive/plainport", "--yes"],
+      argv: ["init", "--root", "work=~/work", "--store-path", "~/store", "--yes"],
       summary: "Set up without prompts",
     },
     {
@@ -272,9 +283,13 @@ export const init = defineCommand({
         "--yes",
       ];
       const missing = [needRoots && "a root", needStore && "a store"].filter(Boolean).join(" and ");
+      const found = suggested.map(
+        (c) =>
+          `${displayPath(c.path, home)} (${c.projects} project${c.projects === 1 ? "" : "s"}, ${sizeOf(c)})`,
+      );
       return fail(
         finding("usage.invalid", {
-          message: `init needs ${missing}, and without a terminal it never prompts${scanned.notes
+          message: `init needs ${missing}, and without a terminal it never prompts${found.length === 0 ? "" : `; likely roots: ${found.join(", ")}`}${scanned.notes
             .map((note) => `; skipped ${note.path}: ${note.reason}`)
             .join("")}`,
           fix: (needStore ? fix : fix.filter((part) => !part.startsWith("--store-path"))).join(" "),
@@ -345,7 +360,24 @@ export const init = defineCommand({
         store: { kind: "local", path, ...(secretRef === undefined ? {} : { secret: secretRef }) },
         opener: ctx.stores,
       });
-      if (!pin.ok && pin.finding.code !== "store.unreachable") return pin;
+      // Re-pointing a pinned name at a path that cannot be reached is refused (Q15): nothing could check that it is the
+      // same store. The same path recorded again while its disk is away stays allowed, as does re-pointing through
+      // config.toml, which is checked at use (D68).
+      if (!pin.ok) {
+        const before =
+          existing === undefined
+            ? undefined
+            : existing.kind === "local"
+              ? expandHome(existing.path, paths.home, paths.home)
+              : `${existing.kind} store`;
+        if (pin.finding.code !== "store.unreachable") return pin;
+        if (before !== path)
+          return fail({
+            ...pin.finding,
+            message: `store ${store.name} is pinned on this device to a store set up${before === undefined ? "" : ` at ${before}`}, and ${path} cannot be reached to check that it is the same store, so it was not re-pointed; nothing was written (${pin.finding.message})`,
+            fix: `mount the disk and re-run plainport init --store-path ${word(store.path)}${store.name === DEFAULT_STORE ? "" : ` --store ${word(store.name)}`} --yes; to point the name at a disk that is away, set stores.${store.name}.path in config.toml, which is checked when the store is used`,
+          });
+      }
     }
     const writes = changes.length > 0 || store !== undefined;
     if (writes) {
@@ -371,15 +403,21 @@ export const init = defineCommand({
     if (!reloaded.ok) return reloaded;
     const storeName = writtenStore?.name ?? ctx.store ?? reloaded.value.config.defaultStore;
     const storeConfig = storeName === undefined ? undefined : reloaded.value.config.stores[storeName];
-    let setUp: StoreSetup | undefined;
+    let setUp: InitSetUp | undefined;
     if (storeName !== undefined && storeConfig !== undefined) {
-      const ready = await setUpStore(ctx.io, {
+      const ready = await setUpForInit(ctx.io, {
         paths,
         env: ctx.env,
         name: storeName,
         store: storeConfig,
         opener: ctx.stores,
         mint: () => ulid(ctx.clock.now().getTime()),
+        ports: {
+          faultAt: (point) => ctx.system.faultAt(point),
+          clock: () => ctx.clock.now(),
+          log: (level, message) => ctx.output.log(level, message),
+          wait: (ms) => ctx.sleep(ms),
+        },
       });
       if (ready.ok) setUp = ready.value;
       else if (ready.finding.code === "store.unreachable" || ready.finding.code === "store.unsupported") {
@@ -395,7 +433,7 @@ export const init = defineCommand({
     }
     const shownStore =
       setUp !== undefined && storeName !== undefined
-        ? { name: storeName, path: writtenStore?.path ?? setUp.path, id: setUp.id }
+        ? { name: storeName, path: writtenStore?.path ?? setUp.path, id: setUp.id, format: setUp.format }
         : writtenStore;
     const storeChanged =
       setUp !== undefined && (setUp.identityCreated || setUp.repositoryCreated || setUp.recorded);

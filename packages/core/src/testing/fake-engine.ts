@@ -7,7 +7,9 @@
 // An engine made with a password authenticates as restic does: init keeps the password in the repository, and every
 // later call with another one is restic.wrong-password. Each call is logged on the repository with the password that
 // made it, so a test can show which devices reached it. `duringInit` pauses or delays an init before the repository
-// exists (restic writes its config last), as two initialisers racing on a slow store do.
+// exists (restic writes its config last), as two initialisers racing on a slow store do. The repository has a master
+// key of its own, 64 random bytes, which every password opens: catalogKey derives the store's catalog key from it as
+// restic's engine does (Catalog seal v1).
 
 import {
   chmodSync,
@@ -24,6 +26,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { type Failure, fail, finding, ok } from "@plainport/contract";
+import { deriveSealKey, keyId, MASTER_KEY_BYTES } from "../catalog/seal.ts";
 import type {
   Engine,
   EntryMeta,
@@ -49,6 +52,8 @@ export interface FakeRepository {
   snapshots: FakeSnapshot[];
   /** Every call that reached the repository, with the password of the engine that made it. */
   access: { method: string; password: string | undefined }[];
+  /** The repository's master key (encrypt ‖ mac.k ‖ mac.r), the same for every password. */
+  masterKey: Uint8Array;
 }
 
 export const fakeRepository = (): FakeRepository => ({
@@ -56,6 +61,7 @@ export const fakeRepository = (): FakeRepository => ({
   password: undefined,
   snapshots: [],
   access: [],
+  masterKey: crypto.getRandomValues(new Uint8Array(MASTER_KEY_BYTES)),
 });
 
 export interface FakeEngineHooks {
@@ -74,7 +80,7 @@ export interface FakeEngineHooks {
    * The next call of this method returns the failure instead of running. A restore writes its folders and the first
    * of its files before it fails, as an interrupted one leaves them.
    */
-  failNext?: Partial<Record<"snapshot" | "list" | "entries" | "init" | "restore", Failure>>;
+  failNext?: Partial<Record<"snapshot" | "list" | "entries" | "init" | "restore" | "catalogKey", Failure>>;
 }
 
 /** What each restore was asked, in order. */
@@ -358,5 +364,14 @@ export const fakeEngine = (
       });
     },
     check: async () => reach("check") ?? ok({ ok: true, errors: 0, messages: [] }),
+    catalogKey: async (storeId) => {
+      const denied = reach("catalogKey");
+      if (denied !== undefined) return denied;
+      const failure = taken(hooks, "catalogKey");
+      if (failure !== undefined) return failure;
+      if (!repository.initialized) return missing();
+      const key = deriveSealKey(repository.masterKey, storeId);
+      return key.ok ? ok({ key: key.value, kid: keyId(key.value) }) : key;
+    },
   };
 };

@@ -1,0 +1,3 @@
+# gitleaks fingerprints judged false positives (ADR-0021); each names one finding in one commit, nothing wider.
+# cc4b5c8: Task 19's T2 test reads the S3 secret key from a test env variable; no key in the source.
+cc4b5c8f49aca134ef3031713f16ae6fd0fe9623:packages/cli/src/store-commands.t2.test.ts:generic-api-key:145

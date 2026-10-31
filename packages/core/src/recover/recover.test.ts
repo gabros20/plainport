@@ -21,7 +21,7 @@ import { fail, finding, ok, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
 import { type CatalogPolicy, encode } from "../catalog/codec.ts";
 import { catalogReader } from "../catalog/head.ts";
-import { parseStoreIdentity } from "../catalog/identity.ts";
+import { encodeStoreIdentityV2, parseStoreIdentity, STORE_IDENTITY_KEY } from "../catalog/identity.ts";
 import { appendEvent, type CatalogEvent, foldCatalog, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
@@ -39,7 +39,7 @@ import type { BlobStore } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
 import type { SecretProvider } from "../ports/secrets.ts";
-import type { StoreOpener } from "../ports/store.ts";
+import type { StoreCredentials, StoreOpener } from "../ports/store.ts";
 import { readRegistry, updateRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
 import { openSaga } from "../saga/journaled.ts";
@@ -55,6 +55,7 @@ import { releaseOffload } from "../saga/release.ts";
 import { runRestore } from "../saga/restore.ts";
 import { type ProjectCondition, projectViews, type ViewDeps } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
+import { storeStateFile } from "../stores-state.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
@@ -734,7 +735,10 @@ describe("recover: keepLocalFor, locks and an unreachable store", () => {
   });
 
   test("nothing to recover: an empty report, exit 0", async () => {
-    expect(await recover(recoverDeps())).toEqual({ ok: true, value: { operations: [], unreadable: [] } });
+    expect(await recover(recoverDeps())).toEqual({
+      ok: true,
+      value: { operations: [], bootstraps: [], unreadable: [] },
+    });
   });
 
   test("a journal this version cannot read is reported and left alone (journal.pending, 6)", async () => {
@@ -3028,6 +3032,52 @@ describe("views read the mirror first, and resolve a secret only for a sealed ca
     key: new Uint8Array(32).fill(7),
   });
 
+  // Review phase 5 M2 (judgement c): an S3 store opens only with its key pair, so views resolve the pair (never the
+  // restic password, for a plain catalog) within the same deadline.
+  const s3Config = () =>
+    box.file(
+      ".config/plainport/config.toml",
+      [
+        "version = 1",
+        'defaultStore = "ssd"',
+        "[stores.ssd]",
+        'kind = "s3"',
+        'endpoint = "https://s3.example.eu"',
+        'bucket = "plainport"',
+        'secret = "env:PLAINPORT_STORE_PASSWORD"',
+        'accessKeyId = "env:S3_KEY_ID"',
+        'secretAccessKey = "env:S3_SECRET"',
+        "[roots.work]",
+        'store = "ssd"',
+        'on = { mbp = "~/work" }',
+      ].join("\n"),
+    );
+  /** Opens as the binary's opener does: an S3 store without its key pair is store.secret-missing. */
+  const pairing = (seen: [string, StoreCredentials | undefined][]): StoreOpener => ({
+    open: async (n, s, password, credentials) => {
+      seen.push([password, credentials]);
+      if (s.kind === "s3" && credentials === undefined)
+        return fail(finding("store.secret-missing", { message: "no key pair" }));
+      return opener.open(n, { kind: "local", path: "~/ssd" }, password);
+    },
+  });
+
+  test("a plain catalog on an S3 store reads live with its key pair and no restic password (review phase 5 M2)", async () => {
+    value(await offloadNow());
+    await web();
+    s3Config();
+    const seen: [string, StoreCredentials | undefined][] = [];
+    const view = await web({
+      opener: pairing(seen),
+      env: { HOME: box.home, PATH, S3_KEY_ID: "key-id", S3_SECRET: "key-secret" },
+    });
+    expect([view.stale, view.conditions]).toEqual([false, []]);
+    expect(seen).toEqual([["", { accessKeyId: "key-id", secretAccessKey: "key-secret" }]]);
+    // Without the pair, the mirror, with secret-unavailable.
+    const without = await web({ opener: pairing([]), env: { HOME: box.home, PATH } });
+    expect([without.stale, without.conditions]).toEqual([true, ["stale", "secret-unavailable"]]);
+  });
+
   // Task 15: keychain: and op: references resolve through the providers the opener carries, under the same deadline;
   // since D108 only a sealed catalog asks for the secret.
   const keychainConfig = () =>
@@ -3099,6 +3149,45 @@ describe("views read the mirror first, and resolve a secret only for a sealed ca
     const seen: string[] = [];
     value(await projectViews(viewDeps({ opener: watching(seen, sealedPolicy()) })));
     expect(seen).toEqual(["", "pw"]);
+  });
+
+  test("a seal key derivation the views' deadline gives up on is stopped, not left running (review phase 5 r2 M5)", async () => {
+    value(await offloadNow());
+    await web();
+    // The store publishes a sealed catalog; the opener gives no policy, so the views derive the key from restic's.
+    const held = parseStoreIdentity(store.data.get(STORE_IDENTITY_KEY) as Uint8Array);
+    if (held === undefined) throw new Error("no store identity");
+    store.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id: held.id, repo: held.repo, seal: "v1" }));
+    // This device's pin of the plain policy would refuse the flip first: a device that never pinned it.
+    rmSync(storeStateFile(box.paths, held.id), { force: true });
+    const signals: AbortSignal[] = [];
+    const slowKey: StoreOpener = {
+      open: async (n, st, password) => {
+        const opened = await opener.open(n, st, password);
+        if (!opened.ok) return opened;
+        return {
+          ok: true,
+          value: {
+            ...opened.value,
+            engine: {
+              ...opened.value.engine,
+              catalogKey: (_id, ctx) =>
+                new Promise((resolve) => {
+                  if (ctx?.signal === undefined) return;
+                  signals.push(ctx.signal);
+                  ctx.signal.addEventListener("abort", () =>
+                    resolve(fail(finding("process.cancelled", { message: "stopped" }))),
+                  );
+                }),
+            },
+          },
+        };
+      },
+    };
+    const view = await web({ opener: slowKey });
+    expect(view.stale).toBe(true);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
   });
 
   test("a sealed catalog whose secret the provider does not give: the mirror's state, secret-unavailable", async () => {
@@ -3307,5 +3396,172 @@ describe("review r1 I2: a sealed event that does not open is never an absent or 
     const { event: _e, ...rest } = journal;
     await rewrite({ ...rest, step: "offload.verified" });
     await expectPendingThenFinished(await sealEvents());
+  });
+});
+
+describe("ls merges catalogs by project id (Task 21)", () => {
+  const viewDeps = (over: Partial<ViewDeps> = {}): ViewDeps => ({
+    io: testHost(),
+    paths: box.paths,
+    env: env(),
+    device,
+    loader: new ConfigLoader(testHost(), box.paths),
+    opener,
+    openMirror: async () => ({ ok: true, value: mirror }),
+    providerDeadlineMs: 5_000,
+    ...over,
+  });
+
+  /** A second store, nas, whose catalog holds the web project too (an offload made there from another copy). */
+  const nasHolding = async (names: string[]) => {
+    const done = value(await offloadNow());
+    await waitJournalsGone();
+    const event = value(await readEvents(storeEventLog(store))).events.find((e) => e.type === "offloaded");
+    if (event?.type !== "offloaded") throw new Error("no offloaded event");
+    config(names.map((n) => `[stores.${n}]\nkind = "local"\npath = "~/nas"`).join("\n"));
+    box.dir("nas");
+    const nas = memoryBlobStore({ createIfAbsent: true });
+    const nasMirror = memoryBlobStore({ createIfAbsent: true });
+    const nasId = ulid();
+    const both: StoreOpener = {
+      open: async (name) => ({ ok: true, value: { blob: names.includes(name) ? nas : store, engine } }),
+    };
+    value(
+      await setUpStore(testHost(), {
+        paths: box.paths,
+        env: { PLAINPORT_STORE_PASSWORD: "pw" },
+        name: names[0] as string,
+        store: { kind: "local", path: "~/nas" },
+        opener: both,
+        mint: () => nasId,
+      }),
+    );
+    for (const name of names.slice(1))
+      value(
+        await updateRegistry(testHost(), box.paths, (r) => ({
+          ok: true,
+          value: { ...r, stores: { ...r.stores, [name]: nasId } },
+        })),
+      );
+    const other = ulid();
+    value(
+      await appendEvent(storeEventLog(nas), {
+        ...event,
+        id: ulid(),
+        op: other,
+        snapshot: other,
+        stored: { [nasId]: "e".repeat(64) },
+      }),
+    );
+    return {
+      done,
+      deps: viewDeps({
+        opener: both,
+        openMirror: async (id) => ({ ok: true, value: id === nasId ? nasMirror : mirror }),
+      }),
+    };
+  };
+
+  test("a project in two stores' catalogs is one row, with several-stores, showing its root's store's", async () => {
+    const { done, deps } = await nasHolding(["nas"]);
+    const views = value(await projectViews(deps));
+    const webs = views.projects.filter((p) => p.address === "work:web");
+    expect(webs).toHaveLength(1);
+    const [web] = webs;
+    expect(web?.conditions).toContain("several-stores");
+    expect(web?.store).toBe("ssd");
+    expect(web?.head).toBe(done.snapshot);
+    expect(web?.conditionDetails.find((d) => d.condition === "several-stores")?.message).toContain(
+      "stores ssd and nas",
+    );
+  });
+
+  test("one store under two names is one catalog: no several-stores", async () => {
+    value(await offloadNow());
+    await waitJournalsGone();
+    config('[stores.disk]\nkind = "local"\npath = "~/ssd"');
+    value(
+      await updateRegistry(testHost(), box.paths, (r) => ({
+        ok: true,
+        value: { ...r, stores: { ...r.stores, disk: r.stores?.ssd as string } },
+      })),
+    );
+    const views = value(await projectViews(viewDeps()));
+    const webs = views.projects.filter((p) => p.address === "work:web");
+    expect(webs.map((w) => w.conditions)).toEqual([[]]);
+    expect(views.stores.map((st) => st.name).sort()).toEqual(["disk", "ssd"]);
+  });
+});
+
+describe("recover: the writer rule on a format-2 store (D104, Q11)", () => {
+  /** The store, as v0.2 sets it up or upgrades it: format 2 under the same id (repo/ stays, as an upgrade leaves it). */
+  let storeId: string;
+  beforeEach(async () => {
+    storeId = value(await readRegistry(testHost(), box.paths)).stores?.ssd as string;
+    store.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id: storeId, repo: "repo", seal: "none" }));
+  });
+
+  test("[stored] an offload keys its event's one stored entry by the store's id, never by the alias", async () => {
+    value(await offloadNow());
+    const [event] = (await storeEvents()).filter((e) => e.type === "offloaded");
+    expect(event?.type === "offloaded" && Object.keys(event.stored)).toEqual([storeId]);
+    await waitJournalsGone();
+    await expectInvariants();
+  });
+
+  test("[stored] the snapshot-discarded event recover writes is keyed by the store's id", async () => {
+    engine.hooks.duringSnapshot = () => chmodSync(join(dir, "src/main.ts"), 0o000);
+    await crashOffloadAt("offload.snapshot.discarded");
+    chmodSync(join(dir, "src/main.ts"), 0o644);
+    const journal = onlyJournal<OffloadJournal>();
+    expect(reportOf(await recover(recoverDeps())).operations[0]?.outcome).toBe("rolled-back");
+    const discarded = (await storeEvents()).filter((e) => e.type === "snapshot-discarded");
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0]).toMatchObject({
+      snapshot: journal.op,
+      stored: { [storeId]: journal.discarded?.snapshot },
+    });
+    expect(Object.keys(discarded[0]?.type === "snapshot-discarded" ? discarded[0].stored : {})).toEqual([
+      storeId,
+    ]);
+    await expectLocalUntouched();
+    await expectInvariants();
+  });
+
+  test("[stored] recover's fork event is keyed by the store's id", async () => {
+    engine.hooks.failNext = {
+      snapshot: fail(finding("internal.unexpected", { message: "the first try fails" })),
+    };
+    expect((await offloadNow()).ok).toBe(false);
+    const id = (await projectId()) as string;
+    const rootId = value(await readRegistry(testHost(), box.paths)).roots?.work as string;
+    engine.hooks.duringSnapshot = async () => {
+      engine.hooks.duringSnapshot = undefined;
+      const other = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: other,
+          op: other,
+          type: "offloaded",
+          device: ulid(),
+          at: "2026-10-02T00:00:00.000Z",
+          project: id,
+          root: rootId,
+          path: "web",
+          snapshot: other,
+          stored: { [storeId]: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    await crashOffloadAt("offload.diverged");
+    const journal = onlyJournal<OffloadJournal>();
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    const fork = (await storeEvents()).find((e) => e.id === journal.event);
+    expect(fork?.type === "offloaded" && fork.stored).toEqual({ [storeId]: journal.verified as string });
+    await expectLocalUntouched();
+    await expectInvariants();
   });
 });

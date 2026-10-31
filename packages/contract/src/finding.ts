@@ -45,14 +45,14 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, or names its snapshot's location in zero or several stores (stored-multiple, Q11); it is left out of the fold and never changed",
+      "A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, names its snapshot's location in zero or several stores (stored-multiple, Q11), or was listed by the store and not returned by the read; it is left out of the fold and never changed",
   },
   "catalog.head-uncertain": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
-      "The catalog left out an event it could not read or use, and the snapshot this device knows of the project (its stub's or its registry's) is named by no readable event, so the head may be older than the newest snapshot; nothing is restored or offloaded. The fix names that newest known snapshot: onload or restore --snapshot <it> restores it from the repository by its tag; any other snapshot is refused until the event reads again (D86)",
+      "The catalog left out an event it could not read or use that may change the project's head: one whose project cannot be told or authenticated (it may be any project's) or one of this project's, whatever its id's time says (a writer's clock may run slow), so the head may be older than the newest snapshot; nothing is restored or offloaded. When this device knows a snapshot no readable event names (its stub's or its registry's), the fix names it: onload or restore --snapshot <it> restores it from the repository by its tag, and any other snapshot is refused; otherwise onload or restore --snapshot <id> takes the snapshot named. The doubt ends when the event reads again (D86, Task 21)",
   },
   "catalog.seal-failed": {
     severity: "block",
@@ -565,6 +565,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "The root has no folder on this device; fix is plainport root bind <root> <path>",
   },
+  "store.assertion-ignored": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "config.toml asserts a semantics property of a remote store that this device measured otherwise; the measured value is kept, since an assertion only fills what the measurement leaves unknown (D111), and the message names both",
+  },
   "store.bootstrap-contested": {
     severity: "block",
     allowable: false,
@@ -600,6 +607,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store at this path is not the one this device knows (its meta/v1/store.json names another id, or none): a re-pointed path, another disk or a restored copy; nothing is synced",
   },
+  "store.in-use": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "store remove refuses while something on this device still uses the store: a root names it (or takes it as the default store), or an open journal or setup attempt names it; the message lists them, and nothing is changed",
+  },
   "store.inside-project": {
     severity: "block",
     allowable: false,
@@ -620,12 +634,26 @@ export const FINDINGS = Object.freeze({
     summary:
       "Another plainport process on this device is setting this store up, or changing this device's record of it (stores/<store id>.json)",
   },
+  "store.not-quiescent": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)",
+  },
   "store.not-set-up": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
+  },
+  "store.history-elsewhere": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The store's catalog does not name the snapshot this copy came from (or the stub's): before replication a project's history lives in one store (Q12), so nothing is offloaded or restored there; the message names the store whose catalog this device's mirror shows holding it, by store id, or says it is unknown",
   },
   "store.root-contested": {
     severity: "block",
