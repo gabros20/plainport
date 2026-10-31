@@ -965,7 +965,7 @@ const onloadFlow = async (
       return fail(
         finding("catalog.head-moved", {
           message: `${ref.address} is conflicted in the catalog: two copies were offloaded from the same snapshot (${project.conflicts.map((c) => c.join(" and ")).join("; ")}); nothing was restored`,
-          fix: `plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side (settling which copy wins arrives in M2)`,
+          fix: `plainport resolve ${shellWord(ref.address)} --keep <snapshot> --yes keeps one (plainport status ${shellWord(ref.address)} lists them); plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side meanwhile`,
         }),
       );
     }

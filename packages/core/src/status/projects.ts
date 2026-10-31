@@ -8,7 +8,7 @@
 //
 //   unavailable             the project's root is bound to a volume that is not mounted (its folder is unknown)
 //   offloading, onloading   a journal of the project is open: running, or interrupted (plainport recover settles it)
-//   conflicted              the catalog holds a fork (plainport resolve, M2)
+//   conflicted              the catalog holds a fork (plainport resolve --keep; `heads` lists each live tip)
 //   restored-unhydrated     the folder is here, its dependencies are not installed (plainport hydrate)
 //   local                   the folder is here; or the catalog's latest event onloaded it on some device
 //   shelved                 the folder is not here, and the catalog's latest event offloaded it (or its stub is here)
@@ -139,6 +139,21 @@ export type ProjectStatus = {
   head: string | null;
   /** The snapshot this device's copy came from (registry.json). */
   base?: string;
+  /**
+   * A conflicted project's live tips, sorted (Q18's read-only inspection): each one's device (an id until M3), time,
+   * kind, base and size, and whether this device's copy is on it (its folder here, its base that snapshot): the one
+   * `resolve --keep` must name while the copy is here.
+   */
+  heads?: {
+    snapshot: string;
+    device: string;
+    at: string;
+    kind: "offloaded" | "checkpointed";
+    base?: string;
+    files?: number;
+    bytes?: number;
+    here: boolean;
+  }[];
   /** The device whose onload holds the project's lease, and whether it is this one. */
   lease?: { device: string; at: string; base: string; here: boolean };
   /** Snapshots the catalog holds of it. */
@@ -659,6 +674,30 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         strippedBytes = got.value.event.stats.strippedBytes;
       }
     }
+    // A conflicted project's live tips, each with its size from the mirror's copy of its event (Q18).
+    let heads: ProjectStatus["heads"];
+    if (catalog !== undefined && (catalog.status === "conflicted" || catalog.conflicts.length > 0)) {
+      heads = [];
+      for (const snapshot of [...catalog.heads].sort()) {
+        const tip = catalog.snapshots[snapshot];
+        if (tip === undefined) continue;
+        let size: { files: number; bytes: number } | undefined;
+        if (read?.mirror !== undefined) {
+          const got = await eventAt(mirrorEventLog(read.mirror), tip.event);
+          if (got.ok && got.value !== null && "event" in got.value && "stats" in got.value.event)
+            size = { files: got.value.event.stats.files, bytes: got.value.event.stats.bytes };
+        }
+        heads.push({
+          snapshot,
+          device: tip.device,
+          at: tip.at,
+          kind: tip.kind,
+          ...(tip.base === undefined ? {} : { base: tip.base }),
+          ...(size ?? {}),
+          here: here && entry?.base === snapshot,
+        });
+      }
+    }
     // Never offloaded, here: the folder's own size now, without its dependency folders, when sizes are shown.
     if (options.sizes === true && bytes === undefined && head === null && here && dir !== undefined)
       bytes = await treeBytes(io, dir, skip);
@@ -742,6 +781,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       ...(read === undefined ? {} : { store: read.store }),
       head,
       ...(entry?.base === undefined ? {} : { base: entry.base }),
+      ...(heads === undefined ? {} : { heads }),
       ...(lease === null
         ? {}
         : {
@@ -806,12 +846,20 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
       reason:
         "the catalog misses snapshots: connect the store that holds every snapshot; meanwhile restore reads a snapshot it holds side by side",
     };
-  if (p.state === "conflicted")
-    return {
-      command: `plainport restore ${address} --snapshot <id> --to <path>`,
-      reason:
-        "the catalog holds a fork: restore reads either copy side by side (settling which copy wins arrives in M2)",
-    };
+  if (p.state === "conflicted") {
+    const mine = p.heads?.find((h) => h.here);
+    return mine !== undefined
+      ? {
+          command: `plainport resolve ${address} --keep ${mine.snapshot} --yes`,
+          reason:
+            "the catalog holds a fork, and this device's copy is on one of its live tips: resolving keeps that one over the others (heads lists them; restore --snapshot reads any side by side)",
+        }
+      : {
+          command: `plainport resolve ${address} --keep <snapshot> --yes`,
+          reason:
+            "the catalog holds a fork: keep one of its live tips (heads lists each one's device, time and size; restore --snapshot reads any side by side)",
+        };
+  }
   const refused = p.trash.find((t) => t.refused !== undefined && !t.deleting);
   if (refused?.refused !== undefined)
     return {

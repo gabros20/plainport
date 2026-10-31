@@ -7,6 +7,7 @@ import { init } from "./init.ts";
 import { offload } from "./offload.ts";
 import { dehydrate, hydrate, onload } from "./onload.ts";
 import { gc, recover, restore } from "./recover.ts";
+import { resolveConflict } from "./resolve-conflict.ts";
 import { rootAdd, rootBind, rootList, rootScan } from "./root.ts";
 import { ls, status } from "./status.ts";
 import { storeAdd, storeList, storeRemove, storeTest, storeUpgrade } from "./store.ts";
@@ -23,6 +24,7 @@ export const REGISTRY: Registry = [
   dehydrate,
   restore,
   compare,
+  resolveConflict,
   recover,
   gc,
   rootAdd,

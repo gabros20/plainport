@@ -435,6 +435,20 @@ export const FINDINGS = Object.freeze({
     summary:
       "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)",
   },
+  "resolve.copy-here": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "resolve --keep names another snapshot than the one this device's working copy is on (its registry base) while that copy is here: keeping it would reject the line the copy is on (Q18). fix names the resolve that keeps the copy's snapshot, and where to run the other one; paths names the folder",
+  },
+  "resolve.not-live-tip": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "resolve --keep names a snapshot of the project that is not a live tip: a resolution rejected it, or a later kept snapshot was made from it. The message lists the live tips; plainport status shows each one's device, time, size and base",
+  },
   "registry.invalid": {
     severity: "block",
     allowable: false,
@@ -661,6 +675,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary:
       "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)",
+  },
+  "store.needs-upgrade": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The command writes what only a format-2 store may hold (resolve's resolved event, Q2, Q3), and the store is format 1 (an M1 store, which plainport v0.1.x still uses); nothing is written, and fix is plainport store upgrade <name> --others-stopped --yes once every other device is stopped",
   },
   "store.not-set-up": {
     severity: "block",

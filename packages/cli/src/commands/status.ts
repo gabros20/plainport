@@ -25,6 +25,27 @@ export const ProjectStatusSchema = z
     store: z.string().optional().meta({ description: "The store whose catalog holds it" }),
     head: z.string().nullable().meta({ description: "The catalog's head; null when there is none" }),
     base: z.string().optional().meta({ description: "The snapshot this device's copy came from" }),
+    heads: z
+      .array(
+        z.looseObject({
+          snapshot: z.string(),
+          device: z.string().meta({ description: "The device that made it (its id until M3's pairing)" }),
+          at: z.string(),
+          kind: z.enum(["offloaded", "checkpointed"]),
+          base: z.string().optional().meta({ description: "The snapshot it was made from" }),
+          files: z.int().nonnegative().optional(),
+          bytes: z.int().nonnegative().optional().meta({ description: "Files' bytes in it" }),
+          here: z.boolean().meta({
+            description:
+              "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one",
+          }),
+        }),
+      )
+      .optional()
+      .meta({
+        description:
+          "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+      }),
     lease: z
       .looseObject({ device: z.string(), at: z.string(), base: z.string(), here: z.boolean() })
       .optional()
@@ -178,6 +199,13 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     ),
   );
   if (p.base !== undefined) lines.push(row("base", p.base));
+  for (const h of p.heads ?? [])
+    lines.push(
+      row(
+        "tip",
+        `${h.snapshot} · ${h.here ? "this device's copy" : `device ${h.device}`} · ${h.at}${h.bytes === undefined ? "" : ` · ${formatBytes(h.bytes)}`}${h.base === undefined ? "" : ` · from ${h.base}`}`,
+      ),
+    );
   if (p.strippableBytes !== undefined)
     lines.push(row("strip", `${formatBytes(p.strippableBytes)} an offload would strip now`));
   for (const f of p.gitWarnings ?? []) lines.push(row(f.severity, `${f.code}  ${f.message}`));

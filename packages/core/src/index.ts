@@ -65,6 +65,7 @@ export * from "./saga/compare-refs.ts";
 export * from "./saga/hydrate.ts";
 export * from "./saga/offload.ts";
 export * from "./saga/onload.ts";
+export * from "./saga/resolve.ts";
 export * from "./saga/restore.ts";
 export * from "./scan/index.ts";
 export { posixDeleteTrash, posixSpawner } from "./spawner.ts";

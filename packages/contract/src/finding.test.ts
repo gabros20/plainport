@@ -99,6 +99,13 @@ describe("findings", () => {
         exitCode: 4,
         summary: expect.any(String),
       },
+      "resolve.copy-here": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "resolve.not-live-tip": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "registry.unreadable": {
@@ -294,6 +301,12 @@ describe("findings", () => {
       },
       "plan.stale": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "project.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.needs-upgrade": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.not-set-up": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.in-use": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.not-quiescent": {

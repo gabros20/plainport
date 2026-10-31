@@ -633,6 +633,59 @@
                   "description": "The snapshot this device's copy came from",
                   "type": "string"
                 },
+                "heads": {
+                  "description": "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "snapshot": {
+                        "type": "string"
+                      },
+                      "device": {
+                        "type": "string",
+                        "description": "The device that made it (its id until M3's pairing)"
+                      },
+                      "at": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "offloaded",
+                          "checkpointed"
+                        ]
+                      },
+                      "base": {
+                        "description": "The snapshot it was made from",
+                        "type": "string"
+                      },
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "bytes": {
+                        "description": "Files' bytes in it",
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "here": {
+                        "type": "boolean",
+                        "description": "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one"
+                      }
+                    },
+                    "required": [
+                      "snapshot",
+                      "device",
+                      "at",
+                      "kind",
+                      "here"
+                    ],
+                    "additionalProperties": {}
+                  }
+                },
                 "lease": {
                   "description": "The device whose onload holds the lease, and whether it is this one",
                   "type": "object",
@@ -1212,6 +1265,59 @@
           "base": {
             "description": "The snapshot this device's copy came from",
             "type": "string"
+          },
+          "heads": {
+            "description": "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "The device that made it (its id until M3's pairing)"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offloaded",
+                    "checkpointed"
+                  ]
+                },
+                "base": {
+                  "description": "The snapshot it was made from",
+                  "type": "string"
+                },
+                "files": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes": {
+                  "description": "Files' bytes in it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "here": {
+                  "type": "boolean",
+                  "description": "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one"
+                }
+              },
+              "required": [
+                "snapshot",
+                "device",
+                "at",
+                "kind",
+                "here"
+              ],
+              "additionalProperties": {}
+            }
           },
           "lease": {
             "description": "The device whose onload holds the lease, and whether it is this one",
@@ -3919,6 +4025,126 @@
       ]
     },
     {
+      "name": "resolve",
+      "summary": "Settle a conflict: keep one live tip over the others, from a fresh read (a resolved event; format-2 stores only)",
+      "usage": "plainport resolve <project> --keep <value>",
+      "risk": "confirm",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "keep",
+          "type": "string",
+          "multiple": false,
+          "summary": "The snapshot to keep: one of the live tips plainport status lists (each one's device, time, size and base). While this device holds a working copy, the copy's own snapshot. The others stay in the store: plainport restore --snapshot reads them, and a copy on one offloads as live work that conflicts again"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "keep": {
+            "type": "string",
+            "description": "The snapshot to keep: one of the live tips plainport status lists (each one's device, time, size and base). While this device holds a working copy, the copy's own snapshot. The others stay in the store: plainport restore --snapshot reads them, and a copy on one offloads as live work that conflicts again"
+          }
+        },
+        "required": [
+          "project",
+          "keep"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string",
+            "description": "root:path"
+          },
+          "store": {
+            "type": "string",
+            "description": "The store whose catalog holds it"
+          },
+          "keep": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "nothing-to-resolve"
+            ],
+            "description": "resolved: a resolved event was appended. nothing-to-resolve: the project is not conflicted and has one live tip, so nothing was written (a re-run of a resolve that landed ends here)"
+          },
+          "head": {
+            "description": "The head now: keep once resolved; the one live tip with nothing to resolve",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event": {
+            "description": "resolved: the resolved event's id",
+            "type": "string"
+          },
+          "over": {
+            "description": "resolved: the snapshots it rejects; they stay in the store, and restore --snapshot reads them",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supersedes": {
+            "description": "resolved: the active resolutions it replaces",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "store",
+          "keep",
+          "outcome",
+          "head"
+        ],
+        "additionalProperties": {},
+        "description": "The resolution appended, or that there was nothing to resolve"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "resolve",
+            "work:clients/acme/api",
+            "--keep",
+            "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB",
+            "--yes"
+          ],
+          "summary": "Keep one live tip of a conflicted project (plainport status lists them); the others stay restorable by their snapshot. Not conflicted: nothing to resolve"
+        }
+      ]
+    },
+    {
       "name": "recover",
       "summary": "Settle interrupted operations: roll back what had not committed, finish what had",
       "usage": "plainport recover",
@@ -6528,6 +6754,20 @@
       "summary": "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)"
     },
     {
+      "code": "resolve.copy-here",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "resolve --keep names another snapshot than the one this device's working copy is on (its registry base) while that copy is here: keeping it would reject the line the copy is on (Q18). fix names the resolve that keeps the copy's snapshot, and where to run the other one; paths names the folder"
+    },
+    {
+      "code": "resolve.not-live-tip",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "resolve --keep names a snapshot of the project that is not a live tip: a resolution rejected it, or a later kept snapshot was made from it. The message lists the live tips; plainport status shows each one's device, time, size and base"
+    },
+    {
       "code": "registry.invalid",
       "severity": "block",
       "allowable": false,
@@ -6771,6 +7011,13 @@
       "allowable": false,
       "exitCode": 6,
       "summary": "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)"
+    },
+    {
+      "code": "store.needs-upgrade",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The command writes what only a format-2 store may hold (resolve's resolved event, Q2, Q3), and the store is format 1 (an M1 store, which plainport v0.1.x still uses); nothing is written, and fix is plainport store upgrade <name> --others-stopped --yes once every other device is stopped"
     },
     {
       "code": "store.not-set-up",

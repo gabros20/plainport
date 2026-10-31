@@ -252,6 +252,8 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `registry.invalid` | block | no | 6 | registry.json, this device's project registry, is unreadable; plainport never overwrites it |
 | `registry.locked` | block | no | 11 | Another process holds registry.json.lock |
 | `registry.unreadable` | block | no | 6 | registry.json exists but plainport may not read it; fix is about permissions, and the file is left as it is |
+| `resolve.copy-here` | block | no | 6 | resolve --keep names another snapshot than the one this device's working copy is on (its registry base) while that copy is here: keeping it would reject the line the copy is on (Q18). fix names the resolve that keeps the copy's snapshot, and where to run the other one; paths names the folder |
+| `resolve.not-live-tip` | block | no | 6 | resolve --keep names a snapshot of the project that is not a live tip: a resolution rejected it, or a later kept snapshot was made from it. The message lists the live tips; plainport status shows each one's device, time, size and base |
 | `restic.failed` | block | no | 1 | restic exited with a fatal error (exit code 1, or one plainport does not map); the message is restic's |
 | `restic.interrupted` | block | no | 130 | restic was interrupted (exit code 130) before it finished |
 | `restic.locked` | block | no | 11 | Another restic process holds a lock on the store's repository (restic exit code 11) |
@@ -286,6 +288,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `store.key-exists` | block | no | 1 | A create-only write found the key already there; the existing value is left as it was |
 | `store.locked` | block | no | 11 | Another plainport process on this device is setting this store up, or changing this device's record of it (stores/<store id>.json) |
 | `store.lost-write` | block | no | 6 | Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and onload renames it back (Q21, D24) |
+| `store.needs-upgrade` | block | no | 6 | The command writes what only a format-2 store may hold (resolve's resolved event, Q2, Q3), and the store is format 1 (an M1 store, which plainport v0.1.x still uses); nothing is written, and fix is plainport store upgrade <name> --others-stopped --yes once every other device is stopped |
 | `store.not-quiescent` | block | no | 6 | store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands) |
 | `store.not-set-up` | block | no | 6 | The store is not configured, or this device has not set it up (no id recorded); fix is plainport init |
 | `store.root-contested` | block | no | 8 | No root could claim the store: every root that stood for it refuses (Q9, D99), so none was claimed; another root is not blocked by them (D109), and fix is the quiesced cleanup it names for one of these roots to claim it |
