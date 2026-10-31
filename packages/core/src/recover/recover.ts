@@ -47,11 +47,10 @@ import {
   shellWord,
 } from "@plainport/contract";
 import { TEMP_SUFFIX } from "../atomic.ts";
-import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
+import { UNOPENED_CODES } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
 import { type CatalogProject, foldCatalog } from "../catalog/fold.ts";
 import { type CatalogRead, catalogReader } from "../catalog/head.ts";
-import { identityChanged, readUsableStore } from "../catalog/identity.ts";
 import {
   appendEvent,
   type EventLog,
@@ -81,7 +80,7 @@ import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry } from "../registry.ts";
 import { type RecoveredBootstrap, recoverBootstraps } from "../saga/bootstrap.ts";
-import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
+import { openSaga, writeFailed } from "../saga/journaled.ts";
 import type { OffloadStep } from "../saga/offload.ts";
 import { finishOnload, type OnloadStep, onloadSwapped } from "../saga/onload.ts";
 import {
@@ -100,7 +99,7 @@ import {
   rootFolderOf,
 } from "../saga/release.ts";
 import { kindAt } from "../saga/restore-tree.ts";
-import { type ConfiguredStore, openBootstrapStore, openStore } from "../store.ts";
+import { type ConfiguredStore, openBootstrapStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { isUlid, ulid } from "../ulid.ts";

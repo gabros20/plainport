@@ -777,7 +777,7 @@ const onloadFlow = async (
       reused = {
         from: reuse.folder,
         offload: reuse.op,
-        reason: `the folder offload ${reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+        reason: `the folder offload ${reuse.op} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
       };
       hydratePlan = {
         status: "reused",
@@ -1097,8 +1097,9 @@ const onloadFlow = async (
   }
 
   /**
-   * The trash folder of the offload that made `snapshot`, when it can be renamed back: its trash is held by
-   * keepLocalFor (so no detached delete runs in it) and it still has the fingerprint that offload verified (D51).
+   * The trash folder of the offload that made `snapshot`, when it can be renamed back: its trash is kept by
+   * keepLocalFor or held for the conflict grace (so no detached delete runs in it) and it still has the fingerprint
+   * that offload verified (D51).
    */
   async function reusable(
     snapshot: string,
@@ -1117,8 +1118,10 @@ const onloadFlow = async (
         j.op === snapshot &&
         j.project.id === id &&
         j.project.dir === target &&
-        j.step === "offload.release.delete" &&
-        j.keepUntil !== undefined,
+        // Kept by keepLocalFor (no detached delete runs in it), or held for Q16's checked read in grace or
+        // conflict-retained (no deleter deletes it at that step).
+        ((j.step === "offload.release.delete" && j.keepUntil !== undefined) ||
+          j.step === "offload.release.held"),
     );
     if (offload === undefined || offload.plan?.fp !== FINGERPRINT_VERSION) return undefined;
     const folder = join(offloadTrashOf(offload), target.slice(dirname(target).length + 1));
@@ -1331,7 +1334,7 @@ const onloadFlow = async (
             reused: {
               from: journal.reuse.folder,
               offload: journal.reuse.op,
-              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
             },
           }),
       files,

@@ -23,7 +23,7 @@
 // listings lag) another kept snapshot made from the same base. A rejected snapshot is no live fork: its trash goes
 // after the grace, and the snapshot stays restorable with restore --snapshot.
 
-import { fail, type Finding, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
 import { type CatalogRead, catalogReader } from "../catalog/head.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
@@ -109,7 +109,8 @@ export const conflictFinding = (journal: OffloadJournal): Finding => {
  * where the trash now stands; a failure leaves the journal as it was, for the next gc or recover.
  */
 export const checkHeld = async (ctx: HeldContext, journal: OffloadJournal): Promise<Result<HeldVerdict>> => {
-  if (journal.step !== HELD_STEP) throw new Error(`checkHeld: the offload ${journal.op} is at ${journal.step}`);
+  if (journal.step !== HELD_STEP)
+    throw new Error(`checkHeld: the offload ${journal.op} is at ${journal.step}`);
   const now = ctx.clock();
   if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > now.getTime())
     return ok({ kind: "grace", until: journal.keepUntil });
@@ -269,7 +270,9 @@ export const heldStoreOpener =
         if (typeof there.value === "object" && UNOPENED_CODES.includes(there.value.code))
           return fail(there.value);
         if (there.value !== "ours")
-          return lost(`the offloaded event ${id} is ${there.value === "absent" ? "not on the store" : "not whole"}`);
+          return lost(
+            `the offloaded event ${id} is ${there.value === "absent" ? "not on the store" : "not whole"}`,
+          );
         const listed = await engine.list({ tags: ["plainport", `plainport:op=${held.op}`] });
         if (!listed.ok) return listed;
         if (!listed.value.some((s) => s.id === held.verified))

@@ -86,6 +86,10 @@ export const ProjectStatusSchema = z
             description:
               "The delete guard's last refusal of it (delete.guard-refused, D87): why it stays and the way out; gc tries again",
           }),
+          held: z.enum(["grace", "conflict-retained"]).optional().meta({
+            description:
+              "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+          }),
         }),
       )
       .meta({
@@ -179,7 +183,7 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     lines.push(
       row(
         "trash",
-        `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
+        `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.held === "conflict-retained" ? "conflict-retained: a fork names its snapshot" : t.held === "grace" ? `held for the conflict grace until ${t.keepUntil}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
       ),
     );
   if (p.next !== undefined) lines.push(row("next", `${p.next.command}  (${p.next.reason})`));
