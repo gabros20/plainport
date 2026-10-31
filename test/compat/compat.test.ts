@@ -25,8 +25,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
-import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import { appendEvent, readEvents, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import { looksSealed } from "../../packages/core/src/catalog/seal.ts";
+import { nodeLocalIo } from "../../packages/core/src/node-io.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
 import { UNKNOWN_SEMANTICS } from "../../packages/core/src/ports/blob-store.ts";
 import { InjectedFault } from "../../packages/core/src/ports/host.ts";
@@ -988,7 +989,50 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
 
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
-  test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
+  // Q2, Q3: a resolved event is written only to a format-2 store. On v0.1.1's M1 store, a conflicted project's resolve
+  // refuses with store upgrade as the fix and writes nothing, so v0.1.1 never meets the event (its skipping one is
+  // tested above).
+  test("[event.resolved] resolve on a format-1 store refuses with store upgrade as the fix and writes no resolved event", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const offloaded = await w.old(offloadArgs);
+      expectOk(offloaded, "old offload");
+      await settleJournals(w.box.paths);
+      const ours = (envelope(offloaded)?.data as { snapshot: string } | undefined)?.snapshot as string;
+      // A stranger's first offload of the same project: two first offloads are a fork.
+      const store = fsBlobStore(nodeLocalIo, w.store);
+      const log = storeEventLog(store);
+      const read = await readEvents(log);
+      if (!read.ok) throw new Error(read.finding.message);
+      const first = read.value.events.find((e) => e.type === "offloaded");
+      if (first?.type !== "offloaded") throw new Error("no offload");
+      const id = ulid();
+      const appended = await appendEvent(log, {
+        ...first,
+        id,
+        op: id,
+        device: ulid(),
+        snapshot: id,
+        stored: { local: "c".repeat(64) },
+      });
+      if (!appended.ok) throw new Error(appended.finding.message);
+      const before = treeDigest(w.store);
+
+      const refused = await w.current(["resolve", "work:web", "--keep", ours, "--yes", "--json"]);
+      expect(refused.code).toBe(6);
+      const error = envelope(refused)?.error as { finding?: { code?: string; fix?: string } } | undefined;
+      expect(error?.finding?.code).toBe("store.needs-upgrade");
+      expect(error?.finding?.fix).toContain("plainport store upgrade local --others-stopped --yes");
+      expect(treeDigest(w.store)).toBe(before);
+      const after = await readEvents(log);
+      expect(after.ok && after.value.events.some((e) => e.type === "resolved")).toBe(false);
+      // v0.1.1 still reads the store whole: the project conflicted, nothing skipped.
+      const oldLs = await w.old(["ls", "--json"]);
+      expectOk(oldLs, "old ls");
+      expect(projectOf(oldLs)?.state).toBe("conflicted");
+      expect(findingCodes(oldLs)).not.toContain(SKIPPED);
+    });
+  });
   test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
   test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
 });

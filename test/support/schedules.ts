@@ -369,6 +369,220 @@ const lostAcknowledgement = async (): Promise<void> => {
   }
 };
 
+/** The fake store with a hook before each write: another device acts between this device's read and its append. */
+const hooked = (fake: SemanticBlobStore) => {
+  let down = false;
+  const hook: { beforePut?: (key: string) => Promise<void> } = {};
+  const gone = () =>
+    Promise.resolve({
+      ok: false as const,
+      exitCode: 9 as const,
+      finding: { code: "store.unreachable", severity: "block" as const, message: "down", allowable: false },
+    });
+  const store: SemanticBlobStore & { hook: typeof hook; setDown(on: boolean): void } = {
+    ...fake,
+    get: (key) => (down ? gone() : fake.get(key)),
+    list: (prefix) => (down ? gone() : fake.list(prefix)),
+    stat: (key) => (down ? gone() : fake.stat(key)),
+    put: async (key, data, opts) => {
+      if (down) return gone();
+      await hook.beforePut?.(key);
+      return fake.put(key, data, opts);
+    },
+    hook,
+    setDown: (on) => {
+      down = on;
+    },
+  };
+  return store;
+};
+
+/** Two fake devices on a format-2 store, both onloaded from one head, each with an edit of its own. */
+const resolutionWorld = async () => {
+  const store = hooked(semanticBlobStore());
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"], { format: 2 })) as [FakeDevice, FakeDevice];
+  a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+  a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+  okOf(await a.offload());
+  await fakeSettled(a);
+  okOf(await b.onload());
+  okOf(await a.onload());
+  writeFileSync(join(a.dir(), "src/a.ts"), "export const a = 1;\n");
+  writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+  const first = (await allEvents(store)).find((e) => e.type === "offloaded");
+  if (first?.type !== "offloaded") throw new Error("no first offload");
+  const before = {
+    events: await allEvents(store),
+    snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+  };
+  return { store, a, b, project: first.project, before };
+};
+
+const fakeSettled = async (d: FakeDevice) => {
+  for (let i = 0; i < 400 && existsSync(join(d.box.home, "work/.plainport-trash")); i++) await Bun.sleep(25);
+  for (let i = 0; i < 400 && openJournals(d.box.paths.journalDir).length > 0; i++) await Bun.sleep(25);
+};
+
+/** Invariants 1–3 on both fake devices and 4–6 on the store; no snapshot ever left the repository or the catalog. */
+const expectFakeInvariants = async (w: Awaited<ReturnType<typeof resolutionWorld>>) => {
+  for (const d of [w.a, w.b]) {
+    await fakeSettled(d);
+    expect({
+      device: d.name,
+      problems: await invariantViolations({
+        now: new Date(),
+        paths: d.box.paths,
+        device: d.device.id,
+        project: { id: w.project, dir: d.dir() },
+        roots: [join(d.box.home, "work")],
+        store: { name: "ssd", blob: w.store, engine: d.engine },
+        ...(d.released === undefined ? {} : { released: d.released }),
+        stripped: ["node_modules"],
+      }),
+    }).toEqual({ device: d.name, problems: [] });
+  }
+  const events = await allEvents(w.store);
+  expect(
+    catalogInvariantViolations({
+      events,
+      eventsBefore: w.before.events,
+      snapshotsBefore: w.before.snapshots,
+      snapshotsNow: w.a.engine.repository.snapshots.map((s) => s.info.id),
+    }),
+  ).toEqual([]);
+  // Every snapshot an event made is still in the catalog and in the repository.
+  const project = foldCatalog(events).projects[w.project];
+  const made = events.flatMap((e) => (e.type === "offloaded" ? [e.snapshot] : []));
+  for (const snapshot of made) expect(project?.snapshots[snapshot]).toBeDefined();
+};
+
+/**
+ * S7, competing: both devices resolve the fork from one read, each keeping its own side, so neither supersedes the
+ * other. `first` appends first; the other's whole resolve runs between its read and its append. Either order folds to
+ * the same state on every device's read: still conflicted, both tips live, nothing rejected (D103). A resolution made
+ * after both supersedes them.
+ */
+const competingResolutions = async (first: "dev-a" | "dev-b"): Promise<void> => {
+  const w = await resolutionWorld();
+  try {
+    // The fork: dev-b offloads to its end while dev-a uploads; dev-a keeps its folder as a fork (F1).
+    w.a.engine.hooks.duringSnapshot = async () => {
+      w.a.engine.hooks.duringSnapshot = undefined;
+      okOf(await w.b.offload());
+    };
+    const byA = await w.a.offload();
+    expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([8, "catalog.head-moved"]);
+    await fakeSettled(w.b);
+    const aSnap = (byA.ok ? undefined : (byA.data as { snapshot: string }))?.snapshot as string;
+    const bSnap = foldCatalog(await allEvents(w.store)).projects[w.project]?.heads.find(
+      (s) => s !== aSnap,
+    ) as string;
+    // dev-a keeps its own copy's snapshot; dev-b, shelved, keeps its own.
+    const [writer, other] = first === "dev-a" ? [w.a, w.b] : [w.b, w.a];
+    const keepOf = (d: FakeDevice) => (d === w.a ? aSnap : bSnap);
+    let raced = false;
+    w.store.hook.beforePut = async (key) => {
+      if (raced || !key.includes("events/")) return;
+      raced = true;
+      const inner = okOf(await other.resolve(keepOf(other)));
+      expect([inner.outcome, inner.supersedes]).toEqual(["resolved", []]);
+    };
+    const outer = okOf(await writer.resolve(keepOf(writer)));
+    w.store.hook.beforePut = undefined;
+    expect([outer.outcome, outer.supersedes]).toEqual(["resolved", []]);
+
+    // One result whatever the order, and on every device's fresh read.
+    const events = await allEvents(w.store);
+    const folded = foldCatalog(events).projects[w.project];
+    expect(foldCatalog([...events].reverse()).projects[w.project]).toEqual(folded);
+    expect([folded?.status, folded?.head, folded?.rejected, folded?.invalid]).toEqual([
+      "conflicted",
+      null,
+      [],
+      [],
+    ]);
+    expect([...(folded?.heads ?? [])].sort()).toEqual([aSnap, bSnap].sort());
+    expect(folded?.resolutions).toHaveLength(2);
+    for (const d of [w.a, w.b]) {
+      const again = await d.resolve(keepOf(d), "web", { at: "resolve.checked" }).catch((e: Error) => e);
+      // Each device's read sees both and would supersede both: stopped at the seam, before any append.
+      expect(again instanceof Error ? again.name : "ran").toBe("InjectedFault");
+    }
+
+    // A resolution after both supersedes them: dev-a keeps its copy's snapshot.
+    const settles = okOf(await w.a.resolve(aSnap));
+    expect(settles.supersedes).toEqual([...(folded?.resolutions ?? [])].sort());
+    const now = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect([now?.head, now?.rejected]).toEqual([aSnap, [bSnap]]);
+    // dev-b onloads the kept snapshot; its own stays restorable.
+    expect(okOf(await w.b.onload()).snapshot).toBe(aSnap);
+    expect(readFileSync(join(w.b.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    const to = join(w.b.box.home, "old-b");
+    expect(okOf(await w.b.restore(bSnap, to)).snapshot).toBe(bSnap);
+    await expectFakeInvariants(w);
+  } finally {
+    for (const d of [w.a, w.b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S7, pending: dev-a commits and its store goes down before its re-read, so its journal stays open; meanwhile dev-b
+ * forks (F1) and resolves, keeping its own copy's snapshot over dev-a's. dev-a's recover reads the resolution: its
+ * folder stays on its own snapshot (F2, rejected-line), and its next offload uploads that work as live work, which
+ * conflicts again. No snapshot is lost.
+ */
+const resolutionWhilePending = async (): Promise<void> => {
+  const w = await resolutionWorld();
+  try {
+    w.b.engine.hooks.duringSnapshot = async () => {
+      w.b.engine.hooks.duringSnapshot = undefined;
+      const byA = await w.a.offload("web", {
+        onStep: (step) => {
+          if (step === "offload.committed") w.store.setDown(true);
+        },
+      });
+      expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([9, "store.unreachable"]);
+      expect(openJournals(w.a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.trash"]);
+      w.store.setDown(false);
+    };
+    const byB = await w.b.offload();
+    expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const bSnap = (byB.ok ? undefined : (byB.data as { snapshot: string }))?.snapshot as string;
+    const resolved = okOf(await w.b.resolve(bSnap));
+    const aSnap = resolved.over?.[0] as string;
+    expect([resolved.outcome, resolved.over]).toEqual(["resolved", [aSnap]]);
+    // dev-a, its journal still open, cannot resolve until it recovers.
+    const refused = await w.a.resolve(aSnap);
+    expect(refused.ok ? "resolved" : refused.finding.code).toBe("journal.pending");
+
+    // dev-a's recover settles by the resolved head: its rejected snapshot keeps the folder, nothing is released.
+    const recovered = await w.a.recover();
+    const report = (recovered.ok ? recovered.value : recovered.data) as {
+      operations: { outcome: string; state: string; snapshot: string }[];
+    };
+    expect(report.operations.map((o) => [o.snapshot, o.outcome, o.state])).toEqual([
+      [aSnap, "forked", "local"],
+    ]);
+    expect(readFileSync(join(w.a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${w.a.dir()}.plainport`)).toBe(false);
+    expect((await w.a.entry())?.base).toBe(aSnap);
+    const after = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect([after?.head, after?.rejected]).toEqual([bSnap, [aSnap]]);
+
+    // Its next offload is live work on the rejected line: kept as a fork, a live tip, conflicted again.
+    writeFileSync(join(w.a.dir(), "src/a2.ts"), "export const a2 = 2;\n");
+    const again = await w.a.offload();
+    expect(again.ok ? "released" : [again.exitCode, again.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const live = (again.ok ? undefined : (again.data as { snapshot: string }))?.snapshot as string;
+    const conflicted = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect(conflicted?.status).toBe("conflicted");
+    expect([...(conflicted?.heads ?? [])].sort()).toEqual([bSnap, live].sort());
+    await expectFakeInvariants(w);
+  } finally {
+    for (const d of [w.a, w.b]) await d.box.cleanupSettled();
+  }
+};
+
 /** Both devices' offloads, each with an edit of its own, about to race. */
 const editBoth = async (a: Device, b: Device) => {
   await Bun.write(`${a.dir()}/src/a.ts`, "export const a = 1;\n");
@@ -565,11 +779,17 @@ export const SCHEDULES: readonly Schedule[] = [
     id: "S7",
     title:
       "resolution races: competing resolutions, and a resolution while the other device's journal is pending",
-    owner: 25,
     devices: ["dev-a", "dev-b"],
     outcomes: {
-      "dev-a": "its resolution and B's fold to one result on every device (D103), whatever the order",
-      "dev-b": "its pending operation settles by the resolved head and loses no snapshot",
+      "dev-a":
+        "its resolution and B's fold to one result on every device (D103), whatever the order: still conflicted, both tips live, nothing rejected, until a resolution made after both supersedes them; and with its journal pending while B resolves, its recover settles by the resolved head (F2: the folder stays on its rejected snapshot) and loses no snapshot",
+      "dev-b":
+        "resolves from its fresh read and supersedes only what it read; its rejected snapshot stays in the store, restorable, and a pending operation of the other device never makes it lose one",
+    },
+    runInProcess: async () => {
+      await competingResolutions("dev-a");
+      await competingResolutions("dev-b");
+      await resolutionWhilePending();
     },
   },
   {
