@@ -2904,6 +2904,20 @@ describe("offload: a store whose profile does not admit release without Q21's pr
     expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
   });
 
+  for (const durability of ["acked-unsynced", "unknown"] as const)
+    test(`a crash past the rename on a remote ${durability} store with grace 0: recover holds the trash (review r2 I1)`, async () => {
+      box.file(".config/plainport/config.toml", [...NAS, "[offload]", 'conflictGrace = "0"'].join("\n"));
+      const crashed = offload(
+        {},
+        { opener: profiled(durability), host: testHost({ faults: { at: "offload.release.moved" } }) },
+      );
+      await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+      const done = value(await recoverWith(profiled(durability)));
+      expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+      expect(await heldSteps()).toEqual(["offload.release.held"]);
+      expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(true);
+    });
+
   test("a release past the rename is finished without the gate or the store's secrets (review phase 5 I2)", async () => {
     const crashed = offload(
       {},

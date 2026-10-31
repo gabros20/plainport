@@ -836,6 +836,13 @@ export const FINDINGS = Object.freeze({
     summary:
       'Another device holds the project\'s lease; a warning, or a refusal of the onload with exit 8 when onload.leases = "strict". At offload (and its --dry-run) it is only ever a warning (D114)',
   },
+  "offload.grace-raised": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "offload.conflictGrace is below the 15 minutes a store that is not durable (acked-unsynced or unknown) needs before Q21's proof, so its trash is held for 15 minutes anyway (D115); a warning only",
+  },
   "path.occupied": {
     severity: "block",
     allowable: false,

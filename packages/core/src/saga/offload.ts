@@ -1074,7 +1074,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
       );
       if (!released.ok) return released;
       phase("release", "end");
-      const { trash, stub, keepUntil, freed, held, refused } = released.value;
+      const { trash, stub, keepUntil, freed, held, refused, graceRaised } = released.value;
+      if (graceRaised !== undefined) report(graceRaised);
       // Held because the store cannot release a folder: said now, and by gc and status until it can (Task 17 M7).
       if (refused !== undefined) deps.log("warn", `${refused.code}: ${refused.message}`);
       return ok({

@@ -113,6 +113,11 @@ const settled = async (d: FakeDevice) => {
     journalsOf(d).some((j) => j.step === "offload.release.delete");
   for (let i = 0; i < 400 && busy(); i++) await Bun.sleep(25);
 };
+/** Sets a device's offload.conflictGrace to 0. */
+const noGrace = (d: FakeDevice) => {
+  const file = join(d.box.home, ".config/plainport/config.toml");
+  writeFileSync(file, readFileSync(file, "utf8").replace('conflictGrace = "15m"', 'conflictGrace = "0"'));
+};
 /** A clock `ms` from now. */
 const after = (ms: number) => {
   const at = Date.now() + ms;
@@ -457,20 +462,57 @@ describe("a store whose profile cannot release a folder (Task 17 M7's carry-over
     expect(reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) })).deleted).toHaveLength(1);
   });
 
-  test("acked-unsynced with no grace: held anyway, and deleted once Q21's proof holds", async () => {
+  test("acked-unsynced with no grace: held for the 15-minute floor, the raise reported, deleted after it once Q21's proof holds (D115)", async () => {
     const w = await world();
-    const file = join(w.a.box.home, ".config/plainport/config.toml");
-    writeFileSync(file, readFileSync(file, "utf8").replace('conflictGrace = "15m"', 'conflictGrace = "0"'));
+    noGrace(w.a);
     w.store.setProfile({
       ...MEMORY_SEMANTICS,
       durability: { value: "acked-unsynced", evidence: "measured" },
     });
+    w.a.findings.length = 0;
     const done = value(await w.a.offload());
     expect([done.held, done.releaseRefused]).toEqual([true, undefined]);
-    expect(reportOf<GcReport>(await w.a.gc({ now: after(1_000) })).deleted.map((d) => d.op)).toEqual([
-      done.snapshot,
+    expect(w.a.findings.filter((f) => f.code === "offload.grace-raised").map((f) => f.severity)).toEqual([
+      "warn",
     ]);
+    const committed = (await allEvents(w.store)).find(
+      (e) => e.type === "offloaded" && e.snapshot === done.snapshot,
+    );
+    expect(Date.parse(done.keepUntil as string) - Date.parse(committed?.at as string)).toBeGreaterThanOrEqual(
+      GRACE_MS - 1_000,
+    );
+    // A second after the acknowledgement proves nothing against a store that may still lose it: kept.
+    expect(reportOf<GcReport>(await w.a.gc({ now: after(1_000) })).deleted).toEqual([]);
+    expect(rowOf(w.a, done.snapshot).trash).toBe(true);
+    expect(
+      reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) })).deleted.map((d) => d.op),
+    ).toEqual([done.snapshot]);
   });
+});
+
+describe("a crash past the rename: recover's release reads the profile and holds as the live run does (review r2 I1)", () => {
+  for (const durability of ["acked-unsynced", "unknown"] as const)
+    test(`killed at offload.release.moved with grace 0 on a ${durability} store: recover holds the trash, never deletes it`, async () => {
+      const w = await world();
+      noGrace(w.a);
+      w.store.setProfile({
+        ...MEMORY_SEMANTICS,
+        durability: durability === "unknown" ? "unknown" : { value: durability, evidence: "measured" },
+      });
+      await expect(w.a.offload("web", { at: "offload.release.moved" })).rejects.toBeInstanceOf(InjectedFault);
+      const op = journalsOf(w.a)[0]?.op as string;
+      const recovered = reportOf<RecoveryReport>(await w.a.recover());
+      expect(recovered.operations.map((o) => o.outcome)).toEqual(["finished"]);
+      expect(rowOf(w.a, op)).toEqual({
+        folder: false,
+        trash: true,
+        stub: true,
+        journals: [["offload.release.held", "deadline"]],
+      });
+      // And the next gc a second later keeps it too.
+      await w.a.gc({ now: after(1_000) });
+      expect(rowOf(w.a, op).trash).toBe(true);
+    });
 });
 
 describe("crashes at the checked read and at each transition", () => {

@@ -75,7 +75,7 @@ import {
   rereadJournal,
 } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
-import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
+import { type BlobStore, type StoreSemantics, UNKNOWN_SEMANTICS } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry } from "../registry.ts";
@@ -814,15 +814,28 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   }
 
   /**
-   * The store's profile, which release checks before the folder moves: a remote store's, from its opener (config and
-   * this device's measurement; no secret is read and nothing is reached, I2). A local store has every property, so it
-   * is not asked. Once the folder has moved no gate applies. The gate fails closed (I1): a journal whose store config
-   * no longer names, or names for another store (another id pinned), is pending, its folder kept.
+   * The store's profile, which release's hold decision reads, before the folder moves and after: a remote store's,
+   * from its opener (config and this device's measurement; no secret is read and nothing is reached, I2). A local store
+   * has every property, so it is not asked. The gate fails closed (I1): before the rename, a journal whose store config
+   * no longer names, or names for another store (another id pinned), is pending, its folder kept. Once the folder has
+   * moved nothing stops the release, but what cannot be learnt holds the trash as a store of unknown semantics would
+   * (review r2 I1): never straight to release.delete without the hold and Q21's proof.
    */
   async function releaseStore(
     journal: OffloadJournal,
   ): Promise<Result<{ name: string; semantics: StoreSemantics } | undefined>> {
-    if (releaseMoved(journal)) return ok(undefined);
+    const gated = await releaseProfile(journal);
+    if (gated.ok || !releaseMoved(journal)) return gated;
+    deps.log(
+      "warn",
+      `the profile of store ${journal.store.name} could not be read (${gated.finding.message}), so the trash of ${journal.project.address} is held for the checked read`,
+    );
+    return ok({ name: journal.store.name, semantics: UNKNOWN_SEMANTICS });
+  }
+
+  async function releaseProfile(
+    journal: OffloadJournal,
+  ): Promise<Result<{ name: string; semantics: StoreSemantics } | undefined>> {
     const { name, id } = journal.store;
     const loaded = await deps.loader.load({ env: deps.env, root: journal.project.root });
     if (!loaded.ok) return loaded;
@@ -839,7 +852,12 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         }),
       );
     }
-    if (configured.kind === "local") return ok(undefined);
+    // A local store has every property; its opened store says so (a test's store may say otherwise), and one that does
+    // not open is taken at its word.
+    if (configured.kind === "local") {
+      const opened = await deps.opener.open(name, configured, "");
+      return opened.ok ? ok({ name, semantics: opened.value.blob.semantics() }) : ok(undefined);
+    }
     if (deps.opener.profile !== undefined) {
       const profile = await deps.opener.profile(name, configured);
       return profile.ok ? ok({ name, semantics: profile.value }) : profile;

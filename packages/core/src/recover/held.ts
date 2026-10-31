@@ -38,6 +38,7 @@ import { openSaga, withFix } from "../saga/journaled.ts";
 import {
   conflictGraceOf,
   forkAfterCommit,
+  heldGrace,
   keepLocalUntil,
   offloadTrashOf,
   releaseRefused,
@@ -234,7 +235,11 @@ export const heldStoreOpener =
     return ok({
       name: journal.store.name,
       semantics,
-      grace: conflictGraceOf(loaded.value.config, journal.store.name),
+      // A store that needs Q21's proof waits at least the floor, a resolution's fresh deadline too (D115).
+      grace: heldGrace(conflictGraceOf(loaded.value.config, journal.store.name), {
+        name: journal.store.name,
+        semantics,
+      }).ms,
       read: catalogReader({
         store: blob,
         mirror: mirror.value,
