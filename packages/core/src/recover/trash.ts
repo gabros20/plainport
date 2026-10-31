@@ -886,7 +886,12 @@ export const housekeeping = async (
     // A due trash that housekeeping does not hand on now, and that no live delete claims (one that crashed before its
     // claim, or could not write it): only gc deletes it, so say so.
     if (!options.deleteDue || journal.keepUntil === undefined) {
-      if ((await claimedReason(host, itemOf(journal).trash, self)) === undefined)
+      // The claim first, then the trash: a detached delete removes the trash before its claim, so a trash seen gone
+      // after the claim was seen gone is a delete that finished in between, not one that never ran.
+      if (
+        (await claimedReason(host, itemOf(journal).trash, self)) === undefined &&
+        !(await finished(io, journal))
+      )
         done.notices.push(
           `the trash ${itemOf(journal).trash} of ${journal.project.address}'s offload ${journal.op} is due and nothing is deleting it; plainport gc deletes it`,
         );
