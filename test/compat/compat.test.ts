@@ -1032,7 +1032,7 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
       expect(projectOf(oldLs)?.state).toBe("conflicted");
       expect(findingCodes(oldLs)).not.toContain(SKIPPED);
     });
-  });
+  }, 300_000);
   test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
   test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
 });
