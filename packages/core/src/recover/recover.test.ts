@@ -2268,6 +2268,31 @@ describe("fix wave q2: claim edges, the notice for unclaimed due trash, the exit
     return rest as OffloadJournal;
   };
 
+  test("a detached delete finishing between the trash check and the claim check is not 'nothing is deleting it'", async () => {
+    const journal = await unclaimed();
+    const trash = journal.trash as string;
+    const real = testHost();
+    // The first look at the trash finds it; the delete then finishes (trash, then claim, gone) before the claim is read.
+    let looked = false;
+    const host: typeof real = {
+      ...real,
+      fs: {
+        ...real.fs,
+        lstat: async (path: string) => {
+          const stat = await real.fs.lstat(path);
+          if (path === trash && !looked) {
+            looked = true;
+            rmSync(trash, { recursive: true, force: true });
+          }
+          return stat;
+        },
+      },
+    };
+    const notices = (await housekeeping({ ...trashDeps(), host }, { deleteDue: false })).notices;
+    expect(looked).toBe(true);
+    expect(notices).toEqual([]);
+  });
+
   test("a due trash nothing claims (a crash before the claim) is named with plainport gc, in the notice and the view; gc deletes it", async () => {
     const journal = await unclaimed();
     const notices = (await housekeeping(trashDeps(), { deleteDue: false })).notices;
