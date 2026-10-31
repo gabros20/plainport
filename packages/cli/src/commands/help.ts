@@ -10,6 +10,10 @@ import { VERSION } from "../version.ts";
 const InfoSchema = z.looseObject({
   name: z.string(),
   summary: z.string(),
+  details: z
+    .array(z.string())
+    .optional()
+    .meta({ description: "Paragraphs help prints after the usage; absent when the command has none" }),
   usage: z.string(),
   risk: RiskClassSchema,
   dryRun: z.boolean(),
@@ -116,6 +120,9 @@ const detail = (c: Shown): string => {
     `Usage: ${c.usage}`,
     `Risk: ${c.risk}${c.risk === "confirm" ? ` (needs --yes${c.acceptsPlan ? ", or --plan <id> from a --dry-run" : ""})` : ""} · --dry-run: ${c.dryRun ? "previews without changing anything" : "not supported"}`,
   ];
+  // A detail line indented by two spaces (a list of refs, a command) is printed as it is; the rest is filled.
+  for (const paragraph of c.details ?? [])
+    lines.push("", ...paragraph.split("\n").flatMap((line) => (line.startsWith("  ") ? [line] : wrap(line))));
   if (c.positionals.length > 0) {
     lines.push("", "Arguments:");
     lines.push(...table(c.positionals.map((p) => [`<${p.name}${p.variadic ? "..." : ""}>`, p.summary])));

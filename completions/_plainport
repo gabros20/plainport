@@ -15,6 +15,7 @@ _plainport_names() {
         'hydrate:Install a project'\''s dependencies again with its own package manager (frozen)'
         'dehydrate:Remove a project'\''s installed dependencies (only what a plugin claims and git does not track)'
         'restore:Restore a snapshot side by side into a free path: no lease, no hydration'
+        'compare:Write each other head of a project into its repository as refs/plainport/theirs/<snapshot>/…'
         'recover:Settle interrupted operations: roll back what had not committed, finish what had'
         'gc:Delete released trash past its keepLocalFor deadline; --now deletes it early'
         'root:root commands'
@@ -53,7 +54,7 @@ _plainport() {
   done
   local cmd='' used=0
   if (( ${#typed} >= 2 )); then case "${typed[1]} ${typed[2]}" in 'root add'|'root bind'|'root list'|'root scan'|'store add'|'store list'|'store test'|'store upgrade'|'store remove') cmd="${typed[1]} ${typed[2]}"; used=2 ;; esac; fi
-  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|recover|gc|version) cmd=${typed[1]}; used=1 ;; esac; fi
+  if [[ -z $cmd ]] && (( ${#typed} >= 1 )); then case "${typed[1]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|compare|recover|gc|version) cmd=${typed[1]}; used=1 ;; esac; fi
   case "$cmd" in
     'help') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'init') opts=(--root --store-path --store-secret --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
@@ -64,6 +65,7 @@ _plainport() {
     'hydrate') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'dehydrate') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'restore') opts=(--to --snapshot --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'compare') opts=(--clean --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'recover') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'gc') opts=(--now --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'root add') opts=(--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;

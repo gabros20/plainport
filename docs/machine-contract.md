@@ -188,6 +188,8 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `catalog.unsealed-event` | warn | no | 6 | A plaintext catalog event sits on a store whose catalog is sealed. It is never read, since anyone who can write to the store could have put it there; it is left out of the fold and never changed, and the fold is not known to be whole (D86) |
 | `command.cancelled` | block | no | 130 | The person answering init's prompts cancelled; nothing was written |
 | `command.unknown` | block | no | 4 | No registered command has this name; the message suggests the closest one and fix is the corrected command line |
+| `compare.not-git` | block | no | 6 | compare writes the other copies as git refs, and this project's folder (or the other copy) holds no git repository, so no refs were written; the message and paths list the paths that differ, and fix reads the other copy side by side with plainport restore |
+| `compare.not-local` | block | no | 6 | compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side |
 | `config.invalid` | block | no | 6 | A config file does not parse or does not match its schema, and there is no last good copy to keep; paths names the file and the message the line or key |
 | `config.kept-last-good` | warn | no | 6 | A config file broke since it was last loaded in this process; its last good contents stay in effect |
 | `config.locked` | block | no | 11 | Another process holds managed.toml.lock; the message names its PID, host and start time |

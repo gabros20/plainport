@@ -59,6 +59,8 @@ export * from "./registry.ts";
 export * from "./roots/index.ts";
 export * from "./runner/index.ts";
 export * from "./saga/bootstrap.ts";
+export * from "./saga/compare.ts";
+export * from "./saga/compare-refs.ts";
 export * from "./saga/hydrate.ts";
 export * from "./saga/offload.ts";
 export * from "./saga/onload.ts";

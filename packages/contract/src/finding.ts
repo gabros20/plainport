@@ -88,6 +88,20 @@ export const FINDINGS = Object.freeze({
     summary:
       "No registered command has this name; the message suggests the closest one and fix is the corrected command line",
   },
+  "compare.not-git": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare writes the other copies as git refs, and this project's folder (or the other copy) holds no git repository, so no refs were written; the message and paths list the paths that differ, and fix reads the other copy side by side with plainport restore",
+  },
+  "compare.not-local": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side",
+  },
   "config.invalid": {
     severity: "block",
     allowable: false,

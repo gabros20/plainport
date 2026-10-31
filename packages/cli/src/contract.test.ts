@@ -249,6 +249,11 @@ const FAILURES: Record<string, FailureCase[]> = {
       data: false,
     },
   ],
+  compare: [
+    // The shelved example project has no working copy here.
+    { argv: ["compare", "work:clients/acme/api"], exit: 6, code: "compare.not-local", data: false },
+    { argv: ["compare", "work:nosuch"], exit: 6, code: "compare.not-local", data: false },
+  ],
   recover: [
     {
       argv: ["recover"],
@@ -687,9 +692,11 @@ describe("generated contract files", () => {
       "verbose",
     ]);
     for (const command of manifest.commands) {
+      // details: only a command that has any (compare's refs).
       expect(Object.keys(command)).toEqual([
         "name",
         "summary",
+        ...(command.details === undefined ? [] : ["details"]),
         "usage",
         "risk",
         "dryRun",
@@ -937,6 +944,7 @@ describe("completions", () => {
           "hydrate",
           "dehydrate",
           "restore",
+          "compare",
           "recover",
           "gc",
           "root",
