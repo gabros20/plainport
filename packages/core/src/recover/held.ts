@@ -49,6 +49,7 @@ import {
 } from "../saga/release.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
+import { clearRefusal, noteRefusal } from "../trash-claim.ts";
 
 /** The step a trash is held at; v0.1.1 does not know it, so a rollback never deletes held trash (Q2). */
 export const HELD_STEP = "offload.release.held";
@@ -121,9 +122,26 @@ export const checkHeld = async (ctx: HeldContext, journal: OffloadJournal): Prom
   if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > now.getTime())
     return ok({ kind: "grace", until: journal.keepUntil });
   const trash = journal.trash ?? offloadTrashOf(journal);
+  // A read that failed is noted beside the trash, so a write command's housekeeping leaves it to gc and recover rather
+  // than reaching the store again at every command (review r2 M1); one that reads clears the note.
+  const checked = await checkedRead(ctx, journal, now, trash);
+  if (checked.ok) await clearRefusal(ctx.io, trash);
+  else await noteRefusal(ctx.io, trash, checked.finding);
+  return checked;
+};
+
+const checkedRead = async (
+  ctx: HeldContext,
+  journal: OffloadJournal,
+  now: Date,
+  trash: string,
+): Promise<Result<HeldVerdict>> => {
   const kept = `the trash ${trash} is kept, and the next plainport gc or recover checks it again`;
   const store = await ctx.open(journal);
   if (!store.ok) return withFix(store, `${store.finding.fix ?? "connect the store"}; ${kept}`);
+  // A profile that cannot release a folder refuses before anything else is read (review r2 M1).
+  const refused = releaseRefused(store.value.name, store.value.semantics, journal.project.address, trash);
+  if (refused !== undefined) return fail(refused);
   const read = await store.value.read();
   if (!read.ok) return withFix(read, `${read.finding.fix ?? "connect the store"}; ${kept}`);
   const seen = forkAfterCommit(read.value, journal);
@@ -151,8 +169,6 @@ export const checkHeld = async (ctx: HeldContext, journal: OffloadJournal): Prom
   // Q21: what the commit wrote is still there, read no earlier than the grace after it.
   const proved = await store.value.proof(journal);
   if (!proved.ok) return proved;
-  const refused = releaseRefused(store.value.name, store.value.semantics, journal.project.address, trash);
-  if (refused !== undefined) return fail(refused);
   ctx.faultAt(CHECKED_SEAM);
   const keepUntil = keepLocalUntil(journal, now);
   const moved = await saga.step("offload.release.delete", { keepUntil });
@@ -364,6 +380,7 @@ export const putBackHeld = async (
     const dropped = await forget.mirror.delete(`${MIRROR_EVENTS_PREFIX}${forget.event}.json`);
     if (!dropped.ok) return dropped;
   }
+  await clearRefusal(io, holder);
   await rmdirIfEmpty(io, holder);
   await removeEmptyHolder(io, dirname(holder), TRASH_DIR);
   await removeJournal(io, paths, journal.op);

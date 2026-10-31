@@ -99,6 +99,7 @@ import { ManifestBuilder } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
+import { clearRefusal } from "../trash-claim.ts";
 import { ulid } from "../ulid.ts";
 import {
   type HydratePlan,
@@ -1505,6 +1506,8 @@ export const finishOnload = async (
       else
         try {
           await io.fs.removeTree(leftovers);
+          // A held trash's note of a failed checked read goes with it (review r2 M1).
+          await clearRefusal(io, leftovers);
           await removeEmptyHolder(io, dirname(leftovers), TRASH_DIR);
           await removeJournal(io, paths, journal.reuse.op);
         } catch (error) {

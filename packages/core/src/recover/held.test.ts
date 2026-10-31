@@ -532,6 +532,38 @@ describe("a store whose profile cannot release a folder (Task 17 M7's carry-over
   });
 });
 
+describe("housekeeping stays local for a held trash whose last checked read failed (review r2 M1)", () => {
+  test("the store away: after gc's failed read, a write command's housekeeping names it and reaches nothing", async () => {
+    const w = await world();
+    const op = await heldOffload(w);
+    const now = after(GRACE_MS + 60_000);
+    w.store.setDown(true);
+    const gc = await w.a.gc({ now });
+    expect(gc.ok ? "" : gc.finding.code).toBe("store.unreachable");
+    w.store.setDown(false);
+    const calls = { ...w.store.calls };
+    const kept = await w.a.housekeeping({ now });
+    expect(kept.started).toEqual([]);
+    expect(kept.notices.some((n) => n.includes(`held trash`) && n.includes("store is down"))).toBe(true);
+    expect(w.store.calls).toEqual(calls);
+    expect(rowOf(w.a, op).trash).toBe(true);
+    // gc reads again, finds the store back, and deletes it; the note goes with the trash.
+    expect(reportOf<GcReport>(await w.a.gc({ now })).deleted.map((d) => d.op)).toEqual([op]);
+    expect(existsSync(join(w.a.box.home, "work/.plainport-trash"))).toBe(false);
+  });
+
+  test("a profile that cannot release refuses before the catalog is read or Q21's proof is taken", async () => {
+    const w = await world();
+    w.store.setProfile({ ...MEMORY_SEMANTICS, durability: "unknown" });
+    const done = value(await w.a.offload());
+    const lists = w.store.calls.list;
+    const gc = await w.a.gc({ now: after(GRACE_MS + 60_000) });
+    expect(gc.ok ? "" : gc.finding.code).toBe("store.semantics-unknown");
+    expect(w.store.calls.list).toBe(lists);
+    expect(rowOf(w.a, done.snapshot).trash).toBe(true);
+  });
+});
+
 describe("a crash past the rename: recover's release reads the profile and holds as the live run does (review r2 I1)", () => {
   for (const durability of ["acked-unsynced", "unknown"] as const)
     test(`killed at offload.release.moved with grace 0 on a ${durability} store: recover holds the trash, never deletes it`, async () => {
