@@ -532,6 +532,36 @@ describe("a store whose profile cannot release a folder (Task 17 M7's carry-over
   });
 });
 
+describe("two trashes of one project, one held and one released (review r2 M3)", () => {
+  test("a rejected snapshot's trash stays held while the kept head is onloaded, edited and offloaded again", async () => {
+    const w = await world();
+    const [op, bSnap] = await heldThenForked(w);
+    await resolve(w, bSnap);
+    // dev-a onloads the kept head beside its held trash: restored from the store, the trash untouched.
+    const back = value(await w.a.onload());
+    expect(back.restored).toBe("restore");
+    expect(rowOf(w.a, op)).toMatchObject({ folder: true, trash: true });
+    writeFileSync(join(w.a.dir(), "src/a3.ts"), "export const a3 = 3;\n");
+    noGrace(w.a);
+    const again = value(await w.a.offload());
+    expect(again.snapshot).not.toBe(op);
+    // Its detached delete runs; the held trash keeps the holder, so wait on the second journal only.
+    for (let i = 0; i < 400 && journalsOf(w.a).some((j) => j.op === again.snapshot); i++) await Bun.sleep(25);
+    // The second offload's trash is released; the first one is still held, its folder as it was.
+    expect(rowOf(w.a, op).trash).toBe(true);
+    expect(rowOf(w.a, again.snapshot).trash).toBe(false);
+    expect(journalsOf(w.a).map((j) => [j.op, j.step])).toEqual([[op, "offload.release.held"]]);
+    expect(readFileSync(join(trashOf(w.a, op), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    // Past the grace the rejected snapshot's trash goes; the snapshot stays in the store.
+    const gc = reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) }));
+    expect(gc.deleted.map((d) => d.op)).toEqual([op]);
+    expect(snapshotsOf(w.a)).toHaveLength(4);
+    expect(Object.keys((await foldOf(w))?.snapshots ?? {})).toEqual(
+      expect.arrayContaining([op, again.snapshot]),
+    );
+  });
+});
+
 describe("housekeeping stays local for a held trash whose last checked read failed (review r2 M1)", () => {
   test("the store away: after gc's failed read, a write command's housekeeping names it and reaches nothing", async () => {
     const w = await world();

@@ -42,6 +42,7 @@ import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
 import { type ProtectedStore, storeOverlap } from "../store-overlap.ts";
 import { placeStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
+import { recordHeldClock } from "./held-clock.ts";
 import { type Saga, withFix, writeFailed } from "./journaled.ts";
 import { unchanged } from "./verify.ts";
 
@@ -557,6 +558,9 @@ export const releaseOffload = async (
     if (!atHeld) {
       const held = await saga.step("offload.release.held", keepUntil === undefined ? {} : { keepUntil });
       if (!held.ok) return held;
+      // The deadline on this boot's uptime too, so a forward step of the clock does not bring it forward (r2 M2).
+      if (keepUntil !== undefined)
+        await recordHeldClock(io, paths, op, await rc.host.bootSession(), keepUntil, rc.clock());
     }
     const refused =
       rc.store === undefined

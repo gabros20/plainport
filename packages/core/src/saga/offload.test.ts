@@ -2860,6 +2860,42 @@ describe("offload: a store whose profile does not admit release without Q21's pr
     expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
   });
 
+  test("a forward step of the clock does not cut the grace short: this boot's uptime must pass it too (review r2 M2)", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    // The clock stepped 16 minutes forward; the host's boot time, computed from it, moved with it: no time passed.
+    const real = testHost();
+    const step = 16 * 60_000;
+    const stepped: HostPorts = {
+      ...real,
+      proc: {
+        pid: real.proc.pid,
+        hostname: () => real.proc.hostname(),
+        isAlive: (pid) => real.proc.isAlive(pid),
+        bootedAtMs: () => real.proc.bootedAtMs() + step,
+        sleep: (ms) => real.proc.sleep(ms),
+        monotonicMs: () => real.proc.monotonicMs(),
+      },
+    };
+    const kept = value(
+      await recover({
+        host: stepped,
+        paths: box.paths,
+        device,
+        env: { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener: profiled("acked-unsynced"),
+        openMirror: async () => ({ ok: true, value: mirror }),
+        log: () => {},
+        now: pastGrace,
+      }),
+    );
+    expect(kept.operations.map((o) => o.outcome)).toEqual(["trash-kept"]);
+    expect(await heldSteps()).toEqual(["offload.release.held"]);
+    // The same 16 minutes really passed (the boot time stays): the checked read goes on and deletes it.
+    const done = value(await recoverWith(profiled("acked-unsynced"), pastGrace));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+  });
+
   test("recover keeps the trash before the grace, and deletes it after, once Q21's proof holds", async () => {
     await offload({}, { opener: profiled("acked-unsynced") });
     const kept = value(await recoverWith(profiled("acked-unsynced")));

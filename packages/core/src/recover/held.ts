@@ -37,6 +37,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { updateRegistry } from "../registry.ts";
+import { heldClockRemaining, recordHeldClock } from "../saga/held-clock.ts";
 import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
 import {
   conflictGraceOf,
@@ -90,6 +91,8 @@ export interface HeldContext {
   log(level: "debug" | "info" | "warn", message: string): void;
   /** Opens the journal's own store (D45), or says why it cannot now. */
   open(journal: OffloadJournal): Promise<Result<HeldStore>>;
+  /** HostPorts.bootSession: with it the grace is also kept on this boot's uptime (saga/held-clock.ts, r2 M2). */
+  bootSession?(): Promise<string | undefined>;
 }
 
 export type HeldVerdict =
@@ -121,6 +124,12 @@ export const checkHeld = async (ctx: HeldContext, journal: OffloadJournal): Prom
   const now = ctx.clock();
   if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > now.getTime())
     return ok({ kind: "grace", until: journal.keepUntil });
+  // Past the wall deadline, the grace must also have passed on this boot's uptime: a forward step of the clock (an NTP
+  // correction after sleep, a manual change) does not shorten it (review r2 M2). Across a reboot the wall clock decides.
+  if (journal.keepUntil !== undefined) {
+    const left = await heldClockRemaining(ctx.io, ctx.paths, journal.op, await ctx.bootSession?.(), now);
+    if (left > 0) return ok({ kind: "grace", until: new Date(now.getTime() + left).toISOString() });
+  }
   const trash = journal.trash ?? offloadTrashOf(journal);
   // A read that failed is noted beside the trash, so a write command's housekeeping leaves it to gc and recover rather
   // than reaching the store again at every command (review r2 M1); one that reads clears the note.
@@ -164,6 +173,7 @@ const checkedRead = async (
     const until = new Date(now.getTime() + store.value.grace).toISOString();
     const written = await saga.step(HELD_STEP, { keepUntil: until });
     if (!written.ok) return written;
+    await recordHeldClock(ctx.io, ctx.paths, journal.op, await ctx.bootSession?.(), until, now);
     return ok({ kind: "grace", until });
   }
   // Q21: what the commit wrote is still there, read no earlier than the grace after it.

@@ -1084,6 +1084,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         clock,
         faultAt: (point) => host.faultAt(point),
         log: deps.log,
+        bootSession: () => host.bootSession(),
         open: heldStoreOpener({
           io,
           paths,

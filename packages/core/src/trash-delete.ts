@@ -169,6 +169,8 @@ export const runTrashDelete = async (
   await unlinkIfThere(io, boot);
   await unlinkIfThere(io, trashRefusedFile(trash));
   if (!(await unlinkIfThere(io, journal))) return TRASH_DELETE_EXIT.failed;
+  // A held trash's grace on this boot's uptime (saga/held-clock.ts), beside the journal.
+  await unlinkIfThere(io, journal.replace(/\.json$/, ".held"));
   await removeEmptyHolder(io, dirname(trash), ".plainport-trash");
   return TRASH_DELETE_EXIT.done;
 };

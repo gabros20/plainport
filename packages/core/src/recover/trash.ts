@@ -268,6 +268,7 @@ const checkedRead = async (
       clock,
       faultAt: (point) => deps.host.faultAt(point),
       log: deps.log,
+      bootSession: () => deps.host.bootSession(),
       open: deps.held,
     },
     journal,
