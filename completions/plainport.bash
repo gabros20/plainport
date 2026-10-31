@@ -40,7 +40,7 @@ _plainport() {
     'restore') opts='--to --snapshot --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'compare') opts='--clean --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'resolve') opts='--keep --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
-    'recover') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'recover') opts='--restore-held --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'gc') opts='--now --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root add') opts='--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root bind') opts='--device --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;

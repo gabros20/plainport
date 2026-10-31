@@ -421,14 +421,56 @@ describe("any held: unchanged while the store does not answer or Q21's proof fin
     expect(reportOf<GcReport>(await w.a.gc({ now })).deleted.map((d) => d.op)).toEqual([op]);
   });
 
-  test("the commit's event gone from the store: store.lost-write, the trash kept", async () => {
+  test("the commit's event gone from the store: store.lost-write, the trash kept; recover then puts it back, as the fix says, and it offloads again (D115)", async () => {
     const w = await world();
+    const base = (await w.a.entry())?.base;
     const op = await heldOffload(w);
     const event = (await allEvents(w.store)).find((e) => e.type === "offloaded" && e.snapshot === op);
     w.store.data.delete(storeEventKey(event?.id as string));
-    const gc = await w.a.gc({ now: after(GRACE_MS + 60_000) });
+    const now = after(GRACE_MS + 60_000);
+    const gc = await w.a.gc({ now });
     expect(gc.ok ? "" : gc.finding.code).toBe("store.lost-write");
     expect(rowOf(w.a, op).trash).toBe(true);
+    // The fix, as printed: recover puts the folder back, then offload it again.
+    expect(gc.ok ? "" : gc.finding.fix).toContain(`plainport recover puts the folder back at ${w.a.dir()}`);
+    const recovered = reportOf<RecoveryReport>(await w.a.recover(undefined, now));
+    expect(recovered.operations.map((o) => [o.outcome, o.state, o.finding?.code])).toEqual([
+      ["restored", "local", "store.lost-write"],
+    ]);
+    expect(recovered.operations[0]?.finding?.fix).toBe("offload it again: plainport offload work:web --yes");
+    expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
+    expect(existsSync(join(w.a.box.home, "work/.plainport-trash"))).toBe(false);
+    expect(readFileSync(join(w.a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect((await w.a.entry())?.base).toBe(base);
+    const again = value(await w.a.offload());
+    expect(again.held).toBe(true);
+    expect((await foldOf(w))?.head).toBe(again.snapshot);
+  });
+
+  test("recover <project> --restore-held puts a held trash back with the store gone for good (D115)", async () => {
+    const w = await world();
+    const base = (await w.a.entry())?.base;
+    const op = await heldOffload(w);
+    w.store.setDown(true);
+    const calls = { ...w.store.calls };
+    const restored = reportOf<RecoveryReport>(
+      await w.a.recover(undefined, undefined, { restoreHeld: w.project }),
+    );
+    expect(restored.operations.map((o) => [o.op, o.outcome, o.state])).toEqual([[op, "restored", "local"]]);
+    expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
+    expect((await w.a.entry())?.base).toBe(base);
+    expect(w.store.calls).toEqual(calls);
+  });
+
+  test("--restore-held never writes over a folder that stands at the project's place (path.occupied)", async () => {
+    const w = await world();
+    const op = await heldOffload(w);
+    w.a.box.file("work/web/other.txt", "not the project\n");
+    const kept = await w.a.recover(undefined, undefined, { restoreHeld: w.project });
+    expect(reportOf<RecoveryReport>(kept).operations.map((o) => [o.outcome, o.finding?.code])).toEqual([
+      ["pending", "path.occupied"],
+    ]);
+    expect(rowOf(w.a, op)).toMatchObject({ trash: true, journals: [["offload.release.held", "deadline"]] });
   });
 
   test("the restic snapshot gone from the repository: store.lost-write, the trash kept", async () => {

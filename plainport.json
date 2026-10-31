@@ -4147,17 +4147,46 @@
     {
       "name": "recover",
       "summary": "Settle interrupted operations: roll back what had not committed, finish what had",
-      "usage": "plainport recover",
+      "usage": "plainport recover [<project...>] [--restore-held]",
       "risk": "safe_write",
       "dryRun": false,
       "acceptsPlan": false,
       "group": "recovery",
-      "positionals": [],
-      "options": [],
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "With --restore-held: the project whose held trash goes back (an address, a unique name or a path)",
+          "required": false,
+          "variadic": true
+        }
+      ],
+      "options": [
+        {
+          "name": "restore-held",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Put the project's held trash back at its folder without the store (D115): for a store that is gone or keeps losing what the offload wrote. Its stub goes, its base goes back to the snapshot it came from, and the project is local again; nothing else is recovered",
+          "risk": "confirm"
+        }
+      ],
       "arguments": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {},
+        "properties": {
+          "project": {
+            "description": "With --restore-held: the project whose held trash goes back (an address, a unique name or a path)",
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "restore-held": {
+            "description": "Put the project's held trash back at its folder without the store (D115): for a store that is gone or keeps losing what the offload wrote. Its stub goes, its base goes back to the snapshot it came from, and the project is local again; nothing else is recovered",
+            "risk": "confirm",
+            "type": "boolean"
+          }
+        },
         "additionalProperties": false
       },
       "output": {
@@ -4199,9 +4228,10 @@
                     "diverged-after-commit",
                     "trash-deleted",
                     "trash-kept",
+                    "restored",
                     "pending"
                   ],
-                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
+                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. restored: a held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it; the project is local again, and offload it again. pending: not settled now (finding says why); recover can run again"
                 },
                 "state": {
                   "type": "string",
@@ -7031,7 +7061,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 6,
-      "summary": "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and onload renames it back (Q21, D24)"
+      "summary": "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and plainport recover puts it back at its folder, then offload it again (Q21, D24, D115)"
     },
     {
       "code": "store.history-elsewhere",

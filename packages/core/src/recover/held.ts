@@ -23,18 +23,21 @@
 // listings lag) another kept snapshot made from the same base. A rejected snapshot is no live fork: its trash goes
 // after the grace, and the snapshot stays restorable with restore --snapshot.
 
-import { type Finding, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { basename, dirname } from "node:path";
+import { type Finding, fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { PLAIN_CATALOG, policyFits, UNOPENED_CODES } from "../catalog/codec.ts";
 import { type CatalogRead, catalogReader } from "../catalog/head.ts";
 import { identityChanged, readUsableStore } from "../catalog/identity.ts";
-import { eventForOp, storeEventLog } from "../catalog/log.ts";
+import { eventForOp, MIRROR_EVENTS_PREFIX, storeEventLog } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
-import type { LocalIo } from "../io.ts";
-import type { Journal, OffloadJournal } from "../journal/index.ts";
+import { removeEmptyHolder, rmdirIfEmpty } from "../holder.ts";
+import { type LocalIo, systemErrorCode } from "../io.ts";
+import { type Journal, type OffloadJournal, removeJournal } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
 import type { BlobStore, StoreSemantics } from "../ports/blob-store.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { openSaga, withFix } from "../saga/journaled.ts";
+import { updateRegistry } from "../registry.ts";
+import { openSaga, withFix, writeFailed } from "../saga/journaled.ts";
 import {
   conflictGraceOf,
   forkAfterCommit,
@@ -42,8 +45,10 @@ import {
   keepLocalUntil,
   offloadTrashOf,
   releaseRefused,
+  TRASH_DIR,
 } from "../saga/release.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
+import { readStub, STUB_SUFFIX } from "../stub.ts";
 
 /** The step a trash is held at; v0.1.1 does not know it, so a rollback never deletes held trash (Q2). */
 export const HELD_STEP = "offload.release.held";
@@ -250,13 +255,15 @@ export const heldStoreOpener =
         report: (f) => deps.log("warn", `${f.code}: ${f.message}`),
       }),
       proof: async (held) => {
-        const lost = (what: string) =>
-          fail(
+        const lost = (what: string, absent?: string) =>
+          failWith(
             finding("store.lost-write", {
               message: `${what}, so the trash ${held.trash ?? offloadTrashOf(held)} of ${held.project.address} is kept: the store acknowledged the offload ${held.op} but no longer holds all of it (Q21)`,
-              fix: `nothing local was deleted: plainport onload ${shellWord(held.project.address)} renames the folder back, and a new offload uploads it again; check the store (${journal.store.name}) and its disk`,
+              fix: `nothing local was deleted: plainport recover puts the folder back at ${held.project.dir} (D115), then offload it again with plainport offload ${shellWord(held.project.address)} --yes; check the store (${journal.store.name}) and its disk`,
               paths: [held.trash ?? offloadTrashOf(held)],
             }),
+            // The event the store no longer has, which this device's mirror still holds (put back, it is forgotten).
+            absent === undefined ? {} : { absentEvent: absent },
           );
         const id = held.event;
         if (id === undefined || held.verified === undefined) return lost("the journal names no event");
@@ -275,9 +282,9 @@ export const heldStoreOpener =
         if (typeof there.value === "object" && UNOPENED_CODES.includes(there.value.code))
           return fail(there.value);
         if (there.value !== "ours")
-          return lost(
-            `the offloaded event ${id} is ${there.value === "absent" ? "not on the store" : "not whole"}`,
-          );
+          return there.value === "absent"
+            ? lost(`the offloaded event ${id} is not on the store`, id)
+            : lost(`the offloaded event ${id} is not whole`);
         const listed = await engine.list({ tags: ["plainport", `plainport:op=${held.op}`] });
         if (!listed.ok) return listed;
         if (!listed.value.some((s) => s.id === held.verified))
@@ -286,3 +293,80 @@ export const heldStoreOpener =
       },
     });
   };
+
+/**
+ * Puts a held trash back (D115): the store lost what the offload wrote (store.lost-write), or cannot be reached for
+ * good, so the folder in the trash is the only copy of its work. Under the project's lock, it renames the folder back
+ * to its place (path.occupied when something stands there), removes this project's stub, sets the registry's base
+ * back to the snapshot the copy came from (so the next offload builds on what the catalog holds, not on the lost
+ * snapshot), and closes the journal. Nothing on the store is read or written.
+ */
+export const putBackHeld = async (
+  ctx: Pick<HeldContext, "io" | "paths" | "log">,
+  journal: OffloadJournal,
+  /** The commit's event the store lost: this device's mirror forgets it too, so no fold here names a lost snapshot. */
+  forget?: { mirror: BlobStore; event: string },
+): Promise<Result<{ dir: string }>> => {
+  if (journal.step !== HELD_STEP)
+    throw new Error(`putBackHeld: the offload ${journal.op} is at ${journal.step}`);
+  const { io, paths } = ctx;
+  const dir = journal.project.dir;
+  const holder = journal.trash ?? offloadTrashOf(journal);
+  const folder = `${holder}/${basename(dir)}`;
+  const kind = async (path: string) => {
+    try {
+      return (await io.fs.lstat(path)).kind;
+    } catch (error) {
+      if (systemErrorCode(error) === "ENOENT") return undefined;
+      throw error;
+    }
+  };
+  try {
+    if ((await kind(dir)) !== undefined)
+      return fail(
+        finding("path.occupied", {
+          message: `${dir} stands where the held trash of ${journal.project.address} would go back, so it was left in ${folder}`,
+          fix: `move ${shellWord(dir)} somewhere else, then run plainport recover ${shellWord(journal.project.address)} --restore-held --yes`,
+          paths: [dir, folder],
+        }),
+      );
+    if ((await kind(folder)) !== "dir")
+      return fail(
+        finding("journal.pending", {
+          message: `the held trash ${folder} of ${journal.project.address} is not there, so nothing was put back; the journal stays`,
+          fix: `look for the folder in ${shellWord(holder)}, then run plainport recover`,
+          paths: [folder],
+        }),
+      );
+    await io.fs.rename(folder, dir);
+    // Only this project's stub goes; anything else at the stub's path is left alone.
+    const stubPath = `${dir}${STUB_SUFFIX}`;
+    const stub = await readStub(io, stubPath);
+    if (stub.ok && stub.value.project === journal.project.id && stub.value.snapshot === journal.op)
+      await io.fs.unlink(stubPath);
+  } catch (error) {
+    return writeFailed(error, `putting the held trash ${folder} back at ${dir}`, true, dir);
+  }
+  const based = await updateRegistry(io, paths, (registry) => {
+    const entry = registry.projects[journal.project.id];
+    if (entry === undefined) return ok(registry);
+    const { base: _, onloadedAt: __, ...rest } = entry;
+    return ok({
+      ...registry,
+      projects: {
+        ...registry.projects,
+        [journal.project.id]: { ...rest, ...(journal.base === undefined ? {} : { base: journal.base }) },
+      },
+    });
+  });
+  if (!based.ok) return based;
+  if (forget !== undefined) {
+    const dropped = await forget.mirror.delete(`${MIRROR_EVENTS_PREFIX}${forget.event}.json`);
+    if (!dropped.ok) return dropped;
+  }
+  await rmdirIfEmpty(io, holder);
+  await removeEmptyHolder(io, dirname(holder), TRASH_DIR);
+  await removeJournal(io, paths, journal.op);
+  ctx.log("warn", `the held trash of ${journal.project.address} was put back at ${dir}; offload it again`);
+  return ok({ dir });
+};

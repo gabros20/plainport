@@ -105,7 +105,7 @@ import { type ConfiguredStore, openBootstrapStore } from "../store.ts";
 import { freshStores } from "../store-overlap.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { isUlid, ulid } from "../ulid.ts";
-import { checkHeld, heldStoreOpener, isHeld, openJournalStore } from "./held.ts";
+import { checkHeld, heldStoreOpener, isHeld, openJournalStore, putBackHeld } from "./held.ts";
 import { claimedReason, removeTrash } from "./trash.ts";
 
 /**
@@ -113,7 +113,8 @@ import { claimedReason, removeTrash } from "./trash.ts";
  * release, or the onload, is done. forked: the offload's snapshot is kept as a fork and the folder stays on it, seen at
  * the commit (F1) or after it (F2: conflicted, or local on a line a resolution rejected).
  * diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a
- * released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (the finding
+ * released offload's trash is gone, or waits for its keepLocalFor deadline. restored: a held trash was put back at its
+ * folder (D115), since the store lost the offload's write or --restore-held asked for it. pending: not settled now (the finding
  * says why); its journal stays for the next recover.
  */
 
@@ -124,6 +125,7 @@ export const RECOVERY_OUTCOMES = [
   "diverged-after-commit",
   "trash-deleted",
   "trash-kept",
+  "restored",
   "pending",
 ] as const;
 export type RecoveryOutcome = (typeof RECOVERY_OUTCOMES)[number];
@@ -148,6 +150,11 @@ export interface RecoverDeps {
    * re-reads follow each other at once, so an attempt holding the tie-break may end undecided sooner.
    */
   wait?(ms: number): Promise<void>;
+  /**
+   * recover <project> --restore-held (D115): this project's held trash is put back at its folder without the store,
+   * and no other journal is touched.
+   */
+  restoreHeld?: string;
 }
 
 export type RecoveredOperation = {
@@ -251,7 +258,7 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
   fork: ["forked", "pending"],
   "commit-check": ["rolled-back", "finished", "forked", "diverged-after-commit", "pending"],
   release: ["finished", "forked", "diverged-after-commit", "pending"],
-  "check-held": ["trash-deleted", "trash-kept", "pending"],
+  "check-held": ["trash-deleted", "trash-kept", "restored", "pending"],
   "delete-trash": ["trash-deleted", "trash-kept", "pending"],
   "swap-check": ["rolled-back", "finished", "pending"],
   "finish-onload": ["finished", "pending"],
@@ -314,7 +321,9 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
   // One project at a time, under its lock; its onloads before a released offload's trash, which an onload may be
   // renaming back (finishOnload then clears that offload's journal).
   const byProject = new Map<string, Journal[]>();
+  const restoring = deps.restoreHeld;
   for (const journal of read.journals) {
+    if (restoring !== undefined && (journal.project.id !== restoring || !isHeld(journal))) continue;
     const group = byProject.get(journal.project.id) ?? [];
     group.push(journal);
     byProject.set(journal.project.id, group);
@@ -1067,6 +1076,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
    */
   async function checkHeldTrash(journal: OffloadJournal): Promise<Settled> {
     const trash = journal.trash ?? offloadTrashOf(journal);
+    if (deps.restoreHeld === journal.project.id) return putBack(journal);
     const checked = await checkHeld(
       {
         io,
@@ -1087,6 +1097,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
       },
       journal,
     );
+    // The store lost what the offload wrote: the trash holds the only copy, so it goes back (D115).
+    if (!checked.ok && checked.finding.code === "store.lost-write") return putBack(journal, checked);
     if (!checked.ok) return pending(journal, checked, "shelved");
     const verdict = checked.value;
     if (verdict.kind === "grace")
@@ -1094,6 +1106,34 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     if (verdict.kind === "conflict")
       return { op: { ...entry(journal, "trash-kept", "conflicted"), trash, finding: verdict.finding } };
     return deleteTrash(verdict.journal);
+  }
+
+  /** A held trash put back at its folder (D115): the project is local again, on the snapshot it came from. */
+  async function putBack(journal: OffloadJournal, lost?: Failure): Promise<Settled> {
+    const absent = (lost?.data as { absentEvent?: string } | undefined)?.absentEvent;
+    let forget: { mirror: BlobStore; event: string } | undefined;
+    if (absent !== undefined) {
+      const mirror = await deps.openMirror(journal.store.id);
+      if (!mirror.ok) return pending(journal, mirror, "shelved");
+      forget = { mirror: mirror.value, event: absent };
+    }
+    const back = await putBackHeld({ io, paths, log: deps.log }, journal, forget);
+    if (!back.ok) return pending(journal, back, "shelved");
+    const again = `offload it again: plainport offload ${shellWord(journal.project.address)} --yes`;
+    return {
+      op: {
+        ...entry(journal, "restored", "local"),
+        ...(lost === undefined
+          ? {}
+          : {
+              finding: {
+                ...lost.finding,
+                message: `${lost.finding.message}; the folder was put back at ${back.value.dir}`,
+                fix: again,
+              },
+            }),
+      },
+    };
   }
 
   /** A released offload: its trash goes once keepUntil (if any) has passed. */

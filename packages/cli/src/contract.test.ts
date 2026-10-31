@@ -269,6 +269,21 @@ const FAILURES: Record<string, FailureCase[]> = {
     },
   ],
   recover: [
+    // --restore-held is confirm (D115): without --yes it prints the command to re-run.
+    {
+      argv: ["recover", "work:clients/acme/web", "--restore-held"],
+      exit: 3,
+      code: "risk.needs-yes",
+      data: false,
+    },
+    { argv: ["recover", "--restore-held", "--yes"], exit: 2, code: "usage.invalid", data: false },
+    { argv: ["recover", "work:clients/acme/web"], exit: 2, code: "usage.invalid", data: false },
+    {
+      argv: ["recover", "work:clients/acme/api", "--restore-held", "--yes"],
+      exit: 6,
+      code: "journal.pending",
+      data: false,
+    },
     {
       argv: ["recover"],
       exit: 8,
