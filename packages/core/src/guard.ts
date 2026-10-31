@@ -204,6 +204,11 @@ export const guardedFs = (fs: LocalFs, guard: PathGuard): LocalFs => {
       };
     }
   }
+  guarded.sameBytes = async (a, b) => {
+    await guard.check("sameBytes", a, false);
+    await guard.check("sameBytes", b, false);
+    return fs.sameBytes(a, b);
+  };
   for (const name of ["link", "rename"] as const) {
     guarded[name] = async (from, to) => {
       await guard.check(name, from, name === "rename");

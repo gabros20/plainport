@@ -94,6 +94,13 @@
                 "summary": {
                   "type": "string"
                 },
+                "details": {
+                  "description": "Paragraphs help prints after the usage; absent when the command has none",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "usage": {
                   "type": "string"
                 },
@@ -597,7 +604,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's)"
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)"
                 },
                 "dir": {
                   "description": "Its folder on this device",
@@ -625,6 +632,59 @@
                 "base": {
                   "description": "The snapshot this device's copy came from",
                   "type": "string"
+                },
+                "heads": {
+                  "description": "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "snapshot": {
+                        "type": "string"
+                      },
+                      "device": {
+                        "type": "string",
+                        "description": "The device that made it (its id until M3's pairing)"
+                      },
+                      "at": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "offloaded",
+                          "checkpointed"
+                        ]
+                      },
+                      "base": {
+                        "description": "The snapshot it was made from",
+                        "type": "string"
+                      },
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "bytes": {
+                        "description": "Files' bytes in it",
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "here": {
+                        "type": "boolean",
+                        "description": "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one"
+                      }
+                    },
+                    "required": [
+                      "snapshot",
+                      "device",
+                      "at",
+                      "kind",
+                      "here"
+                    ],
+                    "additionalProperties": {}
+                  }
                 },
                 "lease": {
                   "description": "The device whose onload holds the lease, and whether it is this one",
@@ -863,6 +923,14 @@
                         ],
                         "additionalProperties": {},
                         "title": "Finding"
+                      },
+                      "held": {
+                        "description": "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+                        "type": "string",
+                        "enum": [
+                          "grace",
+                          "conflict-retained"
+                        ]
                       }
                     },
                     "required": [
@@ -882,7 +950,7 @@
                     "properties": {
                       "condition": {
                         "type": "string",
-                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores; an open set"
+                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line, leased-elsewhere; an open set"
                       },
                       "message": {
                         "type": "string"
@@ -964,6 +1032,47 @@
                   "type": "array",
                   "items": {
                     "type": "string"
+                  }
+                },
+                "theirs": {
+                  "description": "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "snapshot": {
+                        "type": "string"
+                      },
+                      "leaves": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "complete": {
+                        "type": "boolean"
+                      },
+                      "missing": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "extra": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "snapshot",
+                      "leaves",
+                      "complete",
+                      "missing",
+                      "extra"
+                    ],
+                    "additionalProperties": {}
                   }
                 }
               },
@@ -1128,7 +1237,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's)"
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)"
           },
           "dir": {
             "description": "Its folder on this device",
@@ -1156,6 +1265,59 @@
           "base": {
             "description": "The snapshot this device's copy came from",
             "type": "string"
+          },
+          "heads": {
+            "description": "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "The device that made it (its id until M3's pairing)"
+                },
+                "at": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "offloaded",
+                    "checkpointed"
+                  ]
+                },
+                "base": {
+                  "description": "The snapshot it was made from",
+                  "type": "string"
+                },
+                "files": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "bytes": {
+                  "description": "Files' bytes in it",
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "here": {
+                  "type": "boolean",
+                  "description": "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one"
+                }
+              },
+              "required": [
+                "snapshot",
+                "device",
+                "at",
+                "kind",
+                "here"
+              ],
+              "additionalProperties": {}
+            }
           },
           "lease": {
             "description": "The device whose onload holds the lease, and whether it is this one",
@@ -1394,6 +1556,14 @@
                   ],
                   "additionalProperties": {},
                   "title": "Finding"
+                },
+                "held": {
+                  "description": "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+                  "type": "string",
+                  "enum": [
+                    "grace",
+                    "conflict-retained"
+                  ]
                 }
               },
               "required": [
@@ -1413,7 +1583,7 @@
               "properties": {
                 "condition": {
                   "type": "string",
-                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores; an open set"
+                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line, leased-elsewhere; an open set"
                 },
                 "message": {
                   "type": "string"
@@ -1496,6 +1666,47 @@
             "items": {
               "type": "string"
             }
+          },
+          "theirs": {
+            "description": "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "extra": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "snapshot",
+                "leaves",
+                "complete",
+                "missing",
+                "extra"
+              ],
+              "additionalProperties": {}
+            }
           }
         },
         "required": [
@@ -1530,7 +1741,7 @@
     {
       "name": "offload",
       "summary": "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
-      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...] [--fork]",
       "risk": "confirm",
       "dryRun": true,
       "acceptsPlan": true,
@@ -1561,6 +1772,12 @@
           "type": "string",
           "multiple": true,
           "summary": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)"
+        },
+        {
+          "name": "fork",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)"
         }
       ],
       "arguments": {
@@ -1590,6 +1807,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "fork": {
+            "description": "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1658,6 +1879,58 @@
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
               },
+              "held": {
+                "description": "The local copy is held in the trash for Q16's conflict grace (offload.conflictGrace, 15 minutes on a remote store): keepUntil is the grace's deadline, after which gc (or a write command's housekeeping) reads the catalog and deletes it only when no fork names this snapshot; onload renames it back meanwhile",
+                "type": "boolean",
+                "const": true
+              },
+              "releaseRefused": {
+                "description": "Held because the store cannot release a folder (store.semantics-unknown: its durability): why, and the way out; the trash stays until its profile admits release",
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                    "title": "FindingCode",
+                    "description": "Stable dotted code, e.g. git.unpushed"
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "info",
+                      "warn",
+                      "block"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "fix": {
+                    "description": "The exact next step, e.g. a command to run",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "allowable": {
+                    "type": "boolean",
+                    "description": "May --allow <code> override it?"
+                  }
+                },
+                "required": [
+                  "code",
+                  "severity",
+                  "message",
+                  "allowable"
+                ],
+                "additionalProperties": {},
+                "title": "Finding"
+              },
               "deleteStarted": {
                 "description": "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
                 "type": "boolean",
@@ -1690,7 +1963,14 @@
                   "fork",
                   "diverged-after-commit"
                 ],
-                "description": "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)"
+                "description": "fork: the head moved during the upload, or --fork kept a copy that was behind it; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)"
+              },
+              "detail": {
+                "description": "kind fork only (Q6): after-commit when the fork was seen after the commit and before the rename, by release's catalog read (another copy offloaded from the same snapshot, or a resolution rejected this one); the snapshot is committed and the folder stays on it. Absent when the head check at the commit saw it",
+                "type": "string",
+                "enum": [
+                  "after-commit"
+                ]
               },
               "project": {
                 "type": "string"
@@ -1716,7 +1996,7 @@
               "stored"
             ],
             "additionalProperties": {},
-            "description": "Exit 8: the snapshot is kept as a fork (the head moved), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way (D14, D52)"
+            "description": "Exit 8: the snapshot is kept as a fork (the head moved at the commit, or a fork was seen after it: detail), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way, on this snapshot (D14, D52)"
           },
           {
             "type": "object",
@@ -2578,6 +2858,15 @@
             "--yes"
           ],
           "summary": "Offload a project without a prompt"
+        },
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--fork",
+            "--yes"
+          ],
+          "summary": "Keep this copy as a fork when another copy was offloaded since it came"
         }
       ]
     },
@@ -3468,19 +3757,460 @@
       ]
     },
     {
+      "name": "compare",
+      "summary": "Write each other head of a project into its repository as refs/plainport/theirs/<snapshot>/…",
+      "details": [
+        "While a conflict stands, each head other than the snapshot this copy came from is restored beside the project and written into its repository as sibling refs:",
+        "  refs/plainport/theirs/<snapshot>/HEAD       their HEAD commit, detached or not\n  refs/plainport/theirs/<snapshot>/heads/*    their branches\n  refs/plainport/theirs/<snapshot>/index      a commit of their staged index (absent when it is unmerged)\n  refs/plainport/theirs/<snapshot>/worktree   a commit of their working tree, parent = their HEAD",
+        "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) and files that look like secrets (.env*, key files) are never committed, and are listed. A shallow or partial clone, replace refs or a grafts file, two object formats, or files tracked with Git LFS are refused (compare.unsupported-repo). Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead."
+      ],
+      "usage": "plainport compare [<project>] [--clean]",
+      "risk": "safe_write",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+          "required": false,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "clean",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Remove every ref under refs/plainport/theirs/ instead, and nothing else"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "description": "An address (root:path), a unique name, a path or its .plainport stub; default .",
+            "type": "string"
+          },
+          "clean": {
+            "description": "Remove every ref under refs/plainport/theirs/ instead, and nothing else",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string",
+            "description": "The project's folder, whose repository holds the refs"
+          },
+          "store": {
+            "type": "string"
+          },
+          "base": {
+            "description": "The snapshot this copy came from",
+            "type": "string"
+          },
+          "sets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "The device that made the snapshot"
+                },
+                "at": {
+                  "type": "string",
+                  "description": "When it was made"
+                },
+                "refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The set's refs, sorted"
+                },
+                "head": {
+                  "description": "Their HEAD commit; absent when it has no commit yet",
+                  "type": "string"
+                },
+                "detached": {
+                  "type": "boolean",
+                  "description": "Their HEAD was detached"
+                },
+                "branches": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Their branches, as heads/<name>"
+                },
+                "index": {
+                  "description": "The commit of their staged index; absent when unmerged",
+                  "type": "string"
+                },
+                "worktree": {
+                  "type": "string",
+                  "description": "The commit of their working tree, parent = their HEAD"
+                },
+                "unmerged": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Paths their index holds unmerged"
+                },
+                "submodules": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Gitlinks, kept as their index records them"
+                },
+                "nested": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Untracked repositories inside their copy, not committed"
+                },
+                "intentToAdd": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Intent-to-add entries (git add -N): not in index, their files in worktree"
+                },
+                "withheld": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Files that look like secrets (.env*, key files) whose bytes their index does not hold: never committed, listed"
+                },
+                "ignored": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Ignored files that differ between the copies (the first 100): listed, never committed"
+                },
+                "ignoredTotal": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "changed": {
+                  "type": "boolean",
+                  "description": "Refs changed; false when the set was already exactly this"
+                }
+              },
+              "required": [
+                "snapshot",
+                "device",
+                "at",
+                "refs",
+                "detached",
+                "branches",
+                "worktree",
+                "unmerged",
+                "submodules",
+                "nested",
+                "intentToAdd",
+                "withheld",
+                "ignored",
+                "ignoredTotal",
+                "changed"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "One per other head, written by this run"
+          },
+          "nothing": {
+            "description": "Why there was nothing to compare",
+            "type": "string"
+          },
+          "incomplete": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "leaves": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "missing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Leaves it should have that are missing or hold another value"
+                },
+                "extra": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Leaves it should not have"
+                }
+              },
+              "required": [
+                "snapshot",
+                "leaves",
+                "complete",
+                "missing",
+                "extra"
+              ],
+              "additionalProperties": {}
+            },
+            "description": "Sets still incomplete (a crash inside git's ref transaction, or an earlier run's): a rerun replaces them, --clean removes them"
+          },
+          "removed": {
+            "description": "--clean: the refs removed",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "dir",
+          "sets",
+          "incomplete"
+        ],
+        "additionalProperties": {},
+        "description": "The theirs refs written, or removed with --clean"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "compare",
+            "work:clients/acme/web"
+          ],
+          "summary": "Write the other heads as refs/plainport/theirs/<snapshot>/…; nothing to do until there is one"
+        },
+        {
+          "argv": [
+            "compare",
+            "work:clients/acme/web",
+            "--clean"
+          ],
+          "summary": "Remove the theirs refs"
+        }
+      ]
+    },
+    {
+      "name": "resolve",
+      "summary": "Settle a conflict: keep one live tip over the others, from a fresh read (a resolved event; format-2 stores only)",
+      "usage": "plainport resolve <project> --keep <value>",
+      "risk": "confirm",
+      "dryRun": false,
+      "acceptsPlan": false,
+      "group": "projects",
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "An address (root:path), a unique name, a path or its .plainport stub",
+          "required": true,
+          "variadic": false
+        }
+      ],
+      "options": [
+        {
+          "name": "keep",
+          "type": "string",
+          "multiple": false,
+          "summary": "The snapshot to keep: one of the live tips plainport status lists (each one's device, time, size and base). While this device holds a working copy, the copy's own snapshot. The others stay in the store: plainport restore --snapshot reads them, and a copy on one offloads as live work that conflicts again"
+        }
+      ],
+      "arguments": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "An address (root:path), a unique name, a path or its .plainport stub"
+          },
+          "keep": {
+            "type": "string",
+            "description": "The snapshot to keep: one of the live tips plainport status lists (each one's device, time, size and base). While this device holds a working copy, the copy's own snapshot. The others stay in the store: plainport restore --snapshot reads them, and a copy on one offloads as live work that conflicts again"
+          }
+        },
+        "required": [
+          "project",
+          "keep"
+        ],
+        "additionalProperties": false
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string",
+            "description": "root:path"
+          },
+          "store": {
+            "type": "string",
+            "description": "The store whose catalog holds it"
+          },
+          "keep": {
+            "description": "The snapshot this resolution keeps; with nothing to resolve, present only when it is the head (the requested one is not echoed when it differs)",
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "nothing-to-resolve"
+            ],
+            "description": "resolved: a resolved event was appended. nothing-to-resolve: the project is not conflicted and has one live tip, so nothing was written (a re-run of a resolve that landed ends here)"
+          },
+          "head": {
+            "description": "The head the store's catalog shows now, read again after the append: keep once the resolution settles it; null while the project is still conflicted (a competing resolution from another device) or when the read again failed; the one live tip with nothing to resolve",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "conflicted": {
+            "description": "resolved: whether the project is still conflicted by the read after the append; absent when that read failed",
+            "type": "boolean"
+          },
+          "heldRejected": {
+            "description": "resolved: this device's held trash whose snapshot the resolution rejects; it is deleted after its fresh conflict grace, and plainport restore --snapshot reads the snapshot",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "snapshot": {
+                  "type": "string"
+                },
+                "trash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "snapshot",
+                "trash"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "event": {
+            "description": "resolved: the resolved event's id",
+            "type": "string"
+          },
+          "over": {
+            "description": "resolved: the snapshots it rejects; they stay in the store, and restore --snapshot reads them",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supersedes": {
+            "description": "resolved: the active resolutions it replaces",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "op",
+          "project",
+          "store",
+          "outcome",
+          "head"
+        ],
+        "additionalProperties": {},
+        "description": "The resolution appended, or that there was nothing to resolve"
+      },
+      "plan": null,
+      "examples": [
+        {
+          "argv": [
+            "resolve",
+            "work:clients/acme/api",
+            "--keep",
+            "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB",
+            "--yes"
+          ],
+          "summary": "Keep one live tip of a conflicted project (plainport status lists them); the others stay restorable by their snapshot. Not conflicted: nothing to resolve"
+        }
+      ]
+    },
+    {
       "name": "recover",
       "summary": "Settle interrupted operations: roll back what had not committed, finish what had",
-      "usage": "plainport recover",
+      "usage": "plainport recover [<project...>] [--restore-held]",
       "risk": "safe_write",
       "dryRun": false,
       "acceptsPlan": false,
       "group": "recovery",
-      "positionals": [],
-      "options": [],
+      "positionals": [
+        {
+          "name": "project",
+          "summary": "With --restore-held: the project whose held trash goes back (an address, a unique name or a path)",
+          "required": false,
+          "variadic": true
+        }
+      ],
+      "options": [
+        {
+          "name": "restore-held",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Put the project's held trash back at its folder without the store (D115): for a store that is gone or keeps losing what the offload wrote. Its stub goes, its base goes back to the snapshot it came from, and the project is local again; nothing else is recovered",
+          "risk": "confirm"
+        }
+      ],
       "arguments": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "properties": {},
+        "properties": {
+          "project": {
+            "description": "With --restore-held: the project whose held trash goes back (an address, a unique name or a path)",
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "restore-held": {
+            "description": "Put the project's held trash back at its folder without the store (D115): for a store that is gone or keeps losing what the offload wrote. Its stub goes, its base goes back to the snapshot it came from, and the project is local again; nothing else is recovered",
+            "risk": "confirm",
+            "type": "boolean"
+          }
+        },
         "additionalProperties": false
       },
       "output": {
@@ -3524,7 +4254,7 @@
                     "trash-kept",
                     "pending"
                   ],
-                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
+                  "description": "rolled-back: it had not committed, nothing local changed; or its held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it, and the project is local again: offload it again. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
                 },
                 "state": {
                   "type": "string",
@@ -3569,7 +4299,7 @@
                   "additionalProperties": {}
                 },
                 "conflict": {
-                  "description": "diverged-after-commit: exit 8's data, as offload gives it (D52)",
+                  "description": "diverged-after-commit, and forked after the commit (kind fork, detail after-commit): exit 8's data, as offload gives it (D52, Q6)",
                   "type": "object",
                   "properties": {
                     "kind": {
@@ -3577,6 +4307,12 @@
                       "enum": [
                         "fork",
                         "diverged-after-commit"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string",
+                      "enum": [
+                        "after-commit"
                       ]
                     }
                   },
@@ -5648,7 +6384,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 8,
-      "summary": "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted"
+      "summary": "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded, and the fix is offload --fork --yes, which keeps the copy as a fork (D114); found at the commit (or with --fork), the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted"
     },
     {
       "code": "catalog.event-skipped",
@@ -5698,6 +6434,27 @@
       "allowable": false,
       "exitCode": 4,
       "summary": "No registered command has this name; the message suggests the closest one and fix is the corrected command line"
+    },
+    {
+      "code": "compare.not-git",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare writes the other copies as git refs, and this project's folder (or the other copy) holds no git repository, so no refs were written; the message and paths list the paths that differ, and fix reads the other copy side by side with plainport restore"
+    },
+    {
+      "code": "compare.not-local",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side"
+    },
+    {
+      "code": "compare.unsupported-repo",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare cannot write this other copy as refs without harming or misleading this repository, so it wrote none: the two repositories use different object formats, their copy is shallow or has replace refs or a grafts file, either is a partial clone, their index tracks Git LFS files, or the objects their history reaches would not all be here; the message names which, and fix reads the other copy side by side with plainport restore"
     },
     {
       "code": "config.invalid",
@@ -6050,6 +6807,20 @@
       "summary": "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)"
     },
     {
+      "code": "resolve.copy-here",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "resolve --keep names another snapshot than the one this device's working copy is on (its registry base) while that copy is here: keeping it would reject the line the copy is on (Q18). fix names the resolve that keeps the copy's snapshot, and where to run the other one; paths names the folder"
+    },
+    {
+      "code": "resolve.not-live-tip",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "resolve --keep names a snapshot of the project that is not a live tip: a resolution rejected it, or a later kept snapshot was made from it. The message lists the live tips; plainport status shows each one's device, time, size and base"
+    },
+    {
       "code": "registry.invalid",
       "severity": "block",
       "allowable": false,
@@ -6295,11 +7066,25 @@
       "summary": "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)"
     },
     {
+      "code": "store.needs-upgrade",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "The command writes what only a format-2 store may hold (resolve's resolved event, Q2, Q3), and the store is format 1 (an M1 store, which plainport v0.1.x still uses); nothing is written, and fix is plainport store upgrade <name> --others-stopped --yes once every other device is stopped"
+    },
+    {
       "code": "store.not-set-up",
       "severity": "block",
       "allowable": false,
       "exitCode": 6,
       "summary": "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init"
+    },
+    {
+      "code": "store.lost-write",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and plainport recover puts it back at its folder, then offload it again (Q21, D24, D115)"
     },
     {
       "code": "store.history-elsewhere",
@@ -6386,6 +7171,13 @@
       "summary": "A .plainport stub file does not match the stub schema"
     },
     {
+      "code": "trash.conflict-retained",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "A released folder's trash is kept because a fork names its snapshot (Q16): once resolve settles it, onload renames it back when its snapshot is kept, and gc deletes it after the grace otherwise"
+    },
+    {
       "code": "usage.dry-run-unsupported",
       "severity": "block",
       "allowable": false,
@@ -6432,7 +7224,14 @@
       "severity": "warn",
       "allowable": false,
       "exitCode": 8,
-      "summary": "Another device holds the project's lease; a warning, or a refusal with exit 8 when onload.leases = \"strict\""
+      "summary": "Another device holds the project's lease; a warning, or a refusal of the onload with exit 8 when onload.leases = \"strict\". At offload (and its --dry-run) it is only ever a warning (D114)"
+    },
+    {
+      "code": "offload.grace-raised",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "offload.conflictGrace is below the 15 minutes a store that is not durable (acked-unsynced or unknown) needs before Q21's proof, so its trash is held for 15 minutes anyway (D115); a warning only"
     },
     {
       "code": "path.occupied",

@@ -17,6 +17,7 @@ import { gate } from "../gate.ts";
 import type { Ports } from "../registry.ts";
 import { capture, fakeRepositoryAt, STORE_PASSWORD, sandboxPorts } from "../testing.ts";
 import { REGISTRY } from "./index.ts";
+import { ProjectStatusSchema, renderStatus } from "./status.ts";
 
 let box: Sandbox;
 /** Each project folder as it stood when a release began, by its path under work/. */
@@ -606,5 +607,37 @@ describe("status, ls and restore: fix wave q2", () => {
     expect(listed.filter((p) => p.includes("/.git"))).toEqual([]);
     const web = data("ls", run.out).projects.find((p: { address: string }) => p.address === "work:web");
     expect(web.bytes).toBeLessThan(1000);
+  });
+});
+
+describe("status: the lease line names the holder (Task 22, Q17)", () => {
+  const view = (lease: { device: string; here: boolean }) =>
+    ProjectStatusSchema.parse({
+      address: "work:web",
+      root: "work",
+      path: "web",
+      id: "01JB7Q2M4X0000000000000000",
+      state: "shelved",
+      conditions: lease.here ? [] : ["leased-elsewhere"],
+      conditionDetails: [],
+      here: false,
+      head: null,
+      lease: { ...lease, at: "2026-10-30T12:00:00.000Z", base: "01JB7Q2M4X0000000000000001" },
+      snapshots: 1,
+      stale: false,
+      journals: [],
+      trash: [],
+    });
+
+  test("another device's lease reads device <short id> since when, with leased-elsewhere beside the state", () => {
+    const text = renderStatus(view({ device: "01JB9ZZZZZABCDEFGHJKMNPQRS", here: false }));
+    expect(text).toContain("lease    device 01JB9ZZZZZ since 2026-10-30T12:00:00.000Z");
+    expect(text).toContain("work:web  shelved (leased-elsewhere)");
+  });
+
+  test("this device's own lease reads this device", () => {
+    expect(renderStatus(view({ device: "01JB9ZZZZZABCDEFGHJKMNPQRS", here: true }))).toContain(
+      "lease    this device since 2026-10-30T12:00:00.000Z",
+    );
   });
 });

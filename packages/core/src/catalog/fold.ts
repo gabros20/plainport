@@ -456,6 +456,24 @@ export interface Resolution {
 }
 
 /**
+ * Whether `snapshot` is contested (I2, phase-6 review r2): it sits on a live tip's line (it is a head, or an ancestor
+ * of one) while the project has more than one live tip. The fold groups `conflicts` by base, so a fork made from an
+ * older base names that base's child, not this snapshot; this test sees it whatever base the fork came from (a
+ * rejected-line upload, offload --fork, an upload that committed after the head moved twice).
+ */
+export const contested = (project: CatalogProject, snapshot: string): boolean => {
+  if (project.heads.length < 2) return false;
+  return project.heads.some((tip) => {
+    for (let at: string | undefined = tip, steps = 0; at !== undefined; steps++) {
+      if (at === snapshot) return true;
+      if (steps > Object.keys(project.snapshots).length) return false;
+      at = project.snapshots[at]?.base;
+    }
+    return false;
+  });
+};
+
+/**
  * The production rule (Q18, Task 25): the only resolution a writer may append, from its fresh read of the project.
  * `keep` must be a live tip; `over` is the live tips and the active resolutions' keeps, minus `keep` (D105), so two
  * concurrent resolutions that leave one live tip in an incompatible pair can still be superseded; `supersedes` is every

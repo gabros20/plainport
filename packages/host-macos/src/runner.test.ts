@@ -229,6 +229,15 @@ describe("runner: real process groups (host-macos)", () => {
     expect(result.value.stdout.text).toBe(`hello\n${dir}\n`);
   });
 
+  test("stdinFile is read by the child from the file, never passed through memory", async () => {
+    const spool = join(dir, "spool");
+    writeFileSync(spool, "x".repeat(3 * 1024 * 1024));
+    const result = await host.run(sh("wc -c | tr -d ' '", { stdinFile: spool }));
+    if (!result.ok) throw new Error(result.finding.message);
+    expect(result.value.stdout.text).toBe(`${3 * 1024 * 1024}\n`);
+    expect(() => host.run(sh("cat", { stdinFile: spool, stdin: "x" }))).toThrow(RangeError);
+  });
+
   test("an exit code and a terminating signal come back as they are", async () => {
     expect(await host.run(sh("exit 7"))).toMatchObject({ ok: true, value: { exitCode: 7, signal: null } });
     expect(await host.run(sh("kill -USR1 $$"))).toMatchObject({

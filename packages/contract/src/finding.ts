@@ -38,7 +38,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted",
+      "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded, and the fix is offload --fork --yes, which keeps the copy as a fork (D114); found at the commit (or with --fork), the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted",
   },
   "catalog.event-skipped": {
     severity: "warn",
@@ -87,6 +87,27 @@ export const FINDINGS = Object.freeze({
     exitCode: 4,
     summary:
       "No registered command has this name; the message suggests the closest one and fix is the corrected command line",
+  },
+  "compare.not-git": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare writes the other copies as git refs, and this project's folder (or the other copy) holds no git repository, so no refs were written; the message and paths list the paths that differ, and fix reads the other copy side by side with plainport restore",
+  },
+  "compare.not-local": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side",
+  },
+  "compare.unsupported-repo": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare cannot write this other copy as refs without harming or misleading this repository, so it wrote none: the two repositories use different object formats, their copy is shallow or has replace refs or a grafts file, either is a partial clone, their index tracks Git LFS files, or the objects their history reaches would not all be here; the message names which, and fix reads the other copy side by side with plainport restore",
   },
   "config.invalid": {
     severity: "block",
@@ -414,6 +435,20 @@ export const FINDINGS = Object.freeze({
     summary:
       "The folder is a project folder under a root that this device has not registered or offloaded yet, so it has no status; offload takes it as it is (fix: offload <root>:<folder> --dry-run), and root scan registers the root's projects (D76)",
   },
+  "resolve.copy-here": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "resolve --keep names another snapshot than the one this device's working copy is on (its registry base) while that copy is here: keeping it would reject the line the copy is on (Q18). fix names the resolve that keeps the copy's snapshot, and where to run the other one; paths names the folder",
+  },
+  "resolve.not-live-tip": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "resolve --keep names a snapshot of the project that is not a live tip: a resolution rejected it, or a later kept snapshot was made from it. The message lists the live tips; plainport status shows each one's device, time, size and base",
+  },
   "registry.invalid": {
     severity: "block",
     allowable: false,
@@ -641,12 +676,26 @@ export const FINDINGS = Object.freeze({
     summary:
       "store upgrade refuses (Q2): this device has an open journal or a live plainport lock, the store's catalog shows another device's lease or an event from another device inside the quiet window, or --others-stopped is missing; the message names the first reason and the fix lists the devices to stop. Also an offload or a setup on a store whose upgrade is under way (its meta/v1/upgrade-intent.json marker stands)",
   },
+  "store.needs-upgrade": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "The command writes what only a format-2 store may hold (resolve's resolved event, Q2, Q3), and the store is format 1 (an M1 store, which plainport v0.1.x still uses); nothing is written, and fix is plainport store upgrade <name> --others-stopped --yes once every other device is stopped",
+  },
   "store.not-set-up": {
     severity: "block",
     allowable: false,
     exitCode: 6,
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
+  },
+  "store.lost-write": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and plainport recover puts it back at its folder, then offload it again (Q21, D24, D115)",
   },
   "store.history-elsewhere": {
     severity: "block",
@@ -731,6 +780,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 6,
     summary: "A .plainport stub file does not match the stub schema",
   },
+  "trash.conflict-retained": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "A released folder's trash is kept because a fork names its snapshot (Q16): once resolve settles it, onload renames it back when its snapshot is kept, and gc deletes it after the grace otherwise",
+  },
   "usage.dry-run-unsupported": {
     severity: "block",
     allowable: false,
@@ -778,7 +834,14 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      'Another device holds the project\'s lease; a warning, or a refusal with exit 8 when onload.leases = "strict"',
+      'Another device holds the project\'s lease; a warning, or a refusal of the onload with exit 8 when onload.leases = "strict". At offload (and its --dry-run) it is only ever a warning (D114)',
+  },
+  "offload.grace-raised": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "offload.conflictGrace is below the 15 minutes a store that is not durable (acked-unsynced or unknown) needs before Q21's proof, so its trash is held for 15 minutes anyway (D115); a warning only",
   },
   "path.occupied": {
     severity: "block",

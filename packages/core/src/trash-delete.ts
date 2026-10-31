@@ -2,8 +2,9 @@
 // HostPorts.deleteTrashDetached and never waited for. It claims the trash as its own first (trash-claim.ts, so no other
 // deleter takes it while it runs: its `.claim.boot`, then the claim), then runs the delete guard right before it
 // deletes (delete-guard.ts: no mount, no store, no registered project, a clean configuration), and only then removes
-// the trash, its claim and `.claim.boot`, the offload's journal and the holder when that leaves it empty. A refusal
-// removes only the claim files: the trash and the journal stay, and the next gc, housekeeping or recover runs the
+// the trash, its claim and `.claim.boot`, the offload's journal and the holder when that leaves it empty. A journal
+// not at offload.release.delete (a trash held for Q16's checked read, or one whose journal is gone) deletes nothing.
+// A refusal removes only the claim files: the trash and the journal stay, and the next gc, housekeeping or recover runs the
 // guard again and reports delete.guard-refused.
 //
 // The internal word is dispatched by the CLI's entry point before the registry, so it is in no help, completion or
@@ -78,6 +79,16 @@ const restoreDeadline = async (io: LocalIo, journalPath: string, keepUntil: stri
   }
 };
 
+/** Whether the journal is an offload's at release.delete, the one step a trash may be deleted at. */
+const releasedJournal = async (io: LocalIo, journalPath: string): Promise<boolean> => {
+  try {
+    const parsed = JournalSchema.safeParse(JSON.parse(await io.fs.readText(journalPath)));
+    return parsed.success && parsed.data.kind === "offload" && parsed.data.step === "offload.release.delete";
+  } catch {
+    return false;
+  }
+};
+
 const unlinkIfThere = async (io: LocalIo, path: string): Promise<boolean> => {
   try {
     await io.fs.unlink(path);
@@ -130,6 +141,13 @@ export const runTrashDelete = async (
   } catch {
     return TRASH_DELETE_EXIT.failed;
   }
+  // Only a released journal's trash is ever deleted (Q16): one held for the checked read (offload.release.held), or
+  // gone back to an onload, is left with its journal; the claim goes.
+  if (!(await releasedJournal(io, journal))) {
+    await unlinkIfThere(io, claim);
+    await unlinkIfThere(io, boot);
+    return TRASH_DELETE_EXIT.refused;
+  }
   const guarded = await deleteGuard({ io, paths, env: payload.env }, trash);
   if (!guarded.ok) {
     // Nobody waits for this process: the note tells housekeeping, gc and status why the trash stays (r3 #4), and the
@@ -151,6 +169,8 @@ export const runTrashDelete = async (
   await unlinkIfThere(io, boot);
   await unlinkIfThere(io, trashRefusedFile(trash));
   if (!(await unlinkIfThere(io, journal))) return TRASH_DELETE_EXIT.failed;
+  // A held trash's grace on this boot's uptime (saga/held-clock.ts), beside the journal.
+  await unlinkIfThere(io, journal.replace(/\.json$/, ".held"));
   await removeEmptyHolder(io, dirname(trash), ".plainport-trash");
   return TRASH_DELETE_EXIT.done;
 };

@@ -1,5 +1,5 @@
 import { FindingSchema, ok, ProjectStateSchema } from "@plainport/contract";
-import { PROJECT_CONDITIONS, type ProjectStatus } from "@plainport/core";
+import { PROJECT_CONDITIONS, type ProjectStatus, shortDeviceId } from "@plainport/core";
 import { z } from "zod";
 import { defineCommand } from "../registry.ts";
 import { formatBytes } from "./offload.ts";
@@ -17,7 +17,7 @@ export const ProjectStatusSchema = z
     }),
     conditions: z.array(z.string()).meta({
       description:
-        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's)",
+        "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)",
     }),
     dir: z.string().optional().meta({ description: "Its folder on this device" }),
     here: z.boolean().meta({ description: "The folder is on this device" }),
@@ -25,6 +25,27 @@ export const ProjectStatusSchema = z
     store: z.string().optional().meta({ description: "The store whose catalog holds it" }),
     head: z.string().nullable().meta({ description: "The catalog's head; null when there is none" }),
     base: z.string().optional().meta({ description: "The snapshot this device's copy came from" }),
+    heads: z
+      .array(
+        z.looseObject({
+          snapshot: z.string(),
+          device: z.string().meta({ description: "The device that made it (its id until M3's pairing)" }),
+          at: z.string(),
+          kind: z.enum(["offloaded", "checkpointed"]),
+          base: z.string().optional().meta({ description: "The snapshot it was made from" }),
+          files: z.int().nonnegative().optional(),
+          bytes: z.int().nonnegative().optional().meta({ description: "Files' bytes in it" }),
+          here: z.boolean().meta({
+            description:
+              "This device's working copy is on it: while the copy is here, plainport resolve --keep must name this one",
+          }),
+        }),
+      )
+      .optional()
+      .meta({
+        description:
+          "A conflicted project's live tips, sorted: what plainport resolve <project> --keep <snapshot> chooses from (Q18)",
+      }),
     lease: z
       .looseObject({ device: z.string(), at: z.string(), base: z.string(), here: z.boolean() })
       .optional()
@@ -86,6 +107,10 @@ export const ProjectStatusSchema = z
             description:
               "The delete guard's last refusal of it (delete.guard-refused, D87): why it stays and the way out; gc tries again",
           }),
+          held: z.enum(["grace", "conflict-retained"]).optional().meta({
+            description:
+              "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+          }),
         }),
       )
       .meta({
@@ -109,6 +134,21 @@ export const ProjectStatusSchema = z
       description:
         "Journals this version cannot read that name it, or name no project: they hold it back from offload and onload",
     }),
+    theirs: z
+      .array(
+        z.looseObject({
+          snapshot: z.string(),
+          leaves: z.array(z.string()),
+          complete: z.boolean(),
+          missing: z.array(z.string()),
+          extra: z.array(z.string()),
+        }),
+      )
+      .optional()
+      .meta({
+        description:
+          "status, for a git project whose folder is here: the sets plainport compare wrote (refs/plainport/theirs/<snapshot>/…), each complete or not; a rerun of compare replaces an incomplete one",
+      }),
   })
   .meta({ description: "A project as this device sees it" });
 
@@ -159,6 +199,13 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     ),
   );
   if (p.base !== undefined) lines.push(row("base", p.base));
+  for (const h of p.heads ?? [])
+    lines.push(
+      row(
+        "tip",
+        `${h.snapshot} · ${h.here ? "this device's copy" : `device ${h.device}`} · ${h.at}${h.bytes === undefined ? "" : ` · ${formatBytes(h.bytes)}`}${h.base === undefined ? "" : ` · from ${h.base}`}`,
+      ),
+    );
   if (p.strippableBytes !== undefined)
     lines.push(row("strip", `${formatBytes(p.strippableBytes)} an offload would strip now`));
   for (const f of p.gitWarnings ?? []) lines.push(row(f.severity, `${f.code}  ${f.message}`));
@@ -167,7 +214,7 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
       "lease",
       p.lease === undefined
         ? "none"
-        : `${p.lease.here ? "this device" : `device ${p.lease.device}`} since ${p.lease.at}`,
+        : `${p.lease.here ? "this device" : `device ${shortDeviceId(p.lease.device)}`} since ${p.lease.at}`,
     ),
   );
   lines.push(row("catalog", freshness(p)));
@@ -179,7 +226,16 @@ export const renderStatus = (p: z.output<typeof ProjectStatusSchema>): string =>
     lines.push(
       row(
         "trash",
-        `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
+        `${t.path} ${t.deleting ? "being deleted" : t.refused !== undefined ? `not deleted: ${t.refused.message}` : t.held === "conflict-retained" ? "conflict-retained: a fork names its snapshot" : t.held === "grace" ? `held for the conflict grace until ${t.keepUntil}` : t.keepUntil === undefined ? "awaiting deletion" : `kept until ${t.keepUntil}`}`,
+      ),
+    );
+  for (const t of p.theirs ?? [])
+    lines.push(
+      row(
+        "theirs",
+        t.complete
+          ? `refs/plainport/theirs/${t.snapshot}/ (git diff HEAD refs/plainport/theirs/${t.snapshot}/worktree)`
+          : `refs/plainport/theirs/${t.snapshot}/ is incomplete${t.missing.length === 0 ? "" : `: lacks ${t.missing.join(", ")}`}; plainport compare ${p.address} replaces it, --clean removes it`,
       ),
     );
   if (p.next !== undefined) lines.push(row("next", `${p.next.command}  (${p.next.reason})`));
@@ -215,12 +271,16 @@ export const status = defineCommand({
     if (named.value.known === undefined) return notKnown(named.value.ref);
     // Only this project's view is built, with its local details (D64 quality: views are lazy).
     for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
-    return ok(await known.value.set.view(named.value.known.id, { detail: true }));
+    const seen = known.value.set.findings.length;
+    const view = await known.value.set.view(named.value.known.id, { detail: true });
+    // The view's own findings (a theirs set git could not read) arrive with it.
+    for (const f of known.value.set.findings.slice(seen)) ctx.output.log("warn", `${f.code}: ${f.message}`);
+    return ok(view);
   },
 });
 
 const lsRow = (p: ProjectStatus, width: number): string => {
-  const device = p.lease === undefined ? "-" : p.lease.here ? "here" : p.lease.device.slice(0, 10);
+  const device = p.lease === undefined ? "-" : p.lease.here ? "here" : shortDeviceId(p.lease.device);
   const size = p.bytes === undefined ? "-" : formatBytes(p.bytes);
   const when = p.lastActivity === undefined ? "-" : p.lastActivity.slice(0, 10);
   return `${p.address.padEnd(width)}  ${stateText(p).padEnd(24)}  ${device.padEnd(10)}  ${size.padStart(8)}  ${when}`;

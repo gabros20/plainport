@@ -57,6 +57,7 @@ export const OFFLOAD_BRANCH_KINDS = {
   firstOffloadOfRoot: "plain",
   keepStub: "plain",
   detached: "plain",
+  held: "exclusive",
 } as const satisfies Record<OffloadBranch, BranchKind>;
 
 export const ONLOAD_BRANCH_KINDS = {

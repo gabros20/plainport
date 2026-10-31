@@ -1,10 +1,12 @@
 // Housekeeping at the start of every command but help, version and init (D59): core's housekeeping hands released
-// trash past its keepLocalFor deadline to the detached delete, and names each interrupted operation on stderr with
+// trash past its keepLocalFor deadline to the detached delete, gives a held trash past its conflict grace the checked
+// read (Q16), and names each interrupted operation on stderr with
 // `plainport recover`, which is the only thing that replays a journal. A command that runs as a read (a read-class
 // command, or any --dry-run) gets the notices only and deletes nothing (D61). It never fails or delays the command
 // beyond reading the journals: what it cannot do now is left to gc and recover.
 
-import { housekeeping } from "@plainport/core";
+import { openEventMirror } from "@plainport/blob-fs";
+import { ConfigLoader, heldStoreOpener, housekeeping } from "@plainport/core";
 import type { CommandContext } from "./registry.ts";
 
 /** Commands that run before there is anything to keep, or that only describe plainport. */
@@ -24,6 +26,17 @@ export const housekeep = async (command: string, ctx: CommandContext): Promise<v
         env: ctx.env,
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
+        // A held trash past its grace gets the checked read in a write command (Q16).
+        held: heldStoreOpener({
+          io: ctx.system,
+          paths: paths.value,
+          env: ctx.env,
+          loader: new ConfigLoader(ctx.io, paths.value),
+          opener: ctx.stores,
+          clock: () => ctx.clock.now(),
+          openMirror: (storeId) => openEventMirror(ctx.io, paths.value, storeId),
+          log: (level, message) => ctx.output.log(level, message),
+        }),
       },
       { deleteDue: ctx.risk !== "read" && !SETTLE_TRASH.has(command) },
     );

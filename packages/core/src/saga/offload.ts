@@ -27,14 +27,18 @@
 //                                          snapshot or one made from it): committed, so go on as from
 //                                          offload.committed (the fingerprint check included)
 //   offload.diverged                       the head moved: the event (`event`, `diverged`) keeps the snapshot as a
-//                                          fork. Append it if the store lacks it, never release, remove the journal
+//                                          fork (F1). Append it if the store lacks it, never release, record the
+//                                          snapshot as the folder's base, remove the journal
 //   offload.commit.start                   the offloaded event's id is journaled: if the store holds it, go on as
 //                                          from offload.committed; if not, roll back (a lost write never deletes a
 //                                          folder, D24)
 //   offload.committed .. release.stub      committed (the journal's word: its committed write follows the
 //                                          event's durable append, D24): finish release as `release` says (rename,
 //                                          stub, registry, delete), but while the folder still stands at
-//                                          project.dir, only if scanTree(project.dir) still has the verified
+//                                          project.dir, only once the store's catalog, read again, shows no fork
+//                                          naming the snapshot (F2: one keeps the folder on its snapshot, closes the
+//                                          journal, forked; a store that does not answer leaves it pending), and
+//                                          only if scanTree(project.dir) still has the verified
 //                                          fingerprint (plan.fingerprint: the plan of the attempt that was verified).
 //                                          The machine may have been used for hours since the crash; if the folder
 //                                          changed, keep it, write no stub, and report
@@ -44,6 +48,10 @@
 //                                          write was lost (the journal says committed and has none), it is
 //                                          offloadTrashOf(journal), and the folder may already be in it: look in
 //                                          both places. The stub's offloadedAt and bytes are the event's
+//   offload.release.held                   released, its trash held for Q16's conflict grace (recover/held.ts): the
+//                                          checked read, once keepUntil (the grace's deadline) has passed, moves it
+//                                          to release.delete, or keeps it (conflict-retained: no keepUntil); a store
+//                                          that does not answer, or Q21's proof finding data missing, leaves it
 //   offload.release.delete                 released: delete the trash once keepUntil (if any) has passed
 //
 // RECOVERY_NEEDS lists, step by step, the journal fields those rules read; the saga's tests check each is there.
@@ -77,15 +85,17 @@ import {
   shellWord,
 } from "@plainport/contract";
 import type { CatalogEvent } from "../catalog/events.ts";
+import type { CatalogProject } from "../catalog/fold.ts";
 import {
   catalogReader,
   headCheck,
+  leaseAhead,
   namesSnapshot,
   otherRoot,
   rootMismatch,
   storeHolding,
 } from "../catalog/head.ts";
-import { appendEvent, storeEventLog } from "../catalog/log.ts";
+import { appendEvent, eventAt, mirrorEventLog, storeEventLog } from "../catalog/log.ts";
 import { claimStoreRoot } from "../catalog/root-claim.ts";
 import { resolveRootId } from "../catalog/roots.ts";
 import { storedHere, storedKey } from "../catalog/stored.ts";
@@ -104,7 +114,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { ensureRegistered, updateRegistry } from "../registry.ts";
+import { ensureRegistered, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
@@ -120,7 +130,14 @@ import {
   registeredFolders,
   withProjectLock,
 } from "./project-gate.ts";
-import { type OffloadConflict, releaseOffload, rootFolderOf, TRASH_DIR } from "./release.ts";
+import {
+  conflictGraceOf,
+  type OffloadConflict,
+  recordBase,
+  releaseOffload,
+  rootFolderOf,
+  TRASH_DIR,
+} from "./release.ts";
 import { takeSnapshot } from "./snapshot.ts";
 import { isExcluded, verifySnapshot } from "./verify.ts";
 
@@ -148,6 +165,7 @@ export const OFFLOAD_STEPS = [
   "offload.release.trash",
   "offload.release.moved",
   "offload.release.stub",
+  "offload.release.held",
   "offload.release.delete",
 ] as const;
 export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
@@ -159,8 +177,12 @@ export type OffloadStep = (typeof OFFLOAD_STEPS)[number];
  */
 export const OFFLOAD_AFTER_EFFECT = {
   "offload.root-created": "offload.begin",
+  // Not an effect but the release's catalog read (F2): a crash between it and the rename leaves release.trash with the
+  // folder in place, and recover reads the catalog again.
+  "offload.release.reread": "offload.release.trash",
   "offload.snapshot.discarded.appended": "offload.snapshot.discarded",
   "offload.diverged.appended": "offload.diverged",
+  "offload.diverged.based": "offload.diverged",
   "offload.commit.appended": "offload.commit.start",
   "offload.release.renamed": "offload.release.trash",
   "offload.release.stub-placed": "offload.release.moved",
@@ -193,7 +215,7 @@ export const OFFLOAD_BRANCHES = {
   },
   diverged: {
     when: "another copy moves the project's head during the upload",
-    reaches: ["offload.diverged", "offload.diverged.appended"],
+    reaches: ["offload.diverged", "offload.diverged.appended", "offload.diverged.based"],
   },
   retry: {
     when: "a file changes during the upload, once",
@@ -209,6 +231,10 @@ export const OFFLOAD_BRANCHES = {
   firstOffloadOfRoot: { when: "the root has no root-created event yet", reaches: ["offload.root-created"] },
   keepStub: { when: "offload.stub = true (the default)", reaches: ["offload.release.stub-placed"] },
   detached: { when: 'offload.keepLocalFor = "0" (the default)', reaches: ["offload.release.detached"] },
+  held: {
+    when: "offload.conflictGrace above 0 (a remote store's default, Q16): the trash is held for the checked read",
+    reaches: ["offload.release.held"],
+  },
 } as const;
 
 /** What every journal names: the operation, the project and its folder, the store. */
@@ -253,6 +279,7 @@ export const RECOVERY_NEEDS: Readonly<Record<OffloadStep, readonly string[]>> = 
   ],
   "offload.release.moved": [...POLICY, "verified", "event", "trash"],
   "offload.release.stub": [...POLICY, "verified", "event", "trash"],
+  "offload.release.held": [...POLICY, "verified", "event", "trash"],
   "offload.release.delete": [...POLICY, "verified", "event", "trash"],
 };
 
@@ -292,6 +319,11 @@ export interface OffloadRequest {
   keepDeps?: boolean;
   /** --store: overrides the root's store and the default one. */
   store?: string;
+  /**
+   * --fork (D114): a copy whose base is behind the head is uploaded and kept as a fork at the commit (F1), leaving the
+   * project conflicted, instead of being refused before the upload with catalog.head-moved.
+   */
+  fork?: boolean;
 }
 
 export interface OffloadOutcome {
@@ -318,8 +350,12 @@ export interface OffloadOutcome {
   stub?: string;
   /** Where the folder is kept or waits to be deleted; absent when localCopy is deleted (D77). */
   trash?: string;
-  /** keepLocalFor: the trash is kept until then. */
+  /** keepLocalFor: the trash is kept until then; held, the conflict grace's deadline. */
   keepUntil?: string;
+  /** The trash is held for Q16's checked read (offload.conflictGrace): plainport gc deletes it once that read allows. */
+  held?: true;
+  /** Held because the store cannot release a folder (its durability): why, until its profile admits release. */
+  releaseRefused?: Finding;
 }
 
 /** operation.cancelled once the offload is committed: release did not start, and recover finishes it (D52). */
@@ -439,6 +475,86 @@ const sameVolume = async (io: LocalIo, folder: string, rootFolder: string): Prom
   );
 };
 
+/**
+ * lease.held when another device holds the project's lease and its onload is not behind this copy (leaseAhead): its
+ * copy and this one now differ, and the first of the two offloaded becomes the head. Where that onload sits is read
+ * from its event in the mirror the catalog read just brought up to the store. A warning only (Q17, D114).
+ */
+export const leaseHeld = async (
+  project: CatalogProject | undefined,
+  mirror: BlobStore,
+  copy: { device: string; base: string | undefined; address: string },
+): Promise<Finding | undefined> => {
+  const held = project?.lease ?? null;
+  if (held === null || held.device === copy.device) return undefined;
+  const read = await eventAt(mirrorEventLog(mirror), held.event);
+  const opened = read.ok && read.value !== null && "event" in read.value ? read.value.event : undefined;
+  const over = opened?.type === "onloaded" ? (opened.over ?? opened.base) : undefined;
+  const lease = leaseAhead(project, copy.device, copy.base, over);
+  if (lease === undefined) return undefined;
+  return finding("lease.held", {
+    message: `${copy.address} is onloaded on device ${lease.device} since ${lease.at}, level with or further along than this copy; if this copy is offloaded first, that one becomes a fork when it is offloaded`,
+    fix: "offload it on that device first if its copy should be the head",
+  });
+};
+
+/**
+ * The dry run's lease check (D114): lease.held as the real run would warn it, from the store's catalog, so a plan never
+ * previews clean and then warns at its run. The plan needs no store, so this is best effort: a project this device
+ * never registered has no lease to name, and a store or mirror that cannot be read leaves it unsaid, with a log line.
+ */
+export const previewLease = async (
+  deps: Pick<
+    OffloadDeps,
+    "host" | "paths" | "device" | "env" | "loader" | "opener" | "openMirror" | "log" | "now"
+  >,
+  req: Pick<OffloadRequest, "project" | "store">,
+): Promise<Finding | undefined> => {
+  const { host, paths } = deps;
+  const ref = req.project;
+  const clock = (): Date => deps.now?.() ?? host.clock.now();
+  const unsaid = (why: string) => {
+    deps.log("info", `whether another device holds the lease of ${ref.address} was not checked: ${why}`);
+    return undefined;
+  };
+  const registry = await readRegistry(host, paths);
+  if (!registry.ok) return unsaid(registry.finding.message);
+  const id =
+    ref.id ??
+    Object.entries(registry.value.projects).find(([, e]) => e.root === ref.root && e.path === ref.path)?.[0];
+  if (id === undefined) return undefined;
+  const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
+  if (!loaded.ok) return unsaid(loaded.finding.message);
+  const name = req.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
+  if (name === undefined) return undefined;
+  const opened = await openStore(host, {
+    paths,
+    env: deps.env,
+    name,
+    config: loaded.value.config,
+    opener: deps.opener,
+    now: clock,
+  });
+  if (!opened.ok) return unsaid(opened.finding.message);
+  const mirror = await deps.openMirror(opened.value.id);
+  if (!mirror.ok) return unsaid(mirror.finding.message);
+  const read = await catalogReader({
+    store: opened.value.blob,
+    mirror: mirror.value,
+    storeId: opened.value.id,
+    storeName: opened.value.name,
+    now: clock,
+    ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
+    report: (f) => deps.log("info", `${f.code}: ${f.message}`),
+  })();
+  if (!read.ok) return unsaid(read.finding.message);
+  return leaseHeld(read.value.projects[id], mirror.value, {
+    device: deps.device.id,
+    base: registry.value.projects[id]?.base,
+    address: ref.address,
+  });
+};
+
 /** Runs the offload; see the file comment. A failure before the commit changed nothing local. */
 export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promise<Result<OffloadOutcome>> => {
   const { host, paths, device, signal } = deps;
@@ -483,6 +599,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
   });
   if (!opened.ok) return opened;
   const store: ConfiguredStore = opened.value;
+  // Q16: how long release holds the trash for the checked read.
+  const grace = conflictGraceOf(loaded.value.config, store.name);
   // A config assertion the measurement contradicts (D111) is said, and the measured value used.
   for (const f of store.findings ?? []) report(f);
   // Q2: an upgrade under way (its upgrade-intent marker stands) is waited out; this is the offload's first read of the
@@ -559,7 +677,22 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
             }),
           };
     const early = headCheck(before.value, projectId, base, ref.address, home);
-    if (early.kind !== "ok") return fail(early.finding);
+    // A copy on a line a resolution rejected is live work (D103), and --fork asks for a copy behind the head to be
+    // kept (D114): either is uploaded and kept as a fork at the commit (F1), so it conflicts and never vanishes,
+    // instead of being refused here with nothing uploaded.
+    const forkAtCommit =
+      early.kind === "moved" &&
+      (req.fork === true ||
+        (base !== undefined && before.value.projects[projectId]?.rejected.includes(base) === true));
+    if (early.kind !== "ok" && !forkAtCommit) return fail(early.finding);
+    // Another device's working copy, onloaded further along the chain (Q17: advisory): a warning, never a refusal;
+    // onload.leases = "strict" governs onload only (D114).
+    const lease = await leaseHeld(before.value.projects[projectId], mirror.value, {
+      device: device.id,
+      base,
+      address: ref.address,
+    });
+    if (lease !== undefined) report(lease);
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),
@@ -877,6 +1010,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         const kept = await appendEvent(events, event);
         if (!kept.ok) return saga.keep(kept);
         saga.after("offload.diverged.appended");
+        // F1: the folder stays, on its own snapshot: the next offload builds on it, and resolve --keep names it.
+        // The registry's base must name the fork, or resolve --keep refuses this copy: a write that fails keeps the
+        // journal at diverged, and recover writes it again.
+        const based = await recordBase({ host, paths }, saga.journal);
+        if (!based.ok) return saga.keep(based);
+        saga.after("offload.diverged.based");
         const conflict: OffloadConflict = {
           op,
           exitCode: 8,
@@ -886,7 +1025,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           store: store.name,
           stored: verified.snapshot,
         };
-        return failWith(head.finding, conflict, 8);
+        // The fork is made: the fix is what to do with it, not --fork again.
+        const made = {
+          ...head.finding,
+          fix: `this folder stays on its own snapshot ${op}, kept as a fork; plainport compare ${shellWord(ref.address)} writes the other copy into its repository beside it`,
+        };
+        return failWith(made, conflict, 8);
       }
       host.faultAt("offload.head-checked");
       // lock.ts's known limit: a run that lost its lock to a breaker never commits.
@@ -922,12 +1066,18 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           env: deps.env,
           stores,
           store: { name: store.name, semantics: store.blob.semantics() },
+          grace,
+          // F2: the catalog read fresh again right before the rename (Q16).
+          reread: catalog,
         },
         { at: event.at, bytes: verified.bytes },
       );
       if (!released.ok) return released;
       phase("release", "end");
-      const { trash, stub, keepUntil, freed } = released.value;
+      const { trash, stub, keepUntil, freed, held, refused, graceRaised } = released.value;
+      if (graceRaised !== undefined) report(graceRaised);
+      // Held because the store cannot release a folder: said now, and by gc and status until it can (Task 17 M7).
+      if (refused !== undefined) deps.log("warn", `${refused.code}: ${refused.message}`);
       return ok({
         op,
         project: ref.address,
@@ -942,6 +1092,8 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         // A deleted local copy's trash is already going, so it is not named (D77).
         ...(freed ? {} : { trash }),
         ...(keepUntil === undefined ? {} : { keepUntil }),
+        ...(held === true ? { held: true as const } : {}),
+        ...(refused === undefined ? {} : { releaseRefused: refused }),
       });
     };
 

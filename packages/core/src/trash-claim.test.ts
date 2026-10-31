@@ -27,8 +27,35 @@ beforeEach(() => {
   const op = ulid();
   trash = box.dir(`work/.plainport-trash/${op}`);
   box.file(`work/.plainport-trash/${op}/web/a.txt`, "a");
-  journal = box.file(`state/journal/${op}.json`, "{}");
+  journal = box.file(`state/journal/${op}.json`, releasedJournal(op));
 });
+
+/** An offload's journal at release.delete, the one step at which the detached delete deletes (Q16). */
+const releasedJournal = (op: string, step = "offload.release.delete"): string => {
+  const at = new Date().toISOString();
+  return JSON.stringify({
+    v: 1,
+    op,
+    kind: "offload",
+    step,
+    startedAt: at,
+    updatedAt: at,
+    pid: process.pid,
+    host: "test",
+    project: {
+      id: ulid(),
+      address: "work:web",
+      root: "work",
+      rootId: ulid(),
+      path: "web",
+      dir: join(box.home, "work/web"),
+    },
+    store: { name: "ssd", id: ulid() },
+    attempts: [],
+    trash,
+    history: [{ step, at }],
+  });
+};
 afterEach(() => {
   try {
     chmodSync(join(box.home, "work/.plainport-trash"), 0o755);
@@ -221,6 +248,20 @@ describe("the boot session beside the claim (Q5 i)", () => {
     expect([v011(claimed), v011.errors ?? []]).toEqual([true, []]);
     expect(TrashClaimSchema.safeParse(claimed).success).toBe(true);
   });
+});
+
+describe("the detached delete deletes only a released journal's trash (Q16, M2 Task 24)", () => {
+  for (const step of ["offload.release.held", "offload.release.stub"])
+    test(`a journal at ${step}: nothing is deleted, the journal stays, the claim goes`, async () => {
+      writeFileSync(journal, releasedJournal(JSON.parse(readFileSync(journal, "utf8")).op, step));
+      const payload = trashDeletePayload(trash, journal, DEVICE, box.paths, { HOME: box.home });
+      expect(await runTrashDelete({ ...testHost(), bootSession: async () => "S" }, payload)).toBe(3);
+      expect([
+        existsSync(join(trash, "web/a.txt")),
+        existsSync(journal),
+        existsSync(trashClaimFile(trash)),
+      ]).toEqual([true, true, false]);
+    });
 });
 
 describe("the detached delete claims before it deletes (D64 revised)", () => {

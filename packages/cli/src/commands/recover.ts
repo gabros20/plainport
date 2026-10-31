@@ -4,16 +4,18 @@
 // deadline, and `gc --now` (confirm) before it; restore writes a snapshot side by side into a free path.
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { failWith, finding, ok, ProjectStateSchema, type Result } from "@plainport/contract";
+import { fail, failWith, finding, ok, ProjectStateSchema, type Result } from "@plainport/contract";
 import {
   BOOTSTRAP_RECOVERY_OUTCOMES,
   ConfigLoader,
   collectTrash,
   expandHome,
+  heldStoreOpener,
   openStore,
   RECOVERY_OUTCOMES,
   recover as recoverJournals,
   recoverUpgrades,
+  resolveProject,
   runRestore,
   type UpgradeRecoveryReport,
 } from "@plainport/core";
@@ -37,7 +39,7 @@ const RecoveredSchema = z.looseObject({
   step: z.string().meta({ description: "The journal step recover found" }),
   outcome: z.enum(RECOVERY_OUTCOMES).meta({
     description:
-      "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again",
+      "rolled-back: it had not committed, nothing local changed; or its held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it, and the project is local again: offload it again. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again",
   }),
   state: ProjectStateSchema.meta({ description: "The project's state on this device afterwards" }),
   snapshot: z.string(),
@@ -45,9 +47,15 @@ const RecoveredSchema = z.looseObject({
   keepUntil: z.string().optional(),
   finding: FindingDataSchema.optional(),
   conflict: z
-    .looseObject({ kind: z.enum(["fork", "diverged-after-commit"]) })
+    .looseObject({
+      kind: z.enum(["fork", "diverged-after-commit"]),
+      detail: z.enum(["after-commit"]).optional(),
+    })
     .optional()
-    .meta({ description: "diverged-after-commit: exit 8's data, as offload gives it (D52)" }),
+    .meta({
+      description:
+        "diverged-after-commit, and forked after the commit (kind fork, detail after-commit): exit 8's data, as offload gives it (D52, Q6)",
+    }),
 });
 
 const RecoveredBootstrapSchema = z.looseObject({
@@ -125,8 +133,18 @@ export const recover = defineCommand({
   dryRun: false,
   acceptsPlan: false,
   group: "recovery",
-  positionals: [],
-  args: z.strictObject({}),
+  positionals: ["project"],
+  args: z.strictObject({
+    project: z.array(z.string()).max(1).optional().meta({
+      description:
+        "With --restore-held: the project whose held trash goes back (an address, a unique name or a path)",
+    }),
+    "restore-held": z.boolean().optional().meta({
+      description:
+        "Put the project's held trash back at its folder without the store (D115): for a store that is gone or keeps losing what the offload wrote. Its stub goes, its base goes back to the snapshot it came from, and the project is local again; nothing else is recovered",
+      risk: "confirm",
+    }),
+  }),
   output: z
     .looseObject({
       operations: z.array(RecoveredSchema),
@@ -156,7 +174,11 @@ export const recover = defineCommand({
       : [
           ...data.operations.map(
             (o) =>
-              `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${OUTCOME_TEXT[o.outcome]}${
+              `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${
+                o.outcome === "rolled-back" && o.step === "offload.release.held"
+                  ? "its held trash was put back at its folder; offload it again"
+                  : OUTCOME_TEXT[o.outcome]
+              }${
                 o.keepUntil === undefined || o.outcome !== "trash-kept" ? "" : ` until ${o.keepUntil}`
               }${o.finding === undefined || o.outcome === "diverged-after-commit" ? "" : ` (${o.finding.code}: ${o.finding.message})`}; now ${o.state}`,
           ),
@@ -170,10 +192,62 @@ export const recover = defineCommand({
           ),
           ...data.unreadable.map((u) => `${u}: a journal this version cannot read; left as it is`),
         ].join("\n"),
-  handler: async (_args, ctx) => {
+  handler: async (args, ctx) => {
     const local = await thisDevice(ctx);
     if (!local.ok) return local;
     const { paths, device } = local.value;
+    const [named] = args.project ?? [];
+    if ((named === undefined) !== (args["restore-held"] !== true))
+      return fail(
+        finding("usage.invalid", {
+          message:
+            named === undefined
+              ? "--restore-held needs the project whose held trash goes back"
+              : `recover takes a project only with --restore-held (${named})`,
+          fix:
+            named === undefined
+              ? "plainport recover <project> --restore-held --yes"
+              : "plainport recover settles every project; plainport recover <project> --restore-held --yes puts one's held trash back",
+        }),
+        2,
+      );
+    if (named !== undefined) {
+      // Offline (D115): the registry names the project, no store is read.
+      const resolved = await resolveProject(ctx.io, paths, named, {
+        cwd: ctx.cwd,
+        env: ctx.env,
+        device: device.name,
+      });
+      if (!resolved.ok) return resolved;
+      if (resolved.value.id === undefined)
+        return fail(
+          finding("project.not-found", {
+            message: `${resolved.value.address} is not registered on this device, so it has no held trash here`,
+            fix: "plainport status lists this device's projects",
+          }),
+        );
+      const restored = await recoverJournals({
+        host: ctx.system,
+        paths,
+        device,
+        env: ctx.env,
+        loader: new ConfigLoader(ctx.io, paths),
+        opener: ctx.stores,
+        openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
+        log: (level, message) => ctx.output.log(level, message),
+        now: () => ctx.clock.now(),
+        restoreHeld: resolved.value.id,
+      });
+      if (restored.ok && restored.value.operations.length === 0)
+        return fail(
+          finding("journal.pending", {
+            message: `${resolved.value.address} has no held trash on this device, so nothing was put back`,
+            fix: "plainport status names a held trash and its state; plainport recover settles the rest",
+          }),
+          6,
+        );
+      return restored;
+    }
     const release = ctx.holdSignal();
     try {
       // Upgrades first (Q2): a marker a crashed `store upgrade` left on a store is cleared before anything else.
@@ -281,6 +355,17 @@ export const gc = defineCommand({
         env: ctx.env,
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
+        // A held trash gets the checked read (Q16): its store, opened as recover opens it.
+        held: heldStoreOpener({
+          io: ctx.system,
+          paths: paths.value,
+          env: ctx.env,
+          loader: new ConfigLoader(ctx.io, paths.value),
+          opener: ctx.stores,
+          clock: () => ctx.clock.now(),
+          openMirror: (storeId) => openEventMirror(ctx.io, paths.value, storeId),
+          log: (level, message) => ctx.output.log(level, message),
+        }),
       },
       { early: args.now === true },
     );

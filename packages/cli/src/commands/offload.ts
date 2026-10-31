@@ -8,7 +8,7 @@
 // M1 takes one project (D38).
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { fail, failWith, finding, ok } from "@plainport/contract";
+import { FindingSchema, fail, failWith, finding, ok } from "@plainport/contract";
 import {
   ConfigLoader,
   PLAN_TTL_MS,
@@ -17,6 +17,7 @@ import {
   planBlocker,
   planCommand,
   planOffload,
+  previewLease,
   readRegistry,
   resolveProject,
   runOffload,
@@ -136,6 +137,14 @@ const OffloadOutputSchema = z.union([
     keepUntil: z.iso.datetime().optional().meta({
       description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
     }),
+    held: z.literal(true).optional().meta({
+      description:
+        "The local copy is held in the trash for Q16's conflict grace (offload.conflictGrace, 15 minutes on a remote store): keepUntil is the grace's deadline, after which gc (or a write command's housekeeping) reads the catalog and deletes it only when no fork names this snapshot; onload renames it back meanwhile",
+    }),
+    releaseRefused: FindingSchema.optional().meta({
+      description:
+        "Held because the store cannot release a folder (store.semantics-unknown: its durability): why, and the way out; the trash stays until its profile admits release",
+    }),
     deleteStarted: z.literal(true).optional().meta({
       description:
         "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
@@ -147,7 +156,11 @@ const OffloadOutputSchema = z.union([
       exitCode: z.literal(8),
       kind: z.enum(["fork", "diverged-after-commit"]).meta({
         description:
-          "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
+          "fork: the head moved during the upload, or --fork kept a copy that was behind it; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
+      }),
+      detail: z.enum(["after-commit"]).optional().meta({
+        description:
+          "kind fork only (Q6): after-commit when the fork was seen after the commit and before the rename, by release's catalog read (another copy offloaded from the same snapshot, or a resolution rejected this one); the snapshot is committed and the folder stays on it. Absent when the head check at the commit saw it",
       }),
       project: z.string(),
       snapshot: z.string(),
@@ -156,7 +169,7 @@ const OffloadOutputSchema = z.union([
     })
     .meta({
       description:
-        "Exit 8: the snapshot is kept as a fork (the head moved), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way (D14, D52)",
+        "Exit 8: the snapshot is kept as a fork (the head moved at the commit, or a fork was seen after it: detail), or committed as the head while the folder changed after the commit (kind tells them apart); the folder stays either way, on this snapshot (D14, D52)",
     }),
   PlanSchema.meta({ description: "Exit 6 (plan.stale): the fresh plan to review and approve (D14, D38)" }),
 ]);
@@ -187,6 +200,10 @@ export const offload = defineCommand({
     allow: z.array(z.string()).optional().meta({
       description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
     }),
+    fork: z.boolean().optional().meta({
+      description:
+        "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)",
+    }),
   }),
   output: OffloadOutputSchema,
   examples: [
@@ -195,6 +212,10 @@ export const offload = defineCommand({
       summary: "Plan offloading a project; --plan <id> then runs that plan, instead of --yes",
     },
     { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
+    {
+      argv: ["offload", "work:clients/acme/web", "--fork", "--yes"],
+      summary: "Keep this copy as a fork when another copy was offloaded since it came",
+    },
   ],
   human: (data) => {
     if ("fingerprint" in data) return renderPlan(data as Plan);
@@ -206,15 +227,21 @@ export const offload = defineCommand({
     return [
       `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : data.deleteStarted === true ? `freeing ${formatBytes(data.freedBytes)}` : `freed ${formatBytes(data.freedBytes)}`}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
-      ...(data.keepUntil !== undefined
-        ? [
-            `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
-          ]
-        : data.localCopy === "waiting"
-          ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
-          : [
-              "deleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept",
-            ]),
+      ...(data.releaseRefused !== undefined
+        ? [`kept      ${data.trash}${kept}: ${data.releaseRefused.message}`]
+        : data.held === true
+          ? [
+              `held      ${data.trash}${kept} for the conflict grace until ${data.keepUntil}; then plainport gc reads the catalog and deletes it if no fork names this snapshot`,
+            ]
+          : data.keepUntil !== undefined
+            ? [
+                `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
+              ]
+            : data.localCopy === "waiting"
+              ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
+              : [
+                  "deleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept",
+                ]),
     ].join("\n");
   },
   handler: async (args, ctx) => {
@@ -260,6 +287,7 @@ export const offload = defineCommand({
             ...(args.plan === undefined ? {} : { plan: args.plan }),
             ...(args.allow === undefined ? {} : { allow: args.allow }),
             ...(args["keep-deps"] === true ? { keepDeps: true } : {}),
+            ...(args.fork === true ? { fork: true } : {}),
             ...(ctx.store === undefined ? {} : { store: ctx.store }),
           },
         );
@@ -296,6 +324,23 @@ export const offload = defineCommand({
       onFinding: (f) => ctx.output.emit({ type: "finding", op, finding: f }),
     });
     if (!planned.ok) return planned;
+    // The lease the real run would warn of (D114), streamed beside the plan, never part of it: an approval binds the
+    // folder, not who else has a working copy.
+    const lease = await previewLease(
+      {
+        host: ctx.system,
+        paths,
+        device,
+        env: ctx.env,
+        loader: new ConfigLoader(ctx.io, paths),
+        opener: ctx.stores,
+        openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
+        log: (level, message) => ctx.output.log(level, message),
+        now: () => ctx.clock.now(),
+      },
+      { project: ref, ...(ctx.store === undefined ? {} : { store: ctx.store }) },
+    );
+    if (lease !== undefined) ctx.output.emit({ type: "finding", op, finding: lease });
     let saved = true;
     try {
       await savePlan(ctx.io, paths, planned.value);

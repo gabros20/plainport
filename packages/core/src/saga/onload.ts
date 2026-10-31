@@ -99,6 +99,7 @@ import { ManifestBuilder } from "../scan/manifest.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
 import { readStub, STUB_SUFFIX } from "../stub.ts";
+import { clearRefusal } from "../trash-claim.ts";
 import { ulid } from "../ulid.ts";
 import {
   type HydratePlan,
@@ -777,7 +778,7 @@ const onloadFlow = async (
       reused = {
         from: reuse.folder,
         offload: reuse.op,
-        reason: `the folder offload ${reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+        reason: `the folder offload ${reuse.op} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
       };
       hydratePlan = {
         status: "reused",
@@ -965,7 +966,7 @@ const onloadFlow = async (
       return fail(
         finding("catalog.head-moved", {
           message: `${ref.address} is conflicted in the catalog: two copies were offloaded from the same snapshot (${project.conflicts.map((c) => c.join(" and ")).join("; ")}); nothing was restored`,
-          fix: `plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side (settling which copy wins arrives in M2)`,
+          fix: `plainport resolve ${shellWord(ref.address)} --keep <snapshot> --yes keeps one (plainport status ${shellWord(ref.address)} lists them); plainport restore ${shellWord(ref.address)} --snapshot <id> --to <path> reads either copy side by side meanwhile`,
         }),
       );
     }
@@ -1097,8 +1098,9 @@ const onloadFlow = async (
   }
 
   /**
-   * The trash folder of the offload that made `snapshot`, when it can be renamed back: its trash is held by
-   * keepLocalFor (so no detached delete runs in it) and it still has the fingerprint that offload verified (D51).
+   * The trash folder of the offload that made `snapshot`, when it can be renamed back: its trash is kept by
+   * keepLocalFor or held for the conflict grace (so no detached delete runs in it) and it still has the fingerprint
+   * that offload verified (D51).
    */
   async function reusable(
     snapshot: string,
@@ -1117,8 +1119,10 @@ const onloadFlow = async (
         j.op === snapshot &&
         j.project.id === id &&
         j.project.dir === target &&
-        j.step === "offload.release.delete" &&
-        j.keepUntil !== undefined,
+        // Kept by keepLocalFor (no detached delete runs in it), or held for Q16's checked read in grace or
+        // conflict-retained (no deleter deletes it at that step).
+        ((j.step === "offload.release.delete" && j.keepUntil !== undefined) ||
+          j.step === "offload.release.held"),
     );
     if (offload === undefined || offload.plan?.fp !== FINGERPRINT_VERSION) return undefined;
     const folder = join(offloadTrashOf(offload), target.slice(dirname(target).length + 1));
@@ -1331,7 +1335,7 @@ const onloadFlow = async (
             reused: {
               from: journal.reuse.folder,
               offload: journal.reuse.op,
-              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor) and unchanged since it was verified`,
+              reason: `the folder offload ${journal.reuse.op} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
             },
           }),
       files,
@@ -1502,6 +1506,8 @@ export const finishOnload = async (
       else
         try {
           await io.fs.removeTree(leftovers);
+          // A held trash's note of a failed checked read goes with it (review r2 M1).
+          await clearRefusal(io, leftovers);
           await removeEmptyHolder(io, dirname(leftovers), TRASH_DIR);
           await removeJournal(io, paths, journal.reuse.op);
         } catch (error) {

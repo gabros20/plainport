@@ -8,7 +8,12 @@
 //    renamed into the trash), the deleted copy's own snapshot (the op its stub, its journal or the registry names) has
 //    an offloaded event from this device, not discarded and not a fork, whose restic snapshot the store holds; and
 //    that snapshot's listing matches `released`, the folder as it stood when release began (captureTree), outside the
-//    stripped paths.
+//    stripped paths. The grace clause (Q16): a copy that is deleted (its folder gone and its trash with it) had no fork
+//    or rejecting resolution naming its snapshot that its release's catalog read could have seen. The test names
+//    the events that read could not have seen (`unseen`: appended after it, Q16's residual, or not yet listed by a
+//    store whose listings lag); any other is a violation. With a conflict grace (`store.conflictGraceMs`, Task 24) the
+//    copy is also not deleted before the grace has passed since its commit, and a resolution that rejected its
+//    snapshot at least the grace before `now` no longer counts: the held trash goes after a fresh grace (Task 24).
 // 2. Per device: a stub exists if and only if this device's own last completed operation shelved the project: the
 //    newest of this device's offloaded and onloaded events for the project is an offloaded one, and the folder is gone.
 //    The stub names that event's snapshot. The global catalog status is not read: another device's later fork makes it
@@ -38,7 +43,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "
 import { join } from "node:path";
 import type { CatalogPolicy } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
-import { type CatalogState, foldCatalog } from "../catalog/fold.ts";
+import { type CatalogProject, type CatalogState, foldCatalog } from "../catalog/fold.ts";
 import { readStoreDescriptor } from "../catalog/identity.ts";
 import { readEvents, STORE_EVENTS_PREFIX, storeEventLog } from "../catalog/log.ts";
 import { STORED_MULTIPLE, storedHere, storedKey } from "../catalog/stored.ts";
@@ -65,7 +70,15 @@ export interface InvariantSubject {
     blob: BlobStore;
     engine: Engine;
     catalog?: CatalogPolicy;
+    /** The conflict grace on this store (offload.conflictGrace, Q16), in milliseconds; 0 by default. */
+    conflictGraceMs?: number;
   };
+  /**
+   * Invariant 1's grace clause: the ids of events this device's release-time catalog read could not have seen, appended
+   * after it (Q16's residual) or not yet listed by a store whose listings lag. A fork or a rejecting resolution naming
+   * a deleted copy's snapshot must be one of them.
+   */
+  unseen?: Iterable<string>;
   /** The folder as it stood when release began (captureTree at offload.release.trash). Required once it is gone. */
   released?: TreeCapture;
   /** Paths left out of the snapshot on purpose (the strip set), relative to the folder. */
@@ -163,6 +176,28 @@ const deletedOp = (subject: InvariantSubject): string | undefined => {
   }
 };
 
+/**
+ * The events that fork `snapshot` or reject it: the producers of the other snapshots in a fork the fold names it in,
+ * and the resolutions whose `over` takes it while the fold counts it rejected.
+ */
+const namingEvents = (
+  events: readonly CatalogEvent[],
+  project: CatalogProject | undefined,
+  snapshot: string,
+): string[] => {
+  if (project === undefined) return [];
+  const ids = new Set<string>();
+  for (const fork of project.conflicts)
+    if (fork.includes(snapshot))
+      for (const other of fork) {
+        const made = project.snapshots[other];
+        if (other !== snapshot && made !== undefined) ids.add(made.event);
+      }
+  if (project.rejected.includes(snapshot))
+    for (const e of events) if (e.type === "resolved" && e.over.includes(snapshot)) ids.add(e.id);
+  return [...ids].sort();
+};
+
 type OwnEvent = Extract<CatalogEvent, { type: "offloaded" | "onloaded" }>;
 
 /** Whether `a` builds on `b`: an onload of b's snapshot, or an offload whose base b made or onloaded. */
@@ -244,6 +279,40 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
       if (differ.length > 0)
         problems.push(
           `invariant 1: ${dir} is gone, but its snapshot does not match the folder as released: ${differ.sort().join(", ")}`,
+        );
+    }
+    if (
+      event?.type === "offloaded" &&
+      subject.roots.every((root) => !present(join(root, ".plainport-trash", event.snapshot)))
+    ) {
+      // The grace clause (Q16): deleted, so its release read showed no fork naming the snapshot.
+      const unseen = new Set(subject.unseen ?? []);
+      // A held trash goes after a resolution that rejected its snapshot, once a fresh grace has passed since it (Task 24's
+      // held(conflict) → held(grace) → deleted): with a conflict grace, such a resolution names it no longer.
+      const graceMs = subject.store.conflictGraceMs ?? 0;
+      const settledBy = new Set(
+        graceMs === 0
+          ? []
+          : read.value.events
+              .filter(
+                (e) =>
+                  e.type === "resolved" &&
+                  e.over.includes(event.snapshot) &&
+                  Date.parse(e.at) + graceMs <= subject.now.getTime(),
+              )
+              .map((e) => e.id),
+      );
+      const seen = namingEvents(read.value.events, project, event.snapshot).filter(
+        (e) => !unseen.has(e) && !settledBy.has(e),
+      );
+      if (seen.length > 0)
+        problems.push(
+          `invariant 1: ${dir} was deleted, but ${seen.join(", ")} forked or rejected its snapshot ${event.snapshot} before its release read the catalog (Q16)`,
+        );
+      const grace = subject.store.conflictGraceMs ?? 0;
+      if (grace > 0 && Date.parse(event.at) + grace > subject.now.getTime())
+        problems.push(
+          `invariant 1: ${dir} was deleted within the conflict grace of its commit at ${event.at} (Q16)`,
         );
     }
   }

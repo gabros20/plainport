@@ -249,7 +249,41 @@ const FAILURES: Record<string, FailureCase[]> = {
       data: false,
     },
   ],
+  compare: [
+    // The shelved example project has no working copy here.
+    { argv: ["compare", "work:clients/acme/api"], exit: 6, code: "compare.not-local", data: false },
+    { argv: ["compare", "work:nosuch"], exit: 6, code: "compare.not-local", data: false },
+  ],
+  resolve: [
+    {
+      argv: ["resolve", "work:clients/acme/api", "--keep", "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB"],
+      exit: 3,
+      code: "risk.needs-yes",
+      data: false,
+    },
+    {
+      argv: ["resolve", "work:nosuch", "--keep", "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB", "--yes"],
+      exit: 4,
+      code: "project.not-found",
+      data: false,
+    },
+  ],
   recover: [
+    // --restore-held is confirm (D115): without --yes it prints the command to re-run.
+    {
+      argv: ["recover", "work:clients/acme/web", "--restore-held"],
+      exit: 3,
+      code: "risk.needs-yes",
+      data: false,
+    },
+    { argv: ["recover", "--restore-held", "--yes"], exit: 2, code: "usage.invalid", data: false },
+    { argv: ["recover", "work:clients/acme/web"], exit: 2, code: "usage.invalid", data: false },
+    {
+      argv: ["recover", "work:clients/acme/api", "--restore-held", "--yes"],
+      exit: 6,
+      code: "journal.pending",
+      data: false,
+    },
     {
       argv: ["recover"],
       exit: 8,
@@ -510,7 +544,7 @@ describe("what plainport tells people to run exists (I1)", () => {
         .map((m) => m[1] as string)
         .filter((word) => !registered.has(word)),
     );
-    expect(planned.has("doctor") && planned.has("resolve")).toBe(true);
+    expect(planned.has("doctor") && planned.has("move")).toBe(true);
     const named: string[] = [];
     for (const { file, text } of sources()) {
       for (const m of text.matchAll(/\bplainport ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?/g)) {
@@ -687,9 +721,11 @@ describe("generated contract files", () => {
       "verbose",
     ]);
     for (const command of manifest.commands) {
+      // details: only a command that has any (compare's refs).
       expect(Object.keys(command)).toEqual([
         "name",
         "summary",
+        ...(command.details === undefined ? [] : ["details"]),
         "usage",
         "risk",
         "dryRun",
@@ -937,6 +973,8 @@ describe("completions", () => {
           "hydrate",
           "dehydrate",
           "restore",
+          "compare",
+          "resolve",
           "recover",
           "gc",
           "root",
