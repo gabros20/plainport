@@ -58,8 +58,10 @@ import type { OpenedStore, StoreCredentials, StoreOpener } from "../ports/store.
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
+import { readTheirs, type TheirsListed } from "../saga/compare-refs.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
+import { dotGit } from "../scan/git.ts";
 import { resolveS3Credentials, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 import { sealedByPin, storeCatalog } from "../stores/seal.ts";
 import { STUB_SUFFIX } from "../stub.ts";
@@ -173,6 +175,11 @@ export type ProjectStatus = {
   gitWarnings?: Finding[];
   /** With `detail`, for a folder here: what an offload would strip now. */
   strippableBytes?: number;
+  /**
+   * With `detail`, for a git project whose folder is here: the sets plainport compare wrote
+   * (refs/plainport/theirs/<snapshot>/…), each complete or not; absent when there are none.
+   */
+  theirs?: TheirsListed[];
 };
 
 export type StoreView = {
@@ -678,6 +685,17 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         };
       else findings.push(planned.finding);
     }
+    // The theirs refs compare wrote, read (for-each-ref, cat-file) from a git project's folder here; a repository
+    // git cannot read leaves them out and adds its finding to the set's.
+    let theirs: TheirsListed[] = [];
+    if (options.detail === true && deps.planning !== undefined && here && dir !== undefined) {
+      const repo = await dotGit(deps.planning.host, dir);
+      if (repo.ok && repo.value !== "none") {
+        const listed = await readTheirs({ host: deps.planning.host, env: deps.env }, dir);
+        if (listed.ok) theirs = listed.value;
+        else findings.push(listed.finding);
+      }
+    }
     const lastActivity = newest([
       ...Object.values(catalog?.snapshots ?? {}).map((s) => s.at),
       lease?.at,
@@ -713,6 +731,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       trash,
       ...(unreadable.length === 0 ? {} : { unreadableJournals: unreadable }),
       ...details,
+      ...(theirs.length === 0 ? {} : { theirs }),
     };
     const next = nextStep(view);
     return next === undefined ? view : { ...view, next };
