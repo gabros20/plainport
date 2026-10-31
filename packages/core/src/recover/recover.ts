@@ -113,8 +113,8 @@ import { claimedReason, removeTrash } from "./trash.ts";
  * release, or the onload, is done. forked: the offload's snapshot is kept as a fork and the folder stays on it, seen at
  * the commit (F1) or after it (F2: conflicted, or local on a line a resolution rejected).
  * diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a
- * released offload's trash is gone, or waits for its keepLocalFor deadline. restored: a held trash was put back at its
- * folder (D115), since the store lost the offload's write or --restore-held asked for it. pending: not settled now (the finding
+ * released offload's trash is gone, or waits for its keepLocalFor deadline; a held trash put back at its folder is
+ * rolled-back too (D115: the store lost the offload's write, or --restore-held asked for it). pending: not settled now (the finding
  * says why); its journal stays for the next recover.
  */
 
@@ -125,7 +125,6 @@ export const RECOVERY_OUTCOMES = [
   "diverged-after-commit",
   "trash-deleted",
   "trash-kept",
-  "restored",
   "pending",
 ] as const;
 export type RecoveryOutcome = (typeof RECOVERY_OUTCOMES)[number];
@@ -258,7 +257,7 @@ export const RECOVERY_RULE_OUTCOMES: Readonly<Record<RecoveryRule, readonly Reco
   fork: ["forked", "pending"],
   "commit-check": ["rolled-back", "finished", "forked", "diverged-after-commit", "pending"],
   release: ["finished", "forked", "diverged-after-commit", "pending"],
-  "check-held": ["trash-deleted", "trash-kept", "restored", "pending"],
+  "check-held": ["trash-deleted", "trash-kept", "rolled-back", "pending"],
   "delete-trash": ["trash-deleted", "trash-kept", "pending"],
   "swap-check": ["rolled-back", "finished", "pending"],
   "finish-onload": ["finished", "pending"],
@@ -1123,7 +1122,7 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const again = `offload it again: plainport offload ${shellWord(journal.project.address)} --yes`;
     return {
       op: {
-        ...entry(journal, "restored", "local"),
+        ...entry(journal, "rolled-back", "local"),
         ...(lost === undefined
           ? {}
           : {

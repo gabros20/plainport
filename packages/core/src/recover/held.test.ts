@@ -435,7 +435,7 @@ describe("any held: unchanged while the store does not answer or Q21's proof fin
     expect(gc.ok ? "" : gc.finding.fix).toContain(`plainport recover puts the folder back at ${w.a.dir()}`);
     const recovered = reportOf<RecoveryReport>(await w.a.recover(undefined, now));
     expect(recovered.operations.map((o) => [o.outcome, o.state, o.finding?.code])).toEqual([
-      ["restored", "local", "store.lost-write"],
+      ["rolled-back", "local", "store.lost-write"],
     ]);
     expect(recovered.operations[0]?.finding?.fix).toBe("offload it again: plainport offload work:web --yes");
     expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
@@ -456,7 +456,9 @@ describe("any held: unchanged while the store does not answer or Q21's proof fin
     const restored = reportOf<RecoveryReport>(
       await w.a.recover(undefined, undefined, { restoreHeld: w.project }),
     );
-    expect(restored.operations.map((o) => [o.op, o.outcome, o.state])).toEqual([[op, "restored", "local"]]);
+    expect(restored.operations.map((o) => [o.op, o.outcome, o.state])).toEqual([
+      [op, "rolled-back", "local"],
+    ]);
     expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
     expect((await w.a.entry())?.base).toBe(base);
     expect(w.store.calls).toEqual(calls);

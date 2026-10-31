@@ -39,7 +39,7 @@ const RecoveredSchema = z.looseObject({
   step: z.string().meta({ description: "The journal step recover found" }),
   outcome: z.enum(RECOVERY_OUTCOMES).meta({
     description:
-      "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. restored: a held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it; the project is local again, and offload it again. pending: not settled now (finding says why); recover can run again",
+      "rolled-back: it had not committed, nothing local changed; or its held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it, and the project is local again: offload it again. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again",
   }),
   state: ProjectStateSchema.meta({ description: "The project's state on this device afterwards" }),
   snapshot: z.string(),
@@ -96,7 +96,6 @@ const OUTCOME_TEXT: Record<(typeof RECOVERY_OUTCOMES)[number], string> = {
   "diverged-after-commit": "committed, but the folder changed since: it was kept, with no stub",
   "trash-deleted": "its trash was deleted",
   "trash-kept": "its trash is kept",
-  restored: "its held trash was put back at its folder; offload it again",
   pending: "not settled now",
 };
 
@@ -175,7 +174,11 @@ export const recover = defineCommand({
       : [
           ...data.operations.map(
             (o) =>
-              `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${OUTCOME_TEXT[o.outcome]}${
+              `${o.kind} ${o.op} of ${o.project} (stopped at ${o.step}): ${
+                o.outcome === "rolled-back" && o.step === "offload.release.held"
+                  ? "its held trash was put back at its folder; offload it again"
+                  : OUTCOME_TEXT[o.outcome]
+              }${
                 o.keepUntil === undefined || o.outcome !== "trash-kept" ? "" : ` until ${o.keepUntil}`
               }${o.finding === undefined || o.outcome === "diverged-after-commit" ? "" : ` (${o.finding.code}: ${o.finding.message})`}; now ${o.state}`,
           ),

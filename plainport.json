@@ -4228,10 +4228,9 @@
                     "diverged-after-commit",
                     "trash-deleted",
                     "trash-kept",
-                    "restored",
                     "pending"
                   ],
-                  "description": "rolled-back: it had not committed, nothing local changed. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. restored: a held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it; the project is local again, and offload it again. pending: not settled now (finding says why); recover can run again"
+                  "description": "rolled-back: it had not committed, nothing local changed; or its held trash was put back at its folder (D115), because the store lost the offload's write (store.lost-write) or --restore-held asked for it, and the project is local again: offload it again. finished: the release or the onload is done. forked: the snapshot is kept as a fork, the folder stays. diverged-after-commit: committed, but the folder changed since, so it was kept (D51). trash-deleted, trash-kept: a released offload's trash is gone, or waits for its keepLocalFor deadline. pending: not settled now (finding says why); recover can run again"
                 },
                 "state": {
                   "type": "string",
