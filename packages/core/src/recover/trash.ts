@@ -12,6 +12,10 @@
 //   replays a journal itself (read commands never write, D45; an onload stopped before its swap is taken over by the
 //   next onload).
 //
+// A trash held for Q16's conflict grace (offload.release.held) is deleted by neither, gc --now included: under the
+// lock, gc and a write command's housekeeping give it the checked read (held.ts), which alone moves it on to
+// release.delete; a conflict-retained one is named at the start of every command.
+//
 // Only plainport's own trash and journals are deleted, and only for operations whose journal says committed and
 // released; nothing else is touched.
 
@@ -51,6 +55,14 @@ import {
   trashRefusedFile,
 } from "../trash-claim.ts";
 import { isUlid } from "../ulid.ts";
+import {
+  checkHeld,
+  conflictFinding,
+  conflictRetained,
+  type HeldContext,
+  type HeldVerdict,
+  isHeld,
+} from "./held.ts";
 import { notedStagingHolders, readStagingRecords, removeStagingRecord } from "./staging.ts";
 
 export interface TrashDeps {
@@ -60,6 +72,11 @@ export interface TrashDeps {
   log(level: "debug" | "info" | "warn", message: string): void;
   /** The command's clock, which deadlines are compared with; the host's when absent. */
   now?: () => Date;
+  /**
+   * Opens a held trash's store for the checked read (held.ts's heldStoreOpener). Absent, a held trash is only reported:
+   * nothing that cannot read the catalog moves it on (Q16).
+   */
+  held?: HeldContext["open"];
 }
 
 export type TrashItem = {
@@ -237,6 +254,27 @@ const rootAway = async (io: LocalIo, journal: OffloadJournal): Promise<Failure |
   );
 };
 
+/** The checked read of a held trash (held.ts), under its project's lock; undefined without a way to open its store. */
+const checkedRead = async (
+  deps: TrashDeps,
+  clock: () => Date,
+  journal: OffloadJournal,
+): Promise<Result<HeldVerdict> | undefined> => {
+  if (deps.held === undefined) return undefined;
+  return checkHeld(
+    {
+      io: deps.host,
+      paths: deps.paths,
+      clock,
+      faultAt: (point) => deps.host.faultAt(point),
+      log: deps.log,
+      bootSession: () => deps.host.bootSession(),
+      open: deps.held,
+    },
+    journal,
+  );
+};
+
 /** plainport gc: deletes released offloads' trash past its deadline, or all of it with `early` (see above). */
 export const collectTrash = async (
   deps: TrashDeps,
@@ -262,10 +300,11 @@ export const collectTrash = async (
   const me = await thisDevice(io, paths);
   const self = me.id;
   let problem: Failure | undefined;
-  for (const journal of read.journals.filter(released)) {
+  for (const journal of read.journals.filter((j) => released(j) || isHeld(j))) {
     const item = itemOf(journal);
     const due = journal.keepUntil === undefined || Date.parse(journal.keepUntil) <= clock().getTime();
-    if (!due && !options.early) {
+    // A held trash is never deleted early (gc --now shortens no grace): the checked read under the lock decides.
+    if (!isHeld(journal) && !due && !options.early) {
       report.kept.push(item);
       continue;
     }
@@ -283,8 +322,9 @@ export const collectTrash = async (
         // Read again under the lock: an onload may have renamed the folder back, a detached delete finished it.
         const reread = await rereadJournal(io, paths, journal.op);
         if (!reread.ok) return reread;
-        const now = reread.value;
-        if (now === undefined || !released(now)) return ok(undefined);
+        const found = reread.value;
+        if (found === undefined || found.kind !== "offload") return ok(undefined);
+        let now: OffloadJournal = found;
         let journals: Journal[];
         try {
           journals = (await readJournals(io, paths)).journals;
@@ -299,6 +339,41 @@ export const collectTrash = async (
           });
           return ok(undefined);
         }
+        if (isHeld(now)) {
+          // Q16: only the checked read moves a held trash on to release.delete.
+          const checked = await checkedRead(deps, clock, now);
+          if (checked === undefined) {
+            report.kept.push({
+              ...itemOf(now),
+              reason: "it is held for the checked read, which plainport recover makes",
+            });
+            return ok(undefined);
+          }
+          if (!checked.ok) return checked;
+          const verdict = checked.value;
+          if (verdict.kind === "grace") {
+            report.kept.push({
+              ...itemOf(now),
+              keepUntil: verdict.until,
+              reason: `it is held for the conflict grace until ${verdict.until}; the catalog is read then before it is deleted (Q16)`,
+            });
+            return ok(undefined);
+          }
+          if (verdict.kind === "conflict") {
+            report.kept.push({
+              ...itemOf(now),
+              reason: `${verdict.finding.message}; ${verdict.finding.fix}`,
+            });
+            return ok(undefined);
+          }
+          now = verdict.journal;
+          const until = now.keepUntil;
+          if (until !== undefined && Date.parse(until) > clock().getTime() && !options.early) {
+            report.kept.push(itemOf(now));
+            return ok(undefined);
+          }
+        }
+        if (!released(now)) return ok(undefined);
         const trash = itemOf(now).trash;
         // One deleter at a time (D64): a live detached delete's trash is its own.
         const deleting = await claimedReason(host, trash, self);
@@ -627,6 +702,89 @@ const sweepStaging = async (
   return { removed, kept, problems };
 };
 
+/**
+ * Housekeeping's part in a held trash (Q16): a conflict-retained one is named with the way out; one past its grace is
+ * given the checked read in a write command (deleteDue, with a way to open its store), then the detached delete when
+ * the read allows it; otherwise it is named, with plainport gc. A held(conflict) trash is not read again here: gc and
+ * recover read it, so a write command does not reach the store while a fork stands.
+ */
+const heldHousekeeping = async (
+  deps: TrashDeps,
+  clock: () => Date,
+  journal: OffloadJournal,
+  deleteDue: boolean,
+  done: Housekept,
+  self: string,
+): Promise<void> => {
+  const { host, paths } = deps;
+  const trash = itemOf(journal).trash;
+  if (conflictRetained(journal)) {
+    const f = conflictFinding(journal);
+    done.notices.push(`${f.message}; ${f.fix}`);
+    return;
+  }
+  if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > clock().getTime()) return;
+  // Its last checked read failed (the store away, a profile that cannot release, a lost write): named, and left to gc
+  // and recover, so no write command reaches the store for it again (review r2 M1).
+  const failed = await readRefusal(host, trash);
+  if (failed !== undefined) {
+    done.notices.push(
+      `the held trash ${trash} of ${journal.project.address}'s offload ${journal.op} is kept: ${failed.message}; ${failed.fix ?? "plainport gc checks it again"}`,
+    );
+    return;
+  }
+  if (!deleteDue || deps.held === undefined) {
+    done.notices.push(
+      `the trash ${trash} of ${journal.project.address}'s offload ${journal.op} is past its conflict grace; plainport gc reads the catalog and deletes it when no fork names its snapshot`,
+    );
+    return;
+  }
+  const settled = await withProjectLock(
+    { io: host, paths, clock, log: deps.log },
+    { id: journal.project.id, address: journal.project.address },
+    async () => {
+      const reread = await rereadJournal(host, paths, journal.op);
+      if (!reread.ok) return reread;
+      const now = reread.value;
+      if (now === undefined || !isHeld(now)) return ok(undefined);
+      let current: Journal[];
+      try {
+        current = (await readJournals(host, paths)).journals;
+      } catch (error) {
+        return writeFailed(error, `reading the journals in ${paths.journalDir}`, false, paths.journalDir);
+      }
+      if (renamedBack(current).has(now.op)) return ok(undefined);
+      const away = await rootAway(host, now);
+      if (away !== undefined) return away;
+      const checked = await checkedRead(deps, clock, now);
+      if (checked === undefined) return ok(undefined);
+      if (!checked.ok) return checked;
+      const verdict = checked.value;
+      if (verdict.kind === "conflict") {
+        done.notices.push(`${verdict.finding.message}; ${verdict.finding.fix}`);
+        return ok(undefined);
+      }
+      // Kept for keepLocalFor, or for a fresh grace: its own deadline hands it on later.
+      if (verdict.kind === "grace" || verdict.journal.keepUntil !== undefined) return ok(undefined);
+      const guarded = await notAProject(host, paths, deps.env, trash);
+      if (!guarded.ok) return guarded;
+      const detached = await host.deleteTrashDetached(trash, journalFile(paths, now.op), self, {
+        paths,
+        env: deps.env,
+      });
+      if (!detached.ok) return detached;
+      done.started.push(itemOf(verdict.journal));
+      return ok(undefined);
+    },
+    { resume: () => true },
+  );
+  if (!settled.ok)
+    deps.log(
+      "warn",
+      `the held trash of ${journal.project.address}'s offload ${journal.op} was not checked now (${settled.finding.message}); plainport gc checks it`,
+    );
+};
+
 export type Housekept = {
   /** Trash past its deadline handed to the detached delete. */
   started: TrashItem[];
@@ -674,6 +832,10 @@ export const housekeeping = async (
         done.notices.push(
           `the ${journal.kind} ${journal.op} of ${journal.project.address} was interrupted at ${journal.step}; plainport recover finishes or rolls it back`,
         );
+      continue;
+    }
+    if (isHeld(journal) && !reused.has(journal.op)) {
+      await heldHousekeeping(deps, clock, journal, options.deleteDue, done, self);
       continue;
     }
     if (!released(journal) || reused.has(journal.op)) continue;

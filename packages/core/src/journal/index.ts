@@ -249,6 +249,12 @@ export const removeJournal = async (io: LocalIo, paths: PlainportPaths, op: stri
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
   }
+  // A held trash's grace on this boot's uptime (saga/held-clock.ts) goes with its journal.
+  try {
+    await io.fs.unlink(`${paths.journalDir}/${op}.held`);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
 };
 
 export interface JournalsRead {

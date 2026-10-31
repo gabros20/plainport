@@ -99,6 +99,13 @@ describe("findings", () => {
         exitCode: 4,
         summary: expect.any(String),
       },
+      "resolve.copy-here": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "resolve.not-live-tip": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "registry.invalid": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "registry.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
       "registry.unreadable": {
@@ -155,6 +162,13 @@ describe("findings", () => {
         summary: expect.any(String),
       },
       "store.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.lost-write": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "trash.conflict-retained": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 8,
+        summary: expect.any(String),
+      },
       "store.history-elsewhere": {
         severity: "block",
         allowable: false,
@@ -203,6 +217,14 @@ describe("findings", () => {
         severity: "block",
         allowable: false,
         exitCode: 1,
+        summary: expect.any(String),
+      },
+      "compare.not-git": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "compare.not-local": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
+      "compare.unsupported-repo": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
         summary: expect.any(String),
       },
       "contract.invalid": { severity: "block", allowable: false, exitCode: 1, summary: expect.any(String) },
@@ -271,6 +293,12 @@ describe("findings", () => {
         exitCode: 8,
         summary: expect.any(String),
       },
+      "offload.grace-raised": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "operation.cancelled": {
         severity: "block",
         allowable: false,
@@ -279,6 +307,12 @@ describe("findings", () => {
       },
       "plan.stale": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "project.locked": { severity: "block", allowable: false, exitCode: 11, summary: expect.any(String) },
+      "store.needs-upgrade": {
+        severity: "block",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "store.not-set-up": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.in-use": { severity: "block", allowable: false, exitCode: 6, summary: expect.any(String) },
       "store.not-quiescent": {

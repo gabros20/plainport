@@ -63,7 +63,7 @@ export const posixSpawner: Spawner = {
       cwd: request.cwd,
       // Always explicit: the child never inherits this process's environment.
       env: { ...request.env },
-      stdin: request.stdin ?? "ignore",
+      stdin: request.stdinFile === undefined ? (request.stdin ?? "ignore") : Bun.file(request.stdinFile),
       stdout: "pipe",
       stderr: "pipe",
       detached: true,

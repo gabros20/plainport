@@ -45,6 +45,11 @@ const offload = {
   keepLocalFor: DurationSchema,
   requirePushed: z.boolean(),
   stub: z.boolean(),
+  /**
+   * Q16's conflict grace: a released folder's trash is held this long after the commit, and deleted only after a
+   * catalog read taken then shows no fork naming its snapshot. Absent, the store's kind decides (conflictGraceMs).
+   */
+  conflictGrace: DurationSchema.optional(),
 };
 const onload = { hydrate: z.boolean(), leases: z.enum(["warn", "strict"]) };
 const deps = { mode: z.enum(["strip", "keep"]) };
@@ -264,6 +269,9 @@ const deepFreeze = <T>(value: T): T => {
   }
   return value;
 };
+
+/** offload.conflictGrace's default by store kind (Q16): 15 minutes on a remote store, none on a local one. */
+export const DEFAULT_CONFLICT_GRACE = { local: "0", remote: "15m" } as const;
 
 /**
  * Built-in defaults, the lowest layer. Values from DESIGN.md: its config examples, and its Decisions (local copy

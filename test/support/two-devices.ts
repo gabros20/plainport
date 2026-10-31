@@ -9,10 +9,21 @@
 // pinned restic (the log's path is in the wrapper: plainport hands restic only a few variables). recorded() hands the log to invariant 6 (no forget, prune or rewrite). The harness itself reads the
 // store through the pinned restic directly, so its own reads are not in the log.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { localStores } from "../../packages/cli/src/stores.ts";
+import { storeEventKey } from "../../packages/core/src/catalog/codec.ts";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import { type PlainportPaths, resolvePaths } from "../../packages/core/src/paths.ts";
@@ -39,7 +50,11 @@ export type Ran = { code: number | null; signal: string | null; out: string; err
 export const envelope = (
   ran: Ran,
 ):
-  | { ok?: boolean; data?: Record<string, unknown>; error?: { code?: number; finding?: { code?: string } } }
+  | {
+      ok?: boolean;
+      data?: Record<string, unknown>;
+      error?: { code?: number; finding?: { code?: string; fix?: string } };
+    }
   | undefined => {
   try {
     return JSON.parse(ran.out.trim().split("\n").at(-1) ?? "");
@@ -122,6 +137,8 @@ export class Device {
   ): Started {
     const pauseFile = join(this.home, `paused-${this.children.size}`);
     const extra = {
+      // Every step and seam this device's binary reaches, with the time: what its release read could see (unseen).
+      PLAINPORT_TEST_TRACE_FILE: this.traceFile,
       ...options.extra,
       ...(options.pauseAt === undefined
         ? {}
@@ -189,11 +206,31 @@ export class Device {
     expectCode(ran, 0, `${this.name}: init`);
   }
 
-  /** Waits until no trash of a finished offload is left in this device's root (the detached delete ran). */
+  /**
+   * Waits until no trash of a finished offload is left in this device's root (the detached delete ran); a trash held
+   * for the conflict grace (offload.release.held, Q16) stays, and is not waited for.
+   */
   async settled(): Promise<void> {
     const trash = join(this.root, ".plainport-trash");
+    const held = (op: string): boolean => {
+      try {
+        return (
+          JSON.parse(readFileSync(join(this.paths.journalDir, `${op}.json`), "utf8")).step ===
+          "offload.release.held"
+        );
+      } catch {
+        return false;
+      }
+    };
+    const busy = (): boolean => {
+      try {
+        return readdirSync(trash).some((name) => !name.includes(".") && !held(name));
+      } catch {
+        return false;
+      }
+    };
     const deadline = Date.now() + 30_000;
-    while (existsSync(trash) && Date.now() < deadline) await Bun.sleep(25);
+    while (busy() && Date.now() < deadline) await Bun.sleep(25);
   }
 
   /** Invariants 1–3's subject for the project at `path` on this device. */
@@ -209,6 +246,29 @@ export class Device {
       ...(released === undefined ? {} : { released }),
       stripped: STRIPPED,
     };
+  }
+
+  /** The trace its binaries append each step and seam to (PLAINPORT_TEST_TRACE_FILE). */
+  get traceFile(): string {
+    return join(this.home, "steps.trace");
+  }
+
+  /**
+   * Invariant 1's `unseen`, derived (Q16's residual): the events that landed on the store after this device's last
+   * release read the catalog again (its offload.release.reread seam, live or in recover). A file's time is when it
+   * landed on the local store; one that landed in the same millisecond counts as seen, so the list is never broader
+   * than the truth. Nothing when it never released.
+   */
+  async unseen(): Promise<string[]> {
+    if (!existsSync(this.traceFile)) return [];
+    const reads = readFileSync(this.traceFile, "utf8")
+      .split("\n")
+      .filter((line) => line.endsWith(" offload.release.reread"));
+    const at = Number(reads.at(-1)?.split(" ")[0]);
+    if (!Number.isFinite(at)) return [];
+    return (await this.world.events())
+      .filter((e) => statSync(this.world.eventFile(e.id)).mtimeMs >= at + 1)
+      .map((e) => e.id);
   }
 
   /** Kills what is still running (a test that failed while a device stood at a seam). */
@@ -286,6 +346,11 @@ export class Devices {
     );
     if (!opened.ok) throw new Error(opened.finding.message);
     return opened.value;
+  }
+
+  /** The file the local store keeps an event in. */
+  eventFile(id: string): string {
+    return join(this.store, ...storeEventKey(id).split("/"));
   }
 
   async events(): Promise<CatalogEvent[]> {

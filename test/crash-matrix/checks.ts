@@ -4,8 +4,8 @@
 //   allows (RECOVERY_RULE_OUTCOMES), never leaving it pending;
 // - invariants 1–3 on this device (invariantViolations) and 4–6 on the store (catalogInvariantViolations);
 // - no work is lost: a folder still in place is byte-identical to the project as it stood before the run (plus the
-//   scenario's own edits), and a folder that is gone is shelved, its head restoring byte-identical to it apart from the
-//   stripped paths;
+//   scenario's own edits), and a folder that is gone is shelved, its head (or its side of a fork appended after its
+//   release, Q16) restoring byte-identical to it apart from the stripped paths;
 // - recover is idempotent: running it again finds nothing to do.
 
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -40,6 +40,8 @@ export interface World {
   store: { name: string; blob: BlobStore; engine: Engine; catalog?: CatalogPolicy };
   /** Where to restore the head to compare it: on the project's own volume (a case pair needs a case-sensitive one). */
   scratch?: string;
+  /** Events a release's catalog read could not have seen (invariant 1's grace clause, Q16): appended after it. */
+  unseen?: readonly string[];
 }
 
 /** The engine ids of the snapshots the store's repository holds. */
@@ -196,6 +198,7 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
       store: world.store,
       ...(s.released === undefined ? {} : { released: s.released }),
       stripped: STRIPPED,
+      ...(world.unseen === undefined ? {} : { unseen: world.unseen }),
     })),
   );
 
@@ -231,7 +234,11 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     try {
       stub = StubSchema.parse(JSON.parse(readFileSync(`${world.dir}.plainport`, "utf8"))).snapshot;
     } catch {}
-    const head = project?.head ?? undefined;
+    // The head; or, when a fork appended after the release made the project conflicted (Q16's residual, F3), the
+    // stub's snapshot as one side of that fork: either way a kept snapshot that holds the folder.
+    const head =
+      project?.head ??
+      (stub !== undefined && project?.conflicts.some((f) => f.includes(stub as string)) ? stub : undefined);
     const event = events.find((e) => e.type === "offloaded" && e.snapshot === head);
     // The event's one stored entry (Q11): keyed by the store's id on a format-2 store, by its alias on format 1.
     const stored = event?.type === "offloaded" ? storedHere(event.stored) : undefined;

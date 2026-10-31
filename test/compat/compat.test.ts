@@ -25,8 +25,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020";
 import { fsBlobStore } from "../../packages/blob-fs/src/index.ts";
-import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import { appendEvent, readEvents, storeEventLog } from "../../packages/core/src/catalog/index.ts";
 import { looksSealed } from "../../packages/core/src/catalog/seal.ts";
+import { nodeLocalIo } from "../../packages/core/src/node-io.ts";
 import type { PlainportPaths } from "../../packages/core/src/paths.ts";
 import { UNKNOWN_SEMANTICS } from "../../packages/core/src/ports/blob-store.ts";
 import { InjectedFault } from "../../packages/core/src/ports/host.ts";
@@ -458,6 +459,75 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
           await w.old(args);
           const went = await goneAfter(join(trash, "web"), Math.max(2000, tookMs * 3));
           const where = `after old ${args.slice(0, 2).join(" ")} (keepUntil ${keepUntil})`;
+          expect(went, where).toBeUndefined();
+          expect(existsSync(journal), where).toBe(true);
+        }
+      });
+    }
+  }, 300_000);
+
+  test("[journal.held][config.keys] real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now and housekeeping; v0.2 accepts offload.conflictGrace", async () => {
+    for (const held of ["grace", "conflict-retained"] as const) {
+      await scenario(async (w) => {
+        expectOk(await w.old(w.initArgs), "old init");
+        // v0.2 reads the key v0.1.1 refuses (the refusal is tested below), and holds its trash with it.
+        appendFileSync(
+          w.box.paths.configFile,
+          `\n[offload]\nconflictGrace = "${held === "grace" ? "15m" : "2s"}"\n`,
+        );
+        const offloaded = await w.current(offloadArgs);
+        expectOk(offloaded, "current offload");
+        const [op] = trashes(w);
+        const [name] = journals(w);
+        if (op === undefined || name === undefined) throw new Error("no held trash");
+        const journal = join(w.box.paths.journalDir, name);
+        const trash = join(trashDir(w), op);
+        if (held === "conflict-retained") {
+          // Another first offload of the project: a fork naming the held snapshot. Past the grace, v0.2's gc reads it.
+          const registry = registryOf(w);
+          const [id] = Object.keys(registry.projects);
+          const s = ulid();
+          const appended = await appendEvent(storeEventLog(fsBlobStore(testHost(), w.store)), {
+            v: 1,
+            id: s,
+            op: s,
+            type: "offloaded",
+            device: ulid(),
+            at: new Date().toISOString(),
+            project: id as string,
+            root: registry.roots.work,
+            path: "web",
+            snapshot: s,
+            stored: { ssd: "c".repeat(64) },
+            stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+          });
+          if (!appended.ok) throw new Error(appended.finding.message);
+          await Bun.sleep(2_100);
+          expectOk(await w.current(["gc", "--json"]), "current gc");
+        }
+        const parsed = JSON.parse(readFileSync(journal, "utf8"));
+        expect([parsed.step, parsed.keepUntil === undefined ? "conflict-retained" : "grace"]).toEqual([
+          "offload.release.held",
+          held,
+        ]);
+        // v0.1.1 must take the config without the key: a rollback removes the lines.
+        writeFileSync(
+          w.box.paths.configFile,
+          readFileSync(w.box.paths.configFile, "utf8").replace(
+            /\n\[offload\]\nconflictGrace = "[^"]+"\n/,
+            "\n",
+          ),
+        );
+        for (const args of [
+          ["recover", "--json"],
+          ["gc", "--json"],
+          ["gc", "--now", "--yes", "--json"],
+          // a write command: its housekeeping hands a due trash to a detached delete
+          ["root", "scan", "work", "--json"],
+        ]) {
+          await w.old(args);
+          const went = await goneAfter(join(trash, "web"), 2000);
+          const where = `${held}: after old ${args.slice(0, 2).join(" ")}`;
           expect(went, where).toBeUndefined();
           expect(existsSync(journal), where).toBe(true);
         }
@@ -961,10 +1031,75 @@ describeT1Mac("compat: v0.2 and the released v0.1.1", () => {
     });
   }, 300_000);
 
+  // Q6: a fork seen after the commit (Task 23's F2) keeps the closed value kind: "fork" and adds the optional detail,
+  // so a consumer keyed on v0.1.1's published offload output still validates exit 8's data, and the enum is unchanged.
+  test("[value.offload-kind] a fork after the commit keeps kind fork and adds detail after-commit, which v0.1.1's published schema accepts", () => {
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    const outputOf = (manifest: { commands: { name: string; output: object }[] }) =>
+      ajv.compile(manifest.commands.find((c) => c.name === "offload")?.output as object);
+    const old = outputOf(JSON.parse(released("plainport.json")));
+    const now = outputOf(JSON.parse(readFileSync(join(import.meta.dir, "../../plainport.json"), "utf8")));
+    const data = {
+      op: ulid(),
+      exitCode: 8,
+      kind: "fork",
+      detail: "after-commit",
+      project: "work:web",
+      snapshot: ulid(),
+      store: "local",
+      stored: "a".repeat(64),
+    };
+    expect(old(data), JSON.stringify(old.errors)).toBe(true);
+    expect(now(data), JSON.stringify(now.errors)).toBe(true);
+    // The closed values stay closed: a new kind would be a contract change, refused by either schema.
+    for (const check of [old, now]) expect(check({ ...data, kind: "fork-after-commit" })).toBe(false);
+    expect(now({ ...data, detail: "later" })).toBe(false);
+  });
+
   // Rows a later task owns. Each task turns its todo into a test and the guard (PLAINPORT_COMPAT_GATE=1) fails the M2
   // gate while any remains.
-  test.todo("[event.resolved] Task 25: resolve writes resolved only to format-2 stores (v0.1.1 skipping it is tested above)", () => {});
-  test.todo("[journal.held] Task 24: real held trash, in grace and conflict-retained, survives v0.1.1's recover, gc, gc --now, housekeeping and detached delete", () => {});
-  test.todo("[config.keys] Task 24: v0.2 accepts offload.conflictGrace, which v0.1.1 refuses (the S3 keys and the keychain: and op: references are tested above)", () => {});
-  test.todo("[value.offload-kind] Task 23: a fork after the commit keeps kind fork and adds detail after-commit", () => {});
+  // Q2, Q3: a resolved event is written only to a format-2 store. On v0.1.1's M1 store, a conflicted project's resolve
+  // refuses with store upgrade as the fix and writes nothing, so v0.1.1 never meets the event (its skipping one is
+  // tested above).
+  test("[event.resolved] resolve on a format-1 store refuses with store upgrade as the fix and writes no resolved event", async () => {
+    await scenario(async (w) => {
+      expectOk(await w.old(w.initArgs), "old init");
+      const offloaded = await w.old(offloadArgs);
+      expectOk(offloaded, "old offload");
+      await settleJournals(w.box.paths);
+      const ours = (envelope(offloaded)?.data as { snapshot: string } | undefined)?.snapshot as string;
+      // A stranger's first offload of the same project: two first offloads are a fork.
+      const store = fsBlobStore(nodeLocalIo, w.store);
+      const log = storeEventLog(store);
+      const read = await readEvents(log);
+      if (!read.ok) throw new Error(read.finding.message);
+      const first = read.value.events.find((e) => e.type === "offloaded");
+      if (first?.type !== "offloaded") throw new Error("no offload");
+      const id = ulid();
+      const appended = await appendEvent(log, {
+        ...first,
+        id,
+        op: id,
+        device: ulid(),
+        snapshot: id,
+        stored: { local: "c".repeat(64) },
+      });
+      if (!appended.ok) throw new Error(appended.finding.message);
+      const before = treeDigest(w.store);
+
+      const refused = await w.current(["resolve", "work:web", "--keep", ours, "--yes", "--json"]);
+      expect(refused.code).toBe(6);
+      const error = envelope(refused)?.error as { finding?: { code?: string; fix?: string } } | undefined;
+      expect(error?.finding?.code).toBe("store.needs-upgrade");
+      expect(error?.finding?.fix).toContain("plainport store upgrade local --others-stopped --yes");
+      expect(treeDigest(w.store)).toBe(before);
+      const after = await readEvents(log);
+      expect(after.ok && after.value.events.some((e) => e.type === "resolved")).toBe(false);
+      // v0.1.1 still reads the store whole: the project conflicted, nothing skipped.
+      const oldLs = await w.old(["ls", "--json"]);
+      expectOk(oldLs, "old ls");
+      expect(projectOf(oldLs)?.state).toBe("conflicted");
+      expect(findingCodes(oldLs)).not.toContain(SKIPPED);
+    });
+  }, 300_000);
 });

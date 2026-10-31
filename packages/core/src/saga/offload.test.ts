@@ -348,7 +348,9 @@ describe("offload: the happy path", () => {
     ]);
     expect(phases.every((e) => e.op === result.op)).toBe(true);
     expect(steps.filter(isStep)).toEqual(
-      OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
+      OFFLOAD_STEPS.filter(
+        (s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged" && s !== "offload.release.held",
+      ),
     );
     await expectInvariants();
   });
@@ -381,7 +383,9 @@ describe("offload: the happy path", () => {
     });
     value(await runOffload(deps({}, host), { project: await ref() }));
     expect(seen.map((s) => s.step).filter(isStep)).toEqual(
-      OFFLOAD_STEPS.filter((s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged"),
+      OFFLOAD_STEPS.filter(
+        (s) => s !== "offload.snapshot.discarded" && s !== "offload.diverged" && s !== "offload.release.held",
+      ),
     );
     for (const { step, journal } of seen.filter((s) => isStep(s.step))) expect(journal).toBe(step);
     await expectInvariants();
@@ -1040,6 +1044,7 @@ describe("offload: fix wave r1", () => {
       "offload.release.trash",
       "offload.release.moved",
       "offload.release.stub",
+      "offload.release.held",
       "offload.release.delete",
     ]);
   });
@@ -1426,7 +1431,26 @@ describe("the detached trash delete (D47)", () => {
     ).rejects.toThrow();
     const trash = box.dir(`work/.plainport-trash/${op}`);
     box.file(`work/.plainport-trash/${op}/web/a.txt`, "a");
-    const journal = box.file(`.local/state/plainport/journal/${op}.json`, "{}");
+    // A released offload's journal (release.delete): the one step at which it deletes (Q16).
+    const at = new Date().toISOString();
+    const journal = box.file(
+      `.local/state/plainport/journal/${op}.json`,
+      JSON.stringify({
+        v: 1,
+        op,
+        kind: "offload",
+        step: "offload.release.delete",
+        startedAt: at,
+        updatedAt: at,
+        pid: process.pid,
+        host: "test",
+        project: { id: ulid(), address: "work:web", root: "work", rootId: ulid(), path: "web", dir },
+        store: { name: "ssd", id: ulid() },
+        attempts: [],
+        trash,
+        history: [{ step: "offload.release.delete", at }],
+      }),
+    );
     value(await posixDeleteTrash(testHost(), trash, journal, ulid(), launch()));
     await waitGone(journal);
     expect([existsSync(trash), existsSync(journal)]).toEqual([false, false]);
@@ -2209,6 +2233,7 @@ describe("offload: fix wave q1 (D52)", () => {
       [
         "offload.root-created",
         "offload.commit.appended",
+        "offload.release.reread",
         "offload.release.renamed",
         "offload.release.stub-placed",
         "offload.release.registry-updated",
@@ -2745,9 +2770,10 @@ describe("offload: a store inside the project is never offloaded with it (D83)",
   });
 });
 
-describe("offload: a store whose profile does not admit release (M2 Task 18)", () => {
+describe("offload: a store whose profile does not admit release without Q21's proof (M2 Tasks 18, 24)", () => {
   // An SFTP-like store: everything a commit needs, but acknowledged writes are not synced (acked-unsynced), so release
-  // needs Q21's post-grace proof (Task 24). Until then the offload commits and keeps the folder.
+  // needs Q21's post-grace proof. The offload commits and holds the trash (offload.release.held, Task 24); the checked
+  // read deletes it once the grace has passed and the proof holds.
   const NAS = [
     "version = 1",
     'defaultStore = "nas"',
@@ -2760,7 +2786,7 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
     'store = "nas"',
     'on = { mbp = "~/work" }',
   ];
-  const profiled = (durability: "acked-unsynced" | "durable"): StoreOpener => ({
+  const profiled = (durability: "acked-unsynced" | "durable" | "unknown"): StoreOpener => ({
     open: async () => ({
       ok: true,
       value: {
@@ -2768,7 +2794,7 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
           ...store,
           semantics: () => ({
             ...store.semantics(),
-            durability: { value: durability, evidence: "measured" },
+            durability: durability === "unknown" ? "unknown" : { value: durability, evidence: "measured" },
           }),
         },
         engine,
@@ -2782,7 +2808,9 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
     value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: id ?? "" } })));
   });
 
-  const recoverWith = (opener: StoreOpener) =>
+  /** Past the remote store's default grace (15 minutes). */
+  const pastGrace = () => new Date(Date.now() + 16 * 60_000);
+  const recoverWith = (opener: StoreOpener, now?: () => Date) =>
     recover({
       host: testHost(),
       paths: box.paths,
@@ -2792,49 +2820,91 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
       opener,
       openMirror: async () => ({ ok: true, value: mirror }),
       log: () => {},
+      ...(now === undefined ? {} : { now }),
     });
+  const heldSteps = async () => (await readJournals(testHost(), box.paths)).journals.map((j) => j.step);
 
-  test("the offload commits, keeps the folder and its journal, and says why release was refused", async () => {
-    const result = await offload({}, { opener: profiled("acked-unsynced") });
-    expect(result.ok ? 0 : [result.exitCode, result.finding.code]).toEqual([6, "store.semantics-unknown"]);
-    expect(result.ok ? "" : result.finding.message).toContain("committed");
-    expect(result.ok ? "" : result.finding.message).toContain("durability is acked-unsynced (measured)");
-    // A measured property cannot be asserted away (D111), and this build has no held release: the fix says so,
-    // and promises no post-grace proof (review phase 5, judgement a).
-    const fix = result.ok ? "" : (result.finding.fix ?? "");
-    expect(fix).not.toContain("Q21");
-    expect(fix).not.toContain("semantics.durability");
-    expect(fix).toContain("not in this build");
-    // Committed: the snapshot is the head on the store.
+  test("acked-unsynced: the offload commits and holds the trash for the grace; nothing is refused", async () => {
+    const result = value(await offload({}, { opener: profiled("acked-unsynced") }));
+    expect([result.localCopy, result.held, result.releaseRefused]).toEqual(["kept", true, undefined]);
     expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(1);
-    // Kept: the folder as it was, no stub, no trash.
-    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
-    expect(existsSync(join(dir, "node_modules/dep/index.js"))).toBe(true);
-    expect(existsSync(`${dir}.plainport`)).toBe(false);
-    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
-    const journals = (await readJournals(testHost(), box.paths)).journals;
-    expect(journals.map((j) => j.step)).toEqual(["offload.committed"]);
+    // Moved into the trash, stubbed, and held: no delete started.
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(`${dir}.plainport`)).toBe(true);
+    expect(existsSync(join(box.home, "work/.plainport-trash", result.snapshot, "web/src/main.ts"))).toBe(
+      true,
+    );
+    expect(await heldSteps()).toEqual(["offload.release.held"]);
   });
 
-  test("recover keeps it pending on that profile, and finishes the release once the profile admits it", async () => {
-    await offload({}, { opener: profiled("acked-unsynced") });
-    const held = await recoverWith(profiled("acked-unsynced"));
+  test("durability unknown: the offload commits, keeps the trash and reports why release was refused (Task 17 M7)", async () => {
+    const result = value(await offload({}, { opener: profiled("unknown") }));
+    expect([result.localCopy, result.held, result.releaseRefused?.code]).toEqual([
+      "kept",
+      true,
+      "store.semantics-unknown",
+    ]);
+    expect(result.releaseRefused?.message).toContain("durability is unknown");
+    // A property the measurement left unknown is the owner's to assert (D111): the fix names its key.
+    expect(result.releaseRefused?.fix).toContain('stores.nas.semantics.durability = "durable"');
+    expect(existsSync(join(box.home, "work/.plainport-trash", result.snapshot, "web/src/main.ts"))).toBe(
+      true,
+    );
+    // Past the grace the checked read keeps refusing: pending, the trash kept.
+    const held = await recoverWith(profiled("unknown"), pastGrace);
     expect(held.ok ? "" : held.finding.code).toBe("store.semantics-unknown");
-    // A property the measurement left unknown is the owner's to assert: then the fix names its key.
-    const unknown = await recoverWith({
-      ...profiled("acked-unsynced"),
-      profile: async () => ok({ ...store.semantics(), durability: "unknown" }),
-    });
-    expect(unknown.ok ? "" : unknown.finding.fix).toContain('stores.nas.semantics.durability = "durable"');
-    expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
-    expect((await readJournals(testHost(), box.paths)).journals).toHaveLength(1);
-
-    const done = value(await recoverWith(profiled("durable")));
-    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
-    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+    expect(await heldSteps()).toEqual(["offload.release.held"]);
+    // A measured acked-unsynced store stays refused only without Q21's proof, which the checked read makes.
+    const done = value(await recoverWith(profiled("acked-unsynced"), pastGrace));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+    expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(false);
   });
 
-  test("recover keeps the folder when the journal's store is no longer the configured one: the gate fails closed (review phase 5 I1)", async () => {
+  test("a forward step of the clock does not cut the grace short: this boot's uptime must pass it too (review r2 M2)", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    // The clock stepped 16 minutes forward; the host's boot time, computed from it, moved with it: no time passed.
+    const real = testHost();
+    const step = 16 * 60_000;
+    const stepped: HostPorts = {
+      ...real,
+      proc: {
+        pid: real.proc.pid,
+        hostname: () => real.proc.hostname(),
+        isAlive: (pid) => real.proc.isAlive(pid),
+        bootedAtMs: () => real.proc.bootedAtMs() + step,
+        sleep: (ms) => real.proc.sleep(ms),
+        monotonicMs: () => real.proc.monotonicMs(),
+      },
+    };
+    const kept = value(
+      await recover({
+        host: stepped,
+        paths: box.paths,
+        device,
+        env: { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" },
+        loader: new ConfigLoader(testHost(), box.paths),
+        opener: profiled("acked-unsynced"),
+        openMirror: async () => ({ ok: true, value: mirror }),
+        log: () => {},
+        now: pastGrace,
+      }),
+    );
+    expect(kept.operations.map((o) => o.outcome)).toEqual(["trash-kept"]);
+    expect(await heldSteps()).toEqual(["offload.release.held"]);
+    // The same 16 minutes really passed (the boot time stays): the checked read goes on and deletes it.
+    const done = value(await recoverWith(profiled("acked-unsynced"), pastGrace));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+  });
+
+  test("recover keeps the trash before the grace, and deletes it after, once Q21's proof holds", async () => {
+    await offload({}, { opener: profiled("acked-unsynced") });
+    const kept = value(await recoverWith(profiled("acked-unsynced")));
+    expect(kept.operations.map((o) => o.outcome)).toEqual(["trash-kept"]);
+    const done = value(await recoverWith(profiled("acked-unsynced"), pastGrace));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
+  });
+
+  test("the checked read fails closed when the journal's store is no longer the configured one (review phase 5 I1)", async () => {
     const id = value(await readStoreIdentity(store)) ?? "";
     const other = "01JC0000000000000000000000";
     const configs: [string, string[], string][] = [
@@ -2845,33 +2915,44 @@ describe("offload: a store whose profile does not admit release (M2 Task 18)", (
       // The name pointed at a local folder: not the store the offload committed to.
       ["now local", [...NAS.slice(0, 3), 'kind = "local"', 'path = "~/elsewhere"', ...NAS.slice(7)], other],
     ];
-    await offload({}, { opener: profiled("acked-unsynced") });
+    const done = value(await offload({}, { opener: profiled("acked-unsynced") }));
     for (const [what, config, pinned] of configs) {
       box.file(".config/plainport/config.toml", config.join("\n"));
       value(await updateRegistry(testHost(), box.paths, (r) => ok({ ...r, stores: { nas: pinned } })));
-      const held = await recoverWith(profiled("durable"));
-      expect([what, held.ok ? "released" : held.finding.code]).toEqual([what, "store.not-set-up"]);
-      expect(held.ok ? "" : held.finding.message).toContain(id);
-      expect(existsSync(join(dir, "src/main.ts"))).toBe(true);
-      expect((await readJournals(testHost(), box.paths)).journals.map((j) => j.step)).toEqual([
-        "offload.committed",
-      ]);
+      const held = await recoverWith(profiled("durable"), pastGrace);
+      expect([what, held.ok ? "deleted" : "kept"]).toEqual([what, "kept"]);
+      expect(existsSync(join(box.home, "work/.plainport-trash", done.snapshot, "web/src/main.ts"))).toBe(
+        true,
+      );
+      expect(await heldSteps()).toEqual(["offload.release.held"]);
     }
   });
 
-  test("recover's gate reads the opener's profile, which needs no secret, not an opened store's (review phase 5 I2)", async () => {
-    await offload({}, { opener: profiled("acked-unsynced") });
-    // Opened with its secrets the store says acked-unsynced; its profile alone, from config and the measurement,
-    // says durable. The gate asks the profile.
+  test("the checked read reads the opener's profile, so an owner's assertion counts (D111, review phase 5 I2)", async () => {
+    await offload({}, { opener: profiled("unknown") });
+    // Opened with its secrets the store says unknown; its profile, from config and the measurement, says durable.
     const opener: StoreOpener = {
-      ...profiled("acked-unsynced"),
+      ...profiled("unknown"),
       profile: async () =>
         ok({ ...store.semantics(), durability: { value: "durable", evidence: "asserted" } }),
     };
-    const done = value(await recoverWith(opener));
-    expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
-    expect(existsSync(join(dir, "src/main.ts"))).toBe(false);
+    const done = value(await recoverWith(opener, pastGrace));
+    expect(done.operations.map((o) => o.outcome)).toEqual(["trash-deleted"]);
   });
+
+  for (const durability of ["acked-unsynced", "unknown"] as const)
+    test(`a crash past the rename on a remote ${durability} store with grace 0: recover holds the trash (review r2 I1)`, async () => {
+      box.file(".config/plainport/config.toml", [...NAS, "[offload]", 'conflictGrace = "0"'].join("\n"));
+      const crashed = offload(
+        {},
+        { opener: profiled(durability), host: testHost({ faults: { at: "offload.release.moved" } }) },
+      );
+      await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+      const done = value(await recoverWith(profiled(durability)));
+      expect(done.operations.map((o) => o.outcome)).toEqual(["finished"]);
+      expect(await heldSteps()).toEqual(["offload.release.held"]);
+      expect(existsSync(join(box.home, "work/.plainport-trash"))).toBe(true);
+    });
 
   test("a release past the rename is finished without the gate or the store's secrets (review phase 5 I2)", async () => {
     const crashed = offload(

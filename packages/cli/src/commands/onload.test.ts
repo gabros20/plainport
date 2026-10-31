@@ -195,7 +195,7 @@ describe("onload: the command", () => {
       reused: {
         from: trash,
         offload: snapshot,
-        reason: `the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified`,
+        reason: `the folder offload ${snapshot} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
       },
       hydrate: {
         status: "reused",
@@ -217,7 +217,7 @@ describe("onload: the command", () => {
     expect(run.code).toBe(0);
     expect(run.out).toBe(
       [
-        `onloaded work:web into ${dir()}: renamed back from ${join(box.home, "work/.plainport-trash", snapshot, "web")}, not restored from the store (the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified)`,
+        `onloaded work:web into ${dir()}: renamed back from ${join(box.home, "work/.plainport-trash", snapshot, "web")}, not restored from the store (the folder offload ${snapshot} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified)`,
         "dependencies came back with the folder, so nothing was installed",
         "",
       ].join("\n"),
@@ -325,6 +325,11 @@ describe("onload: the command", () => {
       if (event.type !== "offloaded" || event.snapshot !== snapshot) continue;
       edit(event);
       writeFileSync(join(folder, name), `${JSON.stringify(event)}\n`);
+      // The edit stands for an event its writer wrote so: this device's mirror (which the offload's release read
+      // filled) never held another copy of it, or the read would keep both and leave it out (a mirror clash).
+      for (const id of existsSync(box.paths.cacheDir) ? readdirSync(box.paths.cacheDir) : [])
+        if (existsSync(join(box.paths.cacheDir, id, "events", name)))
+          rmSync(join(box.paths.cacheDir, id, "events", name));
       return event;
     }
     throw new Error(`no offloaded event of ${snapshot}`);

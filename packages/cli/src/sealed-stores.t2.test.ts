@@ -111,7 +111,11 @@ const sealedStore = async (d: RemoteDevice, kind: StoreSpec["kind"]) => {
     prefix: freshPrefix(`t20-${kind}`),
     semantics: assertedProfile(kind, "durable"),
   };
-  d.configure({ [STORE]: spec }, { store: STORE, extra: ["[onload]", "hydrate = false"] });
+  // No conflict grace (Q16): the durable store releases as M1 did, so a trash goes at once.
+  d.configure(
+    { [STORE]: spec },
+    { store: STORE, extra: ["[onload]", "hydrate = false", "[offload]", 'conflictGrace = "0"'] },
+  );
   const started = performance.now();
   const add = await d.cli(["store", "add", STORE, ...addArgs(d, spec), "--json"]);
   timings.push(`store add (sealed) on ${kind}: ${Math.round(performance.now() - started)} ms`);

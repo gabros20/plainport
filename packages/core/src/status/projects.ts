@@ -8,7 +8,7 @@
 //
 //   unavailable             the project's root is bound to a volume that is not mounted (its folder is unknown)
 //   offloading, onloading   a journal of the project is open: running, or interrupted (plainport recover settles it)
-//   conflicted              the catalog holds a fork (plainport resolve, M2)
+//   conflicted              the catalog holds a fork (plainport resolve --keep; `heads` lists each live tip)
 //   restored-unhydrated     the folder is here, its dependencies are not installed (plainport hydrate)
 //   local                   the folder is here; or the catalog's latest event onloaded it on some device
 //   shelved                 the folder is not here, and the catalog's latest event offloaded it (or its stub is here)
@@ -20,7 +20,9 @@
 // looks running), folder-missing (this device should hold it but its folder is gone), stale and never-synced (the
 // store did not answer), journal-unreadable (a journal this version cannot read names the project, or names none and
 // so may be any project's), several-stores (the catalogs of two stores hold the project, merged by its id; the view
-// shows its root's store's, else the first's). Each condition comes with a sentence in `conditionDetails`.
+// shows its root's store's, else the first's), rejected-line (the folder is here on a snapshot another device's
+// resolution rejected: its next offload is live work that conflicts again, Task 23). Each condition comes with a
+// sentence in `conditionDetails`.
 //
 // Views are lazy (loadProjects): the registry, roots, journals and catalogs are read once, for every project, since a
 // name is matched against all of them; a project's own view (its folder's stat, its head's size, its local planning)
@@ -30,7 +32,7 @@
 import { join } from "node:path";
 import type { Failure, Finding, ProjectState, Result } from "@plainport/contract";
 import { fail, finding, ok, shellWord } from "@plainport/contract";
-import type { CatalogProject, CatalogState } from "../catalog/fold.ts";
+import { type CatalogProject, type CatalogState, contested } from "../catalog/fold.ts";
 import { readStoreDescriptor } from "../catalog/identity.ts";
 import {
   eventAt,
@@ -42,7 +44,7 @@ import {
 } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import { realScheduler, type Scheduler, withinDeadline } from "../deadline.ts";
-import type { Device } from "../device.ts";
+import { type Device, shortDeviceId } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, type OffloadJournal, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -53,11 +55,14 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { SECRET_DEADLINE_MS } from "../ports/secrets.ts";
 import type { OpenedStore, StoreCredentials, StoreOpener } from "../ports/store.ts";
+import { conflictRetained, isHeld } from "../recover/held.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
+import { readTheirs, type TheirsListed } from "../saga/compare-refs.ts";
 import { holdsProjectBack, operationRunning, unreadableOf } from "../saga/project-gate.ts";
 import { offloadTrashOf } from "../saga/release.ts";
+import { dotGit } from "../scan/git.ts";
 import { resolveS3Credentials, resolveSecret, secretProvidersOf, secretRefOf } from "../store.ts";
 import { sealedByPin, storeCatalog } from "../stores/seal.ts";
 import { STUB_SUFFIX } from "../stub.ts";
@@ -104,6 +109,8 @@ export const PROJECT_CONDITIONS = [
   "catalog-unreadable",
   "journal-unreadable",
   "several-stores",
+  "rejected-line",
+  "leased-elsewhere",
 ] as const;
 export type ProjectCondition = (typeof PROJECT_CONDITIONS)[number];
 
@@ -132,6 +139,21 @@ export type ProjectStatus = {
   head: string | null;
   /** The snapshot this device's copy came from (registry.json). */
   base?: string;
+  /**
+   * A conflicted project's live tips, sorted (Q18's read-only inspection): each one's device (an id until M3), time,
+   * kind, base and size, and whether this device's copy is on it (its folder here, its base that snapshot): the one
+   * `resolve --keep` must name while the copy is here.
+   */
+  heads?: {
+    snapshot: string;
+    device: string;
+    at: string;
+    kind: "offloaded" | "checkpointed";
+    base?: string;
+    files?: number;
+    bytes?: number;
+    here: boolean;
+  }[];
   /** The device whose onload holds the project's lease, and whether it is this one. */
   lease?: { device: string; at: string; base: string; here: boolean };
   /** Snapshots the catalog holds of it. */
@@ -161,6 +183,11 @@ export type ProjectStatus = {
     due: boolean;
     /** The delete guard's last refusal of it (D87, r3 #4): why it stays, and the way out. */
     refused?: Finding;
+    /**
+     * Held for Q16's checked read (offload.release.held): `grace` until keepUntil; `conflict-retained` while a fork
+     * names its snapshot (the last checked read saw one, or this view's catalog shows one).
+     */
+    held?: "grace" | "conflict-retained";
   }[];
   /** Journals this version cannot read that name it, or name no project (journal-unreadable). */
   unreadableJournals?: string[];
@@ -170,6 +197,11 @@ export type ProjectStatus = {
   gitWarnings?: Finding[];
   /** With `detail`, for a folder here: what an offload would strip now. */
   strippableBytes?: number;
+  /**
+   * With `detail`, for a git project whose folder is here: the sets plainport compare wrote
+   * (refs/plainport/theirs/<snapshot>/…), each complete or not; absent when there are none.
+   */
+  theirs?: TheirsListed[];
 };
 
 export type StoreView = {
@@ -584,6 +616,18 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       state = "local";
       note("folder-missing", `it is registered here, but ${dir ?? "its folder"} is not here`);
     }
+    // A copy kept on a snapshot a resolution rejected (F2): live work that conflicts again at its next offload.
+    if (here && entry?.base !== undefined && catalog?.rejected.includes(entry.base) === true)
+      note(
+        "rejected-line",
+        `this copy is on snapshot ${entry.base}, which a resolution rejected; its next offload uploads it as live work, which conflicts again`,
+      );
+    // Another device's onload holds the lease (Q17: advisory): a working copy is there.
+    if (lease !== null && lease.device !== device.id)
+      note(
+        "leased-elsewhere",
+        `device ${shortDeviceId(lease.device)} holds its lease since ${lease.at}: a working copy is onloaded there`,
+      );
     if (catalog !== undefined && catalog.missing.length > 0)
       note(
         "incomplete",
@@ -630,6 +674,30 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         strippedBytes = got.value.event.stats.strippedBytes;
       }
     }
+    // A conflicted project's live tips, each with its size from the mirror's copy of its event (Q18).
+    let heads: ProjectStatus["heads"];
+    if (catalog !== undefined && (catalog.status === "conflicted" || catalog.conflicts.length > 0)) {
+      heads = [];
+      for (const snapshot of [...catalog.heads].sort()) {
+        const tip = catalog.snapshots[snapshot];
+        if (tip === undefined) continue;
+        let size: { files: number; bytes: number } | undefined;
+        if (read?.mirror !== undefined) {
+          const got = await eventAt(mirrorEventLog(read.mirror), tip.event);
+          if (got.ok && got.value !== null && "event" in got.value && "stats" in got.value.event)
+            size = { files: got.value.event.stats.files, bytes: got.value.event.stats.bytes };
+        }
+        heads.push({
+          snapshot,
+          device: tip.device,
+          at: tip.at,
+          kind: tip.kind,
+          ...(tip.base === undefined ? {} : { base: tip.base }),
+          ...(size ?? {}),
+          here: here && entry?.base === snapshot,
+        });
+      }
+    }
     // Never offloaded, here: the folder's own size now, without its dependency folders, when sizes are shown.
     if (options.sizes === true && bytes === undefined && head === null && here && dir !== undefined)
       bytes = await treeBytes(io, dir, skip);
@@ -639,12 +707,24 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     for (const j of open) {
       if (j.kind !== "offload" || holdsProjectBack(j)) continue;
       const at = j.trash ?? offloadTrashOf(j as OffloadJournal);
+      const forked =
+        catalog !== undefined &&
+        (catalog.conflicts.some((f) => f.includes(j.op)) || contested(catalog, j.op));
+      const held = isHeld(j)
+        ? conflictRetained(j) || forked
+          ? ("conflict-retained" as const)
+          : ("grace" as const)
+        : undefined;
       trash.push({
         op: j.op,
         path: at,
         ...(j.keepUntil === undefined ? {} : { keepUntil: j.keepUntil }),
         deleting: (await claimedReason(io, at, device.id)) !== undefined,
-        due: j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime(),
+        // A conflict-retained trash is not due: only a resolution and a checked read move it on.
+        due:
+          held !== "conflict-retained" &&
+          (j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime()),
+        ...(held === undefined ? {} : { held }),
       });
       const refused = await readRefusal(io, at);
       if (refused !== undefined) (trash.at(-1) as ProjectStatus["trash"][number]).refused = refused;
@@ -673,6 +753,17 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
         };
       else findings.push(planned.finding);
     }
+    // The theirs refs compare wrote, read (for-each-ref, cat-file) from a git project's folder here; a repository
+    // git cannot read leaves them out and adds its finding to the set's.
+    let theirs: TheirsListed[] = [];
+    if (options.detail === true && deps.planning !== undefined && here && dir !== undefined) {
+      const repo = await dotGit(deps.planning.host, dir);
+      if (repo.ok && repo.value !== "none") {
+        const listed = await readTheirs({ host: deps.planning.host, env: deps.env }, dir);
+        if (listed.ok) theirs = listed.value;
+        else findings.push(listed.finding);
+      }
+    }
     const lastActivity = newest([
       ...Object.values(catalog?.snapshots ?? {}).map((s) => s.at),
       lease?.at,
@@ -692,6 +783,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       ...(read === undefined ? {} : { store: read.store }),
       head,
       ...(entry?.base === undefined ? {} : { base: entry.base }),
+      ...(heads === undefined ? {} : { heads }),
       ...(lease === null
         ? {}
         : {
@@ -708,6 +800,7 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       trash,
       ...(unreadable.length === 0 ? {} : { unreadableJournals: unreadable }),
       ...details,
+      ...(theirs.length === 0 ? {} : { theirs }),
     };
     const next = nextStep(view);
     return next === undefined ? view : { ...view, next };
@@ -724,6 +817,10 @@ export const projectViews = async (deps: ViewDeps, options: ViewOptions = {}): P
   return ok({ projects, stores, findings, unreadableJournals });
 };
 
+/** A next step that is a confirm command never carries --yes (review r2 M7): run, it asks, or prints the re-run. */
+const CONFIRM =
+  "; it is a confirm command: it asks first, and without a terminal prints the command to re-run with --yes";
+
 /** What to do next for a project in this view, when anything is to be done. */
 export const nextStep = (p: ProjectStatus): { command: string; reason: string } | undefined => {
   const address = shellWord(p.address);
@@ -736,8 +833,18 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
     };
   if (p.conditions.includes("diverged-after-commit"))
     return {
-      command: `plainport offload ${address} --yes`,
-      reason: `keep working in the folder; the next offload builds on snapshot ${p.head}`,
+      command: `plainport offload ${address}`,
+      reason: `keep working in the folder; the next offload builds on snapshot ${p.head}${CONFIRM}`,
+    };
+  if (p.conditions.includes("rejected-line"))
+    return {
+      command: `plainport offload ${address}`,
+      reason: `a resolution rejected snapshot ${p.base}, which this copy is on: the offload keeps its work as live work, which conflicts again and can then be resolved${CONFIRM}`,
+    };
+  if (p.conditions.includes("head-moved"))
+    return {
+      command: `plainport offload ${address} --fork`,
+      reason: `another copy was offloaded since this one came: this uploads it as a fork, so the project is conflicted and compare can show the two copies side by side (D114)${CONFIRM}`,
     };
   if (p.conditions.includes("incomplete"))
     return {
@@ -745,12 +852,30 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
       reason:
         "the catalog misses snapshots: connect the store that holds every snapshot; meanwhile restore reads a snapshot it holds side by side",
     };
-  if (p.state === "conflicted")
-    return {
-      command: `plainport restore ${address} --snapshot <id> --to <path>`,
-      reason:
-        "the catalog holds a fork: restore reads either copy side by side (settling which copy wins arrives in M2)",
-    };
+  if (p.state === "conflicted") {
+    const mine = p.heads?.find((h) => h.here);
+    // A copy here on no live tip reaches the conflict only as a fork of its own (D114).
+    if (
+      mine === undefined &&
+      p.here &&
+      p.base !== undefined &&
+      !(p.heads ?? []).some((h) => h.snapshot === p.base)
+    )
+      return {
+        command: `plainport offload ${address} --fork`,
+        reason: `the catalog holds a fork, and this copy is on snapshot ${p.base}, which is no live tip: this uploads it as a fork, a live tip resolve can keep (D114)${CONFIRM}`,
+      };
+    // Which tip to keep is a choice: compare and status show the copies; resolve, a confirm command, takes no --yes here.
+    return mine !== undefined
+      ? {
+          command: `plainport resolve ${address} --keep ${mine.snapshot}`,
+          reason: `the catalog holds a fork, and this device's copy is on one of its live tips: resolving keeps that one over the others; plainport compare ${address} shows the others beside it first (heads lists them)${CONFIRM}`,
+        }
+      : {
+          command: `plainport resolve ${address} --keep <snapshot>`,
+          reason: `the catalog holds a fork: keep one of its live tips (heads lists each one's device, time and size; plainport status ${address} shows them, restore --snapshot reads any side by side)${CONFIRM}`,
+        };
+  }
   const refused = p.trash.find((t) => t.refused !== undefined && !t.deleting);
   if (refused?.refused !== undefined)
     return {

@@ -149,6 +149,8 @@ export interface CommandDef<
   /** As typed after `plainport`: one word, or two for a command group (`root add`). */
   name: string;
   summary: string;
+  /** Paragraphs `help <command>` prints after the usage, for what the summary and options cannot say. */
+  details?: readonly string[];
   risk: RiskClass;
   /** The plan a --dry-run returns, or false: then --dry-run is refused with exit 2 (D18). */
   dryRun: false | DryRun<P>;
@@ -420,6 +422,8 @@ export const suggestCommand = (
 export type CommandInfo = {
   name: string;
   summary: string;
+  /** Only when the command has any. */
+  details?: string[];
   usage: string;
   risk: RiskClass;
   dryRun: boolean;
@@ -434,6 +438,7 @@ export type CommandInfo = {
 export const commandInfo = (command: AnyCommand): CommandInfo => ({
   name: command.name,
   summary: command.summary,
+  ...(command.details === undefined ? {} : { details: [...command.details] }),
   usage: usageOf(command),
   risk: command.risk,
   dryRun: command.dryRun !== false,

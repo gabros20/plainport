@@ -1,11 +1,13 @@
 // Every registered command, in help order. Later milestones add entries here; nothing else lists commands.
 
 import type { Registry } from "../registry.ts";
+import { compare } from "./compare.ts";
 import { help } from "./help.ts";
 import { init } from "./init.ts";
 import { offload } from "./offload.ts";
 import { dehydrate, hydrate, onload } from "./onload.ts";
 import { gc, recover, restore } from "./recover.ts";
+import { resolveConflict } from "./resolve-conflict.ts";
 import { rootAdd, rootBind, rootList, rootScan } from "./root.ts";
 import { ls, status } from "./status.ts";
 import { storeAdd, storeList, storeRemove, storeTest, storeUpgrade } from "./store.ts";
@@ -21,6 +23,8 @@ export const REGISTRY: Registry = [
   hydrate,
   dehydrate,
   restore,
+  compare,
+  resolveConflict,
   recover,
   gc,
   rootAdd,

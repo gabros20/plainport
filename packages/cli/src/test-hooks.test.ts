@@ -3,7 +3,7 @@
 // on the release binary itself (scripts/build.test.ts).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testFaultPlan } from "./test-hooks.ts";
@@ -69,6 +69,19 @@ describe("testFaultPlan", () => {
         testRun({ ...pause, PLAINPORT_TEST_PAUSE_FILE: join(dir, "home/paused") }),
         refused,
       ),
+    ).toBeUndefined();
+  });
+
+  test("a trace file under HOME gets every step and seam reached, with the time; one outside HOME plans nothing", async () => {
+    const file = join(dir, "home/steps.trace");
+    const plan = await testFaultPlan(testRun({ PLAINPORT_TEST_TRACE_FILE: file }), guard);
+    plan?.onStep?.("offload.committed");
+    plan?.onStep?.("offload.release.reread");
+    const lines = readFileSync(file, "utf8").trim().split("\n");
+    expect(lines.map((l) => l.split(" ")[1])).toEqual(["offload.committed", "offload.release.reread"]);
+    expect(lines.every((l) => Number.isInteger(Number(l.split(" ")[0])))).toBe(true);
+    expect(
+      await testFaultPlan(testRun({ PLAINPORT_TEST_TRACE_FILE: join(dir, "elsewhere") }), guard),
     ).toBeUndefined();
   });
 

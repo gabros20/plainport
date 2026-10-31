@@ -8,14 +8,17 @@
 // in process instead (`runInProcess`), its devices on the semantic fake (test/support/fake-devices.ts).
 
 import { expect } from "bun:test";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { storeEventKey } from "../../packages/core/src/catalog/codec.ts";
 import { foldCatalog } from "../../packages/core/src/catalog/fold.ts";
 import { capabilitiesOf, type StoreSemantics } from "../../packages/core/src/ports/blob-store.ts";
 import {
+  type CatalogInvariantSubject,
   catalogInvariantViolations,
   invariantViolations,
+  type RecordedCall,
+  recordingBlobStore,
 } from "../../packages/core/src/testing/invariants.ts";
 import { MEMORY_SEMANTICS } from "../../packages/core/src/testing/memory-blob-store.ts";
 import {
@@ -23,7 +26,7 @@ import {
   semanticBlobStore,
 } from "../../packages/core/src/testing/semantic-blob-store.ts";
 import { allEvents, type FakeDevice, fakeDevices } from "./fake-devices.ts";
-import { type Device, type Devices, envelope, expectCode } from "./two-devices.ts";
+import { type Device, type Devices, envelope, expectCode, type Ran } from "./two-devices.ts";
 
 export interface Schedule {
   id: string;
@@ -50,15 +53,21 @@ const projectId = async (world: Devices): Promise<string> => {
   return event.project;
 };
 
-/** Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. */
+/**
+ * Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. Invariant 1's
+ * `unseen` (the events a device's release read could not have seen, Q16's residual) is derived from each device's
+ * trace, never written by hand; `strict` names the onloads run under onload.leases = "strict", for invariant 5.
+ */
 export const expectInvariants = async (
   world: Devices,
   before: { events: Awaited<ReturnType<Devices["events"]>>; snapshots: readonly string[] },
+  { strict = [] }: { strict?: CatalogInvariantSubject["strictOnloads"] } = {},
 ): Promise<void> => {
   const id = await projectId(world);
   for (const d of world.devices) {
     await d.settled();
-    expect({ device: d.name, problems: await invariantViolations(await d.subject(id)) }).toEqual({
+    const subject = { ...(await d.subject(id)), unseen: await d.unseen() };
+    expect({ device: d.name, problems: await invariantViolations(subject) }).toEqual({
       device: d.name,
       problems: [],
     });
@@ -72,6 +81,7 @@ export const expectInvariants = async (
       snapshotsBefore: before.snapshots,
       snapshotsNow: await world.snapshots(),
       recorded: world.recorded(),
+      strictOnloads: strict,
     }),
   ).toEqual([]);
 };
@@ -84,6 +94,229 @@ const bothOnloaded = async (world: Devices, a: Device, b: Device): Promise<void>
   expectCode(await b.run(ONLOAD()), 0, `${b.name}: onload`);
   // The default leases ("warn") let the second working copy happen, with lease.held.
   expectCode(await a.run(ONLOAD()), 0, `${a.name}: onload`);
+};
+
+/** A device's registry entry for the web project: its base is the snapshot its copy is on. */
+const baseOf = (d: Device): string | undefined => {
+  const registry = JSON.parse(readFileSync(d.paths.registryFile, "utf8")) as {
+    projects: Record<string, { path: string; base?: string }>;
+  };
+  return Object.values(registry.projects).find((e) => e.path === "web")?.base;
+};
+
+/** The offload journals open on a device's disk. */
+const openJournals = (journalDir: string): { kind: string; step: string }[] =>
+  existsSync(journalDir)
+    ? readdirSync(journalDir)
+        .filter((f) => f.endsWith(".json"))
+        .map((f) => JSON.parse(readFileSync(join(journalDir, f), "utf8")) as { kind: string; step: string })
+    : [];
+
+/** Turns a device's leases to "strict" from its next command on (its config.toml gains an [onload] table). */
+export const strictLeases = (d: Device): void =>
+  appendFileSync(d.paths.configFile, '\n[onload]\nleases = "strict"\n');
+
+/** The codes of the findings a --json run streamed before its envelope. */
+export const streamedCodes = (ran: Ran): string[] =>
+  ran.out
+    .trim()
+    .split("\n")
+    .slice(0, -1)
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line) as { type?: string; finding?: { code?: string } };
+        return event.type === "finding" && event.finding?.code !== undefined ? [event.finding.code] : [];
+      } catch {
+        return [];
+      }
+    });
+
+/**
+ * Two strict onloads stand at onload.lease-checked together, each having observed no holder at its fresh read, and
+ * both onload (Q17: a lease is advisory). The fold names one holder; each device's status says whose it is. Returns
+ * the holder, the other, the store before the race and the onloads for invariant 5.
+ */
+const strictRace = async (world: Devices) => {
+  const a = world.device("dev-a");
+  const b = world.device("dev-b");
+  world.project(a);
+  expectCode(await a.run(OFFLOAD()), 0, `${a.name}: the first offload`);
+  await a.settled();
+  strictLeases(a);
+  strictLeases(b);
+  const before = { events: await world.events(), snapshots: await world.snapshots() };
+
+  // Both read the catalog fresh and pass the lease check before either appends its onloaded event.
+  const onloadA = a.start(ONLOAD(), { pauseAt: "onload.lease-checked" });
+  await onloadA.paused();
+  const onloadB = b.start(ONLOAD(), { pauseAt: "onload.lease-checked" });
+  await onloadB.paused();
+  onloadA.resume();
+  onloadB.resume();
+  const [byA, byB] = await Promise.all([onloadA.done, onloadB.done]);
+  // Each device, by its own report: it observed no holder, and onloaded.
+  for (const [d, ran] of [
+    [a, byA],
+    [b, byB],
+  ] as const) {
+    expectCode(ran, 0, `${d.name}: strict onload`);
+    expect({ device: d.name, findings: streamedCodes(ran).filter((c) => c === "lease.held") }).toEqual({
+      device: d.name,
+      findings: [],
+    });
+    expect(await Bun.file(`${d.dir()}/src/main.ts`).exists()).toBe(true);
+  }
+  const strict = [
+    { device: a.id, op: envelope(byA)?.data?.op as string, before: before.events.map((e) => e.id) },
+    { device: b.id, op: envelope(byB)?.data?.op as string, before: before.events.map((e) => e.id) },
+  ];
+
+  // The fold names one holder; each device's status says whose it is.
+  const id = await projectId(world);
+  const lease = foldCatalog(await world.events()).projects[id]?.lease;
+  const holder = lease?.device === a.id ? a : b;
+  const other = holder === a ? b : a;
+  expect([a.id, b.id]).toContain(lease?.device as string);
+  const statusOf = async (d: Device) => {
+    const ran = await d.run(["status", "work:web", "--json"]);
+    expectCode(ran, 0, `${d.name}: status`);
+    return envelope(ran)?.data as { lease?: { device: string; here: boolean }; conditions: string[] };
+  };
+  const seenByHolder = await statusOf(holder);
+  expect([seenByHolder.lease?.here, seenByHolder.conditions.includes("leased-elsewhere")]).toEqual([
+    true,
+    false,
+  ]);
+  const seenByOther = await statusOf(other);
+  expect([seenByOther.lease?.device, seenByOther.lease?.here]).toEqual([holder.id, false]);
+  expect(seenByOther.conditions).toContain("leased-elsewhere");
+  const human = await other.run(["status", "work:web"]);
+  expect(human.out).toContain(`device ${holder.id.slice(0, 10)} since`);
+
+  await Bun.write(`${holder.dir()}/src/held.ts`, "export const held = 1;\n");
+  await Bun.write(`${other.dir()}/src/other.ts`, "export const other = 1;\n");
+  return { id, holder, other, before, strict };
+};
+
+/** The restic backups the binaries ran so far. */
+const backups = (world: Devices) =>
+  world.recorded().filter((c) => c.tool === "restic" && c.args.includes("backup")).length;
+
+/**
+ * S4: after the strict race, strict governs onload only (D114): the non-holder's dry run previews lease.held, and its
+ * offload warns lease.held and goes on, first, while the holder's offload, verified, stands at its commit. The
+ * holder's then forks: both snapshots are kept, the project is conflicted, nothing is lost.
+ */
+const strictOnloads = async (world: Devices): Promise<void> => {
+  const { id, holder, other, before, strict } = await strictRace(world);
+  const previewed = await other.run(["offload", "work:web", "--dry-run", "--json"]);
+  expectCode(previewed, 0, `${other.name}: offload --dry-run`);
+  expect(streamedCodes(previewed)).toContain("lease.held");
+
+  const offloadHolder = holder.start(OFFLOAD(), { pauseAt: "offload.verified" });
+  await offloadHolder.paused();
+  const first = await other.run(OFFLOAD());
+  expectCode(first, 0, `${other.name}: strict offload of the non-holding copy`);
+  expect(streamedCodes(first)).toContain("lease.held");
+  const committed = envelope(first)?.data;
+  offloadHolder.resume();
+  const second = await offloadHolder.done;
+  expectCode(second, 8, `${holder.name}: offload after the other's commit`);
+  expect(envelope(second)?.error?.finding?.code).toBe("catalog.head-moved");
+  const forked = envelope(second)?.data;
+  expect([forked?.kind, forked?.project]).toEqual(["fork", "work:web"]);
+  // The holder keeps its folder with its edit; the store keeps both snapshots, the project conflicted between them.
+  expect(await Bun.file(`${holder.dir()}/src/held.ts`).text()).toBe("export const held = 1;\n");
+  const project = foldCatalog(await world.events()).projects[id];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual(
+    [committed?.snapshot as string, forked?.snapshot as string].sort(),
+  );
+  // The holder's event came after the other's release read the catalog: Q16's residual, read from the traces.
+  await expectInvariants(world, before, { strict });
+};
+
+/**
+ * S4b: after the strict race, the holder offloads first. The non-holder's offload is behind the head: refused with
+ * catalog.head-moved before anything is uploaded, its fix the exact command; offload --fork --yes then uploads it and
+ * keeps it as a fork (F1), so the project is conflicted with both snapshots kept and compare reaches the other copy.
+ */
+const holderFirst = async (world: Devices): Promise<void> => {
+  const { id, holder, other, before, strict } = await strictRace(world);
+  const first = await holder.run(OFFLOAD());
+  expectCode(first, 0, `${holder.name}: the holder's offload`);
+  const committed = envelope(first)?.data?.snapshot as string;
+  await holder.settled();
+
+  const uploaded = backups(world);
+  const refused = await other.run(OFFLOAD());
+  expectCode(refused, 8, `${other.name}: offload behind the head`);
+  expect(envelope(refused)?.error?.finding?.code).toBe("catalog.head-moved");
+  expect(envelope(refused)?.error?.finding?.fix).toContain("plainport offload work:web --fork --yes");
+  expect(backups(world)).toBe(uploaded);
+  expect((await other.run(["status", "work:web", "--json"])).out).toContain(
+    '"command":"plainport offload work:web --fork"',
+  );
+
+  const kept = await other.run(["offload", "work:web", "--fork", "--yes", "--json"]);
+  expectCode(kept, 8, `${other.name}: offload --fork`);
+  const forked = envelope(kept)?.data;
+  expect([forked?.kind, forked?.detail, forked?.project]).toEqual(["fork", undefined, "work:web"]);
+  expect(await Bun.file(`${other.dir()}/src/other.ts`).text()).toBe("export const other = 1;\n");
+  expect(await Bun.file(`${other.dir()}.plainport`).exists()).toBe(false);
+  expect(baseOf(other)).toBe(forked?.snapshot as string);
+  const project = foldCatalog(await world.events()).projects[id];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual([committed, forked?.snapshot as string].sort());
+  // The conflict is reachable: compare writes the holder's copy beside this one.
+  const compared = await other.run(["compare", "work:web", "--json"]);
+  expectCode(compared, 0, `${other.name}: compare`);
+  const sets = envelope(compared)?.data?.sets as { snapshot: string }[];
+  expect(sets.map((s) => s.snapshot)).toEqual([committed]);
+  expectCode(
+    await other.run(["compare", "work:web", "--clean", "--json"]),
+    0,
+    `${other.name}: compare --clean`,
+  );
+  await expectInvariants(world, before, { strict });
+};
+
+/**
+ * S4c: the same gap under leases = "warn" (the default): two working copies whose offloads do not overlap. The first
+ * offload commits; the second copy is behind the head, refused with catalog.head-moved before anything is uploaded,
+ * and offload --fork --yes keeps it as a fork (D114), so the project is conflicted and compare reaches the other copy.
+ */
+const warnNoOverlap = async (world: Devices): Promise<void> => {
+  const a = world.device("dev-a");
+  const b = world.device("dev-b");
+  await bothOnloaded(world, a, b);
+  const before = { events: await world.events(), snapshots: await world.snapshots() };
+  await editBoth(a, b);
+  const first = await a.run(OFFLOAD());
+  expectCode(first, 0, `${a.name}: the first offload`);
+  const committed = envelope(first)?.data?.snapshot as string;
+  await a.settled();
+  const uploaded = backups(world);
+  const refused = await b.run(OFFLOAD());
+  expectCode(refused, 8, `${b.name}: offload behind the head`);
+  expect(envelope(refused)?.error?.finding?.code).toBe("catalog.head-moved");
+  expect(envelope(refused)?.error?.finding?.fix).toContain("plainport offload work:web --fork --yes");
+  expect(backups(world)).toBe(uploaded);
+  const kept = await b.run(["offload", "work:web", "--fork", "--yes", "--json"]);
+  expectCode(kept, 8, `${b.name}: offload --fork`);
+  const forked = envelope(kept)?.data;
+  expect([forked?.kind, forked?.project]).toEqual(["fork", "work:web"]);
+  expect(await Bun.file(`${b.dir()}/src/b.ts`).text()).toBe("export const b = 1;\n");
+  expect(baseOf(b)).toBe(forked?.snapshot as string);
+  const project = foldCatalog(await world.events()).projects[await projectId(world)];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual([committed, forked?.snapshot as string].sort());
+  const compared = await b.run(["compare", "work:web", "--json"]);
+  expectCode(compared, 0, `${b.name}: compare`);
+  const sets = (envelope(compared)?.data?.sets ?? []) as { snapshot: string }[];
+  expect(sets.map((x) => x.snapshot)).toEqual([committed]);
+  expectCode(await b.run(["compare", "work:web", "--clean", "--json"]), 0, `${b.name}: compare --clean`);
+  await expectInvariants(world, before);
 };
 
 /**
@@ -107,7 +340,7 @@ const okOf = <T>(
  * S6: dev-a commits while the store's listings leave its event out, then dev-b offloads. With `seen` "at-commit" the
  * event is listed while B verifies, so B's fresh read at its commit finds the fork. With "never" it stays unlisted
  * through B's commit, and both commit: release waits on the store's profile, never on visibility. On UNSEEN
- * (acked-unsynced) neither profile admits release, so both keep their folders with their journals open; on a durable
+ * (acked-unsynced) neither profile admits release without Q21's proof, so both hold their trash (Task 24); on a durable
  * store (`durable`) both release. Either way both snapshots stay, and the fold shows the fork once A's event lists.
  */
 const delayedVisibility = async (seen: "at-commit" | "never", durable = false): Promise<void> => {
@@ -161,29 +394,27 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
       expect(okOf(byA).snapshot).toBe(eventA.snapshot);
       expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
     } else {
-      // dev-a: committed, and its folder stays: the profile does not admit release.
-      expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([6, "store.semantics-unknown"]);
-      expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
-      expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+      // dev-a: committed and moved into its trash, held (Task 24): the profile needs Q21's proof before a delete.
+      expect(byA.ok ? [byA.value.localCopy, byA.value.held] : [byA.exitCode, byA.finding.code]).toEqual([
+        "kept",
+        true,
+      ]);
+      expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
     }
     const byB = await b.offload();
     expect(b.engine.calls).toHaveLength(1); // it uploaded: the head check before the upload passed
     expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual(
-      seen === "at-commit"
-        ? [8, "catalog.head-moved"]
-        : releases
-          ? "released"
-          : [6, "store.semantics-unknown"],
+      seen === "at-commit" ? [8, "catalog.head-moved"] : "released",
     );
-    if (releases) {
-      // dev-b: released too: its commit could not see A's event, and release does not wait for it.
+    if (seen === "never") {
+      // dev-b: released too (held on UNSEEN): its commit could not see A's event, and release does not wait for it.
       expect(existsSync(`${b.dir()}.plainport`)).toBe(true);
     } else {
       expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
       expect(existsSync(`${b.dir()}.plainport`)).toBe(false);
     }
     if (seen === "never" && !releases) {
-      // Each device keeps its offload journal at the commit, for recover to finish the release once admitted.
+      // Each device holds its trash at offload.release.held, for the checked read (Q16, Q21) to settle.
       for (const d of [a, b]) {
         const open = readdirSync(d.box.paths.journalDir)
           .filter((f) => f.endsWith(".json"))
@@ -194,9 +425,9 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
                 step: string;
               },
           );
-        expect({ device: d.name, open: open.map((j) => j.kind) }).toEqual({
+        expect({ device: d.name, open: open.map((j) => j.step) }).toEqual({
           device: d.name,
-          open: ["offload"],
+          open: ["offload.release.held"],
         });
       }
     }
@@ -215,7 +446,12 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
 
     // Invariants 1–3 on each device, 4–6 on the store.
     for (const d of [a, b]) {
-      for (let i = 0; i < 400 && existsSync(join(d.box.home, "work/.plainport-trash")); i++)
+      // A detached delete may still run; a held trash stays.
+      for (
+        let i = 0;
+        i < 400 && openJournals(d.box.paths.journalDir).some((j) => j.step === "offload.release.delete");
+        i++
+      )
         await Bun.sleep(25);
       expect({
         device: d.name,
@@ -228,6 +464,9 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
           store: { name: "ssd", blob: store, engine: d.engine },
           ...(d.released === undefined ? {} : { released: d.released }),
           stripped: ["node_modules"],
+          // What each release read could not see (Q16): B's event came after A's release, and A's was not listed yet
+          // when B's release read the catalog; derived from what each re-read listed.
+          unseen: await d.unseen(),
         }),
       }).toEqual({ device: d.name, problems: [] });
     }
@@ -242,6 +481,486 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
   } finally {
     for (const d of [a, b]) await d.box.cleanupSettled();
   }
+};
+
+/**
+ * S5: dev-a's offloaded event lands and its acknowledgement is lost, while dev-b uploads. dev-a never heard: its
+ * journal stays at commit.start with its folder untouched. dev-b's commit sees dev-a's event like any other and keeps
+ * its snapshot as a fork (F1). dev-a's recover finds its own event on the store, so it committed, and its re-read sees
+ * dev-b's fork: its folder stays on its own snapshot (F2).
+ */
+const lostAcknowledgement = async (): Promise<void> => {
+  const store = semanticBlobStore();
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    okOf(await a.offload());
+    for (let i = 0; i < 400 && existsSync(join(a.box.home, "work/.plainport-trash")); i++)
+      await Bun.sleep(25);
+    okOf(await b.onload());
+    okOf(await a.onload());
+    writeFileSync(join(a.dir(), "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+    const before = {
+      events: await allEvents(store),
+      snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+    };
+
+    // dev-b uploads; meanwhile dev-a's append lands and its acknowledgement is lost.
+    let byA: Awaited<ReturnType<FakeDevice["offload"]>> | undefined;
+    b.engine.hooks.duringSnapshot = async () => {
+      b.engine.hooks.duringSnapshot = undefined;
+      store.loseAckNext();
+      byA = await a.offload();
+    };
+    const byB = await b.offload();
+    // dev-a: never heard; its journal stays at commit.start, its folder as it was, no stub.
+    expect(byA === undefined || byA.ok ? "heard" : [byA.exitCode, byA.finding.code]).toEqual([
+      9,
+      "store.unreachable",
+    ]);
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.commit.start"]);
+    expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+    const eventA = (await allEvents(store)).find(
+      (e) => e.type === "offloaded" && e.device === a.device.id && !before.events.some((x) => x.id === e.id),
+    );
+    if (eventA?.type !== "offloaded") throw new Error("dev-a's event did not land");
+    // dev-b: sees dev-a's event at its commit like any other: a fork (F1), its folder kept on its own snapshot.
+    expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const forkB = byB.ok ? undefined : (byB.data as { kind: string; detail?: string; snapshot: string });
+    expect([forkB?.kind, forkB?.detail]).toEqual(["fork", undefined]);
+    expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+    expect((await b.entry())?.base).toBe(forkB?.snapshot);
+
+    // dev-a's recover finds its event, so the offload committed; its re-read sees dev-b's fork (F2).
+    const recovered = await a.recover();
+    const report = (recovered.ok ? recovered.value : recovered.data) as {
+      operations: { step: string; outcome: string; state: string; snapshot: string }[];
+    };
+    expect(report.operations.map((o) => [o.step, o.outcome, o.state])).toEqual([
+      ["offload.commit.start", "forked", "conflicted"],
+    ]);
+    expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+    expect((await a.entry())?.base).toBe(eventA.snapshot);
+    expect(openJournals(a.box.paths.journalDir)).toEqual([]);
+    const project = foldCatalog(await allEvents(store)).projects[eventA.project];
+    expect(project?.conflicts.flat().sort()).toEqual([eventA.snapshot, forkB?.snapshot as string].sort());
+
+    for (const d of [a, b])
+      expect({
+        device: d.name,
+        problems: await invariantViolations({
+          now: new Date(),
+          paths: d.box.paths,
+          device: d.device.id,
+          project: { id: eventA.project, dir: d.dir() },
+          roots: [join(d.box.home, "work")],
+          store: { name: "ssd", blob: store, engine: d.engine },
+          stripped: ["node_modules"],
+        }),
+      }).toEqual({ device: d.name, problems: [] });
+    expect(
+      catalogInvariantViolations({
+        events: await allEvents(store),
+        eventsBefore: before.events,
+        snapshotsBefore: before.snapshots,
+        snapshotsNow: a.engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S8: dev-a's project holds, under a stripped folder (node_modules), a local alias of the remote store: what a mount of
+ * it shows, its meta/v1/store.json and its repository's layout. No configured local store names it, so release's
+ * overlap check cannot see it; the trash is held for the grace, and when the checked read allows the delete, the guard
+ * (D87), run right before it, refuses: the trash and the store stay. dev-b sees every event and snapshot it saw before,
+ * and a recorder on the store shows no delete (invariant 6).
+ */
+const aliasUnderStripped = async (): Promise<void> => {
+  const fake = semanticBlobStore();
+  const recorded: RecordedCall[] = [];
+  const recording = recordingBlobStore(fake, recorded);
+  const store: SemanticBlobStore = { ...fake, put: recording.put, delete: recording.delete };
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.configure('[offload]\nconflictGrace = "15m"');
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    // The alias: the store as a mount presents it, under the stripped dependency folder.
+    const marker = fake.data.get("meta/v1/store.json") as Uint8Array;
+    a.box.file("work/web/node_modules/.remote/meta/v1/store.json", new TextDecoder().decode(marker));
+    a.box.file("work/web/node_modules/.remote/repo/config", "restic config\n");
+    const done = okOf(await a.offload());
+    expect([done.localCopy, done.held]).toEqual(["kept", true]);
+    okOf(await b.onload());
+    const before = {
+      events: await allEvents(store),
+      snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+    };
+    const storeBytes = new Map(fake.data);
+
+    // dev-a: past the grace the checked read allows the delete; the guard right after it refuses.
+    const past = () => new Date(Date.now() + 16 * 60_000);
+    let checked = false;
+    const gc = await a.gc({
+      now: past,
+      faults: { onStep: (step) => (checked ||= step === "trash.delete.checked") },
+    });
+    expect(gc.ok ? "deleted" : gc.finding.code).toBe("delete.guard-refused");
+    expect(checked).toBe(true);
+    const trash = join(a.box.home, "work/.plainport-trash", done.snapshot, "web");
+    expect(existsSync(join(trash, "node_modules/.remote/meta/v1/store.json"))).toBe(true);
+    expect(existsSync(join(trash, "src/main.ts"))).toBe(true);
+    // A write command's housekeeping names the refusal and starts no delete; recover leaves it pending.
+    const kept = await a.housekeeping({ now: past });
+    expect(kept.started).toEqual([]);
+    expect(kept.notices.some((n) => n.includes("was not deleted"))).toBe(true);
+    const recovered = await a.recover(undefined, past);
+    expect(recovered.ok ? "deleted" : recovered.finding.code).toBe("delete.guard-refused");
+    expect(existsSync(join(trash, "src/main.ts"))).toBe(true);
+    // The store: every byte it held is there, and the recorder saw no delete.
+    for (const [key, bytes] of storeBytes)
+      expect({ key, same: fake.data.get(key) === bytes }).toEqual({ key, same: true });
+    expect(recorded.filter((c) => c.tool === "store" && c.method === "delete")).toEqual([]);
+
+    // dev-b: every event and snapshot it saw before.
+    const events = await allEvents(store);
+    for (const e of before.events) expect(events.some((x) => x.id === e.id)).toBe(true);
+    const snapshots = b.engine.repository.snapshots.map((s) => s.info.id);
+    for (const id of before.snapshots) expect(snapshots).toContain(id);
+    expect(
+      catalogInvariantViolations({
+        events,
+        eventsBefore: before.events,
+        snapshotsBefore: before.snapshots,
+        snapshotsNow: snapshots,
+        recorded,
+      }),
+    ).toEqual([]);
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/** The fake store with a hook before each write: another device acts between this device's read and its append. */
+const hooked = (fake: SemanticBlobStore) => {
+  let down = false;
+  const hook: { beforePut?: (key: string) => Promise<void> } = {};
+  const gone = () =>
+    Promise.resolve({
+      ok: false as const,
+      exitCode: 9 as const,
+      finding: { code: "store.unreachable", severity: "block" as const, message: "down", allowable: false },
+    });
+  const store: SemanticBlobStore & { hook: typeof hook; setDown(on: boolean): void } = {
+    ...fake,
+    get: (key) => (down ? gone() : fake.get(key)),
+    list: (prefix) => (down ? gone() : fake.list(prefix)),
+    stat: (key) => (down ? gone() : fake.stat(key)),
+    put: async (key, data, opts) => {
+      if (down) return gone();
+      await hook.beforePut?.(key);
+      return fake.put(key, data, opts);
+    },
+    hook,
+    setDown: (on) => {
+      down = on;
+    },
+  };
+  return store;
+};
+
+/** Two fake devices on a format-2 store, both onloaded from one head, each with an edit of its own. */
+const resolutionWorld = async () => {
+  const store = hooked(semanticBlobStore());
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"], { format: 2 })) as [FakeDevice, FakeDevice];
+  a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+  a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+  okOf(await a.offload());
+  await fakeSettled(a);
+  okOf(await b.onload());
+  okOf(await a.onload());
+  writeFileSync(join(a.dir(), "src/a.ts"), "export const a = 1;\n");
+  writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+  const first = (await allEvents(store)).find((e) => e.type === "offloaded");
+  if (first?.type !== "offloaded") throw new Error("no first offload");
+  const before = {
+    events: await allEvents(store),
+    snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+  };
+  return { store, a, b, project: first.project, before };
+};
+
+const fakeSettled = async (d: FakeDevice) => {
+  for (let i = 0; i < 400 && existsSync(join(d.box.home, "work/.plainport-trash")); i++) await Bun.sleep(25);
+  for (let i = 0; i < 400 && openJournals(d.box.paths.journalDir).length > 0; i++) await Bun.sleep(25);
+};
+
+/** Invariants 1–3 on both fake devices and 4–6 on the store; no snapshot ever left the repository or the catalog. */
+const expectFakeInvariants = async (w: Awaited<ReturnType<typeof resolutionWorld>>) => {
+  for (const d of [w.a, w.b]) {
+    await fakeSettled(d);
+    expect({
+      device: d.name,
+      problems: await invariantViolations({
+        now: new Date(),
+        paths: d.box.paths,
+        device: d.device.id,
+        project: { id: w.project, dir: d.dir() },
+        roots: [join(d.box.home, "work")],
+        store: { name: "ssd", blob: w.store, engine: d.engine },
+        ...(d.released === undefined ? {} : { released: d.released }),
+        stripped: ["node_modules"],
+      }),
+    }).toEqual({ device: d.name, problems: [] });
+  }
+  const events = await allEvents(w.store);
+  expect(
+    catalogInvariantViolations({
+      events,
+      eventsBefore: w.before.events,
+      snapshotsBefore: w.before.snapshots,
+      snapshotsNow: w.a.engine.repository.snapshots.map((s) => s.info.id),
+    }),
+  ).toEqual([]);
+  // Every snapshot an event made is still in the catalog and in the repository.
+  const project = foldCatalog(events).projects[w.project];
+  const made = events.flatMap((e) => (e.type === "offloaded" ? [e.snapshot] : []));
+  for (const snapshot of made) expect(project?.snapshots[snapshot]).toBeDefined();
+};
+
+/**
+ * S7, competing: both devices resolve the fork from one read, each keeping its own side, so neither supersedes the
+ * other. `first` appends first; the other's whole resolve runs between its read and its append. Either order folds to
+ * the same state on every device's read: still conflicted, both tips live, nothing rejected (D103). A resolution made
+ * after both supersedes them.
+ */
+const competingResolutions = async (first: "dev-a" | "dev-b"): Promise<void> => {
+  const w = await resolutionWorld();
+  try {
+    // The fork: dev-b offloads to its end while dev-a uploads; dev-a keeps its folder as a fork (F1).
+    w.a.engine.hooks.duringSnapshot = async () => {
+      w.a.engine.hooks.duringSnapshot = undefined;
+      okOf(await w.b.offload());
+    };
+    const byA = await w.a.offload();
+    expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([8, "catalog.head-moved"]);
+    await fakeSettled(w.b);
+    const aSnap = (byA.ok ? undefined : (byA.data as { snapshot: string }))?.snapshot as string;
+    const bSnap = foldCatalog(await allEvents(w.store)).projects[w.project]?.heads.find(
+      (s) => s !== aSnap,
+    ) as string;
+    // dev-a keeps its own copy's snapshot; dev-b, shelved, keeps its own.
+    const [writer, other] = first === "dev-a" ? [w.a, w.b] : [w.b, w.a];
+    const keepOf = (d: FakeDevice) => (d === w.a ? aSnap : bSnap);
+    let raced = false;
+    w.store.hook.beforePut = async (key) => {
+      if (raced || !key.includes("events/")) return;
+      raced = true;
+      const inner = okOf(await other.resolve(keepOf(other)));
+      expect([inner.outcome, inner.supersedes]).toEqual(["resolved", []]);
+    };
+    const outer = okOf(await writer.resolve(keepOf(writer)));
+    w.store.hook.beforePut = undefined;
+    expect([outer.outcome, outer.supersedes]).toEqual(["resolved", []]);
+
+    // One result whatever the order, and on every device's fresh read.
+    const events = await allEvents(w.store);
+    const folded = foldCatalog(events).projects[w.project];
+    expect(foldCatalog([...events].reverse()).projects[w.project]).toEqual(folded);
+    expect([folded?.status, folded?.head, folded?.rejected, folded?.invalid]).toEqual([
+      "conflicted",
+      null,
+      [],
+      [],
+    ]);
+    expect([...(folded?.heads ?? [])].sort()).toEqual([aSnap, bSnap].sort());
+    expect(folded?.resolutions).toHaveLength(2);
+    for (const d of [w.a, w.b]) {
+      const again = await d.resolve(keepOf(d), "web", { at: "resolve.checked" }).catch((e: Error) => e);
+      // Each device's read sees both and would supersede both: stopped at the seam, before any append.
+      expect(again instanceof Error ? again.name : "ran").toBe("InjectedFault");
+    }
+
+    // A resolution after both supersedes them: dev-a keeps its copy's snapshot.
+    const settles = okOf(await w.a.resolve(aSnap));
+    expect(settles.supersedes).toEqual([...(folded?.resolutions ?? [])].sort());
+    const now = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect([now?.head, now?.rejected]).toEqual([aSnap, [bSnap]]);
+    // dev-b onloads the kept snapshot; its own stays restorable.
+    expect(okOf(await w.b.onload()).snapshot).toBe(aSnap);
+    expect(readFileSync(join(w.b.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    const to = join(w.b.box.home, "old-b");
+    expect(okOf(await w.b.restore(bSnap, to)).snapshot).toBe(bSnap);
+    await expectFakeInvariants(w);
+  } finally {
+    for (const d of [w.a, w.b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S7, pending: dev-a commits and its store goes down before its re-read, so its journal stays open; meanwhile dev-b
+ * forks (F1) and resolves, keeping its own copy's snapshot over dev-a's. dev-a's recover reads the resolution: its
+ * folder stays on its own snapshot (F2, rejected-line), and its next offload uploads that work as live work, which
+ * conflicts again. No snapshot is lost.
+ */
+const resolutionWhilePending = async (): Promise<void> => {
+  const w = await resolutionWorld();
+  try {
+    w.b.engine.hooks.duringSnapshot = async () => {
+      w.b.engine.hooks.duringSnapshot = undefined;
+      const byA = await w.a.offload("web", {
+        onStep: (step) => {
+          if (step === "offload.committed") w.store.setDown(true);
+        },
+      });
+      expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([9, "store.unreachable"]);
+      expect(openJournals(w.a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.trash"]);
+      w.store.setDown(false);
+    };
+    const byB = await w.b.offload();
+    expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const bSnap = (byB.ok ? undefined : (byB.data as { snapshot: string }))?.snapshot as string;
+    const resolved = okOf(await w.b.resolve(bSnap));
+    const aSnap = resolved.over?.[0] as string;
+    expect([resolved.outcome, resolved.over]).toEqual(["resolved", [aSnap]]);
+    // dev-a, its journal still open, cannot resolve until it recovers.
+    const refused = await w.a.resolve(aSnap);
+    expect(refused.ok ? "resolved" : refused.finding.code).toBe("journal.pending");
+
+    // dev-a's recover settles by the resolved head: its rejected snapshot keeps the folder, nothing is released.
+    const recovered = await w.a.recover();
+    const report = (recovered.ok ? recovered.value : recovered.data) as {
+      operations: { outcome: string; state: string; snapshot: string }[];
+    };
+    expect(report.operations.map((o) => [o.snapshot, o.outcome, o.state])).toEqual([
+      [aSnap, "forked", "local"],
+    ]);
+    expect(readFileSync(join(w.a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(existsSync(`${w.a.dir()}.plainport`)).toBe(false);
+    expect((await w.a.entry())?.base).toBe(aSnap);
+    const after = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect([after?.head, after?.rejected]).toEqual([bSnap, [aSnap]]);
+
+    // Its next offload is live work on the rejected line: kept as a fork, a live tip, conflicted again.
+    writeFileSync(join(w.a.dir(), "src/a2.ts"), "export const a2 = 2;\n");
+    const again = await w.a.offload();
+    expect(again.ok ? "released" : [again.exitCode, again.finding.code]).toEqual([8, "catalog.head-moved"]);
+    const live = (again.ok ? undefined : (again.data as { snapshot: string }))?.snapshot as string;
+    const conflicted = foldCatalog(await allEvents(w.store)).projects[w.project];
+    expect(conflicted?.status).toBe("conflicted");
+    expect([...(conflicted?.heads ?? [])].sort()).toEqual([bSnap, live].sort());
+    await expectFakeInvariants(w);
+  } finally {
+    for (const d of [w.a, w.b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S9 (phase-6 review r2 I1): dev-a's offload to a store that is not durable, with offload.conflictGrace = "0", dies
+ * right after its rename (offload.release.moved). Recover's release reads the store's profile as the live run does,
+ * so the trash is held for Q21's proof (raised to the 15-minute floor, D115), never handed straight to the delete.
+ * dev-b, meanwhile, sees dev-a's event and snapshot like any other.
+ */
+const crashPastRename = async (durability: "acked-unsynced" | "unknown"): Promise<void> => {
+  const store = semanticBlobStore({ durability });
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.configure('[offload]\nconflictGrace = "0"');
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    let died = false;
+    try {
+      await a.offload("web", { at: "offload.release.moved" });
+    } catch {
+      died = true;
+    }
+    expect(died).toBe(true);
+    const [op] = openJournals(a.box.paths.journalDir).map((j) => (j as { op?: string }).op as string);
+    okOf(await a.recover());
+    // dev-a: the trash is held (its folder in the trash, its stub written), not deleted, through a gc a second later.
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
+    await a.gc({ now: () => new Date(Date.now() + 1_000) });
+    expect(existsSync(join(a.box.home, "work/.plainport-trash", op as string, "web/src/main.ts"))).toBe(true);
+    expect(existsSync(`${a.dir()}.plainport`)).toBe(true);
+    // dev-b: the event and the snapshot are there; it onloads them.
+    okOf(await b.onload());
+    expect(readFileSync(join(b.dir(), "src/main.ts"), "utf8")).toBe("export const main = 0;\n");
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S10 (phase-6 review r2 I2): dev-a offloads P, onloads it back, and offloads A1 from P with its trash held. dev-b's
+ * copy is still on the grandparent; it offloads with --fork (D114), a fork made from that older base. The fold groups
+ * the fork as [P, B1], but A1 is a live tip beside B1: dev-a's checked read sees the snapshot contested and keeps the
+ * trash conflict-retained, past the grace.
+ */
+const forkFromGrandparent = async (): Promise<void> => {
+  const store = semanticBlobStore();
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    okOf(await a.offload());
+    for (let i = 0; i < 400 && existsSync(join(a.box.home, "work/.plainport-trash")); i++)
+      await Bun.sleep(25);
+    okOf(await b.onload());
+    okOf(await a.onload());
+    for (const d of [a, b]) d.configure('[offload]\nconflictGrace = "15m"');
+    writeFileSync(join(a.dir(), "src/p.ts"), "export const p = 1;\n");
+    okOf(await a.offload());
+    okOf(await a.onload());
+    writeFileSync(join(a.dir(), "src/a1.ts"), "export const a1 = 1;\n");
+    const a1 = okOf(await a.offload()).snapshot;
+    writeFileSync(join(b.dir(), "src/b.ts"), "export const b = 1;\n");
+    const byB = await b.offload("web", undefined, { fork: true });
+    expect(byB.ok ? "released" : byB.finding.code).toBe("catalog.head-moved");
+    const events = await allEvents(store);
+    const id = events.find((e) => e.type === "offloaded")?.project as string;
+    const project = foldCatalog(events).projects[id];
+    expect(project?.heads).toContain(a1);
+    expect(project?.conflicts.flat()).not.toContain(a1);
+    // dev-a: past the grace, gc keeps the trash, conflict-retained; dev-b: its fork is kept, its folder stays.
+    const gc = await a.gc({ now: () => new Date(Date.now() + 16 * 60_000) });
+    expect(gc.ok ? gc.value.deleted : []).toEqual([]);
+    expect(existsSync(join(a.box.home, "work/.plainport-trash", a1, "web/src/a1.ts"))).toBe(true);
+    expect(openJournals(a.box.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
+    expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/** Both devices' offloads, each with an edit of its own, about to race. */
+const editBoth = async (a: Device, b: Device) => {
+  await Bun.write(`${a.dir()}/src/a.ts`, "export const a = 1;\n");
+  await Bun.write(`${b.dir()}/src/b.ts`, "export const b = 1;\n");
+};
+
+/** exit 8's data, kind fork after the commit (F2): the folder kept with its edit, no stub, its base its snapshot. */
+const expectKeptAfterCommit = async (d: Device, ran: Ran, edit: string) => {
+  expectCode(ran, 8, `${d.name}: offload`);
+  expect(envelope(ran)?.error?.finding?.code).toBe("catalog.head-moved");
+  const data = envelope(ran)?.data;
+  expect([data?.exitCode, data?.kind, data?.detail, data?.project]).toEqual([
+    8,
+    "fork",
+    "after-commit",
+    "work:web",
+  ]);
+  expect(await Bun.file(`${d.dir()}/src/${edit}.ts`).text()).toBe(`export const ${edit} = 1;\n`);
+  expect(await Bun.file(`${d.dir()}.plainport`).exists()).toBe(false);
+  expect(baseOf(d)).toBe(data?.snapshot as string);
+  expect(openJournals(d.paths.journalDir)).toEqual([]);
+  return data?.snapshot as string;
 };
 
 export const SCHEDULES: readonly Schedule[] = [
@@ -292,53 +1011,149 @@ export const SCHEDULES: readonly Schedule[] = [
       expect(project?.conflicts.flat().sort()).toEqual(
         [committed?.snapshot as string, forked?.snapshot as string].sort(),
       );
+      // dev-b's fork was appended after dev-a's release read the catalog: Q16's residual, read from the traces.
       await expectInvariants(world, before);
     },
   },
   {
     id: "S2",
     title: "both checked: both pass the head check, then both append",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "the first to append commits; it keeps its folder if it sees the fork at its re-read, else releases it",
+        "the first to append commits; it keeps its folder if it sees the fork at its re-read (here: dev-b appends before it), else releases it. Kept: exit 8, kind fork, detail after-commit, no stub, its base its own snapshot, its journal closed",
       "dev-b":
-        "the second sees the fork at its commit or re-read and keeps its folder; both snapshots are kept",
+        "the second appends too, having passed its head check, and sees the fork at its re-read: exit 8, kind fork, detail after-commit; it keeps its folder on its own snapshot. Both snapshots are kept and the project is conflicted",
+    },
+    run: async (world) => {
+      const a = world.device("dev-a");
+      const b = world.device("dev-b");
+      await bothOnloaded(world, a, b);
+      const before = { events: await world.events(), snapshots: await world.snapshots() };
+      await editBoth(a, b);
+
+      // dev-b passes its commit's head check and stands there; dev-a passes its own, appends, and stands committed.
+      const offloadB = b.start(OFFLOAD(), { pauseAt: "offload.head-checked" });
+      await offloadB.paused();
+      const offloadA = a.start(OFFLOAD(), { pauseAt: "offload.committed" });
+      await offloadA.paused();
+      // dev-b appends now; its re-read sees dev-a's commit. Then dev-a's re-read sees dev-b's.
+      offloadB.resume();
+      const byB = await offloadB.done;
+      offloadA.resume();
+      const byA = await offloadA.done;
+
+      const snapA = await expectKeptAfterCommit(a, byA, "a");
+      const snapB = await expectKeptAfterCommit(b, byB, "b");
+      const project = foldCatalog(await world.events()).projects[await projectId(world)];
+      expect(project?.status).toBe("conflicted");
+      expect(project?.conflicts.flat().sort()).toEqual([snapA, snapB].sort());
+      await expectInvariants(world, before);
     },
   },
   {
     id: "S3",
     title: "asymmetric: A appends and releases before B appends (Q16's residual)",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "releases its folder; on a remote store the trash is held for the conflict grace and kept as conflict-retained once B's fork names it",
-      "dev-b": "forks and keeps its folder; both snapshots stay in the store and the catalog",
+        "reaches F3: its re-read sees no fork, so it releases its folder and its stub names its snapshot; with a conflict grace (a remote store's default) the trash is held, and B's append within the grace keeps it: past the deadline, gc's checked read finds the fork and keeps it as conflict-retained (Task 24)",
+      "dev-b":
+        "passed its head check before A appended, so it appends too and sees the fork at its re-read (F2): exit 8, kind fork, detail after-commit; it keeps its folder on its own snapshot. Both snapshots stay in the store and the catalog",
+    },
+    run: async (world) => {
+      const a = world.device("dev-a");
+      const b = world.device("dev-b");
+      await bothOnloaded(world, a, b);
+      const before = { events: await world.events(), snapshots: await world.snapshots() };
+      await editBoth(a, b);
+      // A conflict grace, as a remote store has by default (Task 24), short enough for the test to wait out.
+      appendFileSync(a.paths.configFile, '\n[offload]\nconflictGrace = "5s"\n');
+
+      // dev-b passes its commit's head check and stands there while dev-a offloads to its end.
+      const offloadB = b.start(OFFLOAD(), { pauseAt: "offload.head-checked" });
+      await offloadB.paused();
+      const byA = await a.run(OFFLOAD());
+      expectCode(byA, 0, "dev-a: offload");
+      const released = envelope(byA)?.data;
+      expect([released?.localCopy, released?.held]).toEqual(["kept", true]);
+      offloadB.resume();
+      const byB = await offloadB.done;
+
+      // dev-a: F3, released into a held trash.
+      expect(await Bun.file(a.dir()).exists()).toBe(false);
+      expect((await Bun.file(`${a.dir()}.plainport`).json()).snapshot).toBe(released?.snapshot);
+      expect(baseOf(a)).toBe(released?.snapshot as string);
+      // dev-b: F2, kept.
+      const snapB = await expectKeptAfterCommit(b, byB, "b");
+      // B's append within the grace keeps A's trash: past the deadline, gc's checked read finds the fork and keeps it,
+      // conflict-retained (held with no deadline).
+      const until = Date.parse(released?.keepUntil as string);
+      while (Date.now() <= until) await Bun.sleep(50);
+      const gc = await a.run(["gc", "--json"]);
+      expectCode(gc, 0, "dev-a: gc");
+      const kept = envelope(gc)?.data?.kept as { op: string; reason?: string }[];
+      expect(kept.map((k) => [k.op, k.reason?.includes("a fork names its snapshot")])).toEqual([
+        [released?.snapshot as string, true],
+      ]);
+      expect(
+        await Bun.file(
+          join(a.root, ".plainport-trash", released?.snapshot as string, "web", "src/a.ts"),
+        ).text(),
+      ).toBe("export const a = 1;\n");
+      expect(openJournals(a.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
+      const project = foldCatalog(await world.events()).projects[await projectId(world)];
+      expect(project?.status).toBe("conflicted");
+      expect(project?.conflicts.flat().sort()).toEqual([released?.snapshot as string, snapB].sort());
+      // dev-b's event came after dev-a's release read the catalog: Q16's residual for dev-a.
+      await expectInvariants(world, before);
     },
   },
   {
     id: "S4",
     title: "strict onloads: two simultaneous strict onloads (Q17)",
-    owner: 22,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a": "may onload: it observed no holder at its fresh read",
       "dev-b":
-        "may onload too when it observed none; the fold names one holder, and the race ends at offload in a fork, never a lost update",
+        "may onload too when it observed none; the fold names one holder. The non-holder's offload warns lease.held (also in its dry run) and goes on, since strict governs onload only (D114), and the race ends at offload in a fork, never a lost update",
     },
+    run: strictOnloads,
+  },
+  {
+    id: "S4b",
+    title: "strict onloads, the holder offloads first: the other copy forks with --fork (D114)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "whichever device holds the lease offloads first, and its snapshot is the head; its folder is released",
+      "dev-b":
+        "the other copy's offload is refused with catalog.head-moved before anything is uploaded, its fix naming offload --fork --yes; with --fork it is uploaded and kept as a fork, its folder on its own snapshot, the project conflicted with both snapshots kept, and compare reaches the other copy",
+    },
+    run: holderFirst,
+  },
+  {
+    id: "S4c",
+    title: "under warn, two offloads that do not overlap: the second copy forks with --fork (D114)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a": "offloads first; its snapshot is the head and its folder is released",
+      "dev-b":
+        "its offload is behind the head: refused with catalog.head-moved before anything is uploaded, its fix naming offload --fork --yes; with --fork it is kept as a fork, its folder on its own snapshot, the project conflicted, and compare reaches dev-a's copy",
+    },
+    run: warnNoOverlap,
   },
   {
     id: "S5",
     title: "lost acknowledgement at the event append",
-    owner: 23,
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "its append landed but it never heard so: the journal stays, and recover finds the event and goes on",
-      "dev-b": "sees A's event like any other and forks or keeps going as the head says",
+        "its append landed but it never heard so: the journal stays at commit.start with the folder as it was, and recover finds the event and goes on; here its re-read sees dev-b's fork, so the folder stays on its own snapshot (F2)",
+      "dev-b":
+        "sees A's event like any other and forks or keeps going as the head says; here its commit's head check finds it, so its snapshot is kept as a fork and its folder stays (F1)",
     },
+    runInProcess: lostAcknowledgement,
   },
   {
     id: "S6",
@@ -347,7 +1162,7 @@ export const SCHEDULES: readonly Schedule[] = [
     outcomes: {
       "dev-a": "commits; its event is invisible to B's listings for a while",
       "dev-b":
-        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release (writes acknowledged before they are synced) each device keeps its folder with its journal open (store.semantics-unknown) until recover finds the profile admits release; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
+        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release without Q21's proof (writes acknowledged before they are synced) each device moves its folder into a held trash (offload.release.held), which only the checked read after the grace deletes; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
     },
     runInProcess: async () => {
       await delayedVisibility("at-commit");
@@ -359,23 +1174,55 @@ export const SCHEDULES: readonly Schedule[] = [
     id: "S7",
     title:
       "resolution races: competing resolutions, and a resolution while the other device's journal is pending",
-    owner: 25,
     devices: ["dev-a", "dev-b"],
     outcomes: {
-      "dev-a": "its resolution and B's fold to one result on every device (D103), whatever the order",
-      "dev-b": "its pending operation settles by the resolved head and loses no snapshot",
+      "dev-a":
+        "its resolution and B's fold to one result on every device (D103), whatever the order: still conflicted, both tips live, nothing rejected, until a resolution made after both supersedes them; and with its journal pending while B resolves, its recover settles by the resolved head (F2: the folder stays on its rejected snapshot) and loses no snapshot",
+      "dev-b":
+        "resolves from its fresh read and supersedes only what it read; its rejected snapshot stays in the store, restorable, and a pending operation of the other device never makes it lose one",
+    },
+    runInProcess: async () => {
+      await competingResolutions("dev-a");
+      await competingResolutions("dev-b");
+      await resolutionWhilePending();
     },
   },
   {
     id: "S8",
     title:
       "D87 aliases: a remote store reachable through a local mount or alias placed under a stripped folder",
-    owner: 24,
     devices: ["dev-a", "dev-b"],
     outcomes: {
-      "dev-a": "the delete guard refuses at trash.delete.checked; the trash and the store stay",
-      "dev-b": "sees every event and snapshot it saw before",
+      "dev-a":
+        "its trash is held for the grace; once the checked read allows the delete (trash.delete.checked), the delete guard refuses (delete.guard-refused): the trash and the store stay, gc, housekeeping and recover say why",
+      "dev-b": "sees every event and snapshot it saw before; a recorder on the store shows no delete",
     },
+    runInProcess: aliasUnderStripped,
+  },
+  {
+    id: "S9",
+    title: "a crash past the rename on a store that is not durable, with conflictGrace 0 (review r2 I1)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "its recover reads the store's profile and holds the trash for Q21's proof (the 15-minute floor, D115), as the live run does; a gc a second later keeps it",
+      "dev-b": "sees dev-a's event and snapshot like any other, and onloads them",
+    },
+    runInProcess: async () => {
+      await crashPastRename("acked-unsynced");
+      await crashPastRename("unknown");
+    },
+  },
+  {
+    id: "S10",
+    title: "a fork from an older base while a held trash's snapshot is a live tip (review r2 I2)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "its A1 is a live tip beside dev-b's fork, though the fold groups that fork with P: its checked read sees A1 contested and keeps the trash conflict-retained past the grace",
+      "dev-b": "its copy on the grandparent forks with --fork (D114): kept, its folder stays",
+    },
+    runInProcess: forkFromGrandparent,
   },
 ];
 

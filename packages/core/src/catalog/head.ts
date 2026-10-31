@@ -1,7 +1,8 @@
 // What an operation reads of a store's catalog before it writes there (DESIGN.md "Offload process" step 7, "Catalog
 // and data model"): the catalog itself through the one read path (a stale read is store.unreachable, never trusted for
 // a write), whether the project's head is still the snapshot this working copy came from, and whether the store
-// serves another root (ADR-0010, D48). Offload uses it now; onload's lease check reads the same head.
+// serves another root (ADR-0010, D48), and whether another device holds the project's lease further along (Q17).
+// Offload uses it now; onload's lease check reads the same head.
 //
 // A fold that left out an event it could not read or use is not known to be whole (D86), and the event's ULID says
 // nothing about whether it is newer than the head: its time is its writer's clock, which may run slow (Task 21,
@@ -361,19 +362,61 @@ export const headCheck = (
       }),
     };
   }
-  const moved = (detail: string) => ({
+  const moved = (detail: string, fix: string) => ({
     kind: "moved" as const,
     finding: finding("catalog.head-moved", {
       message: `${address} ${detail}; nothing local was deleted`,
-      fix: `keep this folder; plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side (settling which copy wins arrives in M2)`,
+      fix,
     }),
   });
-  if (project.conflicts.length > 0 || project.head === null) return moved("is conflicted in the catalog");
+  const side = `plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side`;
+  // A copy behind the head (on no live tip) reaches the conflict only as a fork of its own (D114).
+  const fork = `plainport offload ${shellWord(address)} --fork --yes uploads it as a fork and leaves the project conflicted, so plainport compare ${shellWord(address)} shows the copies side by side and resolve settles them (D114)`;
+  if (project.conflicts.length > 0 || project.head === null)
+    return moved(
+      "is conflicted in the catalog",
+      base !== undefined && project.heads.includes(base)
+        ? `keep this folder; plainport status ${shellWord(address)} lists the live tips, and plainport resolve ${shellWord(address)} --keep ${base} --yes keeps one; ${side}`
+        : `keep this folder, which is on no live tip; ${fork}`,
+    );
   if (project.head !== base)
     return moved(
       `was offloaded from another copy since this one was made: the head is ${project.head}, this copy came from ${base ?? "no snapshot"}`,
+      `keep this folder; ${fork}`,
     );
   return { kind: "ok" };
+};
+
+/** The fold's lease on a project: the device whose onload holds it (Fold rules → Lease). */
+export type Lease = NonNullable<CatalogProject["lease"]>;
+
+/**
+ * The lease another device holds that an offload of this copy warns of (lease.held, Q17: advisory): the fold's
+ * holder, when it is not this device and its onload is not behind this copy. An onload sits after the head it was
+ * written over (`over`, D43) and before anything made from it, so it is behind only when this copy's `base` was made
+ * from that head, directly or not: then the holder's copy forks when it is offloaded, whichever goes first, and this
+ * copy's offload is a step forward. `over` is the holder's onloaded event's (its `base` for an event with none);
+ * undefined when that event could not be read, and the lease is then warned of. Reads only.
+ */
+export const leaseAhead = (
+  project: CatalogProject | undefined,
+  device: string,
+  base: string | undefined,
+  over: string | undefined,
+): Lease | undefined => {
+  const lease = project?.lease ?? null;
+  if (project === undefined || lease === null || lease.device === device) return undefined;
+  if (base === undefined || over === undefined || base === over) return lease;
+  const seen = new Set<string>([base]);
+  for (
+    let at = project.snapshots[base]?.base;
+    at !== undefined && !seen.has(at);
+    at = project.snapshots[at]?.base
+  ) {
+    if (at === over) return undefined;
+    seen.add(at);
+  }
+  return lease;
 };
 
 /** A root of the store's catalog other than `rootId` (by key when known): the store already serves it (D48). */

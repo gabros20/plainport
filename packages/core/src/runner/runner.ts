@@ -589,6 +589,8 @@ export const runProcess = async (spawner: Spawner, spec: RunSpec): Promise<Resul
     throw new RangeError("runProcess: wholeStdout needs onLine");
   if (spec.wholeStdout && spec.capture !== undefined)
     throw new RangeError("runProcess: wholeStdout and capture exclude each other");
+  if (spec.stdinFile !== undefined && (spec.stdin !== undefined || spec.sensitive))
+    throw new RangeError("runProcess: stdinFile excludes stdin and sensitive");
   if (spec.classifyStderr !== undefined && !spec.sensitive)
     throw new RangeError("runProcess: classifyStderr is for sensitive runs");
   if (spec.sensitive && (spec.onLine !== undefined || spec.wholeStdout))
@@ -638,6 +640,7 @@ const runChild = async (
       cwd: spec.cwd,
       env: spec.env,
       stdin,
+      ...(spec.stdinFile === undefined ? {} : { stdinFile: spec.stdinFile }),
     });
   } catch (error) {
     return spawnFailed(spec, error);
