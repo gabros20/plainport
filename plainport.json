@@ -5343,7 +5343,7 @@
     {
       "name": "store upgrade",
       "summary": "Move a format-1 store to format 2 once it is quiescent (Q2)",
-      "usage": "plainport store upgrade <name> [--others-stopped] [--quiet-window <value>]",
+      "usage": "plainport store upgrade <name> [--others-stopped] [--quiet-window <value>] [--clear-marker]",
       "risk": "confirm",
       "dryRun": false,
       "acceptsPlan": false,
@@ -5367,7 +5367,13 @@
           "name": "quiet-window",
           "type": "string",
           "multiple": false,
-          "summary": "How long the catalog must show no other device's activity, before and during; default 15m"
+          "summary": "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m"
+        },
+        {
+          "name": "clear-marker",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "Only clear the upgrade marker a stopped upgrade left: another device's once older than the quiet window, with --others-stopped (D112)"
         }
       ],
       "arguments": {
@@ -5384,9 +5390,13 @@
             "type": "boolean"
           },
           "quiet-window": {
-            "description": "How long the catalog must show no other device's activity, before and during; default 15m",
+            "description": "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m",
             "type": "string",
             "pattern": "^(0|[1-9][0-9]*[smhdw])$"
+          },
+          "clear-marker": {
+            "description": "Only clear the upgrade marker a stopped upgrade left: another device's once older than the quiet window, with --others-stopped (D112)",
+            "type": "boolean"
           }
         },
         "required": [
@@ -5427,6 +5437,10 @@
           "resumed": {
             "type": "boolean",
             "description": "This run finished or cleared this device's earlier upgrade"
+          },
+          "markerCleared": {
+            "description": "--clear-marker: this run removed the upgrade marker; store.json was not changed",
+            "type": "boolean"
           }
         },
         "required": [

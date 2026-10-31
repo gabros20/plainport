@@ -73,7 +73,7 @@ _plainport() {
     'store add') opts=(--kind --path --host --endpoint --bucket --region --secret --access-key-id --secret-access-key --secret-stdin --seal --no-seal --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'store list') opts=(--probe --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'store test') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
-    'store upgrade') opts=(--others-stopped --quiet-window --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
+    'store upgrade') opts=(--others-stopped --quiet-window --clear-marker --json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'store remove') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     'version') opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help) ;;
     *) opts=(--json --yes --no-input --dry-run --store --config --quiet --verbose --help --version) ;;

@@ -442,7 +442,11 @@ export const storeUpgrade = defineCommand({
     }),
     "quiet-window": DurationSchema.optional().meta({
       description:
-        "How long the catalog must show no other device's activity, before and during; default 15m",
+        "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m",
+    }),
+    "clear-marker": z.boolean().optional().meta({
+      description:
+        "Only clear the upgrade marker a stopped upgrade left: another device's once older than the quiet window, with --others-stopped (D112)",
     }),
   }),
   output: z.looseObject({
@@ -452,6 +456,9 @@ export const storeUpgrade = defineCommand({
     format: z.literal(2),
     upgraded: z.boolean().meta({ description: "This run replaced store.json" }),
     resumed: z.boolean().meta({ description: "This run finished or cleared this device's earlier upgrade" }),
+    markerCleared: z.boolean().optional().meta({
+      description: "--clear-marker: this run removed the upgrade marker; store.json was not changed",
+    }),
   }),
   examples: [
     {
@@ -460,9 +467,11 @@ export const storeUpgrade = defineCommand({
     },
   ],
   human: (data) =>
-    data.upgraded
-      ? `store ${data.name} (${data.id}) is now format 2${data.resumed ? " (resumed)" : ""}; plainport v0.1.x refuses it from now on`
-      : `store ${data.name} (${data.id}) is format 2 already${data.resumed ? "; the earlier upgrade's marker was removed" : ""}`,
+    data.markerCleared === true
+      ? `store ${data.name} (${data.id}): the upgrade marker was removed; it is still format ${data.from}`
+      : data.upgraded
+        ? `store ${data.name} (${data.id}) is now format 2${data.resumed ? " (resumed)" : ""}; plainport v0.1.x refuses it from now on`
+        : `store ${data.name} (${data.id}) is format 2 already${data.resumed ? "; the earlier upgrade's marker was removed" : ""}`,
   handler: async (args, ctx) => {
     const loaded = await loadConfig(ctx);
     if (!loaded.ok) return loaded;
@@ -493,6 +502,7 @@ export const storeUpgrade = defineCommand({
           opener: ctx.stores,
           device: device.value.id,
           othersStopped: args["others-stopped"] === true,
+          clearMarker: args["clear-marker"] === true,
           windowMs: args["quiet-window"] === undefined ? QUIET_WINDOW_MS : durationMs(args["quiet-window"]),
           mint: () => ulid(ctx.clock.now().getTime()),
         },

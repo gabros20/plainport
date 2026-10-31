@@ -134,6 +134,22 @@ describe("restic engine: catalogKey (Catalog seal v1)", () => {
     expect(code(result)).toBe("store.unreachable");
   });
 
+  for (const [name, stderr] of [
+    [
+      "a cut SFTP link mid-read",
+      "subprocess ssh: Connection to 127.0.0.1 closed by remote host.\nLoad(<key/ce7be18577>, 0, 0) returned error, retrying after 1s: connection lost\n",
+    ],
+    [
+      "an SFTP link cut before the session",
+      "subprocess ssh: Connection closed by 127.0.0.1 port 39323\nunable to start the sftp session\n",
+    ],
+  ] as const)
+    test(`${name} is store.unreachable, not the seal key (review phase 5 r2 M4)`, async () => {
+      const master = makeMasterKeyCanary();
+      const { result } = await derive([master], () => ({ stderr, exit: 1 }), { remote: true });
+      expect(code(result)).toBe("store.unreachable");
+    });
+
   test("a refused host key is not an unreachable store", async () => {
     const master = makeMasterKeyCanary();
     const { result } = await derive(

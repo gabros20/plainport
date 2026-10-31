@@ -55,6 +55,7 @@ import { releaseOffload } from "../saga/release.ts";
 import { runRestore } from "../saga/restore.ts";
 import { type ProjectCondition, projectViews, type ViewDeps } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
+import { storeStateFile } from "../stores-state.ts";
 import { StubSchema } from "../stub.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
@@ -3148,6 +3149,45 @@ describe("views read the mirror first, and resolve a secret only for a sealed ca
     const seen: string[] = [];
     value(await projectViews(viewDeps({ opener: watching(seen, sealedPolicy()) })));
     expect(seen).toEqual(["", "pw"]);
+  });
+
+  test("a seal key derivation the views' deadline gives up on is stopped, not left running (review phase 5 r2 M5)", async () => {
+    value(await offloadNow());
+    await web();
+    // The store publishes a sealed catalog; the opener gives no policy, so the views derive the key from restic's.
+    const held = parseStoreIdentity(store.data.get(STORE_IDENTITY_KEY) as Uint8Array);
+    if (held === undefined) throw new Error("no store identity");
+    store.data.set(STORE_IDENTITY_KEY, encodeStoreIdentityV2({ id: held.id, repo: held.repo, seal: "v1" }));
+    // This device's pin of the plain policy would refuse the flip first: a device that never pinned it.
+    rmSync(storeStateFile(box.paths, held.id), { force: true });
+    const signals: AbortSignal[] = [];
+    const slowKey: StoreOpener = {
+      open: async (n, st, password) => {
+        const opened = await opener.open(n, st, password);
+        if (!opened.ok) return opened;
+        return {
+          ok: true,
+          value: {
+            ...opened.value,
+            engine: {
+              ...opened.value.engine,
+              catalogKey: (_id, ctx) =>
+                new Promise((resolve) => {
+                  if (ctx?.signal === undefined) return;
+                  signals.push(ctx.signal);
+                  ctx.signal.addEventListener("abort", () =>
+                    resolve(fail(finding("process.cancelled", { message: "stopped" }))),
+                  );
+                }),
+            },
+          },
+        };
+      },
+    };
+    const view = await web({ opener: slowKey });
+    expect(view.stale).toBe(true);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
   });
 
   test("a sealed catalog whose secret the provider does not give: the mirror's state, secret-unavailable", async () => {

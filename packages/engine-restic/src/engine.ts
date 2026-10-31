@@ -160,20 +160,9 @@ const redactorOf = (secrets: readonly string[]) => {
 /**
  * What restic, Go and the system's ssh print when a connection cannot be made or breaks (a cut SFTP link: ssh's
  * "Connection to <host> closed by remote host" or "Connection closed by <host> port <n>", the sftp client's
- * "connection lost"; S3's "Connection closed by foreign host"). Not a refused host key or
- * login ("Host key verification failed", "Permission denied"): those are failures to fix, not an unreachable store.
+ * "connection lost"; S3's "Connection closed by foreign host"), in the casings they print. One list gives both the
+ * pattern for decoded stderr and the byte needles for a sensitive run's, which is never decoded (D92, r2 M4).
  */
-const CONNECTION =
-  /dial tcp|connection refused|no such host|i\/o timeout|network is unreachable|no route to host|host is down|connection reset by peer|connection closed by |TLS handshake timeout|ssh: connect to host|ssh: could not resolve hostname|kex_exchange_identification|closed by remote host|connection lost|broken pipe|server unexpectedly closed connection|context deadline exceeded/i;
-const REFUSED_HANDSHAKE =
-  /host key verification failed|permission denied \(|too many authentication failures|no \S+ host key is known/i;
-/** restic's line when a backend request failed and it waits to try again. */
-const RETRYING = /returned error, retrying after/;
-
-/** Whether what restic said names a connection that could not be made, and not a refused login. */
-const unreachableSaid = (text: string): boolean => CONNECTION.test(text) && !REFUSED_HANDSHAKE.test(text);
-
-/** CONNECTION and REFUSED_HANDSHAKE as byte needles, for a sensitive run's stderr, which is never decoded (D92). */
 const CONNECTION_NEEDLES = [
   "dial tcp",
   "connection refused",
@@ -183,23 +172,40 @@ const CONNECTION_NEEDLES = [
   "no route to host",
   "host is down",
   "connection reset by peer",
-  "Connection closed by foreign host",
-  "connection closed by foreign host",
+  "Connection closed by ",
+  "connection closed by ",
+  "closed by remote host",
+  "connection lost",
   "TLS handshake timeout",
   "ssh: connect to host",
   "ssh: Could not resolve hostname",
   "kex_exchange_identification",
-  "Connection closed by remote host",
   "broken pipe",
   "server unexpectedly closed connection",
   "context deadline exceeded",
 ];
+/**
+ * Not a refused host key or login ("Host key verification failed", "Permission denied"): those are failures to fix,
+ * not an unreachable store.
+ */
 const REFUSED_NEEDLES = [
   "Host key verification failed",
   "Permission denied (",
   "Too many authentication failures",
   "host key is known",
 ];
+const escaped = (needle: string): string => needle.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+const CONNECTION = new RegExp(CONNECTION_NEEDLES.map(escaped).join("|"), "i");
+const REFUSED_HANDSHAKE = new RegExp(
+  [...REFUSED_NEEDLES.slice(0, 3).map(escaped), "no \\S+ host key is known"].join("|"),
+  "i",
+);
+/** restic's line when a backend request failed and it waits to try again. */
+const RETRYING = /returned error, retrying after/;
+
+/** Whether what restic said names a connection that could not be made, and not a refused login. */
+const unreachableSaid = (text: string): boolean => CONNECTION.test(text) && !REFUSED_HANDSHAKE.test(text);
+
 /** What `restic cat masterkey`'s stderr may say, as a closed set: a connection that could not be made, or anything. */
 const MASTER_KEY_STDERR = stderrClasses(["unreachable", "other"] as const, (stderr) =>
   REFUSED_NEEDLES.some((needle) => bytesInclude(stderr, needle))
