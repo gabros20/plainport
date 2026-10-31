@@ -7,13 +7,17 @@
 //   1. the table is checked against what config already says under the name: the same table is a re-run (idempotent),
 //      another one is refused, since a name never moves to another store (D85, D68);
 //   2. a local store's folder is made ready (prepareLocalStore: holders, overlap, a mounted disk);
-//   3. with --secret-stdin, the password is saved to the Keychain under the store's keychain: reference;
+//   3. with --secret-stdin, the typed password is held in memory for this run's reads of the store's reference;
 //   4. the store is reached and its identity read: a name already pinned here must find the same id (D85), a store
 //      whose upgrade marker stands is refused (Q2), and an explicit --seal or --no-seal must be the policy an existing
 //      store publishes, since a store's seal policy is fixed when it is set up and a plain store is never sealed in
-//      place (Q10);
-//   5. managed.toml gets the table (references only, never a value), and the default store when none is set;
-//   6. bootstrap runs: published (this attempt won), adopted, or lost, contested, undecided as failures with their data.
+//      place (Q10); then the typed password is saved to the Keychain, only once the store shows it is the right one
+//      (an existing store's repository opens with it; a new store's reference holds no other value), D112;
+//   5. managed.toml gets the table (references only, never a value), which recover and a re-run need to finish an
+//      attempt that stopped; an existing store's repository has already opened with this device's password, so a
+//      wrong one records nothing;
+//   6. bootstrap runs: published (this attempt won), adopted, or lost, contested, undecided as failures with their data;
+//   7. the store becomes the default when none is set (or with makeDefault), only once it is set up.
 //      A new store's catalog is sealed by default when it is remote (s3, sftp) and plain when it is local (Q10); this
 //      device pins the policy the store publishes (stores/seal.ts).
 // Every step is idempotent, so a re-run finishes a setup that stopped: an open attempt resumes with its id (D99).
@@ -25,6 +29,7 @@ import { updateManaged } from "../config/managed.ts";
 import { type ConfigLayer, type Store, StoreSchema } from "../config/schema.ts";
 import type { LocalIo } from "../io.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
+import type { SecretProvider } from "../ports/secrets.ts";
 import { parseSecretRef } from "../ports/secrets.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readRegistry } from "../registry.ts";
@@ -146,8 +151,11 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
     if (!prepared.ok) return prepared;
   }
 
-  // 3. The password, saved where the reference says, before anything reads it.
-  let secretSaved = false;
+  // 3. The typed password, held in memory: every read of the store's reference in this run gets it, and it is saved to
+  //    the Keychain only once the store shows it is the right one (after step 4), so a mistyped password never
+  //    replaces a working one (D112).
+  let opener = options.opener;
+  let typed: { ref: string; keychain: Required<SecretProvider> } | undefined;
   if (options.secretValue !== undefined) {
     const ref = secretRefOf(store);
     const keychain = options.opener.secrets?.keychain;
@@ -165,13 +173,22 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
           fix: `save it yourself: security add-generic-password -s <service> -a <account> -w, then re-run without --secret-stdin`,
         }),
       );
-    const saved = await keychain.set(ref, options.secretValue);
-    if (!saved.ok) return saved;
-    secretSaved = true;
+    const secretValue = options.secretValue;
+    typed = { ref, keychain: keychain as Required<SecretProvider> };
+    opener = {
+      ...options.opener,
+      secrets: {
+        ...options.opener.secrets,
+        keychain: {
+          ...keychain,
+          get: async (asked, ctx) => (asked === ref ? ok(secretValue) : keychain.get(asked, ctx)),
+        },
+      },
+    };
   }
 
   // 4. The store, reached: its identity against this device's pin, and no upgrade under way.
-  const opened = await reachStore(io, { paths, env, name, store: effective, opener: options.opener });
+  const opened = await reachStore(io, { paths, env, name, store: effective, opener });
   if (!opened.ok) return opened;
   const reached = bootstrapStoreOf(opened.value);
   if (reached === undefined)
@@ -213,26 +230,50 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
       );
   }
 
-  // 5. managed.toml: the table, and the default store when none is set.
+  // An existing store's repository must open with this device's password before anything is written: a wrong one
+  // records nothing (review phase 5 r2 M3), and a typed one is never saved (D112).
+  if (found.value !== null) {
+    const opens = await reached.engineAt(found.value.repo).list({ noLock: true });
+    if (!opens.ok)
+      return typed === undefined
+        ? opens
+        : withFix(
+            opens,
+            `the password typed on stdin does not open store ${name}'s repository, so ${typed.ref} was left as it is and nothing was written; re-run with the store's password`,
+          );
+  }
+  // The typed password, saved now that the store shows it is the right one: an existing store's repository opened
+  // with it; a new store has none yet, so the password is saved before its repository is made, and only where the
+  // reference holds no other value (a working password is never replaced).
+  let secretSaved = false;
+  if (typed !== undefined) {
+    const secretValue = options.secretValue as string;
+    if (found.value === null) {
+      const held = await typed.keychain.get(typed.ref);
+      if (held.ok && held.value !== secretValue)
+        return fail(
+          finding("usage.invalid", {
+            message: `${typed.ref} already holds another password, and store ${name} is new: --secret-stdin never replaces a saved password, so nothing was written`,
+            fix: `give store ${name} its own reference: --secret keychain:plainport/${name}-<something> with --secret-stdin`,
+          }),
+        );
+    }
+    const saved = await typed.keychain.set(typed.ref, secretValue);
+    if (!saved.ok) return saved;
+    secretSaved = true;
+  }
+
+  // 5. managed.toml: the table, which recover and a re-run need to finish an attempt that stopped (D99).
   let configChanged = false;
   const fromUser = existing !== undefined;
-  const written = await updateManaged(io, paths, (current) => {
-    const next: ConfigLayer = { ...current };
-    if (!fromUser && current.stores?.[name] === undefined) {
-      next.stores = { ...current.stores, [name]: store };
+  if (!fromUser) {
+    const written = await updateManaged(io, paths, (current) => {
+      if (current.stores?.[name] !== undefined) return ok(current);
       configChanged = true;
-    }
-    const setDefault =
-      options.makeDefault === true
-        ? current.defaultStore !== name
-        : loaded.value.config.defaultStore === undefined;
-    if (setDefault) {
-      next.defaultStore = name;
-      configChanged = true;
-    }
-    return ok(configChanged ? next : current);
-  });
-  if (!written.ok) return written;
+      return ok({ ...current, stores: { ...current.stores, [name]: store } });
+    });
+    if (!written.ok) return written;
+  }
 
   // 6. Bootstrap: adopt, resume or stand.
   const done = await runBootstrap({ ...options.ports, io, paths }, reached, {
@@ -240,6 +281,18 @@ export const addStore = async (io: LocalIo, options: AddStoreOptions): Promise<R
     seal: options.seal ?? defaultSeal(store.kind),
   });
   if (!done.ok) return done;
+
+  // 7. The default store, once the store is set up: a store that is not is never where roots without one send.
+  const defaulted = await updateManaged(io, paths, (current) => {
+    const setDefault =
+      options.makeDefault === true
+        ? current.defaultStore !== name
+        : loaded.value.config.defaultStore === undefined && current.defaultStore === undefined;
+    if (!setDefault) return ok(current);
+    configChanged = true;
+    return ok({ ...current, defaultStore: name } satisfies ConfigLayer);
+  });
+  if (!defaulted.ok) return defaulted;
   return ok({
     name,
     id: done.value.id,

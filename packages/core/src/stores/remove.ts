@@ -4,8 +4,8 @@
 // the same store share).
 //
 // It refuses with store.in-use while anything on this device still uses the store: a root that names it, or takes it as
-// the default store; an open journal (an offload, an onload) or setup attempt that names it. A store config.toml
-// defines is the user's to remove there: plainport never writes config.toml.
+// the default store; an open journal (an offload, an onload), setup attempt or unsettled upgrade that names it. A
+// store config.toml defines is the user's to remove there: plainport never writes config.toml.
 
 import { fail, finding, ok, type Result } from "@plainport/contract";
 import { ConfigLoader } from "../config/load.ts";
@@ -16,6 +16,7 @@ import type { Env, PlainportPaths } from "../paths.ts";
 import { updateRegistry } from "../registry.ts";
 import { configLayers } from "./list.ts";
 import { notConfigured } from "./reach.ts";
+import { readUpgradeJournals } from "./upgrade.ts";
 
 export type StoreRemoved = {
   name: string;
@@ -43,9 +44,11 @@ export const storeUsers = async (
   }
   let journals: Awaited<ReturnType<typeof readJournals>>;
   let attempts: Awaited<ReturnType<typeof readBootstrapJournals>>;
+  let upgrades: Awaited<ReturnType<typeof readUpgradeJournals>>;
   try {
     journals = await readJournals(io, paths);
     attempts = await readBootstrapJournals(io, paths);
+    upgrades = await readUpgradeJournals(io, paths);
   } catch (error) {
     return fail(
       finding("fs.unreadable", {
@@ -67,6 +70,12 @@ export const storeUsers = async (
       users.push(
         `its setup attempt ${attempt.op} is open (plainport recover, or plainport store add ${name}, settles it)`,
       );
+  // An upgrade a crash left: recover opens its store by this name to clear the marker every device refuses under.
+  for (const upgrade of upgrades.journals)
+    if (upgrade.store.name === name)
+      users.push(`its upgrade ${upgrade.op} is unsettled (plainport recover settles it)`);
+  for (const path of upgrades.unreadable)
+    users.push(`the upgrade journal ${path} cannot be read by this version and may name it`);
   return ok(users);
 };
 

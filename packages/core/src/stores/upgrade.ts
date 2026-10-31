@@ -49,6 +49,11 @@ import { notConfigured, reachStore } from "./reach.ts";
 export const UPGRADE_INTENT_KEY = "meta/v1/upgrade-intent.json";
 /** How long the catalog must show no other device's event before and during an upgrade (Q2). */
 export const QUIET_WINDOW_MS = 15 * 60_000;
+/**
+ * The shortest quiet window an upgrade takes (D112, review phase 5 r2 M2): a window of 0 would be a single re-read, so
+ * it is refused. A short window an owner names on purpose is theirs (the T1 compat row runs one of a second).
+ */
+export const QUIET_WINDOW_MIN_MS = 1_000;
 
 export const UpgradeIntentSchema = z
   .strictObject({
@@ -158,6 +163,11 @@ export interface UpgradeOptions {
   device: string;
   othersStopped: boolean;
   windowMs?: number;
+  /**
+   * --clear-marker: clear a marker an upgrade left instead of upgrading (D112): another device's once it is older than
+   * the quiet window and the owner attests (--others-stopped) that device is stopped or gone; this device's at once.
+   */
+  clearMarker?: boolean;
   /** A fresh ULID, the upgrade's id. */
   mint: () => string;
 }
@@ -172,6 +182,8 @@ export type UpgradeDone = {
   upgraded: boolean;
   /** This run found this device's own marker from an earlier run and finished or cleared it. */
   resumed: boolean;
+  /** --clear-marker: this run removed the marker an upgrade left; store.json was not changed. */
+  markerCleared?: boolean;
 };
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -196,7 +208,7 @@ export const upgradeUnderWay = (store: string, doing: string, intent: UpgradeInt
   fail(
     finding("store.not-quiescent", {
       message: `store ${store} is being upgraded to format 2${intent === null ? "" : ` (upgrade ${intent.op} by device ${intent.device}, since ${intent.at})`}: its ${UPGRADE_INTENT_KEY} marker stands, so ${doing} refuses; nothing was written`,
-      fix: `wait for the upgrade to finish and re-run; if it stopped, run plainport store upgrade ${store} --others-stopped --yes on the device that started it (it resumes), or plainport recover there (it clears the marker)`,
+      fix: `wait for the upgrade to finish and re-run; if it stopped, run plainport store upgrade ${store} --others-stopped --yes on the device that started it (it resumes), or plainport recover there (it clears the marker); if that device is gone, once the marker is older than the quiet window: plainport store upgrade ${store} --clear-marker --others-stopped --yes`,
       paths: [UPGRADE_INTENT_KEY],
     }),
   );
@@ -304,6 +316,13 @@ export const upgradeStore = async (
 ): Promise<Result<UpgradeDone>> => {
   const { io, paths } = ports;
   const { name, config } = options;
+  if ((options.windowMs ?? QUIET_WINDOW_MS) < QUIET_WINDOW_MIN_MS)
+    return fail(
+      finding("usage.invalid", {
+        message: `a quiet window of ${options.windowMs ?? 0} ms is no window: Q2's window must let another device's activity show between the two reads, so it is at least 1 second; nothing was changed`,
+        fix: "re-run without --quiet-window (15m, the default), or with a window such as --quiet-window 15m",
+      }),
+    );
   const store = config.stores[name];
   if (store === undefined) return notConfigured(name, Object.keys(config.stores));
   const registry = await readRegistry(io, paths);
@@ -360,6 +379,78 @@ export const upgradeStore = async (
   }
 };
 
+/**
+ * --clear-marker (D112): removes the marker an upgrade left, and changes nothing else. This device's own marker goes at
+ * once (as recover clears it). Another device's goes only once it is older than the quiet window, by the later of its
+ * writer's two clocks, and the owner attests (--others-stopped) that the device is stopped or gone: a device lost
+ * mid-upgrade otherwise leaves every v0.2 offload and setup on the store refused for good.
+ */
+const clearMarker = async (
+  ports: UpgradePorts,
+  options: UpgradeOptions,
+  blob: BlobStore,
+  marker: UpgradeIntent | null | undefined,
+  pinned: string,
+  descriptor: StoreDescriptor,
+): Promise<Result<UpgradeDone>> => {
+  const { name, device } = options;
+  const windowMs = options.windowMs ?? QUIET_WINDOW_MS;
+  const command = `plainport store upgrade ${name} --clear-marker --others-stopped --yes`;
+  if (marker === undefined)
+    return fail(
+      finding("usage.invalid", {
+        message: `no upgrade marker stands on store ${name}, so there is nothing to clear; nothing was changed`,
+        fix: `plainport store upgrade ${name} --others-stopped --yes upgrades it`,
+      }),
+    );
+  if (marker === null)
+    return notQuiescent(
+      name,
+      `its ${UPGRADE_INTENT_KEY} is not a marker this version reads (a newer plainport's?), so it was left`,
+      "clear it with the plainport version that wrote it",
+      [UPGRADE_INTENT_KEY],
+    );
+  if (marker.store !== pinned)
+    return notQuiescent(
+      name,
+      `its marker names store ${marker.store}, not ${pinned}, which this device set up as ${name}, so it was left`,
+      `check ${UPGRADE_INTENT_KEY} on the store by hand; plainport clears only a marker for the store it pinned`,
+      [UPGRADE_INTENT_KEY],
+    );
+  if (marker.device !== device) {
+    const age = ports.clock().getTime() - Math.max(Date.parse(marker.at), ulidTime(marker.op));
+    if (age < windowMs)
+      return notQuiescent(
+        name,
+        `device ${marker.device}'s marker (upgrade ${marker.op}, since ${marker.at}) is younger than the quiet window, so its upgrade may still be running`,
+        `wait until the quiet window has passed since ${marker.at}, then re-run ${command}`,
+        [UPGRADE_INTENT_KEY],
+      );
+    if (!options.othersStopped)
+      return notQuiescent(
+        name,
+        `--others-stopped was not given: plainport cannot see whether device ${marker.device} still runs its upgrade, so the owner says so`,
+        `make sure device ${marker.device} is stopped or gone, then re-run ${command}`,
+        [UPGRADE_INTENT_KEY],
+      );
+  } else if ((await liveHolder(ports.io, lockFile(ports.paths, name))) !== undefined)
+    return notQuiescent(name, "this device's upgrade of it is still running", "wait for it to finish", [
+      UPGRADE_INTENT_KEY,
+    ]);
+  const removed = await blob.delete(UPGRADE_INTENT_KEY);
+  if (!removed.ok) return removed;
+  ports.faultAt("upgrade.intent.removed");
+  return ok({
+    name,
+    id: pinned,
+    from: descriptor.format,
+    format: 2,
+    upgraded: false,
+    resumed: false,
+    markerCleared: true,
+  });
+};
+
 const upgradeLocked = async (
   ports: UpgradePorts,
   options: UpgradeOptions,
@@ -393,6 +484,7 @@ const upgradeLocked = async (
     resumed,
   });
 
+  if (options.clearMarker === true) return clearMarker(ports, options, blob, marker, pinned, descriptor);
   if (marker !== undefined && (marker === null || marker.device !== device || marker.store !== pinned))
     return upgradeUnderWay(name, "this upgrade", marker);
   if (descriptor.format === 2) {
@@ -472,15 +564,23 @@ const upgradeLocked = async (
   }
   const again = await readEvents(log);
   const seen = new Set(first.value.events.map((e) => e.id));
-  const fresh = again.ok ? again.value.events.filter((e) => e.device !== device && !seen.has(e.id)) : [];
+  // Any event new since the first read, this device's own included: this upgrade writes none (r2 M1).
+  const fresh = again.ok ? again.value.events.filter((e) => !seen.has(e.id)) : [];
   const leased = again.ok ? catalogActivity(again.value.events, device, Number.POSITIVE_INFINITY) : undefined;
-  if (!again.ok || fresh.length > 0 || leased !== undefined) {
+  // This device's own operations, again: one may have started between the first check and the marker.
+  const localAgain = await localActivity(ports, own);
+  const busyHere = localAgain.ok
+    ? localAgain.value
+    : `this device's journals and locks could not be read again`;
+  if (!again.ok || fresh.length > 0 || leased !== undefined || busyHere !== undefined) {
     const removed = await blob.delete(UPGRADE_INTENT_KEY);
     const reason = !again.ok
       ? `the catalog could not be read again after the window (${again.finding.message})`
       : fresh.length > 0
-        ? `device ${fresh[0]?.device} wrote event ${fresh[0]?.id} during the quiet window`
-        : (leased as string);
+        ? `${fresh[0]?.device === device ? "this device" : `device ${fresh[0]?.device}`} wrote event ${fresh[0]?.id} during the quiet window`
+        : leased !== undefined
+          ? leased
+          : `${busyHere as string} after the quiet window`;
     return notQuiescent(
       name,
       `${reason}; the upgrade was abandoned${removed.ok ? " and its marker removed" : `, and its marker could not be removed (${removed.finding.message}): plainport recover removes it`}`,
@@ -528,14 +628,25 @@ export const recoverUpgrade = async (
   blob: BlobStore,
   name: string,
   device: string,
+  /** The store id the upgrade's journal names: the marker must be for it, and the store reached must be it (r2 M6). */
+  storeId?: string,
 ): Promise<Result<RecoveredUpgrade | undefined>> => {
   const intent = await readUpgradeIntent(blob);
   if (!intent.ok) return intent;
   if (intent.value === undefined) return ok(undefined);
   if (intent.value === null || intent.value.device !== device) return ok({ store: name, outcome: "kept" });
+  if (storeId !== undefined && intent.value.store !== storeId) return ok({ store: name, outcome: "kept" });
   const running = await liveHolder(ports.io, lockFile(ports.paths, name));
   if (running !== undefined) return ok({ store: name, outcome: "kept" });
   const found = await readStoreDescriptor(blob);
+  if (storeId !== undefined) {
+    if (!found.ok) return found;
+    if (found.value?.id !== storeId)
+      return withFix(
+        identityChanged(storeId, found.value?.id ?? null, `store named ${name}`),
+        `point stores.${name} back at the store this device upgraded (${storeId}), then run plainport recover; its marker was left`,
+      );
+  }
   const removed = await blob.delete(UPGRADE_INTENT_KEY);
   if (!removed.ok) return removed;
   return ok({
@@ -590,7 +701,7 @@ export const recoverUpgrades = async (
       continue;
     }
     const blob = await open(name);
-    const settled = blob.ok ? await recoverUpgrade(ports, blob.value, name, device) : blob;
+    const settled = blob.ok ? await recoverUpgrade(ports, blob.value, name, device, journal.store.id) : blob;
     if (!settled.ok) {
       upgrades.push({ op: journal.op, store: name, outcome: "pending", finding: settled.finding });
       continue;

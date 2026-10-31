@@ -4,7 +4,7 @@
 // Every device is a sandboxed home; every store an in-memory blob store shared through a store world.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { type Failure, fail, finding, ok, type Result } from "@plainport/contract";
 import { encodePlain, storeEventKey } from "../catalog/codec.ts";
 import type { CatalogEvent } from "../catalog/events.ts";
@@ -28,7 +28,13 @@ import { listStores } from "./list.ts";
 import { storeFacts } from "./location.ts";
 import { removeStore } from "./remove.ts";
 import { STORE_TEST_PREFIX, testStore } from "./test.ts";
-import { recoverUpgrade, UPGRADE_INTENT_KEY, type UpgradePorts, upgradeStore } from "./upgrade.ts";
+import {
+  recoverUpgrade,
+  UPGRADE_INTENT_KEY,
+  type UpgradePorts,
+  upgradeJournalDir,
+  upgradeStore,
+} from "./upgrade.ts";
 
 const PASSWORD = "store-test-password";
 const TOOLS = { restic: "0.19.1", rclone: "1.75.1" };
@@ -145,6 +151,8 @@ describe("store add", () => {
     const c = await device(world, { password: "another" });
     expect(failed(await add(c)).finding.code).toBe("restic.wrong-password");
     expect(value(await readRegistry(io, c.box.paths)).stores).toBeUndefined();
+    // Nor in managed.toml: neither the table nor the default store (review phase 5 r2 M3).
+    expect(() => c.managed()).toThrow();
   });
 
   test("refuses another store under a configured name, writing nothing", async () => {
@@ -186,6 +194,9 @@ describe("store add", () => {
     expect((refused.data as { outcome?: string } | undefined)?.outcome).toBe("waiting");
     expect(blob.data.has(STORE_IDENTITY_KEY)).toBe(false);
     expect(value(await readRegistry(io, d.box.paths)).stores).toBeUndefined();
+    // The table stays for recover and a re-run to finish the attempt; the store is not made the default until it is
+    // set up (review phase 5 r2 M3).
+    expect(Bun.TOML.parse(d.managed())).toEqual({ stores: { archive: { kind: "local", path: ARCHIVE() } } });
   });
 
   test("an offload refuses while the store's upgrade marker stands (Q2)", async () => {
@@ -247,6 +258,62 @@ describe("store add", () => {
     const managed = readFileSync(box.paths.managedFile, "utf8");
     expect(managed).toContain("keychain:plainport/nas");
     expect(managed).not.toContain("typed-on-stdin-7f3a");
+  });
+
+  test("--secret-stdin never replaces a saved password the store's repository does not open with (review phase 5 r2 C1)", async () => {
+    const world = storeWorld();
+    const saved = new Map<string, string>();
+    const box = sandbox();
+    value(
+      await ensureDevice(io, box.paths, { role: "owner", name: "mbp", clock: { now: () => new Date() } }),
+    );
+    const secrets = {
+      keychain: {
+        get: async (ref: string) =>
+          saved.has(ref)
+            ? ok(saved.get(ref) as string)
+            : fail(finding("store.secret-missing", { message: "no item" })),
+        set: async (ref: string, secret: string) => {
+          saved.set(ref, secret);
+          return ok(undefined);
+        },
+      },
+    };
+    const opener = world.opener(box.home, { secrets });
+    const nas = { kind: "local" as const, path: `${ARCHIVE()}-nas`, secret: "keychain:plainport/nas" };
+    const addWith = (secretValue: string) =>
+      addStore(io, {
+        paths: box.paths,
+        env: { HOME: box.home },
+        name: "nas",
+        store: nas,
+        opener,
+        ports,
+        secretValue,
+      });
+    value(await addWith("the-working-one"));
+    const managed = readFileSync(box.paths.managedFile, "utf8");
+    // A re-run with a mistyped password: the repository does not open with it, and the saved item stays.
+    expect(failed(await addWith("a-typo")).finding.code).toBe("restic.wrong-password");
+    expect(saved.get("keychain:plainport/nas")).toBe("the-working-one");
+    expect(readFileSync(box.paths.managedFile, "utf8")).toBe(managed);
+    // The right one again: adopted, and the item is as it was.
+    expect(value(await addWith("the-working-one"))).toMatchObject({ outcome: "adopted" });
+    expect(saved.get("keychain:plainport/nas")).toBe("the-working-one");
+    // A new store whose reference already holds another value: refused, the item kept, nothing set up.
+    const other = { ...nas, path: `${ARCHIVE()}-other` };
+    const fresh = await addStore(io, {
+      paths: box.paths,
+      env: { HOME: box.home },
+      name: "other",
+      store: other,
+      opener,
+      ports,
+      secretValue: "something-else",
+    });
+    expect(failed(fresh).finding.code).toBe("usage.invalid");
+    expect(saved.get("keychain:plainport/nas")).toBe("the-working-one");
+    expect(world.blobAt(other.path).data.size).toBe(0);
   });
 });
 
@@ -454,6 +521,22 @@ describe("store remove", () => {
     expect(refused.finding.message).toContain(op);
   });
 
+  test("refuses while an unsettled upgrade journal names it (review phase 5 r2 I1)", async () => {
+    const world = storeWorld();
+    const d = await device(world);
+    const added = value(await add(d));
+    const op = ulid();
+    await io.fs.mkdirp(upgradeJournalDir(d.box.paths));
+    writeFileSync(
+      `${upgradeJournalDir(d.box.paths)}/${op}.json`,
+      `${JSON.stringify({ v: 1, op, kind: "upgrade", store: { name: "archive", id: added.id }, startedAt: new Date().toISOString(), pid: 1, host: "h" })}\n`,
+    );
+    const refused = failed(await remove(d));
+    expect(refused.finding.code).toBe("store.in-use");
+    expect(refused.finding.message).toContain(`upgrade ${op}`);
+    expect(value(await readRegistry(io, d.box.paths)).stores).toEqual({ archive: added.id });
+  });
+
   test("forgets an unused store on this device only: its table, the default and the pin; the store is untouched", async () => {
     const world = storeWorld();
     const d = await device(world);
@@ -509,6 +592,8 @@ describe("store upgrade", () => {
       othersStopped?: boolean;
       wait?: (ms: number) => Promise<void>;
       faultAt?: (point: string) => void;
+      clearMarker?: boolean;
+      windowMs?: number;
     } = {},
   ) =>
     d.config().then((config) => {
@@ -527,6 +612,8 @@ describe("store upgrade", () => {
         device: d.id,
         othersStopped: options.othersStopped ?? true,
         mint: () => ulid(NOW.getTime()),
+        ...(options.clearMarker === undefined ? {} : { clearMarker: options.clearMarker }),
+        ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }),
       });
     });
 
@@ -738,6 +825,137 @@ describe("store upgrade", () => {
     expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
     // And this device's upgrade refuses while it stands.
     expect(failed(await upgrade(d)).finding.code).toBe("store.not-quiescent");
+  });
+
+  test("a quiet window of 0 is refused: Q2's window is never a single re-read (review phase 5 r2 M2)", async () => {
+    const world = storeWorld();
+    const { d, blob } = await m1Store(world);
+    for (const windowMs of [0, 999]) {
+      const refused = failed(await upgrade(d, { windowMs }));
+      expect(refused.finding.code).toBe("usage.invalid");
+      expect(refused.finding.fix).toContain("--quiet-window");
+    }
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(false);
+    expect(value(await upgrade(d, { windowMs: 1_000 }))).toMatchObject({ upgraded: true });
+  });
+
+  test("this device's own activity during the window aborts it too: its events, an open journal (review phase 5 r2 M1)", async () => {
+    for (const during of ["journal", "event"] as const) {
+      const world = storeWorld();
+      const { d, blob } = await m1Store(world);
+      const refused = failed(
+        await upgrade(d, {
+          wait: async () => {
+            if (during === "event")
+              await putEvent(blob, {
+                ...event({ type: "registered", project: ulid(), root: ulid(), path: "web" } as never, NOW),
+                device: d.id,
+              } as CatalogEvent);
+            else {
+              const op = ulid();
+              await writeBootstrapJournal(io, d.box.paths, {
+                v: 1,
+                op,
+                kind: "bootstrap",
+                step: "bootstrap.begin",
+                startedAt: NOW.toISOString(),
+                updatedAt: NOW.toISOString(),
+                pid: 1,
+                host: "h",
+                store: { name: "other", location: "/x" },
+                repo: `repos/${op}`,
+                seal: "none",
+                history: [],
+              });
+            }
+          },
+        }),
+      );
+      expect([during, refused.finding.code]).toEqual([during, "store.not-quiescent"]);
+      expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(false);
+      expect(JSON.parse(text(blob.data.get(STORE_IDENTITY_KEY)) as string).v).toBe(1);
+    }
+  });
+
+  test("another device's stale marker is cleared with --clear-marker --others-stopped, once older than the window (D112, review phase 5 r2 I2)", async () => {
+    const world = storeWorld();
+    const { d, id, blob } = await m1Store(world);
+    const put = (at: Date, over: Record<string, unknown> = {}) =>
+      blob.put(
+        UPGRADE_INTENT_KEY,
+        new TextEncoder().encode(
+          JSON.stringify({
+            v: 1,
+            op: ulid(at.getTime()),
+            store: id,
+            device: OTHER,
+            at: at.toISOString(),
+            ...over,
+          }),
+        ),
+      );
+    // The refusal everyone else sees names the command.
+    value(await put(new Date(NOW.getTime() - 5 * 60_000)));
+    const other = await device(world);
+    expect(failed(await add(other)).finding.fix).toContain(
+      "plainport store upgrade archive --clear-marker --others-stopped --yes",
+    );
+    // Younger than the window: refused, kept.
+    const young = failed(await upgrade(d, { clearMarker: true }));
+    expect(young.finding.code).toBe("store.not-quiescent");
+    expect(young.finding.message).toContain("younger than the quiet window");
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
+    // Older, but without the owner's word: refused, kept.
+    value(await put(new Date(NOW.getTime() - 20 * 60_000)));
+    expect(failed(await upgrade(d, { clearMarker: true, othersStopped: false })).finding.code).toBe(
+      "store.not-quiescent",
+    );
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
+    // A marker for another store: refused, kept.
+    value(await put(new Date(NOW.getTime() - 20 * 60_000), { store: ulid() }));
+    expect(failed(await upgrade(d, { clearMarker: true })).finding.code).toBe("store.not-quiescent");
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
+    // Older, with --others-stopped: cleared; store.json untouched.
+    value(await put(new Date(NOW.getTime() - 20 * 60_000)));
+    expect(value(await upgrade(d, { clearMarker: true }))).toMatchObject({
+      upgraded: false,
+      markerCleared: true,
+      from: 1,
+    });
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(false);
+    expect(JSON.parse(text(blob.data.get(STORE_IDENTITY_KEY)) as string).v).toBe(1);
+    // Nothing left to clear: refused, so the flag never upgrades by surprise.
+    expect(failed(await upgrade(d, { clearMarker: true })).finding.code).toBe("usage.invalid");
+  });
+
+  test("recover clears only the marker its journal names, on the store it pinned (review phase 5 r2 M6)", async () => {
+    const world = storeWorld();
+    const { d, id, blob } = await m1Store(world);
+    const marker = (store: string) =>
+      blob.put(
+        UPGRADE_INTENT_KEY,
+        new TextEncoder().encode(
+          JSON.stringify({ v: 1, op: ulid(), store, device: d.id, at: NOW.toISOString() }),
+        ),
+      );
+    value(await marker(ulid()));
+    expect(value(await recoverUpgrade({ io, paths: d.box.paths }, blob, "archive", d.id, id))).toEqual({
+      store: "archive",
+      outcome: "kept",
+    });
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
+    // The name now reaches another store (config re-pointed): its marker is not this journal's to clear.
+    value(await marker(id));
+    value(
+      await blob.put(
+        STORE_IDENTITY_KEY,
+        new TextEncoder().encode(`${JSON.stringify({ v: 1, id: ulid() })}\n`),
+      ),
+    );
+    expect(
+      failed(await recoverUpgrade({ io, paths: d.box.paths }, blob, "archive", d.id, id)).finding.code,
+    ).toBe("store.identity-changed");
+    expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(true);
   });
 
   test("a format-2 store needs no upgrade", async () => {

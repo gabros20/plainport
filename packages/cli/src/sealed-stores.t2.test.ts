@@ -8,7 +8,7 @@
 //   killed at the step, this device's mirror is deleted, and `plainport recover` settles it from the sealed store
 //   alone, as it would on a plain one: rolled back before the event is on the store, finished after.
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigLoader, ensureDevice, eventMirrorDir, type OpenedStore } from "@plainport/core";
@@ -22,7 +22,7 @@ import {
   type StoreSpec,
   value,
 } from "../../../test/support/remote-device.ts";
-import { describeT2 } from "../../../test/tiers.ts";
+import { beforeAllT2, describeT2 } from "../../../test/tiers.ts";
 import { rclonePath } from "../../blob-rclone/src/testing/t2.ts";
 import { looksSealed } from "../../core/src/catalog/seal.ts";
 import { testHost } from "../../core/src/testing/host.ts";
@@ -148,7 +148,7 @@ const stateOf = async (d: RemoteDevice): Promise<{ state: string; stale: boolean
   );
 };
 
-beforeAll(async () => {
+beforeAllT2(async () => {
   rclone = await rclonePath();
 });
 afterAll(async () => {

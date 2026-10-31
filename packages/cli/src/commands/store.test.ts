@@ -84,6 +84,41 @@ describe("store upgrade: crash rows (Q2)", () => {
   });
 });
 
+describe("store upgrade --clear-marker (D112, review phase 5 r2 I2)", () => {
+  test("a lost device's stale marker: confirm without --yes, then cleared; offload is no longer refused for it", async () => {
+    const lost = "01JC0000000000000000000000";
+    // Long before the CLI tests' pinned clock: older than any quiet window.
+    const at = "2026-01-01T00:00:00.000Z";
+    writeFileSync(
+      marker(),
+      `${JSON.stringify({ v: 1, op: "01JC0000000000000000000001", store: identity().id, device: lost, at })}\n`,
+    );
+    const blocked = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(envelope(blocked.out).error.finding.fix).toContain(
+      "plainport store upgrade local --clear-marker --others-stopped --yes",
+    );
+    const asked = await cli(["store", "upgrade", "local", "--clear-marker", "--others-stopped"]);
+    expect(asked.code).toBe(3);
+    expect(existsSync(marker())).toBe(true);
+    const cleared = await cli([
+      "store",
+      "upgrade",
+      "local",
+      "--clear-marker",
+      "--others-stopped",
+      "--yes",
+      "--json",
+    ]);
+    expect(cleared.code).toBe(0);
+    expect(envelope(cleared.out).data).toMatchObject({ markerCleared: true, upgraded: false, from: 1 });
+    expect(existsSync(marker())).toBe(false);
+    expect(identity().v).toBe(1);
+    // The offload is no longer refused for the marker (this harness's M1 store.json names a repository it lacks).
+    const after = await cli(["offload", "work:web", "--yes", "--json"]);
+    expect(envelope(after.out).error?.finding?.code).not.toBe("store.not-quiescent");
+  });
+});
+
 describe("store upgrade: a ULID-shaped alias (D104, Q11)", () => {
   // An M1 alias shaped like a ULID that is not the store's id: a key, never read as an id.
   const ALIAS = "01HZZZZZZZZZZZZZZZZZZZZZZZ";

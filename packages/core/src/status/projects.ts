@@ -66,6 +66,7 @@ import { resolveS3Credentials, resolveSecret, secretProvidersOf, secretRefOf } f
 import { sealedByPin, storeCatalog } from "../stores/seal.ts";
 import { STUB_SUFFIX } from "../stub.ts";
 import { readRefusal } from "../trash-claim.ts";
+import { ulid } from "../ulid.ts";
 
 /** How long opening a store or reading its catalog may take before the mirror stands in for it (Q14). */
 export const PROVIDER_DEADLINE_MS = SECRET_DEADLINE_MS;
@@ -375,12 +376,22 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     /** A sealed catalog's policy, with its key (stores/seal.ts), when the opener gave none; views pin nothing. */
     const withKey = async (target: OpenedStore): Promise<Result<OpenedStore>> => {
       if (target.catalog !== undefined) return ok(target);
+      // Giving up at the deadline stops the master key's read too (restic cat masterkey), not only the wait (r2 M5).
+      const stop = new AbortController();
       const policy = await withinDeadline(
-        storeCatalog(io, paths, { ...target, name, id }, { pin: false, at: () => now.toISOString() }),
+        storeCatalog(
+          io,
+          paths,
+          { ...target, name, id },
+          { pin: false, at: () => now.toISOString(), ctx: { op: ulid(), signal: stop.signal } },
+        ),
         deadline,
         scheduler,
       );
-      if (policy.timedOut) return timedOut(policy.seconds, "store.unreachable", `store ${name}`);
+      if (policy.timedOut) {
+        stop.abort();
+        return timedOut(policy.seconds, "store.unreachable", `store ${name}`);
+      }
       return policy.value.ok ? ok({ ...target, catalog: policy.value.value }) : policy.value;
     };
     let opened = await openWith("");
