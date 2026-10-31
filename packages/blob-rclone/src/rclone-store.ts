@@ -351,6 +351,15 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       relative === "" ? base : base === "" ? relative : base === "/" ? `/${relative}` : `${base}/${relative}`;
     return `${RCLONE_REMOTE}:${path}`;
   };
+  /**
+   * The rclone path of a folder, with its trailing slash: rclone's S3 backend asks with a HEAD whether a root without one
+   * is a file, and when that HEAD cannot reach the store it takes the root for a file, so a filtered read of it fails
+   * with "can't limit to single files when using filters" and the connection error is never said (Task 27).
+   */
+  const folderPath = (relative: string): string => {
+    const path = remotePath(relative);
+    return path.endsWith("/") || path.endsWith(":") ? path : `${path}/`;
+  };
 
   const unreachable = (command: string, said: string): Failure =>
     fail(
@@ -567,7 +576,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
       // file, never a folder of the same name (whose files cat would join).
       const ran = /[\r\n]/.test(name)
         ? await run(call, "cat", [remotePath(key)], { capture: true })
-        : await run(call, "cat", ["--files-from-raw", "-", remotePath(dir)], {
+        : await run(call, "cat", ["--files-from-raw", "-", folderPath(dir)], {
             capture: true,
             stdin: `${name}\n`,
           });
