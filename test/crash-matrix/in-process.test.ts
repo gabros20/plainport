@@ -60,6 +60,7 @@ import {
   makeProjectTemplate,
   type ProjectTemplate,
   type TreeHash,
+  treeDiff,
 } from "./fixture.ts";
 import {
   ALL_ROWS,
@@ -109,12 +110,19 @@ const sealedFor = (store: MemoryBlobStore): CatalogPolicy => {
 
 /** While set, every store call fails with store.unreachable: a store down (the re-read rows). */
 let storeDown = false;
+/** Run once before the next listing of the store, then cleared: another copy acting just before a catalog read. */
+let beforeNextList: (() => Promise<unknown>) | undefined;
 const reachable = (blob: MemoryBlobStore): MemoryBlobStore => {
   const gone = () => Promise.resolve(fail(finding("store.unreachable", { message: "the store is down" })));
   return {
     ...blob,
     get: (key) => (storeDown ? gone() : blob.get(key)),
-    list: (prefix) => (storeDown ? gone() : blob.list(prefix)),
+    list: async (prefix) => {
+      const hook = beforeNextList;
+      beforeNextList = undefined;
+      await hook?.();
+      return storeDown ? gone() : blob.list(prefix);
+    },
     stat: (key) => (storeDown ? gone() : blob.stat(key)),
     put: (key, data, opts) => (storeDown ? gone() : blob.put(key, data, opts)),
   };
@@ -168,6 +176,8 @@ beforeEach(async () => {
   heldDelete = undefined;
   catalog = undefined;
   storeDown = false;
+  beforeNextList = undefined;
+  forkAfterCommit = false;
   unseen = undefined;
   reference = hashTree(dir);
 });
@@ -210,13 +220,15 @@ const onloadDeps = (host: HostPorts): OnloadDeps => ({
   log: () => {},
 });
 
-const recoverDeps = (): RecoverDeps => {
+/** recover's dependencies; `secret: false` leaves the store's password out of its environment (a locked provider). */
+const recoverDeps = (options: { secret?: boolean } = {}): RecoverDeps => {
   const host = testHost({ faults: { onStep: capture } });
+  const { PLAINPORT_STORE_PASSWORD: _, ...withoutSecret } = env();
   return {
     host,
     paths: box.paths,
     device,
-    env: env(),
+    env: options.secret === false ? withoutSecret : env(),
     loader: new ConfigLoader(host, box.paths),
     opener,
     openMirror: async () => ({ ok: true, value: mirror }),
@@ -246,11 +258,46 @@ const projectId = async (): Promise<string | undefined> => {
   return Object.entries(registry.value.projects).find(([, e]) => e.path === "web")?.[0];
 };
 
+/** Another copy's first offload of the project: with this one's, two first offloads are a fork. */
+const forkNow = async () => {
+  const id = (await projectId()) as string;
+  const registry = await readRegistry(testHost(), box.paths);
+  const rootId = registry.ok ? (registry.value.roots?.work as string) : "";
+  const s = ulid();
+  const appended = await appendEvent(storeEventLog(store, catalog), {
+    v: 1,
+    id: s,
+    op: s,
+    type: "offloaded",
+    device: ulid(),
+    at: new Date().toISOString(),
+    project: id,
+    root: rootId,
+    path: "web",
+    snapshot: s,
+    stored: { ssd: "c".repeat(64) },
+    stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+  });
+  if (!appended.ok) throw new Error(appended.finding.message);
+  return s;
+};
+
 /** The detached delete a crash at MATRIX_POINTS.raced started, held until the crash has been looked at. */
 let heldDelete: (() => Promise<unknown>) | undefined;
 
+/** Set by the forkedAfterCommit setup: once the commit is journaled, another copy's first offload forks the project. */
+let forkAfterCommit = false;
+
 const offload = async (faults: { at?: string; occurrence?: number } = {}) => {
-  const real = testHost({ faults: { ...faults, onStep: capture } });
+  const onStep = (step: string) => {
+    capture(step);
+    // The commit's head check passed; release's catalog read is the next listing of the store (F2).
+    if (step === "offload.committed" && forkAfterCommit) {
+      forkAfterCommit = false;
+      beforeNextList = forkNow;
+    }
+  };
+  const real = testHost({ faults: { ...faults, onStep } });
   // Past the detached delete's start the real delete races the test: on a fast disk it removes the journal before
   // the crash is read. So for that crash it is held, reported as started, and run once the crash has been read.
   const host: HostPorts =
@@ -341,6 +388,11 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
       writeFileSync(join(dir, "notes/todo.txt"), "edited during the upload\n");
       noteEdit("notes/todo.txt");
     };
+    await crashOffload(row);
+  },
+  forkedAfterCommit: async (row) => {
+    // Another copy's first offload lands after the commit's head check, before release reads the catalog again (F2).
+    forkAfterCommit = true;
     await crashOffload(row);
   },
   held: async (row) => {
@@ -568,30 +620,6 @@ describe("crash matrix, in-process: a lost onload.swap.start write (N3)", () => 
 // store unreachable at the re-read, and a lost release.moved write. Recover decides from the world: a folder still in
 // place is read again (a fork keeps it, F2), one already in the trash is never moved back (F3).
 describe("crash matrix, in-process: the release's re-read (forks)", () => {
-  /** Another copy's first offload of the project: with this one's, two first offloads are a fork. */
-  const forkNow = async () => {
-    const id = (await projectId()) as string;
-    const registry = await readRegistry(testHost(), box.paths);
-    const rootId = registry.ok ? (registry.value.roots?.work as string) : "";
-    const s = ulid();
-    const appended = await appendEvent(storeEventLog(store, catalog), {
-      v: 1,
-      id: s,
-      op: s,
-      type: "offloaded",
-      device: ulid(),
-      at: new Date().toISOString(),
-      project: id,
-      root: rootId,
-      path: "web",
-      snapshot: s,
-      stored: { ssd: "c".repeat(64) },
-      stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
-    });
-    if (!appended.ok) throw new Error(appended.finding.message);
-    return s;
-  };
-
   test("offload.release.reread · killed between the re-read and the rename, then a fork: recover keeps the folder (F2)", async () => {
     const row = plainRowAt("offload.release.reread");
     const { problems, crashedOp } = await runRow(row, {
@@ -660,6 +688,75 @@ describe("crash matrix, in-process: the release's re-read (forks)", () => {
   }, 30_000);
 });
 
+// Carried from phase 6 (the board's notes from int-p5 and int-p6): behaviours pinned by a row each.
+describe("crash matrix, in-process: carried from phase 6", () => {
+  const unchanged = () => expect(treeDiff(reference, hashTree(dir))).toEqual([]);
+
+  // Release reads the store's catalog again while the folder stands (F2), and the stub takes the offloaded event's
+  // facts from the mirror, else from the store (recover's eventFacts): both open the store, and opening it reads its
+  // secret. A provider that cannot give it (a locked Keychain, a variable not set) leaves the operation pending with
+  // the folder in place, whether or not the mirror holds the event; once it can, recover finishes the release.
+  for (const mirrored of [true, false])
+    test(`offload.committed · the store's secret unreadable, the event ${mirrored ? "in" : "not in"} the mirror: pending with the folder kept, then finished`, async () => {
+      const { problems } = await runRow(plainRowAt("offload.committed"), {
+        crash: async (row) => {
+          await crashOffload(row);
+          if (!mirrored) mirror.data.clear();
+          const locked = reportOf(await recover(recoverDeps({ secret: false })));
+          expect(locked.operations.map((o) => [o.step, o.outcome, o.finding?.code])).toEqual([
+            ["offload.committed", "pending", "store.secret-missing"],
+          ]);
+          unchanged();
+          expect(existsSync(`${dir}.plainport`)).toBe(false);
+        },
+      });
+      expect(problems).toEqual([]);
+    }, 30_000);
+
+  // At offload.snapshot.done and offload.verified, recover searches the store for the operation's event (D50) and waits
+  // on one it cannot open, unless the event's id says it was made before the operation began (review r2 #3): an id
+  // starts with its time, as the operation's does. A clock stepped back between the operation's start and its commit
+  // gives the commit an earlier id, so its own event, when this device cannot open it, is taken for an older one, and
+  // the operation rolls back. Pinned: the folder stays as it was, nothing is lost, the event stays on the store,
+  // skipped by every reader; without the step back the operation waits (pending, catalog.seal-failed).
+  /** Crashes after the append with the commit.start write lost, the event moved to an id `offsetMs` from now. */
+  const lostCommitWithUnopenedEvent = async (offsetMs: number) => {
+    catalog = sealedFor(store);
+    await crashOffload(plainRowAt("offload.commit.appended"));
+    const [op] = [...journalSteps(box.paths).keys()];
+    const file = join(box.paths.journalDir, `${op}.json`);
+    const { event, ...journal } = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, `${JSON.stringify({ ...journal, step: "offload.verified" }, null, 2)}\n`);
+    // The event's sealed bytes are bound to their key, so under another id this device cannot open them.
+    const key = `meta/v1/events/${event}.json`;
+    const bytes = store.data.get(key) as Uint8Array;
+    expect(looksSealed(bytes)).toBe(true);
+    store.data.delete(key);
+    store.data.set(`meta/v1/events/${ulid(Date.now() + offsetMs)}.json`, bytes);
+    mirror.data.clear();
+  };
+
+  test("offload.verified · the clock stepped back before the commit, its event unopenable here: rolled back, the folder kept", async () => {
+    const { problems, crashedOp } = await runRow(plainRowAt("offload.verified"), {
+      crash: () => lostCommitWithUnopenedEvent(-3_600_000),
+    });
+    expect(problems).toEqual([]);
+    unchanged();
+    expect(crashedOp).toBeDefined();
+  }, 30_000);
+
+  test("offload.verified · the same event with an id after the operation's start: pending, the folder kept", async () => {
+    await lostCommitWithUnopenedEvent(3_600_000);
+    const report = reportOf(await recover(recoverDeps()));
+    expect(report.operations.map((o) => [o.step, o.outcome, o.finding?.code])).toEqual([
+      ["offload.verified", "pending", "catalog.seal-failed"],
+    ]);
+    unchanged();
+    // The journal stays for a later recover; this test's sandbox goes now.
+    for (const op of journalSteps(box.paths).keys()) rmSync(join(box.paths.journalDir, `${op}.json`));
+  }, 30_000);
+});
+
 // The standing proof that the row checks bite (the damage mode, PLAINPORT_CRASH_MATRIX_DAMAGE=1, runs it on every row
 // of both variants): harm done after recover, which a weakened check would let through.
 describe("crash matrix, in-process: the checks catch damage", () => {
@@ -695,6 +792,30 @@ describe("crash matrix, in-process: the checks catch damage", () => {
   for (const [point, harm, done, expected] of cases)
     test(`${point}: ${harm} is reported`, async () => {
       const { problems } = await runRow(plainRowAt(point), { damage: done });
+      expect(problems.some((p) => p.includes(expected))).toBe(true);
+    });
+
+  // F2's rows: a recover that released the fork would pass every check but these, so they are shown to bite.
+  const forked = ALL_ROWS.find((r) => r.scenario === "forkedAfterCommit") as Row;
+  const forkCases: [string, (w: World) => void, string][] = [
+    [
+      "the registry's base taken back",
+      (w) => {
+        const registry = JSON.parse(readFileSync(w.paths.registryFile, "utf8"));
+        for (const entry of Object.values(registry.projects) as { base?: string }[]) delete entry.base;
+        writeFileSync(w.paths.registryFile, JSON.stringify(registry));
+      },
+      "F2: the registry's base is undefined",
+    ],
+    [
+      "a stub beside the kept folder",
+      (w) => writeFileSync(`${w.dir}.plainport`, "{}\n"),
+      "F2: a stub was written",
+    ],
+  ];
+  for (const [harm, done, expected] of forkCases)
+    test(`${forked.point} · forkedAfterCommit: ${harm} is reported`, async () => {
+      const { problems } = await runRow(forked, { damage: done });
       expect(problems.some((p) => p.includes(expected))).toBe(true);
     });
 });

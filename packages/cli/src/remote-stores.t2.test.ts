@@ -21,6 +21,7 @@ import { join } from "node:path";
 import {
   BOOTSTRAP_AFTER_EFFECT,
   BOOTSTRAP_STEPS,
+  bootstrapJournalDir,
   ConfigLoader,
   ensureDevice,
   type OpenedStore,
@@ -157,6 +158,13 @@ const journalsOf = (d: RemoteDevice): string[] => {
   return [...new Bun.Glob("*.json").scanSync(dir)];
 };
 
+/** The bootstrap journals on `d` (journal/bootstrap/, not journal/, where the sagas' are). */
+const bootstrapJournalsOf = (d: RemoteDevice): string[] => {
+  const dir = bootstrapJournalDir(d.box.paths);
+  if (!existsSync(dir)) return [];
+  return [...new Bun.Glob("*.json").scanSync(dir)];
+};
+
 beforeAllT2(async () => {
   rclone = await rclonePath();
 });
@@ -267,6 +275,9 @@ describeT2("remote stores: a kill at each bootstrap step, then recover", () => {
           );
           continue;
         }
+        // The kill left the attempt's journal where the check below looks for it, so that check can fail.
+        if (bootstrapJournalsOf(d).length !== 1)
+          problems.push(`${row}: the kill left ${bootstrapJournalsOf(d).length} bootstrap journals, not 1`);
         const recovered = await d.cli(["recover", "--json"]);
         if (recovered.code !== 0) {
           problems.push(`${row}: recover exited ${recovered.code}: ${recovered.out}${recovered.err}`);
@@ -297,7 +308,7 @@ describeT2("remote stores: a kill at each bootstrap step, then recover", () => {
             problems.push(`${row}: the published repository does not open: ${listed.finding.code}`);
         } else if (published !== undefined || pinned !== undefined)
           problems.push(`${row}: rolled back, yet published ${published?.id}, pinned ${pinned}`);
-        if (journalsOf(d).some((name) => name.startsWith(attempt)))
+        if (bootstrapJournalsOf(d).some((name) => name.startsWith(attempt)))
           problems.push(`${row}: the bootstrap journal is still there`);
         const again = await d.cli(["recover", "--json"]);
         if (again.code !== 0 || (envelope(again.out).data.bootstraps as unknown[]).length !== 0)

@@ -38,14 +38,19 @@ export const binaryEnv = (
   ...extra,
 });
 
-/** A copy of the pinned restic in `dir/tools`, which the binary can read (the checkout's `.tools` is under the real home). */
-export const toolsCopy = (dir: string): string => {
+/**
+ * A copy of the pinned restic (and whatever else `names` asks for, rclone for a remote store) in `dir/tools`, which the
+ * binary can read (the checkout's `.tools` is under the real home).
+ */
+export const toolsCopy = (dir: string, names: readonly string[] = ["restic"]): string => {
   const target = hostTarget();
   if (target === undefined) throw new Error(`no tools for ${process.platform}-${process.arch}`);
   const tools = join(dir, "tools");
   mkdirSync(tools, { recursive: true });
-  copyFileSync(join(checkoutRoot, ".tools", target, "restic"), join(tools, "restic"));
-  chmodSync(join(tools, "restic"), 0o755);
+  for (const name of names) {
+    copyFileSync(join(checkoutRoot, ".tools", target, name), join(tools, name));
+    chmodSync(join(tools, name), 0o755);
+  }
   return tools;
 };
 

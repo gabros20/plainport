@@ -1,20 +1,19 @@
 // The contract suite's own options, checked by running it under `bun test` in a child: a timeout can only be seen from
 // outside the test it bounds.
 
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { lazyTempDir } from "../../../../test/lazy-temp.ts";
 
 describe("blob-store contract: the semantic probe's time", () => {
-  const scratch = mkdtempSync(join(tmpdir(), "plainport-contract-"));
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const scratch = lazyTempDir("plainport-contract-");
 
   // A slow volume (exFAT on a CI runner) needs more than bun's 5 s default for the probe's hundreds of synced writes:
   // the fixture says how long, and the probe test is given exactly that. Here a store whose puts take 20 ms is given
   // 1 ms, so the probe must time out at 1 ms; ignoring the option would give it 5 s, and it would pass.
   test("probeTimeout bounds the probe test", () => {
-    const file = join(scratch, "slow.test.ts");
+    const file = join(scratch(), "slow.test.ts");
     writeFileSync(
       file,
       [
@@ -34,7 +33,7 @@ describe("blob-store contract: the semantic probe's time", () => {
       ].join("\n"),
     );
     const child = Bun.spawnSync(["bun", "test", file, "-t", "when probed"], {
-      cwd: scratch,
+      cwd: scratch(),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -47,7 +46,7 @@ describe("blob-store contract: the semantic probe's time", () => {
   // and the timeout killed the rclone it was waiting for (CI run 40956615672). Here the same slow store is given 1 ms
   // for every case: the listing case must time out at 1 ms, where without the option it would pass.
   test("testTimeout bounds every other case", () => {
-    const file = join(scratch, "slow-cases.test.ts");
+    const file = join(scratch(), "slow-cases.test.ts");
     writeFileSync(
       file,
       [
@@ -67,7 +66,7 @@ describe("blob-store contract: the semantic probe's time", () => {
       ].join("\n"),
     );
     const child = Bun.spawnSync(["bun", "test", file, "-t", "list returns every key"], {
-      cwd: scratch,
+      cwd: scratch(),
       stdout: "pipe",
       stderr: "pipe",
     });

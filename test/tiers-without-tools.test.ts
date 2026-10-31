@@ -3,14 +3,13 @@
 // when every suite in the file is skipped, and fails the run as an "(unnamed)" test, which a checkout with .tools/
 // never shows (CI run 41182891650). This runs those files at tier 0 in a copy of this checkout without .tools/.
 
-import { afterAll, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, test } from "bun:test";
+import { cpSync, existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { lazyTempDir } from "./lazy-temp.ts";
 
 const repo = join(import.meta.dir, "..");
-const scratch = mkdtempSync(join(tmpdir(), "plainport-tiers-no-tools-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = lazyTempDir("plainport-tiers-no-tools-");
 
 /** This working tree's files (tracked, and untracked but not ignored, so never .tools/) copied into `dir`. */
 const copyWithoutTools = (dir: string): string[] => {
@@ -44,15 +43,15 @@ const copyWithoutTools = (dir: string): string[] => {
 };
 
 test("at tier 0, with no .tools/, every tiered suite loads and skips: no file needs a pinned binary to load", () => {
-  const files = copyWithoutTools(scratch);
-  expect(existsSync(join(scratch, ".tools"))).toBe(false);
+  const files = copyWithoutTools(scratch());
+  expect(existsSync(join(scratch(), ".tools"))).toBe(false);
   // The files that are tiered as a whole (<name>.t1, .t2, .t3): at tier 0 nothing in them runs but their top level and
   // top-level hooks. A name filter (-t) would not do: it skips those hooks too. Files that mix T0 tests with tiered
   // suites run their top level in every T0 run already.
   const tiered = files.filter((path) => /\.t[123]\.test\.ts$/.test(path));
   expect(tiered).toContain("packages/cli/src/store-commands.t2.test.ts");
   const ran = Bun.spawnSync(["bun", "test", ...tiered.map((path) => `./${path}`)], {
-    cwd: scratch,
+    cwd: scratch(),
     env: { ...process.env, PLAINPORT_TEST_TIER: "0", PLAINPORT_TOOLS_DIR: "" },
     stdout: "pipe",
     stderr: "pipe",

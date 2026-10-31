@@ -433,6 +433,55 @@ describe("recover: an offload, at every journal step", () => {
     await expectInvariants();
   });
 
+  test("a crash after F2's base write (offload.release.fork-based, journal at release.trash) keeps the folder (conflicted)", async () => {
+    // Another copy's first offload lands after the commit's head check, before release reads the catalog again.
+    const otherCopy = async () => {
+      const s = ulid();
+      value(
+        await appendEvent(storeEventLog(store), {
+          v: 1,
+          id: s,
+          op: s,
+          type: "offloaded",
+          device: ulid(),
+          at: new Date().toISOString(),
+          project: (await projectId()) as string,
+          root: value(await readRegistry(testHost(), box.paths)).roots?.work as string,
+          path: "web",
+          snapshot: s,
+          stored: { ssd: "c".repeat(64) },
+          stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
+        }),
+      );
+    };
+    const onStep = (step: string) => {
+      capture(step);
+      if (step !== "offload.committed") return;
+      const list = store.list;
+      store.list = async (prefix) => {
+        store.list = list;
+        await otherCopy();
+        return list(prefix);
+      };
+    };
+    const host = testHost({ faults: { at: "offload.release.fork-based", onStep } });
+    await expect(runOffload(offloadDeps(host), { project: await ref() })).rejects.toBeInstanceOf(
+      InjectedFault,
+    );
+    const journal = onlyJournal<OffloadJournal>();
+    expect(journal.step).toBe("offload.release.trash");
+    expect(value(await readRegistry(testHost(), box.paths)).projects[journal.project.id]?.base).toBe(
+      journal.op,
+    );
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect(value(await readRegistry(testHost(), box.paths)).projects[journal.project.id]?.base).toBe(
+      journal.op,
+    );
+    await expectLocalUntouched();
+    await expectInvariants();
+  });
+
   test("a crash after the fork's base was written (offload.diverged.based) keeps the folder (conflicted)", async () => {
     await registerFirst();
     await otherCopyDuringUpload();
@@ -507,6 +556,7 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
         "offload.snapshot.discarded.appended",
         "offload.diverged.appended",
         "offload.diverged.based",
+        "offload.release.fork-based",
       ].sort(),
     );
     expect(OFFLOAD_STEPS.length).toBe(17);

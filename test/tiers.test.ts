@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostTarget } from "../packages/core/src/tools.ts";
+import { lazyTempDir } from "./lazy-temp.ts";
 import { environmentGate, resticUnderTest, t1MacEnabled, testenvDir, tierEnabled } from "./tiers.ts";
 
 const checkout = join(import.meta.dir, "..");
@@ -104,28 +104,32 @@ describe("tiers: T2 and T3 gating", () => {
   });
 
   // The real thing: a test file declaring a describeT2 and a describeT3 suite, run by `bun test` in a child.
-  const scratch = mkdtempSync(join(tmpdir(), "plainport-tiers-"));
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
-  const file = join(scratch, "gated.test.ts");
-  writeFileSync(
-    file,
-    [
-      `import { expect, test } from "bun:test";`,
-      `import { describeT2, describeT3 } from ${JSON.stringify(join(import.meta.dir, "tiers.ts"))};`,
-      `describeT2("store", () => { test("ran-t2", () => expect(1).toBe(1)); });`,
-      `describeT3("bucket", () => { test("ran-t3", () => expect(1).toBe(1)); });`,
-      "",
-    ].join("\n"),
-  );
+  const scratch = lazyTempDir("plainport-tiers-");
+  /** The gated test file, written the first time a test runs it. */
+  const gated = (): string => {
+    const file = join(scratch(), "gated.test.ts");
+    if (existsSync(file)) return file;
+    writeFileSync(
+      file,
+      [
+        `import { expect, test } from "bun:test";`,
+        `import { describeT2, describeT3 } from ${JSON.stringify(join(import.meta.dir, "tiers.ts"))};`,
+        `describeT2("store", () => { test("ran-t2", () => expect(1).toBe(1)); });`,
+        `describeT3("bucket", () => { test("ran-t3", () => expect(1).toBe(1)); });`,
+        "",
+      ].join("\n"),
+    );
+    return file;
+  };
   // A fake docker on PATH answers the gate's health probe (`docker inspect`) with the given states.
   const fakeDocker = (states: string, exitCode = 0) => {
-    const bin = join(scratch, `bin-${states.replaceAll(/\W/g, "") || "none"}-${exitCode}`);
+    const bin = join(scratch(), `bin-${states.replaceAll(/\W/g, "") || "none"}-${exitCode}`);
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "docker"), `#!/bin/sh\nprintf '${states}'\nexit ${exitCode}\n`, { mode: 0o755 });
     return bin;
   };
   const envDir = (name: string) => {
-    const dir = join(scratch, name);
+    const dir = join(scratch(), name);
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "env.json"),
@@ -134,8 +138,8 @@ describe("tiers: T2 and T3 gating", () => {
     return dir;
   };
   const run = (tier: string, dir: string, bin = fakeDocker("healthy\nhealthy\nhealthy\nhealthy\n")) => {
-    const child = Bun.spawnSync(["bun", "test", file], {
-      cwd: scratch,
+    const child = Bun.spawnSync(["bun", "test", gated()], {
+      cwd: scratch(),
       env: {
         ...process.env,
         PLAINPORT_TEST_TIER: tier,
@@ -149,13 +153,13 @@ describe("tiers: T2 and T3 gating", () => {
   };
 
   test("bun test: T2 and T3 suites are skipped below their tier", () => {
-    const ran = run("1", join(scratch, "nothing"));
+    const ran = run("1", join(scratch(), "nothing"));
     expect(ran.exitCode).toBe(0);
     expect(ran.output).toContain("2 skip");
   });
 
   test("bun test: a T2 suite with no environment fails the run, naming scripts/testenv up", () => {
-    const ran = run("2", join(scratch, "nothing"));
+    const ran = run("2", join(scratch(), "nothing"));
     expect(ran.exitCode).toBe(1);
     expect(ran.output).toContain("[t2] store");
     expect(ran.output).toContain("scripts/testenv up");

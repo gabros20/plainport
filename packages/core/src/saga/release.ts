@@ -304,6 +304,7 @@ const keptAsFork = async (rc: ReleaseContext, why: "forked" | "rejected"): Promi
   // release.trash with the folder in place, and recover reads the catalog again and writes it.
   const based = await recordBase(rc, saga.journal);
   if (!based.ok) return based;
+  rc.host.faultAt("offload.release.fork-based");
   await saga.close();
   const data: OffloadConflict = {
     op,

@@ -145,7 +145,43 @@ export interface Settlement {
 }
 
 /** Every problem with a settled row; none means it passed. */
-export const rowProblems = async (row: Row, world: World, s: Settlement): Promise<string[]> => {
+export const rowProblems = async (row: Row, world: World, s: Settlement): Promise<string[]> => [
+  ...settlementProblems(row, s),
+  ...scenarioProblems(row, world, s),
+  ...(await worldProblems(row, world, s)),
+];
+
+/**
+ * What a branch's rows must show beyond their rule's outcomes, where the rule allows more than the branch may do:
+ * - forkedAfterCommit (F2): the journal is at release.trash, whose rule also allows finished, and a released folder
+ *   whose stub names one side of a fork passes the world checks (F3's residual). So: recover keeps the folder as the
+ *   fork it is, forked and conflicted, the folder in place with no stub, the registry's base the snapshot.
+ */
+export const scenarioProblems = (row: Row, world: World, s: Settlement): string[] => {
+  if (row.scenario !== "forkedAfterCommit") return [];
+  const problems: string[] = [];
+  const op = s.report.operations.find((o) => o.op === s.crashedOp);
+  if (op?.outcome !== "forked" || op.state !== "conflicted")
+    problems.push(
+      `F2: recover settled ${s.crashedOp} as ${op?.outcome} (${op?.state}), not forked (conflicted)`,
+    );
+  if (!existsSync(world.dir)) problems.push("F2: the folder is not in place");
+  if (existsSync(`${world.dir}.plainport`)) problems.push("F2: a stub was written beside the kept fork");
+  let base: string | undefined;
+  try {
+    const registry = JSON.parse(readFileSync(world.paths.registryFile, "utf8"));
+    base = s.projectId === undefined ? undefined : registry.projects?.[s.projectId]?.base;
+  } catch {}
+  if (base === undefined || base !== s.crashedOp)
+    problems.push(`F2: the registry's base is ${base}, not the snapshot ${s.crashedOp}`);
+  return problems;
+};
+
+/**
+ * recover's part: it found the journal at the step the crash left (the row's step) and settled it with an outcome its
+ * rule allows, never leaving it or another operation pending; a second recover found nothing to do.
+ */
+export const settlementProblems = (row: Row, s: Settlement): string[] => {
   const problems: string[] = [];
 
   // The step the crash left, and recover's outcome for it.
@@ -185,6 +221,16 @@ export const rowProblems = async (row: Row, world: World, s: Settlement): Promis
     problems.push(
       `a second recover found work: ${s.again.operations.map((o) => `${o.op} ${o.step} ${o.outcome}`).join("; ")}`,
     );
+  return problems;
+};
+
+/** The world's part: invariants 1–6, and no work lost (the folder, or the head that holds it). */
+export const worldProblems = async (
+  row: Pick<Row, "saga">,
+  world: World,
+  s: Pick<Settlement, "reference" | "released" | "seen" | "projectId">,
+): Promise<string[]> => {
+  const problems: string[] = [];
 
   // Invariants 1–3.
   problems.push(

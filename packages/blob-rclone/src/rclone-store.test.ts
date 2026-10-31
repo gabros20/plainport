@@ -557,8 +557,36 @@ describe("reads", () => {
     expect(value(await store.get("meta/v1"))).toBeNull();
     const cat = specs[0] as RunSpec;
     expect(cat.args).toContain("--files-from-raw");
-    expect((cat.args ?? []).at(-1)).toBe(`${RCLONE_REMOTE}:plainport/meta`);
+    expect((cat.args ?? []).at(-1)).toBe(`${RCLONE_REMOTE}:plainport/meta/`);
     expect(cat.stdin).toBe("v1\n");
+  });
+
+  test("get names the key's folder as a folder, so a store that cannot be reached reads as unreachable (Task 27)", async () => {
+    // rclone's S3 backend asks with a HEAD whether a root without a trailing slash is a file. When that HEAD cannot reach
+    // the store it takes the root for a file, and cat's one-file filter then fails with exit 1 and only "can't limit to
+    // single files when using filters", the connection error left at DEBUG: a cut store read as store.failed (T2). A
+    // folder named with its slash is never asked about, and the listing's own connection error is what rclone says.
+    const { store, specs } = scripted((spec) =>
+      commandOf(spec) === "cat"
+        ? outcome(0, { stdout: "" })
+        : outcome(0, { stdout: JSON.stringify({ Path: "", Name: "", Size: -1, IsDir: true }) }),
+    );
+    value(await store.get("meta/v1/store.json"));
+    value(await store.get("top.json"));
+    const cats = specs.filter((spec) => commandOf(spec) === "cat");
+    expect(cats.map((spec) => (spec.args ?? []).at(-1))).toEqual([
+      `${RCLONE_REMOTE}:plainport/meta/v1/`,
+      `${RCLONE_REMOTE}:plainport/`,
+    ]);
+  });
+
+  test("getMany names the store's root as a folder too, so its copy never asks whether the root is a file (Task 27)", async () => {
+    const { store, specs } = scripted(() => outcome(0, { stdout: "" }));
+    value(await store.getMany(["meta/v1/a.json", "meta/v1/b.json"]));
+    const copy = specs.find((spec) => commandOf(spec) === "copy") as RunSpec;
+    expect(copy.args).toContain("--files-from-raw");
+    // Source, then the local folder it copies into.
+    expect((copy.args ?? []).at(-2)).toBe(`${RCLONE_REMOTE}:plainport/`);
   });
 
   test("an empty result is an empty value only when stat finds the file", async () => {

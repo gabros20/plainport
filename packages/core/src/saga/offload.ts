@@ -180,6 +180,9 @@ export const OFFLOAD_AFTER_EFFECT = {
   // Not an effect but the release's catalog read (F2): a crash between it and the rename leaves release.trash with the
   // folder in place, and recover reads the catalog again.
   "offload.release.reread": "offload.release.trash",
+  // F2's base write, before the journal closes: a crash leaves release.trash with the folder in place and its base
+  // recorded, and recover reads the catalog again, keeps the folder and writes the base again.
+  "offload.release.fork-based": "offload.release.trash",
   "offload.snapshot.discarded.appended": "offload.snapshot.discarded",
   "offload.diverged.appended": "offload.diverged",
   "offload.diverged.based": "offload.diverged",
@@ -231,6 +234,10 @@ export const OFFLOAD_BRANCHES = {
   firstOffloadOfRoot: { when: "the root has no root-created event yet", reaches: ["offload.root-created"] },
   keepStub: { when: "offload.stub = true (the default)", reaches: ["offload.release.stub-placed"] },
   detached: { when: 'offload.keepLocalFor = "0" (the default)', reaches: ["offload.release.detached"] },
+  forkedAfterCommit: {
+    when: "another copy forks the project after the commit, before the rename (F2): the folder is kept as a fork",
+    reaches: ["offload.release.fork-based"],
+  },
   held: {
     when: "offload.conflictGrace above 0 (a remote store's default, Q16): the trash is held for the checked read",
     reaches: ["offload.release.held"],

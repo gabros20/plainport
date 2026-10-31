@@ -1,17 +1,16 @@
 // Tree comparison for the gates (M2 Task 3): type, mode, content, link target, hard-link groups, extended attributes
 // and BSD flags. Each fixture is built twice, then one side is broken in exactly one way.
 
-import { afterAll, describe, expect, test } from "bun:test";
-import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { lazyTempDir } from "../test/lazy-temp.ts";
 import { compareTrees, hashTree, type TreeSources } from "./tree-compare.ts";
 
-const scratch = mkdtempSync(join(tmpdir(), "plainport-tree-compare-"));
 const flagged: string[] = [];
-afterAll(() => {
+const scratch = lazyTempDir("plainport-tree-compare-", (dir) => {
   for (const file of flagged) Bun.spawnSync(["chflags", "-h", "nouchg", file]);
-  rmSync(scratch, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true });
 });
 
 const darwin = process.platform === "darwin";
@@ -20,7 +19,7 @@ const make = (
   name: string,
   options: { hardLink?: boolean; xattr?: boolean; uchg?: boolean } = {},
 ): string => {
-  const dir = join(scratch, name);
+  const dir = join(scratch(), name);
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, "src/a.ts"), "export const a = 1;\n");
   writeFileSync(join(dir, "doc.md"), "# doc\n");

@@ -1,16 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { lazyTempDir } from "../test/lazy-temp.ts";
 import { macOnlyTests, onMac } from "../test/platform.ts";
 import { describeT1 } from "../test/tiers.ts";
 import { buildCommand } from "./build.ts";
@@ -27,8 +18,7 @@ import {
   stripProblems,
 } from "./gate-m1.ts";
 
-const scratch = mkdtempSync(join(tmpdir(), "plainport-gate-test-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const scratch = lazyTempDir("plainport-gate-test-");
 
 describe("parseProjects", () => {
   test("defaults to the five D11 projects at full pinned commits", () => {
@@ -75,7 +65,7 @@ test("parseTimeL reads wall time and peak RSS from macOS /usr/bin/time -l", () =
 
 describe("hashTree and compareTrees", () => {
   const make = (name: string): string => {
-    const dir = join(scratch, name);
+    const dir = join(scratch(), name);
     mkdirSync(join(dir, "src"), { recursive: true });
     mkdirSync(join(dir, "node_modules/pkg"), { recursive: true });
     writeFileSync(join(dir, "src/a.ts"), "export const a = 1;\n");
@@ -206,9 +196,11 @@ describeT1("gate-m1 on a fixture project", () => {
   const macTest = macOnlyTests();
   let report: GateReport;
   let sha: string;
-  const work = join(scratch, "t1");
+  // Made by beforeAll: a folder asked for at describe scope would leak when a name filter skips these tests.
+  let work = "";
 
   beforeAll(async () => {
+    work = join(scratch(), "t1");
     if (!onMac) return;
     const remote = makeRemote(work);
     sha = remote.sha;
@@ -262,11 +254,13 @@ describeT1("gate-m1 on a fixture project", () => {
 // macOS only in M1, for the same reason (host-linux arrives with M3).
 describeT1("gate-m1 fails when work is lost, and cleans up after itself", () => {
   const macTest = macOnlyTests();
-  const work = join(scratch, "t1-fail");
+  // Made by beforeAll: a folder asked for at describe scope would leak when a name filter skips these tests.
+  let work = "";
   let remote: { url: string; sha: string };
   let real: string;
 
   beforeAll(() => {
+    work = join(scratch(), "t1-fail");
     if (!onMac) return;
     remote = makeRemote(work);
     real = join(work, "real", "plainport");
