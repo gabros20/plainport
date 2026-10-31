@@ -97,6 +97,19 @@ const openUp = async (path: string): Promise<void> => {
     if (entry.isDirectory()) await openUp(join(path, entry.name));
 };
 
+const SAME_CHUNK = 1024 * 1024;
+
+/** Reads into `buffer` until it is full or the file ends; the bytes read. */
+const fill = async (handle: Awaited<ReturnType<typeof open>>, buffer: Uint8Array): Promise<number> => {
+  let at = 0;
+  while (at < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, at, buffer.length - at);
+    if (bytesRead === 0) break;
+    at += bytesRead;
+  }
+  return at;
+};
+
 export const nodeLocalIo: LocalIo = {
   fs: {
     readText: (path) => readFile(path, "utf8"),
@@ -111,6 +124,26 @@ export const nodeLocalIo: LocalIo = {
       }
     },
     readBytes: async (path) => new Uint8Array(await readFile(path)),
+    sameBytes: async (a, b) => {
+      const [x, y] = [
+        await open(a, "r"),
+        await open(b, "r").catch(async (error) => {
+          await x.close();
+          throw error;
+        }),
+      ];
+      try {
+        const [p, q] = [new Uint8Array(SAME_CHUNK), new Uint8Array(SAME_CHUNK)];
+        for (;;) {
+          const [m, n] = [await fill(x, p), await fill(y, q)];
+          if (m !== n || !Buffer.from(p.buffer, 0, m).equals(Buffer.from(q.buffer, 0, n))) return false;
+          if (m < SAME_CHUNK) return true;
+        }
+      } finally {
+        await x.close();
+        await y.close();
+      }
+    },
     writeBytesDurable: async (path, data, options = {}) => {
       const handle = await open(path, options.exclusive ? "wx" : "w", 0o644);
       try {

@@ -3588,7 +3588,7 @@
       "details": [
         "While a conflict stands, each head other than the snapshot this copy came from is restored beside the project and written into its repository as sibling refs:",
         "  refs/plainport/theirs/<snapshot>/HEAD       their HEAD commit, detached or not\n  refs/plainport/theirs/<snapshot>/heads/*    their branches\n  refs/plainport/theirs/<snapshot>/index      a commit of their staged index (absent when it is unmerged)\n  refs/plainport/theirs/<snapshot>/worktree   a commit of their working tree, parent = their HEAD",
-        "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) are never committed, and those that differ are listed. Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead."
+        "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) and files that look like secrets (.env*, key files) are never committed, and are listed. A shallow or partial clone, replace refs or a grafts file, two object formats, or files tracked with Git LFS are refused (compare.unsupported-repo). Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead."
       ],
       "usage": "plainport compare [<project>] [--clean]",
       "risk": "safe_write",
@@ -3714,6 +3714,20 @@
                   },
                   "description": "Untracked repositories inside their copy, not committed"
                 },
+                "intentToAdd": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Intent-to-add entries (git add -N): not in index, their files in worktree"
+                },
+                "withheld": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Files that look like secrets (.env*, key files) whose bytes their index does not hold: never committed, listed"
+                },
                 "ignored": {
                   "type": "array",
                   "items": {
@@ -3742,6 +3756,8 @@
                 "unmerged",
                 "submodules",
                 "nested",
+                "intentToAdd",
+                "withheld",
                 "ignored",
                 "ignoredTotal",
                 "changed"
@@ -6071,6 +6087,13 @@
       "allowable": false,
       "exitCode": 6,
       "summary": "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side"
+    },
+    {
+      "code": "compare.unsupported-repo",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "compare cannot write this other copy as refs without harming or misleading this repository, so it wrote none: the two repositories use different object formats, their copy is shallow or has replace refs or a grafts file, either is a partial clone, their index tracks Git LFS files, or the objects their history reaches would not all be here; the message names which, and fix reads the other copy side by side with plainport restore"
     },
     {
       "code": "config.invalid",

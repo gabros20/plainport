@@ -102,6 +102,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "compare needs the project's working copy on this device, whose repository the other copies are written into; fix names plainport restore --snapshot <id> --to <path> to read any copy side by side",
   },
+  "compare.unsupported-repo": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "compare cannot write this other copy as refs without harming or misleading this repository, so it wrote none: the two repositories use different object formats, their copy is shallow or has replace refs or a grafts file, either is a partial clone, their index tracks Git LFS files, or the objects their history reaches would not all be here; the message names which, and fix reads the other copy side by side with plainport restore",
+  },
   "config.invalid": {
     severity: "block",
     allowable: false,

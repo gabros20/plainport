@@ -26,6 +26,11 @@ export interface RunSpec {
   env: Readonly<Record<string, string>>;
   /** Written to the child's stdin, which is then closed; stdin is /dev/null without it. */
   stdin?: string | Uint8Array;
+  /**
+   * The child's stdin is this file, opened and read by the child itself, never held in memory: a spool too big to
+   * pass as `stdin` (a git pack). Excludes stdin and sensitive.
+   */
+  stdinFile?: string;
   /** Aborting it stops the whole process group (TERM, then KILL) and the run ends as process.cancelled. */
   signal?: AbortSignal;
   /** No output on either stream for this long stops the group: process.idle-timeout. Default 10 minutes. */
@@ -138,6 +143,8 @@ export interface SpawnRequest {
   cwd: string;
   env: Readonly<Record<string, string>>;
   stdin: Uint8Array | undefined;
+  /** RunSpec.stdinFile: the child reads its stdin from this file. */
+  stdinFile?: string;
 }
 
 export interface ChildProcess {

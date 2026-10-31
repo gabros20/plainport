@@ -3,10 +3,20 @@
 // running a filter, or touching this repository's index, branches, stash, config or status.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { Result } from "@plainport/contract";
+import type { HostPorts } from "../ports/host.ts";
 import { InjectedFault } from "../ports/host.ts";
+import type { RunSpec } from "../runner/types.ts";
 import { type GitFixture, makeGitFixture, QUIET_GIT_ENV } from "../testing/git-fixture.ts";
 import { testHost } from "../testing/host.ts";
 import {
@@ -49,6 +59,8 @@ const input = (snapshot = SNAPSHOT): TheirsInput => ({
   snapshot,
   at: AT,
   index: join(fx.root, `index-${++scratch}`),
+  spool: join(fx.root, `spool-${scratch}`),
+  address: "work:web",
 });
 
 const value = <T>(result: Result<T>): T => {
@@ -60,6 +72,35 @@ const refsIn = (repo: string): string[] =>
   fx.git(repo, "for-each-ref", "--format=%(refname)", "refs/plainport").split("\n").filter(Boolean);
 
 const ref = (leaf: string, snapshot = SNAPSHOT) => `refs/plainport/theirs/${snapshot}/${leaf}`;
+
+/** A host that records every child it is asked to run, and may change a spec first. */
+const recording = (change: (spec: RunSpec) => RunSpec = (spec) => spec) => {
+  const host = testHost();
+  const specs: RunSpec[] = [];
+  const wrapped: HostPorts = {
+    ...host,
+    run: (spec) => {
+      const changed = change(spec);
+      specs.push(changed);
+      return host.run(changed);
+    },
+  };
+  return { host: wrapped, specs };
+};
+
+/** Every object in the repository, with its contents. */
+const allObjects = (repo: string): string =>
+  Bun.spawnSync(["git", "cat-file", "--batch-all-objects", "--batch"], {
+    cwd: repo,
+    env: fx.env,
+  }).stdout.toString();
+
+const refused = async (code = "compare.unsupported-repo") => {
+  const done = await buildTheirs(ctx(), input());
+  expect(done.ok ? "ok" : done.finding.code).toBe(code);
+  expect(refsIn(ours)).toEqual([]);
+  return done.ok ? "" : done.finding.message;
+};
 
 describe("buildTheirs", () => {
   test("a canary in their .env, a repository clean filter and a tracked file now ignored: nothing leaks", async () => {
@@ -227,6 +268,149 @@ describe("buildTheirs", () => {
     expect(tree).not.toContain("config.local");
     expect(fx.git(ours, "ls-tree", "-r", "--name-only", ref("index")).split("\n")).toContain("config.local");
     expect(set.changed).toBe(true);
+  });
+});
+
+describe("buildTheirs: what it refuses (review I3, M5, M8)", () => {
+  test("every git child runs with no lazy fetch and no replace objects", async () => {
+    const { host, specs } = recording();
+    value(await buildTheirs(ctx(host), input()));
+    const gits = specs.filter((spec) => spec.command === "git");
+    expect(gits.length).toBeGreaterThan(5);
+    for (const spec of gits)
+      expect([spec.env.GIT_NO_LAZY_FETCH, spec.env.GIT_NO_REPLACE_OBJECTS]).toEqual(["1", "1"]);
+  });
+
+  test("a shallow copy is refused before anything is written", async () => {
+    rmSync(theirs, { recursive: true });
+    fx.git(fx.root, "clone", "-q", "--depth", "1", `file://${ours}`, "theirs");
+    const before = allObjects(ours);
+    expect(await refused()).toContain("shallow clone");
+    expect(allObjects(ours)).toBe(before);
+  });
+
+  test("a partial clone, theirs or ours, is refused", async () => {
+    fx.git(theirs, "config", "core.repositoryformatversion", "1");
+    fx.git(theirs, "config", "extensions.partialClone", "origin");
+    expect(await refused()).toContain("their copy is a partial clone (extensions.partialClone = origin)");
+    fx.git(theirs, "config", "--unset", "extensions.partialClone");
+    fx.git(ours, "config", "core.repositoryformatversion", "1");
+    fx.git(ours, "config", "extensions.partialClone", "origin");
+    expect(await refused()).toContain("this repository is a partial clone");
+  });
+
+  test("replace refs and a grafts file in their copy are refused", async () => {
+    const head = fx.git(theirs, "rev-parse", "HEAD").trim();
+    const first = fx.git(theirs, "rev-parse", "HEAD^").trim();
+    fx.git(theirs, "replace", head, first);
+    expect(await refused()).toContain("replace refs");
+    fx.git(theirs, "replace", "-d", head);
+    writeFileSync(join(theirs, ".git/info/grafts"), `${head}\n`);
+    expect(await refused()).toContain("grafts file");
+  });
+
+  test("files tracked with Git LFS are refused, naming them", async () => {
+    const pointer = `version https://git-lfs.github.com/spec/v1\noid sha256:${"ab".repeat(32)}\nsize 12345\n`;
+    fx.write("theirs/big.bin", pointer);
+    fx.git(theirs, "add", "big.bin");
+    fx.git(theirs, "commit", "-q", "-m", "lfs");
+    fx.write("theirs/big.bin", "the smudged binary\n");
+    const before = allObjects(ours);
+    expect(await refused()).toContain("tracks 1 file with Git LFS (big.bin)");
+    expect(allObjects(ours)).toBe(before);
+  });
+
+  test("two object formats are refused; two sha256 repositories compare, deletions included", async () => {
+    const sha256 = (name: string): string => {
+      const dir = join(fx.root, name);
+      fx.git(fx.root, "init", "-q", "--object-format=sha256", dir);
+      fx.write(`${name}/a.txt`, "a\n");
+      fx.write(`${name}/gone.txt`, "g\n");
+      fx.git(dir, "add", "a.txt", "gone.txt");
+      fx.git(dir, "commit", "-q", "-m", "first");
+      return dir;
+    };
+    const theirs256 = sha256("theirs256");
+    const mixed = await buildTheirs(ctx(), { ...input(), theirs: theirs256 });
+    expect(mixed.ok ? "" : mixed.finding.message).toContain("with sha256 and this one with sha1");
+    const ours256 = sha256("ours256");
+    rmSync(join(theirs256, "gone.txt"));
+    fx.write("theirs256/a.txt", "theirs\n");
+    const set = value(await buildTheirs(ctx(), { ...input(), repo: ours256, theirs: theirs256 }));
+    expect(set.worktree).toMatch(/^[0-9a-f]{64}$/);
+    expect(fx.git(ours256, "ls-tree", "-r", "--name-only", ref("worktree"))).toBe("a.txt\n");
+    expect(fx.git(ours256, "show", `${ref("worktree")}:a.txt`)).toBe("theirs\n");
+    expect(fx.gitStatus(ours256, "fsck", "--connectivity-only", "--no-dangling")).toBe(0);
+  });
+
+  test("no ref is published when the objects their history reaches are not all here", async () => {
+    // Three commits of a.txt alone; this repository holds none of theirs, and the pack is made to leave out the
+    // oldest and what it reaches, none of which their index names.
+    const alone = fx.repo("alone");
+    fx.git(theirs, "rm", "-q", "README.md", ".gitignore", "notes.txt", "config.local");
+    for (const n of ["1", "2", "3"]) {
+      fx.write("theirs/a.txt", `${n}\n`);
+      fx.git(theirs, "add", "a.txt");
+      fx.git(theirs, "commit", "-q", "-m", n);
+    }
+    const oldest = fx.git(theirs, "rev-parse", "HEAD~2").trim();
+    const { host } = recording((spec) =>
+      spec.args?.includes("pack-objects") ? { ...spec, stdin: `${spec.stdin as string}^${oldest}\n` } : spec,
+    );
+    const done = await buildTheirs(ctx(host), { ...input(), repo: alone });
+    expect(done.ok ? "ok" : done.finding.code).toBe("compare.unsupported-repo");
+    expect(done.ok ? "" : done.finding.message).toContain("would lack objects their history reaches");
+    expect(refsIn(alone)).toEqual([]);
+  });
+});
+
+describe("buildTheirs: the pack (review I4)", () => {
+  test("only objects this repository lacks are packed, into a file the unpack reads", async () => {
+    fx.write("theirs/notes.txt", "one\ntheirs\n");
+    fx.git(theirs, "commit", "-q", "-am", "theirs");
+    const { host, specs } = recording();
+    const at = input();
+    value(await buildTheirs(ctx(host), at));
+    const pack = readdirSync(at.spool).find((f) => f.endsWith(".pack")) as string;
+    const listed = fx.git(ours, "verify-pack", "-v", join(at.spool, pack));
+    // The new commit, its tree and the new notes.txt: nothing this repository already had.
+    expect(listed).toMatch(/^non delta: 3 objects$/m);
+    const unpack = specs.find((spec) => spec.args?.includes("unpack-objects"));
+    expect([unpack?.stdinFile, unpack?.stdin]).toEqual([join(at.spool, pack), undefined]);
+    expect(specs.some((spec) => spec.args?.includes("--stdout"))).toBe(false);
+  });
+});
+
+describe("buildTheirs: index flags and secrets (review M6, M7)", () => {
+  test("a skip-worktree entry stays in worktree; an intent-to-add entry is listed, not staged as empty", async () => {
+    fx.git(theirs, "update-index", "--skip-worktree", "config.local");
+    rmSync(join(theirs, "config.local"));
+    fx.write("theirs/planned.txt", "planned\n");
+    fx.git(theirs, "add", "-N", "planned.txt");
+    const set = value(await buildTheirs(ctx(), input()));
+    const worktree = fx.git(ours, "ls-tree", "-r", "--name-only", ref("worktree")).split("\n");
+    expect(worktree).toContain("config.local");
+    expect(fx.git(ours, "show", `${ref("worktree")}:config.local`)).toBe("mine\n");
+    expect(fx.git(ours, "show", `${ref("worktree")}:planned.txt`)).toBe("planned\n");
+    expect(fx.git(ours, "ls-tree", "-r", "--name-only", ref("index")).split("\n")).not.toContain(
+      "planned.txt",
+    );
+    expect(set.intentToAdd).toEqual(["planned.txt"]);
+  });
+
+  test("an un-ignored .env and a tracked .env edited with a secret never reach this repository", async () => {
+    fx.write("theirs/.env.local", `TOKEN=${CANARY}\n`);
+    fx.write("theirs/deploy/.env", "PUBLIC=1\n");
+    fx.git(theirs, "add", "-f", "deploy/.env");
+    fx.git(theirs, "commit", "-q", "-m", "a tracked .env");
+    fx.write("theirs/deploy/.env", `PUBLIC=1\nTOKEN=${CANARY}\n`);
+    fx.write("theirs/id_ed25519", `${CANARY}\n`);
+    const set = value(await buildTheirs(ctx(), input()));
+    expect(allObjects(ours)).not.toContain(CANARY);
+    const worktree = fx.git(ours, "ls-tree", "-r", "--name-only", ref("worktree")).split("\n");
+    expect(worktree).not.toContain(".env.local");
+    expect(fx.git(ours, "show", `${ref("worktree")}:deploy/.env`)).toBe("PUBLIC=1\n");
+    expect(set.withheld).toEqual([".env.local", "deploy/.env", "id_ed25519"]);
   });
 });
 

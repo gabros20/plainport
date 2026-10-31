@@ -3,7 +3,7 @@
 // that is removed afterwards, with nothing else on this device changed.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fail, finding, type Result } from "@plainport/contract";
 import { nodePlugin } from "../../../eco-node/src/index.ts";
@@ -11,10 +11,12 @@ import { appendEvent, readEvents, storeEventLog } from "../catalog/index.ts";
 import { ConfigLoader } from "../config/load.ts";
 import { type Device, ensureDevice } from "../device.ts";
 import { readJournals } from "../journal/index.ts";
+import { nodeLocalIo } from "../node-io.ts";
 import type { StoreOpener } from "../ports/store.ts";
 import { readStagingRecords } from "../recover/staging.ts";
 import { readRegistry } from "../registry.ts";
 import { type ProjectRef, resolveProject } from "../roots/address.ts";
+import { loadProjects } from "../status/projects.ts";
 import { setUpStore } from "../store.ts";
 import { quietChecks } from "../testing/checks.ts";
 import { type FakeEngine, fakeEngine } from "../testing/fake-engine.ts";
@@ -24,7 +26,7 @@ import { type MemoryBlobStore, memoryBlobStore } from "../testing/memory-blob-st
 import { makeSandbox, type Sandbox } from "../testing/sandbox.ts";
 import { settledOffload } from "../testing/settle.ts";
 import { ulid } from "../ulid.ts";
-import { type CompareDeps, runCompare } from "./compare.ts";
+import { type CompareDeps, differingPaths, runCompare } from "./compare.ts";
 import { runOffload } from "./offload.ts";
 import { runOnload } from "./onload.ts";
 
@@ -335,5 +337,56 @@ describe("runCompare", () => {
     expect(done.ok ? "" : done.finding.code).toBe("restic.failed");
     expect(theirRefs()).toEqual([]);
     expect(await untouched()).toEqual(before);
+  });
+});
+
+describe("the view's theirs (review M9: core's view model, not the CLI)", () => {
+  test("status's detailed view lists the sets compare wrote, each complete or not", async () => {
+    gitProject();
+    const base = await roundTrip();
+    const a = await theirOffload(base, "a", (copy) => writeFileSync(join(copy, "x.txt"), "x\n"));
+    value(await runCompare(deps(), { project: await ref() }));
+    const set = value(
+      await loadProjects({
+        ...sagaDeps(),
+        io: testHost(),
+        planning: { host: testHost(), checks: quietChecks, plugins: [nodePlugin] },
+      }),
+    );
+    const id = Object.keys(value(await readRegistry(testHost(), box.paths)).projects)[0] as string;
+    const view = await set.view(id, { detail: true });
+    expect(view.theirs).toEqual([
+      {
+        snapshot: a,
+        leaves: ["HEAD", "heads/main", "index", "worktree"],
+        complete: true,
+        missing: [],
+        extra: [],
+      },
+    ]);
+    expect((await set.view(id)).theirs).toBeUndefined();
+  });
+});
+
+describe("differingPaths", () => {
+  test("equal-sized files are compared in chunks, never read whole; a change past the first chunk counts", async () => {
+    const root = box.home;
+    const big = "x".repeat(3 * 1024 * 1024);
+    for (const side of ["a", "b"]) {
+      mkdirSync(join(root, side));
+      writeFileSync(join(root, side, "same.bin"), big);
+      writeFileSync(join(root, side, "late.bin"), side === "a" ? `${big}a` : `${big}b`);
+    }
+    // A whole read of any file is a bug here.
+    const io = {
+      ...nodeLocalIo,
+      fs: {
+        ...nodeLocalIo.fs,
+        readBytes: async (path: string): Promise<Uint8Array> => {
+          throw new Error(`read whole: ${path}`);
+        },
+      },
+    };
+    expect(value(await differingPaths(io, join(root, "a"), join(root, "b")))).toEqual(["late.bin"]);
   });
 });

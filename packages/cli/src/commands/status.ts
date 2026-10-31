@@ -1,14 +1,7 @@
 import { FindingSchema, ok, ProjectStateSchema } from "@plainport/contract";
-import {
-  dotGit,
-  PROJECT_CONDITIONS,
-  type ProjectStatus,
-  readTheirs,
-  shortDeviceId,
-  type TheirsListed,
-} from "@plainport/core";
+import { PROJECT_CONDITIONS, type ProjectStatus, shortDeviceId } from "@plainport/core";
 import { z } from "zod";
-import { type CommandContext, defineCommand } from "../registry.ts";
+import { defineCommand } from "../registry.ts";
 import { formatBytes } from "./offload.ts";
 import { knownProjects, notKnown, resolveKnown } from "./resolve.ts";
 
@@ -246,26 +239,13 @@ export const status = defineCommand({
     if (named.value.known === undefined) return notKnown(named.value.ref);
     // Only this project's view is built, with its local details (D64 quality: views are lazy).
     for (const f of known.value.set.findings) ctx.output.log("warn", `${f.code}: ${f.message}`);
+    const seen = known.value.set.findings.length;
     const view = await known.value.set.view(named.value.known.id, { detail: true });
-    return ok({ ...view, ...(await theirsOf(ctx, view)) });
+    // The view's own findings (a theirs set git could not read) arrive with it.
+    for (const f of known.value.set.findings.slice(seen)) ctx.output.log("warn", `${f.code}: ${f.message}`);
+    return ok(view);
   },
 });
-
-/**
- * The theirs refs compare wrote into the project's repository, when its folder is here and holds one; reading them
- * is a read (for-each-ref, cat-file). A repository git cannot read leaves them out, said once.
- */
-const theirsOf = async (ctx: CommandContext, view: ProjectStatus): Promise<{ theirs?: TheirsListed[] }> => {
-  if (!view.here || view.dir === undefined) return {};
-  const repo = await dotGit(ctx.system, view.dir);
-  if (!repo.ok || repo.value === "none") return {};
-  const listed = await readTheirs({ host: ctx.system, env: ctx.env }, view.dir);
-  if (!listed.ok) {
-    ctx.output.log("warn", `the theirs refs in ${view.dir} could not be read: ${listed.finding.message}`);
-    return {};
-  }
-  return listed.value.length === 0 ? {} : { theirs: listed.value };
-};
 
 const lsRow = (p: ProjectStatus, width: number): string => {
   const device = p.lease === undefined ? "-" : p.lease.here ? "here" : shortDeviceId(p.lease.device);
