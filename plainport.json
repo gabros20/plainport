@@ -597,7 +597,7 @@
                   "items": {
                     "type": "string"
                   },
-                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again)"
+                  "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)"
                 },
                 "dir": {
                   "description": "Its folder on this device",
@@ -882,7 +882,7 @@
                     "properties": {
                       "condition": {
                         "type": "string",
-                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line; an open set"
+                        "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line, leased-elsewhere; an open set"
                       },
                       "message": {
                         "type": "string"
@@ -1128,7 +1128,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again)"
+            "description": "What needs attention, an open set: incomplete (the catalog names snapshots it does not hold, so it has no head), diverged-after-commit (committed, but the folder stayed here with later edits, D51), head-moved, interrupted or running (the open journal), folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable (a journal this version cannot read names it, or names no project), several-stores (the catalogs of two stores hold it, merged by its id; the view shows its root's store's), rejected-line (the folder is here on a snapshot a resolution rejected; its next offload is live work that conflicts again), leased-elsewhere (another device's onload holds the lease, which is advisory: a working copy is there, Q17)"
           },
           "dir": {
             "description": "Its folder on this device",
@@ -1413,7 +1413,7 @@
               "properties": {
                 "condition": {
                   "type": "string",
-                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line; an open set"
+                  "description": "One of incomplete, diverged-after-commit, head-moved, interrupted, running, folder-missing, stale, never-synced, secret-unavailable, store-unreachable, seal-key-unavailable, catalog-unreadable, journal-unreadable, several-stores, rejected-line, leased-elsewhere; an open set"
                 },
                 "message": {
                   "type": "string"

@@ -44,7 +44,7 @@ import {
 } from "../catalog/log.ts";
 import type { ConfigLoader } from "../config/load.ts";
 import { realScheduler, type Scheduler, withinDeadline } from "../deadline.ts";
-import type { Device } from "../device.ts";
+import { type Device, shortDeviceId } from "../device.ts";
 import { type LocalIo, systemErrorCode } from "../io.ts";
 import { type Journal, type JournalsRead, type OffloadJournal, readJournals } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
@@ -106,6 +106,7 @@ export const PROJECT_CONDITIONS = [
   "journal-unreadable",
   "several-stores",
   "rejected-line",
+  "leased-elsewhere",
 ] as const;
 export type ProjectCondition = (typeof PROJECT_CONDITIONS)[number];
 
@@ -581,6 +582,12 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
       note(
         "rejected-line",
         `this copy is on snapshot ${entry.base}, which a resolution rejected; its next offload uploads it as live work, which conflicts again`,
+      );
+    // Another device's onload holds the lease (Q17: advisory): a working copy is there.
+    if (lease !== null && lease.device !== device.id)
+      note(
+        "leased-elsewhere",
+        `device ${shortDeviceId(lease.device)} holds its lease since ${lease.at}: a working copy is onloaded there`,
       );
     if (catalog !== undefined && catalog.missing.length > 0)
       note(

@@ -41,6 +41,12 @@ export const deviceNameFrom = (hostname: string): string => {
   return name.slice(0, 63).replace(/-+$/, "");
 };
 
+/**
+ * A device's id as views print it: its first 10 characters (`device 01JB7Q2M4X`), the ULID's time of creation, which
+ * tells this owner's devices apart. Events and --json carry the whole id.
+ */
+export const shortDeviceId = (id: string): string => id.slice(0, 10);
+
 export const DeviceSchema = z
   .strictObject({
     v: z.literal(1),

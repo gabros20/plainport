@@ -83,7 +83,6 @@ describe("schedules: the gate", () => {
       expect(s.run === undefined && s.runInProcess === undefined).toBe(s.owner !== undefined);
     }
     expect(todoSchedules().map((s) => [s.id, s.owner])).toEqual([
-      ["S4", 22],
       ["S7", 25],
       ["S8", 24],
     ]);

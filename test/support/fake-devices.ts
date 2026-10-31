@@ -5,6 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { Finding } from "../../packages/contract/src/index.ts";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
@@ -16,6 +17,7 @@ import { type RegistryEntry, readRegistry } from "../../packages/core/src/regist
 import { resolveProject } from "../../packages/core/src/roots/address.ts";
 import { type OffloadDeps, runOffload } from "../../packages/core/src/saga/offload.ts";
 import { type OnloadDeps, runOnload } from "../../packages/core/src/saga/onload.ts";
+import { type ProjectStatus, projectViews } from "../../packages/core/src/status/projects.ts";
 import { setUpStore } from "../../packages/core/src/store.ts";
 import { quietChecks } from "../../packages/core/src/testing/checks.ts";
 import { type FakeEngine, fakeEngine, fakeRepository } from "../../packages/core/src/testing/fake-engine.ts";
@@ -46,6 +48,8 @@ export interface FakeDevice {
   mirror: MemoryBlobStore;
   /** The web folder as it stood when this device's last release began: invariant 1's reference. */
   released?: TreeCapture;
+  /** Every finding its offloads and onloads streamed, oldest first. */
+  findings: Finding[];
   /** The project folder at `path` in this device's root. */
   dir(path?: string): string;
   offload(path?: string, faults?: RunFaults): ReturnType<typeof runOffload>;
@@ -53,12 +57,18 @@ export interface FakeDevice {
   recover(faults?: RunFaults): ReturnType<typeof recover>;
   /** This device's registry entry for the project at `path`. */
   entry(path?: string): Promise<RegistryEntry | undefined>;
+  /** This device's view of the project at `path` (status), read through the store. */
+  view(path?: string): Promise<ProjectStatus | undefined>;
 }
 
-/** Devices on `store`, each set up with `init`'s steps: its device id, its config, the store recorded by its id. */
+/**
+ * Devices on `store`, each set up with `init`'s steps: its device id, its config, the store recorded by its id.
+ * `config` adds TOML to a device's config.toml, by device name (`[onload]\nleases = "strict"`).
+ */
 export const fakeDevices = async (
   store: SemanticBlobStore,
   names: readonly string[],
+  options: { config?: Readonly<Record<string, string>> } = {},
 ): Promise<FakeDevice[]> => {
   const repository = fakeRepository();
   const devices: FakeDevice[] = [];
@@ -75,6 +85,7 @@ export const fakeDevices = async (
         "[roots.work]",
         'store = "ssd"',
         `on = { ${name} = "~/work" }`,
+        ...(options.config?.[name] === undefined ? [] : [options.config[name]]),
       ].join("\n"),
     );
     box.dir("ssd");
@@ -94,7 +105,8 @@ export const fakeDevices = async (
       mint: () => ulid(),
     });
     if (!setUp.ok) throw new Error(setUp.finding.message);
-    const device: Partial<FakeDevice> = {};
+    const findings: Finding[] = [];
+    const device: Partial<FakeDevice> = { findings };
     // Invariant 1's reference: the folder as it stood when release began (by the live run or by recover).
     const hostFor = (faults: RunFaults = {}): HostPorts =>
       testHost({
@@ -116,7 +128,9 @@ export const fakeDevices = async (
       loader: new ConfigLoader(testHost(), box.paths),
       opener,
       openMirror: async () => ({ ok: true as const, value: mirror }),
-      emit: () => {},
+      emit: (event: { type: string; finding?: Finding }) => {
+        if (event.type === "finding" && event.finding !== undefined) findings.push(event.finding);
+      },
       log: () => {},
     };
     const ref = async (path: string) => {
@@ -152,6 +166,11 @@ export const fakeDevices = async (
           const registry = await readRegistry(testHost(), box.paths);
           if (!registry.ok) throw new Error(registry.finding.message);
           return Object.values(registry.value.projects).find((e) => e.path === path);
+        },
+        view: async (path = "web") => {
+          const views = await projectViews({ ...common, io: testHost() });
+          if (!views.ok) throw new Error(views.finding.message);
+          return views.value.projects.find((p) => p.path === path);
         },
       }) as FakeDevice,
     );
