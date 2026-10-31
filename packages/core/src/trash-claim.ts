@@ -150,6 +150,15 @@ export const noteRefusal = async (io: LocalIo, trash: string, refusal: Finding):
   }
 };
 
+/** Removes the refusal note, if any; best effort, as noting it is. */
+export const clearRefusal = async (io: LocalIo, trash: string): Promise<void> => {
+  try {
+    await io.fs.unlink(trashRefusedFile(trash));
+  } catch (error) {
+    systemErrorCode(error);
+  }
+};
+
 /** The last refusal noted for a trash, if any; a note that does not read is no note. */
 export const readRefusal = async (io: LocalIo, trash: string): Promise<Finding | undefined> => {
   try {

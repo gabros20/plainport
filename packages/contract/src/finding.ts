@@ -695,7 +695,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary:
-      "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and onload renames it back (Q21, D24)",
+      "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and plainport recover puts it back at its folder, then offload it again (Q21, D24, D115)",
   },
   "store.history-elsewhere": {
     severity: "block",
@@ -835,6 +835,13 @@ export const FINDINGS = Object.freeze({
     exitCode: 8,
     summary:
       'Another device holds the project\'s lease; a warning, or a refusal of the onload with exit 8 when onload.leases = "strict". At offload (and its --dry-run) it is only ever a warning (D114)',
+  },
+  "offload.grace-raised": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "offload.conflictGrace is below the 15 minutes a store that is not durable (acked-unsynced or unknown) needs before Q21's proof, so its trash is held for 15 minutes anyway (D115); a warning only",
   },
   "path.occupied": {
     severity: "block",

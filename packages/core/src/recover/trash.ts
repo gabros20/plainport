@@ -268,6 +268,7 @@ const checkedRead = async (
       clock,
       faultAt: (point) => deps.host.faultAt(point),
       log: deps.log,
+      bootSession: () => deps.host.bootSession(),
       open: deps.held,
     },
     journal,
@@ -723,6 +724,15 @@ const heldHousekeeping = async (
     return;
   }
   if (journal.keepUntil !== undefined && Date.parse(journal.keepUntil) > clock().getTime()) return;
+  // Its last checked read failed (the store away, a profile that cannot release, a lost write): named, and left to gc
+  // and recover, so no write command reaches the store for it again (review r2 M1).
+  const failed = await readRefusal(host, trash);
+  if (failed !== undefined) {
+    done.notices.push(
+      `the held trash ${trash} of ${journal.project.address}'s offload ${journal.op} is kept: ${failed.message}; ${failed.fix ?? "plainport gc checks it again"}`,
+    );
+    return;
+  }
   if (!deleteDue || deps.held === undefined) {
     done.notices.push(
       `the trash ${trash} of ${journal.project.address}'s offload ${journal.op} is past its conflict grace; plainport gc reads the catalog and deletes it when no fork names its snapshot`,

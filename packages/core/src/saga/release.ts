@@ -42,6 +42,7 @@ import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
 import { type ProtectedStore, storeOverlap } from "../store-overlap.ts";
 import { placeStub, STUB_SUFFIX, type Stub, type StubPlacement, StubSchema } from "../stub.ts";
+import { recordHeldClock } from "./held-clock.ts";
 import { type Saga, withFix, writeFailed } from "./journaled.ts";
 import { unchanged } from "./verify.ts";
 
@@ -66,6 +67,36 @@ export const conflictGraceOf = (config: ResolvedConfig, store: string): number =
         ? DEFAULT_CONFLICT_GRACE.local
         : DEFAULT_CONFLICT_GRACE.remote),
   );
+
+/**
+ * The grace a store that needs Q21's proof gets at least (D115): the proof is taken no earlier than this after the
+ * commit, whatever offload.conflictGrace says, since a store that is not durable may lose a write it acknowledged
+ * shortly after acknowledging it.
+ */
+export const PROOF_GRACE_FLOOR_MS = durationMs(DEFAULT_CONFLICT_GRACE.remote);
+
+/** Whether a store's profile admits release only with Q21's post-grace proof (or not at all). */
+export const needsProof = (semantics: StoreSemantics | undefined): boolean =>
+  semantics !== undefined && !canRelease(semantics).eligible;
+
+/**
+ * The grace a held trash waits for (D115): offload.conflictGrace, raised to PROOF_GRACE_FLOOR_MS for a store whose
+ * profile needs Q21's proof; `raised` says so when it was lower.
+ */
+export const heldGrace = (
+  grace: number,
+  store: { name: string; semantics: StoreSemantics } | undefined,
+): { ms: number; raised?: Finding } => {
+  if (store === undefined || !needsProof(store.semantics) || grace >= PROOF_GRACE_FLOOR_MS)
+    return { ms: grace };
+  return {
+    ms: PROOF_GRACE_FLOOR_MS,
+    raised: finding("offload.grace-raised", {
+      message: `offload.conflictGrace is ${grace === 0 ? "0" : `${Math.round(grace / 1000)}s`}, below the ${PROOF_GRACE_FLOOR_MS / 60_000} minutes a store that is not durable needs before Q21's proof, so the trash on ${store.name} is held for ${PROOF_GRACE_FLOOR_MS / 60_000} minutes (D115)`,
+      fix: `nothing to do: the floor applies to ${store.name} whatever offload.conflictGrace says; set it to 15m or more to stop this warning`,
+    }),
+  };
+};
 
 /** Where the project's root holds its trash: the root's folder, or the folder's parent for a one-off location. */
 export const rootFolderOf = (path: string, dir: string): string =>
@@ -207,6 +238,8 @@ export interface Released {
   held?: true;
   /** Held because the store's profile cannot release a folder (durability unknown): why, until it admits release. */
   refused?: Finding;
+  /** offload.conflictGrace was below the floor a store that needs Q21's proof gets, so it was raised (D115). */
+  graceRaised?: Finding;
 }
 
 /**
@@ -516,14 +549,18 @@ export const releaseOffload = async (
   // Stage 4, the hold (Q16): with a conflict grace, or a profile that cannot release without Q21's proof, the trash
   // waits at offload.release.held for the checked read (recover/held.ts), and no delete starts here.
   // A journal already at release.delete has left the hold (or never needed it): the delete goes on below.
-  const grace = rc.grace ?? 0;
+  // A store that needs Q21's proof is held for at least PROOF_GRACE_FLOOR_MS (D115).
+  const { ms: grace, raised } = heldGrace(rc.grace ?? 0, rc.store);
   const atHeld = journal.step === "offload.release.held";
-  const proofNeeded = rc.store !== undefined && !canRelease(rc.store.semantics).eligible;
+  const proofNeeded = needsProof(rc.store?.semantics);
   if (atHeld || (!reached("offload.release.delete") && (grace > 0 || proofNeeded))) {
     const keepUntil = atHeld ? journal.keepUntil : graceDeadline(journal, grace, rc.clock());
     if (!atHeld) {
       const held = await saga.step("offload.release.held", keepUntil === undefined ? {} : { keepUntil });
       if (!held.ok) return held;
+      // The deadline on this boot's uptime too, so a forward step of the clock does not bring it forward (r2 M2).
+      if (keepUntil !== undefined)
+        await recordHeldClock(io, paths, op, await rc.host.bootSession(), keepUntil, rc.clock());
     }
     const refused =
       rc.store === undefined
@@ -536,6 +573,7 @@ export const releaseOffload = async (
       freed: false,
       held: true,
       ...(refused === undefined ? {} : { refused }),
+      ...(raised === undefined || atHeld ? {} : { graceRaised: raised }),
     });
   }
 

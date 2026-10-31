@@ -293,6 +293,12 @@ describe("findings", () => {
         exitCode: 8,
         summary: expect.any(String),
       },
+      "offload.grace-raised": {
+        severity: "warn",
+        allowable: false,
+        exitCode: 6,
+        summary: expect.any(String),
+      },
       "operation.cancelled": {
         severity: "block",
         allowable: false,

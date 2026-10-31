@@ -113,6 +113,11 @@ const settled = async (d: FakeDevice) => {
     journalsOf(d).some((j) => j.step === "offload.release.delete");
   for (let i = 0; i < 400 && busy(); i++) await Bun.sleep(25);
 };
+/** Sets a device's offload.conflictGrace to 0. */
+const noGrace = (d: FakeDevice) => {
+  const file = join(d.box.home, ".config/plainport/config.toml");
+  writeFileSync(file, readFileSync(file, "utf8").replace('conflictGrace = "15m"', 'conflictGrace = "0"'));
+};
 /** A clock `ms` from now. */
 const after = (ms: number) => {
   const at = Date.now() + ms;
@@ -416,14 +421,58 @@ describe("any held: unchanged while the store does not answer or Q21's proof fin
     expect(reportOf<GcReport>(await w.a.gc({ now })).deleted.map((d) => d.op)).toEqual([op]);
   });
 
-  test("the commit's event gone from the store: store.lost-write, the trash kept", async () => {
+  test("the commit's event gone from the store: store.lost-write, the trash kept; recover then puts it back, as the fix says, and it offloads again (D115)", async () => {
     const w = await world();
+    const base = (await w.a.entry())?.base;
     const op = await heldOffload(w);
     const event = (await allEvents(w.store)).find((e) => e.type === "offloaded" && e.snapshot === op);
     w.store.data.delete(storeEventKey(event?.id as string));
-    const gc = await w.a.gc({ now: after(GRACE_MS + 60_000) });
+    const now = after(GRACE_MS + 60_000);
+    const gc = await w.a.gc({ now });
     expect(gc.ok ? "" : gc.finding.code).toBe("store.lost-write");
     expect(rowOf(w.a, op).trash).toBe(true);
+    // The fix, as printed: recover puts the folder back, then offload it again.
+    expect(gc.ok ? "" : gc.finding.fix).toContain(`plainport recover puts the folder back at ${w.a.dir()}`);
+    const recovered = reportOf<RecoveryReport>(await w.a.recover(undefined, now));
+    expect(recovered.operations.map((o) => [o.outcome, o.state, o.finding?.code])).toEqual([
+      ["rolled-back", "local", "store.lost-write"],
+    ]);
+    expect(recovered.operations[0]?.finding?.fix).toBe("offload it again: plainport offload work:web --yes");
+    expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
+    expect(existsSync(join(w.a.box.home, "work/.plainport-trash"))).toBe(false);
+    expect(readFileSync(join(w.a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect((await w.a.entry())?.base).toBe(base);
+    const again = value(await w.a.offload());
+    expect(again.held).toBe(true);
+    expect((await foldOf(w))?.head).toBe(again.snapshot);
+  });
+
+  test("recover <project> --restore-held puts a held trash back with the store gone for good (D115)", async () => {
+    const w = await world();
+    const base = (await w.a.entry())?.base;
+    const op = await heldOffload(w);
+    w.store.setDown(true);
+    const calls = { ...w.store.calls };
+    const restored = reportOf<RecoveryReport>(
+      await w.a.recover(undefined, undefined, { restoreHeld: w.project }),
+    );
+    expect(restored.operations.map((o) => [o.op, o.outcome, o.state])).toEqual([
+      [op, "rolled-back", "local"],
+    ]);
+    expect(rowOf(w.a, op)).toEqual({ folder: true, trash: false, stub: false, journals: [] });
+    expect((await w.a.entry())?.base).toBe(base);
+    expect(w.store.calls).toEqual(calls);
+  });
+
+  test("--restore-held never writes over a folder that stands at the project's place (path.occupied)", async () => {
+    const w = await world();
+    const op = await heldOffload(w);
+    w.a.box.file("work/web/other.txt", "not the project\n");
+    const kept = await w.a.recover(undefined, undefined, { restoreHeld: w.project });
+    expect(reportOf<RecoveryReport>(kept).operations.map((o) => [o.outcome, o.finding?.code])).toEqual([
+      ["pending", "path.occupied"],
+    ]);
+    expect(rowOf(w.a, op)).toMatchObject({ trash: true, journals: [["offload.release.held", "deadline"]] });
   });
 
   test("the restic snapshot gone from the repository: store.lost-write, the trash kept", async () => {
@@ -457,20 +506,119 @@ describe("a store whose profile cannot release a folder (Task 17 M7's carry-over
     expect(reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) })).deleted).toHaveLength(1);
   });
 
-  test("acked-unsynced with no grace: held anyway, and deleted once Q21's proof holds", async () => {
+  test("acked-unsynced with no grace: held for the 15-minute floor, the raise reported, deleted after it once Q21's proof holds (D115)", async () => {
     const w = await world();
-    const file = join(w.a.box.home, ".config/plainport/config.toml");
-    writeFileSync(file, readFileSync(file, "utf8").replace('conflictGrace = "15m"', 'conflictGrace = "0"'));
+    noGrace(w.a);
     w.store.setProfile({
       ...MEMORY_SEMANTICS,
       durability: { value: "acked-unsynced", evidence: "measured" },
     });
+    w.a.findings.length = 0;
     const done = value(await w.a.offload());
     expect([done.held, done.releaseRefused]).toEqual([true, undefined]);
-    expect(reportOf<GcReport>(await w.a.gc({ now: after(1_000) })).deleted.map((d) => d.op)).toEqual([
-      done.snapshot,
+    expect(w.a.findings.filter((f) => f.code === "offload.grace-raised").map((f) => f.severity)).toEqual([
+      "warn",
     ]);
+    const committed = (await allEvents(w.store)).find(
+      (e) => e.type === "offloaded" && e.snapshot === done.snapshot,
+    );
+    expect(Date.parse(done.keepUntil as string) - Date.parse(committed?.at as string)).toBeGreaterThanOrEqual(
+      GRACE_MS - 1_000,
+    );
+    // A second after the acknowledgement proves nothing against a store that may still lose it: kept.
+    expect(reportOf<GcReport>(await w.a.gc({ now: after(1_000) })).deleted).toEqual([]);
+    expect(rowOf(w.a, done.snapshot).trash).toBe(true);
+    expect(
+      reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) })).deleted.map((d) => d.op),
+    ).toEqual([done.snapshot]);
   });
+});
+
+describe("two trashes of one project, one held and one released (review r2 M3)", () => {
+  test("a rejected snapshot's trash stays held while the kept head is onloaded, edited and offloaded again", async () => {
+    const w = await world();
+    const [op, bSnap] = await heldThenForked(w);
+    await resolve(w, bSnap);
+    // dev-a onloads the kept head beside its held trash: restored from the store, the trash untouched.
+    const back = value(await w.a.onload());
+    expect(back.restored).toBe("restore");
+    expect(rowOf(w.a, op)).toMatchObject({ folder: true, trash: true });
+    writeFileSync(join(w.a.dir(), "src/a3.ts"), "export const a3 = 3;\n");
+    noGrace(w.a);
+    const again = value(await w.a.offload());
+    expect(again.snapshot).not.toBe(op);
+    // Its detached delete runs; the held trash keeps the holder, so wait on the second journal only.
+    for (let i = 0; i < 400 && journalsOf(w.a).some((j) => j.op === again.snapshot); i++) await Bun.sleep(25);
+    // The second offload's trash is released; the first one is still held, its folder as it was.
+    expect(rowOf(w.a, op).trash).toBe(true);
+    expect(rowOf(w.a, again.snapshot).trash).toBe(false);
+    expect(journalsOf(w.a).map((j) => [j.op, j.step])).toEqual([[op, "offload.release.held"]]);
+    expect(readFileSync(join(trashOf(w.a, op), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    // Past the grace the rejected snapshot's trash goes; the snapshot stays in the store.
+    const gc = reportOf<GcReport>(await w.a.gc({ now: after(GRACE_MS + 60_000) }));
+    expect(gc.deleted.map((d) => d.op)).toEqual([op]);
+    expect(snapshotsOf(w.a)).toHaveLength(4);
+    expect(Object.keys((await foldOf(w))?.snapshots ?? {})).toEqual(
+      expect.arrayContaining([op, again.snapshot]),
+    );
+  });
+});
+
+describe("housekeeping stays local for a held trash whose last checked read failed (review r2 M1)", () => {
+  test("the store away: after gc's failed read, a write command's housekeeping names it and reaches nothing", async () => {
+    const w = await world();
+    const op = await heldOffload(w);
+    const now = after(GRACE_MS + 60_000);
+    w.store.setDown(true);
+    const gc = await w.a.gc({ now });
+    expect(gc.ok ? "" : gc.finding.code).toBe("store.unreachable");
+    w.store.setDown(false);
+    const calls = { ...w.store.calls };
+    const kept = await w.a.housekeeping({ now });
+    expect(kept.started).toEqual([]);
+    expect(kept.notices.some((n) => n.includes(`held trash`) && n.includes("store is down"))).toBe(true);
+    expect(w.store.calls).toEqual(calls);
+    expect(rowOf(w.a, op).trash).toBe(true);
+    // gc reads again, finds the store back, and deletes it; the note goes with the trash.
+    expect(reportOf<GcReport>(await w.a.gc({ now })).deleted.map((d) => d.op)).toEqual([op]);
+    expect(existsSync(join(w.a.box.home, "work/.plainport-trash"))).toBe(false);
+  });
+
+  test("a profile that cannot release refuses before the catalog is read or Q21's proof is taken", async () => {
+    const w = await world();
+    w.store.setProfile({ ...MEMORY_SEMANTICS, durability: "unknown" });
+    const done = value(await w.a.offload());
+    const lists = w.store.calls.list;
+    const gc = await w.a.gc({ now: after(GRACE_MS + 60_000) });
+    expect(gc.ok ? "" : gc.finding.code).toBe("store.semantics-unknown");
+    expect(w.store.calls.list).toBe(lists);
+    expect(rowOf(w.a, done.snapshot).trash).toBe(true);
+  });
+});
+
+describe("a crash past the rename: recover's release reads the profile and holds as the live run does (review r2 I1)", () => {
+  for (const durability of ["acked-unsynced", "unknown"] as const)
+    test(`killed at offload.release.moved with grace 0 on a ${durability} store: recover holds the trash, never deletes it`, async () => {
+      const w = await world();
+      noGrace(w.a);
+      w.store.setProfile({
+        ...MEMORY_SEMANTICS,
+        durability: durability === "unknown" ? "unknown" : { value: durability, evidence: "measured" },
+      });
+      await expect(w.a.offload("web", { at: "offload.release.moved" })).rejects.toBeInstanceOf(InjectedFault);
+      const op = journalsOf(w.a)[0]?.op as string;
+      const recovered = reportOf<RecoveryReport>(await w.a.recover());
+      expect(recovered.operations.map((o) => o.outcome)).toEqual(["finished"]);
+      expect(rowOf(w.a, op)).toEqual({
+        folder: false,
+        trash: true,
+        stub: true,
+        journals: [["offload.release.held", "deadline"]],
+      });
+      // And the next gc a second later keeps it too.
+      await w.a.gc({ now: after(1_000) });
+      expect(rowOf(w.a, op).trash).toBe(true);
+    });
 });
 
 describe("crashes at the checked read and at each transition", () => {

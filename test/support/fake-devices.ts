@@ -76,7 +76,11 @@ export interface FakeDevice {
   previewLease(path?: string): ReturnType<typeof previewLease>;
   onload(path?: string): ReturnType<typeof runOnload>;
   /** recover, on the host's clock or `now` (a stepped clock: deadlines are compared with it). */
-  recover(faults?: RunFaults, now?: () => Date): ReturnType<typeof recover>;
+  recover(
+    faults?: RunFaults,
+    now?: () => Date,
+    extra?: Pick<RecoverDeps, "restoreHeld">,
+  ): ReturnType<typeof recover>;
   /** gc (--now with `early`), with the checked read of a held trash (Q16), on `now`'s clock. */
   gc(options?: { early?: boolean; now?: () => Date; faults?: RunFaults }): ReturnType<typeof collectTrash>;
   /** A write command's housekeeping (deleteDue), or a read command's, with the checked read, on `now`'s clock. */
@@ -234,7 +238,8 @@ export const fakeDevices = async (
           }),
         previewLease: async (path = "web") => previewLease(offloadDeps, { project: await ref(path) }),
         onload: async (path = "web") => runOnload(onloadDeps, { project: await ref(path), hydrate: false }),
-        recover: (faults?: RunFaults, now?: () => Date) => recover(recoverDeps(faults, now)),
+        recover: (faults?: RunFaults, now?: () => Date, extra: Pick<RecoverDeps, "restoreHeld"> = {}) =>
+          recover({ ...recoverDeps(faults, now), ...extra }),
         gc: (options: { early?: boolean; now?: () => Date; faults?: RunFaults } = {}) =>
           collectTrash(trashDeps(options.now, options.faults), { early: options.early === true }),
         housekeeping: (options: { deleteDue?: boolean; now?: () => Date } = {}) =>
