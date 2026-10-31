@@ -1,7 +1,7 @@
 // The fork state machine (M2 Task 23; DESIGN.md "Conflict at step 7"): two devices in process on one fake store, each
 // stage of the table asserted device by device (folder, stub, registry base, journal) after the live run and after
 // recover. F1: the fork is seen at the commit's head check. F2: after the commit and before the rename, by release's
-// re-read or recover's. F3: after the rename, which is never undone (Task 24 holds the trash; until then it is
+// re-read or recover's. F3: after the rename, which is never undone (Task 24 holds the trash with a conflict grace; without one it is
 // released as before).
 
 import { afterEach, describe, expect, test } from "bun:test";

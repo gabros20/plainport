@@ -509,7 +509,7 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
         "offload.diverged.based",
       ].sort(),
     );
-    expect(OFFLOAD_STEPS.length).toBe(16);
+    expect(OFFLOAD_STEPS.length).toBe(17);
   });
 });
 

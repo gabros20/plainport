@@ -10,6 +10,7 @@ import {
   ConfigLoader,
   collectTrash,
   expandHome,
+  heldStoreOpener,
   openStore,
   RECOVERY_OUTCOMES,
   recover as recoverJournals,
@@ -287,6 +288,17 @@ export const gc = defineCommand({
         env: ctx.env,
         log: (level, message) => ctx.output.log(level, message),
         now: () => ctx.clock.now(),
+        // A held trash gets the checked read (Q16): its store, opened as recover opens it.
+        held: heldStoreOpener({
+          io: ctx.system,
+          paths: paths.value,
+          env: ctx.env,
+          loader: new ConfigLoader(ctx.io, paths.value),
+          opener: ctx.stores,
+          clock: () => ctx.clock.now(),
+          openMirror: (storeId) => openEventMirror(ctx.io, paths.value, storeId),
+          log: (level, message) => ctx.output.log(level, message),
+        }),
       },
       { early: args.now === true },
     );

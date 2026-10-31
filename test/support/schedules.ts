@@ -17,6 +17,8 @@ import {
   type CatalogInvariantSubject,
   catalogInvariantViolations,
   invariantViolations,
+  type RecordedCall,
+  recordingBlobStore,
 } from "../../packages/core/src/testing/invariants.ts";
 import { MEMORY_SEMANTICS } from "../../packages/core/src/testing/memory-blob-store.ts";
 import {
@@ -300,7 +302,7 @@ const okOf = <T>(
  * S6: dev-a commits while the store's listings leave its event out, then dev-b offloads. With `seen` "at-commit" the
  * event is listed while B verifies, so B's fresh read at its commit finds the fork. With "never" it stays unlisted
  * through B's commit, and both commit: release waits on the store's profile, never on visibility. On UNSEEN
- * (acked-unsynced) neither profile admits release, so both keep their folders with their journals open; on a durable
+ * (acked-unsynced) neither profile admits release without Q21's proof, so both hold their trash (Task 24); on a durable
  * store (`durable`) both release. Either way both snapshots stay, and the fold shows the fork once A's event lists.
  */
 const delayedVisibility = async (seen: "at-commit" | "never", durable = false): Promise<void> => {
@@ -354,29 +356,27 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
       expect(okOf(byA).snapshot).toBe(eventA.snapshot);
       expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
     } else {
-      // dev-a: committed, and its folder stays: the profile does not admit release.
-      expect(byA.ok ? "released" : [byA.exitCode, byA.finding.code]).toEqual([6, "store.semantics-unknown"]);
-      expect(readFileSync(join(a.dir(), "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
-      expect(existsSync(`${a.dir()}.plainport`)).toBe(false);
+      // dev-a: committed and moved into its trash, held (Task 24): the profile needs Q21's proof before a delete.
+      expect(byA.ok ? [byA.value.localCopy, byA.value.held] : [byA.exitCode, byA.finding.code]).toEqual([
+        "kept",
+        true,
+      ]);
+      expect(JSON.parse(readFileSync(`${a.dir()}.plainport`, "utf8")).snapshot).toBe(eventA.snapshot);
     }
     const byB = await b.offload();
     expect(b.engine.calls).toHaveLength(1); // it uploaded: the head check before the upload passed
     expect(byB.ok ? "released" : [byB.exitCode, byB.finding.code]).toEqual(
-      seen === "at-commit"
-        ? [8, "catalog.head-moved"]
-        : releases
-          ? "released"
-          : [6, "store.semantics-unknown"],
+      seen === "at-commit" ? [8, "catalog.head-moved"] : "released",
     );
-    if (releases) {
-      // dev-b: released too: its commit could not see A's event, and release does not wait for it.
+    if (seen === "never") {
+      // dev-b: released too (held on UNSEEN): its commit could not see A's event, and release does not wait for it.
       expect(existsSync(`${b.dir()}.plainport`)).toBe(true);
     } else {
       expect(readFileSync(join(b.dir(), "src/b.ts"), "utf8")).toBe("export const b = 1;\n");
       expect(existsSync(`${b.dir()}.plainport`)).toBe(false);
     }
     if (seen === "never" && !releases) {
-      // Each device keeps its offload journal at the commit, for recover to finish the release once admitted.
+      // Each device holds its trash at offload.release.held, for the checked read (Q16, Q21) to settle.
       for (const d of [a, b]) {
         const open = readdirSync(d.box.paths.journalDir)
           .filter((f) => f.endsWith(".json"))
@@ -387,9 +387,9 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
                 step: string;
               },
           );
-        expect({ device: d.name, open: open.map((j) => j.kind) }).toEqual({
+        expect({ device: d.name, open: open.map((j) => j.step) }).toEqual({
           device: d.name,
-          open: ["offload"],
+          open: ["offload.release.held"],
         });
       }
     }
@@ -408,7 +408,12 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
 
     // Invariants 1–3 on each device, 4–6 on the store.
     for (const d of [a, b]) {
-      for (let i = 0; i < 400 && existsSync(join(d.box.home, "work/.plainport-trash")); i++)
+      // A detached delete may still run; a held trash stays.
+      for (
+        let i = 0;
+        i < 400 && openJournals(d.box.paths.journalDir).some((j) => j.step === "offload.release.delete");
+        i++
+      )
         await Bun.sleep(25);
       expect({
         device: d.name,
@@ -525,6 +530,79 @@ const lostAcknowledgement = async (): Promise<void> => {
         eventsBefore: before.events,
         snapshotsBefore: before.snapshots,
         snapshotsNow: a.engine.repository.snapshots.map((s) => s.info.id),
+      }),
+    ).toEqual([]);
+  } finally {
+    for (const d of [a, b]) await d.box.cleanupSettled();
+  }
+};
+
+/**
+ * S8: dev-a's project holds, under a stripped folder (node_modules), a local alias of the remote store: what a mount of
+ * it shows, its meta/v1/store.json and its repository's layout. No configured local store names it, so release's
+ * overlap check cannot see it; the trash is held for the grace, and when the checked read allows the delete, the guard
+ * (D87), run right before it, refuses: the trash and the store stay. dev-b sees every event and snapshot it saw before,
+ * and a recorder on the store shows no delete (invariant 6).
+ */
+const aliasUnderStripped = async (): Promise<void> => {
+  const fake = semanticBlobStore();
+  const recorded: RecordedCall[] = [];
+  const recording = recordingBlobStore(fake, recorded);
+  const store: SemanticBlobStore = { ...fake, put: recording.put, delete: recording.delete };
+  const [a, b] = (await fakeDevices(store, ["dev-a", "dev-b"])) as [FakeDevice, FakeDevice];
+  try {
+    a.configure('[offload]\nconflictGrace = "15m"');
+    a.box.file("work/web/package.json", `${JSON.stringify({ name: "web" })}\n`);
+    a.box.file("work/web/src/main.ts", "export const main = 0;\n");
+    // The alias: the store as a mount presents it, under the stripped dependency folder.
+    const marker = fake.data.get("meta/v1/store.json") as Uint8Array;
+    a.box.file("work/web/node_modules/.remote/meta/v1/store.json", new TextDecoder().decode(marker));
+    a.box.file("work/web/node_modules/.remote/repo/config", "restic config\n");
+    const done = okOf(await a.offload());
+    expect([done.localCopy, done.held]).toEqual(["kept", true]);
+    okOf(await b.onload());
+    const before = {
+      events: await allEvents(store),
+      snapshots: a.engine.repository.snapshots.map((s) => s.info.id),
+    };
+    const storeBytes = new Map(fake.data);
+
+    // dev-a: past the grace the checked read allows the delete; the guard right after it refuses.
+    const past = () => new Date(Date.now() + 16 * 60_000);
+    let checked = false;
+    const gc = await a.gc({
+      now: past,
+      faults: { onStep: (step) => (checked ||= step === "trash.delete.checked") },
+    });
+    expect(gc.ok ? "deleted" : gc.finding.code).toBe("delete.guard-refused");
+    expect(checked).toBe(true);
+    const trash = join(a.box.home, "work/.plainport-trash", done.snapshot, "web");
+    expect(existsSync(join(trash, "node_modules/.remote/meta/v1/store.json"))).toBe(true);
+    expect(existsSync(join(trash, "src/main.ts"))).toBe(true);
+    // A write command's housekeeping names the refusal and starts no delete; recover leaves it pending.
+    const kept = await a.housekeeping({ now: past });
+    expect(kept.started).toEqual([]);
+    expect(kept.notices.some((n) => n.includes("was not deleted"))).toBe(true);
+    const recovered = await a.recover(undefined, past);
+    expect(recovered.ok ? "deleted" : recovered.finding.code).toBe("delete.guard-refused");
+    expect(existsSync(join(trash, "src/main.ts"))).toBe(true);
+    // The store: every byte it held is there, and the recorder saw no delete.
+    for (const [key, bytes] of storeBytes)
+      expect({ key, same: fake.data.get(key) === bytes }).toEqual({ key, same: true });
+    expect(recorded.filter((c) => c.tool === "store" && c.method === "delete")).toEqual([]);
+
+    // dev-b: every event and snapshot it saw before.
+    const events = await allEvents(store);
+    for (const e of before.events) expect(events.some((x) => x.id === e.id)).toBe(true);
+    const snapshots = b.engine.repository.snapshots.map((s) => s.info.id);
+    for (const id of before.snapshots) expect(snapshots).toContain(id);
+    expect(
+      catalogInvariantViolations({
+        events,
+        eventsBefore: before.events,
+        snapshotsBefore: before.snapshots,
+        snapshotsNow: snapshots,
+        recorded,
       }),
     ).toEqual([]);
   } finally {
@@ -650,7 +728,7 @@ export const SCHEDULES: readonly Schedule[] = [
     devices: ["dev-a", "dev-b"],
     outcomes: {
       "dev-a":
-        "reaches F3: its re-read sees no fork, so it releases its folder and its stub names its snapshot; on a remote store the trash is held for the conflict grace and kept as conflict-retained once B's fork names it (Task 24)",
+        "reaches F3: its re-read sees no fork, so it releases its folder and its stub names its snapshot; with a conflict grace (a remote store's default) the trash is held, and B's append within the grace keeps it: past the deadline, gc's checked read finds the fork and keeps it as conflict-retained (Task 24)",
       "dev-b":
         "passed its head check before A appended, so it appends too and sees the fork at its re-read (F2): exit 8, kind fork, detail after-commit; it keeps its folder on its own snapshot. Both snapshots stay in the store and the catalog",
     },
@@ -660,6 +738,8 @@ export const SCHEDULES: readonly Schedule[] = [
       await bothOnloaded(world, a, b);
       const before = { events: await world.events(), snapshots: await world.snapshots() };
       await editBoth(a, b);
+      // A conflict grace, as a remote store has by default (Task 24), short enough for the test to wait out.
+      appendFileSync(a.paths.configFile, '\n[offload]\nconflictGrace = "5s"\n');
 
       // dev-b passes its commit's head check and stands there while dev-a offloads to its end.
       const offloadB = b.start(OFFLOAD(), { pauseAt: "offload.head-checked" });
@@ -667,16 +747,32 @@ export const SCHEDULES: readonly Schedule[] = [
       const byA = await a.run(OFFLOAD());
       expectCode(byA, 0, "dev-a: offload");
       const released = envelope(byA)?.data;
-      await a.settled();
+      expect([released?.localCopy, released?.held]).toEqual(["kept", true]);
       offloadB.resume();
       const byB = await offloadB.done;
 
-      // dev-a: F3, released.
+      // dev-a: F3, released into a held trash.
       expect(await Bun.file(a.dir()).exists()).toBe(false);
       expect((await Bun.file(`${a.dir()}.plainport`).json()).snapshot).toBe(released?.snapshot);
       expect(baseOf(a)).toBe(released?.snapshot as string);
       // dev-b: F2, kept.
       const snapB = await expectKeptAfterCommit(b, byB, "b");
+      // B's append within the grace keeps A's trash: past the deadline, gc's checked read finds the fork and keeps it,
+      // conflict-retained (held with no deadline).
+      const until = Date.parse(released?.keepUntil as string);
+      while (Date.now() <= until) await Bun.sleep(50);
+      const gc = await a.run(["gc", "--json"]);
+      expectCode(gc, 0, "dev-a: gc");
+      const kept = envelope(gc)?.data?.kept as { op: string; reason?: string }[];
+      expect(kept.map((k) => [k.op, k.reason?.includes("a fork names its snapshot")])).toEqual([
+        [released?.snapshot as string, true],
+      ]);
+      expect(
+        await Bun.file(
+          join(a.root, ".plainport-trash", released?.snapshot as string, "web", "src/a.ts"),
+        ).text(),
+      ).toBe("export const a = 1;\n");
+      expect(openJournals(a.paths.journalDir).map((j) => j.step)).toEqual(["offload.release.held"]);
       const project = foldCatalog(await world.events()).projects[await projectId(world)];
       expect(project?.status).toBe("conflicted");
       expect(project?.conflicts.flat().sort()).toEqual([released?.snapshot as string, snapB].sort());
@@ -726,7 +822,7 @@ export const SCHEDULES: readonly Schedule[] = [
     outcomes: {
       "dev-a": "commits; its event is invisible to B's listings for a while",
       "dev-b":
-        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release (writes acknowledged before they are synced) each device keeps its folder with its journal open (store.semantics-unknown) until recover finds the profile admits release; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
+        "passes its head check before the upload, since A's event is not listed yet. Its commit reads the store fresh (never its mirror): once A's event is listed it keeps its folder as a fork. While it is not, B commits too, since release waits on the store's profile and never on visibility: on a store whose profile does not admit release without Q21's proof (writes acknowledged before they are synced) each device moves its folder into a held trash (offload.release.held), which only the checked read after the grace deletes; on a durable store both release. Both snapshots stay, and the fold shows the fork once A's event is listed",
     },
     runInProcess: async () => {
       await delayedVisibility("at-commit");
@@ -749,12 +845,13 @@ export const SCHEDULES: readonly Schedule[] = [
     id: "S8",
     title:
       "D87 aliases: a remote store reachable through a local mount or alias placed under a stripped folder",
-    owner: 24,
     devices: ["dev-a", "dev-b"],
     outcomes: {
-      "dev-a": "the delete guard refuses at trash.delete.checked; the trash and the store stay",
-      "dev-b": "sees every event and snapshot it saw before",
+      "dev-a":
+        "its trash is held for the grace; once the checked read allows the delete (trash.delete.checked), the delete guard refuses (delete.guard-refused): the trash and the store stay, gc, housekeeping and recover say why",
+      "dev-b": "sees every event and snapshot it saw before; a recorder on the store shows no delete",
     },
+    runInProcess: aliasUnderStripped,
   },
 ];
 

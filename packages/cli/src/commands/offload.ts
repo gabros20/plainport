@@ -8,7 +8,7 @@
 // M1 takes one project (D38).
 
 import { openEventMirror } from "@plainport/blob-fs";
-import { fail, failWith, finding, ok } from "@plainport/contract";
+import { FindingSchema, fail, failWith, finding, ok } from "@plainport/contract";
 import {
   ConfigLoader,
   PLAN_TTL_MS,
@@ -137,6 +137,14 @@ const OffloadOutputSchema = z.union([
     keepUntil: z.iso.datetime().optional().meta({
       description: "offload.keepLocalFor: the local copy is kept until then, and onload renames it back",
     }),
+    held: z.literal(true).optional().meta({
+      description:
+        "The local copy is held in the trash for Q16's conflict grace (offload.conflictGrace, 15 minutes on a remote store): keepUntil is the grace's deadline, after which gc (or a write command's housekeeping) reads the catalog and deletes it only when no fork names this snapshot; onload renames it back meanwhile",
+    }),
+    releaseRefused: FindingSchema.optional().meta({
+      description:
+        "Held because the store cannot release a folder (store.semantics-unknown: its durability): why, and the way out; the trash stays until its profile admits release",
+    }),
     deleteStarted: z.literal(true).optional().meta({
       description:
         "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
@@ -219,15 +227,21 @@ export const offload = defineCommand({
     return [
       `offloaded ${data.project} to ${data.store} as snapshot ${data.snapshot}; ${data.freedBy !== undefined ? "nothing freed yet" : data.deleteStarted === true ? `freeing ${formatBytes(data.freedBytes)}` : `freed ${formatBytes(data.freedBytes)}`}`,
       ...(data.stub === undefined ? [] : [`stub      ${data.stub}`]),
-      ...(data.keepUntil !== undefined
-        ? [
-            `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
-          ]
-        : data.localCopy === "waiting"
-          ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
-          : [
-              "deleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept",
-            ]),
+      ...(data.releaseRefused !== undefined
+        ? [`kept      ${data.trash}${kept}: ${data.releaseRefused.message}`]
+        : data.held === true
+          ? [
+              `held      ${data.trash}${kept} for the conflict grace until ${data.keepUntil}; then plainport gc reads the catalog and deletes it if no fork names this snapshot`,
+            ]
+          : data.keepUntil !== undefined
+            ? [
+                `kept      ${data.trash}${kept} until ${data.keepUntil}; plainport gc frees it then (plainport gc --now --yes frees it early)`,
+              ]
+            : data.localCopy === "waiting"
+              ? [`trash     ${data.trash}${kept} waits for plainport recover to delete it`]
+              : [
+                  "deleting  the local copy in the background (keepLocalFor is 0); it is checked first, and plainport status says if it was kept",
+                ]),
     ].join("\n");
   },
   handler: async (args, ctx) => {

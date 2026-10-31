@@ -195,7 +195,7 @@ describe("onload: the command", () => {
       reused: {
         from: trash,
         offload: snapshot,
-        reason: `the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified`,
+        reason: `the folder offload ${snapshot} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified`,
       },
       hydrate: {
         status: "reused",
@@ -217,7 +217,7 @@ describe("onload: the command", () => {
     expect(run.code).toBe(0);
     expect(run.out).toBe(
       [
-        `onloaded work:web into ${dir()}: renamed back from ${join(box.home, "work/.plainport-trash", snapshot, "web")}, not restored from the store (the folder offload ${snapshot} released was still kept (keepLocalFor) and unchanged since it was verified)`,
+        `onloaded work:web into ${dir()}: renamed back from ${join(box.home, "work/.plainport-trash", snapshot, "web")}, not restored from the store (the folder offload ${snapshot} released was still kept (keepLocalFor or the conflict grace) and unchanged since it was verified)`,
         "dependencies came back with the folder, so nothing was installed",
         "",
       ].join("\n"),

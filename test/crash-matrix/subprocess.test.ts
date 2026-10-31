@@ -429,6 +429,12 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
     });
     killed(ran, "offload");
   },
+  held: async (r, row) => {
+    // A grace short enough that recover's checked read is taken after it, so the held trash settles (Q16).
+    appendFileSync(r.box.paths.configFile, '\n[offload]\nconflictGrace = "1s"\n');
+    killed(await r.run(offloadArgs, crashAt(row.point, row.occurrence)), "offload");
+    await Bun.sleep(1_100);
+  },
 };
 
 const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, Scenario> = {

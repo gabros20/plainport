@@ -52,6 +52,7 @@ export {
 export * from "./ports/secrets.ts";
 export type * from "./ports/store.ts";
 export * from "./preflight/index.ts";
+export * from "./recover/held.ts";
 export * from "./recover/recover.ts";
 export * from "./recover/staging.ts";
 export * from "./recover/trash.ts";

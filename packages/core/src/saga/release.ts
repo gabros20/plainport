@@ -15,12 +15,12 @@
 // before that scan, so the rename follows the scan at once. A fingerprint of another kind than this build's (D53) is
 // never compared: the folder is kept.
 //
-// The folder is moved only onto a store whose semantics profile admits release (DESIGN.md "Remote stores: consistency
-// and publication": commit and durability = durable, or acked-unsynced with Q21's post-grace proof). A committed offload
-// on any other store keeps its folder and its journal at the commit, and ends with store.semantics-unknown naming the
-// property: recover releases it once the profile admits it (an owner's assertion in config of what the measurement
-// leaves unknown, D111). This open journal is interim: Task 24's held trash and post-grace proof replace it before
-// the M2 tag (review phase 5, judgement a).
+// The trash is held (Q16, M2 Task 24; recover/held.ts) when the store's conflict grace is above 0 (a remote store's
+// default) or its semantics profile does not admit release without Q21's post-grace proof (DESIGN.md "Remote stores:
+// consistency and publication": durability acked-unsynced, or unknown): the journal parks at offload.release.held with
+// keepUntil, the grace's deadline from the commit, and no delete starts. Only the checked read (checkHeld) moves it on
+// to release.delete. A profile that cannot release at all (durability unknown) holds it too, and the run says why
+// (`refused`, store.semantics-unknown); the checked delete keeps refusing until the profile admits release.
 //
 // Each stage checks whether it is done before doing it (the folder at its place or already in the trash, the stub
 // placed or ours already, the registry, the detached delete), and a journal step already reached is not written
@@ -28,14 +28,15 @@
 // seam (saga.after), so the crash matrix reaches the states a lost journal write leaves.
 
 import { basename, dirname, join } from "node:path";
-import { fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
+import { type Finding, fail, failWith, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { type CatalogRead, headUncertain } from "../catalog/head.ts";
+import { DEFAULT_CONFLICT_GRACE, type ResolvedConfig } from "../config/schema.ts";
 import { readDevice } from "../device.ts";
 import { makeInHolder } from "../holder.ts";
 import { systemErrorCode } from "../io.ts";
 import { journalFile, type OffloadJournal } from "../journal/index.ts";
 import type { Env, PlainportPaths } from "../paths.ts";
-import { describeProperty, eligibility, type StoreSemantics } from "../ports/blob-store.ts";
+import { canRelease, describeProperty, type StoreSemantics } from "../ports/blob-store.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { updateRegistry } from "../registry.ts";
 import { FINGERPRINT_VERSION } from "../scan/walk.ts";
@@ -53,6 +54,18 @@ export const durationMs = (duration: string): number => {
   const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[match[2] ?? "s"] ?? 1_000;
   return Number(match[1]) * unit;
 };
+
+/**
+ * offload.conflictGrace for a store, in milliseconds (Q16): the configured one, or the store kind's default (15 minutes
+ * on a remote store, none on a local one).
+ */
+export const conflictGraceOf = (config: ResolvedConfig, store: string): number =>
+  durationMs(
+    config.offload.conflictGrace ??
+      (config.stores[store]?.kind === "local" || config.stores[store] === undefined
+        ? DEFAULT_CONFLICT_GRACE.local
+        : DEFAULT_CONFLICT_GRACE.remote),
+  );
 
 /** Where the project's root holds its trash: the root's folder, or the folder's parent for a one-off location. */
 export const rootFolderOf = (path: string, dir: string): string =>
@@ -83,10 +96,12 @@ export interface ReleaseContext {
    */
   reread?(): Promise<Result<CatalogRead>>;
   /**
-   * The store's semantics profile, and its name in config: the folder is moved only when the profile admits release.
-   * Absent, release is not checked (callers that release from a store already checked).
+   * The store's semantics profile, and its name in config: a profile that does not admit release without Q21's proof
+   * holds the trash. Absent, the profile does not hold it (callers that release past the rename).
    */
   store?: { name: string; semantics: StoreSemantics };
+  /** offload.conflictGrace for the journal's store, in milliseconds (conflictGraceOf): above 0, the trash is held. */
+  grace?: number;
   clock(): Date;
   log(level: "warn", message: string): void;
 }
@@ -132,6 +147,7 @@ const RELEASE_ORDER = [
   "offload.release.trash",
   "offload.release.moved",
   "offload.release.stub",
+  "offload.release.held",
   "offload.release.delete",
 ] as const;
 type ReleaseStep = (typeof RELEASE_ORDER)[number];
@@ -183,11 +199,63 @@ const exists = async (rc: ReleaseContext, path: string): Promise<boolean> => {
 export interface Released {
   trash: string;
   stub?: string;
-  /** keepLocalFor: the trash is kept until then. */
+  /** keepLocalFor: the trash is kept until then; held, the conflict grace's deadline. */
   keepUntil?: string;
   /** The detached delete has started. */
   freed: boolean;
+  /** The trash is held at offload.release.held (Q16): only the checked read deletes it. */
+  held?: true;
+  /** Held because the store's profile cannot release a folder (durability unknown): why, until it admits release. */
+  refused?: Finding;
 }
+
+/**
+ * The deadline of the conflict grace: `grace` after the commit (the journal's offload.committed, else now). The checked
+ * read is taken no earlier (Q16, Q21).
+ */
+export const graceDeadline = (journal: OffloadJournal, grace: number, now: Date): string => {
+  const committed = journal.history.findLast((h) => h.step === "offload.committed")?.at;
+  const from = committed === undefined ? now.getTime() : Math.min(Date.parse(committed), now.getTime());
+  return new Date(from + grace).toISOString();
+};
+
+/**
+ * keepLocalFor's deadline for a trash leaving the hold: `keepLocalFor` after the folder was moved, or none once that
+ * has passed (the trash is deleted now).
+ */
+export const keepLocalUntil = (journal: OffloadJournal, now: Date): string | undefined => {
+  const keepMs = durationMs(journal.release?.keepLocalFor ?? "0");
+  if (keepMs === 0) return undefined;
+  const moved = journal.history.findLast((h) => h.step === "offload.release.moved")?.at;
+  const until = (moved === undefined ? now.getTime() : Date.parse(moved)) + keepMs;
+  return until > now.getTime() ? new Date(until).toISOString() : undefined;
+};
+
+/** store.semantics-unknown for a held trash whose store cannot release a folder: what it lacks, and the way out. */
+export const releaseRefused = (
+  name: string,
+  semantics: StoreSemantics,
+  project: string,
+  trash: string,
+): Finding | undefined => {
+  const verdict = canRelease(semantics, { postGraceProof: true });
+  if (verdict.eligible) return undefined;
+  const lacks = verdict.missing.map((p) => describeProperty(semantics, p)).join("; ");
+  // Only what the measurement leaves unknown is the owner's to assert (D111); a measured value stands.
+  const assertable = verdict.missing.filter((p) => {
+    const held = semantics[p];
+    return held === "unknown" || held.value === "unknown";
+  });
+  const assertion =
+    assertable.length === 0
+      ? ""
+      : `If the store does keep what it acknowledged, assert it in config.toml (${assertable.map((p) => (p === "durability" ? `stores.${name}.semantics.durability = "durable"` : `stores.${name}.semantics.${p}`)).join(", ")}); plainport gc then checks the catalog and deletes it. `;
+  return finding("store.semantics-unknown", {
+    message: `the trash ${trash} of ${project} is kept: the store ${name} cannot release a folder after an offload (its ${lacks})`,
+    fix: `nothing is lost: the snapshot is on the store, and plainport onload ${shellWord(project)} renames the folder back. ${assertion}Otherwise the trash stays held`,
+    paths: [trash],
+  });
+};
 
 /**
  * F2: a fork naming the committed snapshot, or a resolution that rejected it, was seen before the rename. The folder
@@ -250,30 +318,6 @@ export const releaseOffload = async (
   const moved = join(trash, basename(folder));
   const reached = (step: ReleaseStep): boolean =>
     RELEASE_ORDER.indexOf(journal.step as ReleaseStep) >= RELEASE_ORDER.indexOf(step);
-  // Nothing has moved yet: a store whose profile does not admit release keeps the folder (see above).
-  if (rc.store !== undefined && !reached("offload.release.trash")) {
-    const { name, semantics } = rc.store;
-    const verdict = eligibility("release", semantics);
-    if (!verdict.eligible) {
-      const lacks = verdict.missing.map((p) => describeProperty(semantics, p)).join("; ");
-      // Only what the measurement leaves unknown is the owner's to assert (D111); a measured value stands.
-      const assertable = verdict.missing.filter((p) => {
-        const held = semantics[p];
-        return held === "unknown" || held.value === "unknown";
-      });
-      const assertion =
-        assertable.length === 0
-          ? ""
-          : `If the store does keep what it acknowledged, assert it in config.toml (${assertable.map((p) => (p === "durability" ? `stores.${name}.semantics.durability = "durable"` : `stores.${name}.semantics.${p}`)).join(", ")}), then run plainport recover to finish the release. `;
-      return fail(
-        finding("store.semantics-unknown", {
-          message: `the offload of ${project.address} is committed as snapshot ${op}, and its folder was kept: the store ${name} cannot release a folder after an offload (its ${lacks})`,
-          fix: `nothing is lost: the snapshot is on the store and the folder is as it was. ${assertion}Otherwise keep the folder: the held release for such a store is not in this build, so this offload's journal stays open and plainport recover reports it as pending`,
-          paths: [folder],
-        }),
-      );
-    }
-  }
   const lockLost = async (): Promise<boolean> => rc.stillHeld !== undefined && !(await rc.stillHeld());
   const locked = () =>
     fail(
@@ -469,7 +513,33 @@ export const releaseOffload = async (
   const stubbed = await advance("offload.release.stub", stubPath === undefined ? {} : { stub: stubPath });
   if (!stubbed.ok) return stubbed;
 
-  // Stage 4, the delete: the deadline the journal holds, or one set now; a detached delete started twice is harmless.
+  // Stage 4, the hold (Q16): with a conflict grace, or a profile that cannot release without Q21's proof, the trash
+  // waits at offload.release.held for the checked read (recover/held.ts), and no delete starts here.
+  // A journal already at release.delete has left the hold (or never needed it): the delete goes on below.
+  const grace = rc.grace ?? 0;
+  const atHeld = journal.step === "offload.release.held";
+  const proofNeeded = rc.store !== undefined && !canRelease(rc.store.semantics).eligible;
+  if (atHeld || (!reached("offload.release.delete") && (grace > 0 || proofNeeded))) {
+    const keepUntil = atHeld ? journal.keepUntil : graceDeadline(journal, grace, rc.clock());
+    if (!atHeld) {
+      const held = await saga.step("offload.release.held", keepUntil === undefined ? {} : { keepUntil });
+      if (!held.ok) return held;
+    }
+    const refused =
+      rc.store === undefined
+        ? undefined
+        : releaseRefused(rc.store.name, rc.store.semantics, project.address, trash);
+    return ok({
+      trash,
+      ...(stubPath === undefined ? {} : { stub: stubPath }),
+      ...(keepUntil === undefined ? {} : { keepUntil }),
+      freed: false,
+      held: true,
+      ...(refused === undefined ? {} : { refused }),
+    });
+  }
+
+  // Stage 5, the delete: the deadline the journal holds, or one set now; a detached delete started twice is harmless.
   const keepMs = durationMs(policy.keepLocalFor);
   const keepUntil =
     journal.keepUntil ?? (keepMs > 0 ? new Date(rc.clock().getTime() + keepMs).toISOString() : undefined);

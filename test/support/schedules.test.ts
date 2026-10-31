@@ -82,10 +82,7 @@ describe("schedules: the gate", () => {
       expect(Object.keys(s.outcomes).sort()).toEqual([...s.devices].sort());
       expect(s.run === undefined && s.runInProcess === undefined).toBe(s.owner !== undefined);
     }
-    expect(todoSchedules().map((s) => [s.id, s.owner])).toEqual([
-      ["S7", 25],
-      ["S8", 24],
-    ]);
+    expect(todoSchedules().map((s) => [s.id, s.owner])).toEqual([["S7", 25]]);
   });
 
   // At the M2 gate every schedule runs: a todo left is a feature the gate cannot judge yet.

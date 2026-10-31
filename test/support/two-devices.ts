@@ -14,6 +14,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -205,11 +206,31 @@ export class Device {
     expectCode(ran, 0, `${this.name}: init`);
   }
 
-  /** Waits until no trash of a finished offload is left in this device's root (the detached delete ran). */
+  /**
+   * Waits until no trash of a finished offload is left in this device's root (the detached delete ran); a trash held
+   * for the conflict grace (offload.release.held, Q16) stays, and is not waited for.
+   */
   async settled(): Promise<void> {
     const trash = join(this.root, ".plainport-trash");
+    const held = (op: string): boolean => {
+      try {
+        return (
+          JSON.parse(readFileSync(join(this.paths.journalDir, `${op}.json`), "utf8")).step ===
+          "offload.release.held"
+        );
+      } catch {
+        return false;
+      }
+    };
+    const busy = (): boolean => {
+      try {
+        return readdirSync(trash).some((name) => !name.includes(".") && !held(name));
+      } catch {
+        return false;
+      }
+    };
     const deadline = Date.now() + 30_000;
-    while (existsSync(trash) && Date.now() < deadline) await Bun.sleep(25);
+    while (busy() && Date.now() < deadline) await Bun.sleep(25);
   }
 
   /** Invariants 1–3's subject for the project at `path` on this device. */

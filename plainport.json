@@ -870,6 +870,14 @@
                         ],
                         "additionalProperties": {},
                         "title": "Finding"
+                      },
+                      "held": {
+                        "description": "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+                        "type": "string",
+                        "enum": [
+                          "grace",
+                          "conflict-retained"
+                        ]
                       }
                     },
                     "required": [
@@ -1442,6 +1450,14 @@
                   ],
                   "additionalProperties": {},
                   "title": "Finding"
+                },
+                "held": {
+                  "description": "Held for Q16's checked read (offload.release.held): grace until keepUntil, then gc reads the catalog before deleting it; conflict-retained while a fork names its snapshot, until a resolution settles it (onload renames it back when its snapshot is kept)",
+                  "type": "string",
+                  "enum": [
+                    "grace",
+                    "conflict-retained"
+                  ]
                 }
               },
               "required": [
@@ -1756,6 +1772,58 @@
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "held": {
+                "description": "The local copy is held in the trash for Q16's conflict grace (offload.conflictGrace, 15 minutes on a remote store): keepUntil is the grace's deadline, after which gc (or a write command's housekeeping) reads the catalog and deletes it only when no fork names this snapshot; onload renames it back meanwhile",
+                "type": "boolean",
+                "const": true
+              },
+              "releaseRefused": {
+                "description": "Held because the store cannot release a folder (store.semantics-unknown: its durability): why, and the way out; the trash stays until its profile admits release",
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$",
+                    "title": "FindingCode",
+                    "description": "Stable dotted code, e.g. git.unpushed"
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "info",
+                      "warn",
+                      "block"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "fix": {
+                    "description": "The exact next step, e.g. a command to run",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "allowable": {
+                    "type": "boolean",
+                    "description": "May --allow <code> override it?"
+                  }
+                },
+                "required": [
+                  "code",
+                  "severity",
+                  "message",
+                  "allowable"
+                ],
+                "additionalProperties": {},
+                "title": "Finding"
               },
               "deleteStarted": {
                 "description": "With localCopy deleted: the detached delete has started, nothing more. It checks the folder first (D87); a refusal (delete.guard-refused) keeps it, and status, ls, gc and the start of the next command name the reason and the way out",
@@ -6712,6 +6780,13 @@
       "summary": "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init"
     },
     {
+      "code": "store.lost-write",
+      "severity": "block",
+      "allowable": false,
+      "exitCode": 6,
+      "summary": "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and onload renames it back (Q21, D24)"
+    },
+    {
       "code": "store.history-elsewhere",
       "severity": "block",
       "allowable": false,
@@ -6794,6 +6869,13 @@
       "allowable": false,
       "exitCode": 6,
       "summary": "A .plainport stub file does not match the stub schema"
+    },
+    {
+      "code": "trash.conflict-retained",
+      "severity": "warn",
+      "allowable": false,
+      "exitCode": 8,
+      "summary": "A released folder's trash is kept because a fork names its snapshot (Q16): once resolve settles it, onload renames it back when its snapshot is kept, and gc deletes it after the grace otherwise"
     },
     {
       "code": "usage.dry-run-unsupported",

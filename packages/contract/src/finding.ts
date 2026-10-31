@@ -669,6 +669,13 @@ export const FINDINGS = Object.freeze({
     summary:
       "The store is not configured, or this device has not set it up (no id recorded); fix is plainport init",
   },
+  "store.lost-write": {
+    severity: "block",
+    allowable: false,
+    exitCode: 6,
+    summary:
+      "Q21's proof, taken before a held trash is deleted, found the offload's event or its restic snapshot missing from the store that acknowledged them: the trash is kept, and onload renames it back (Q21, D24)",
+  },
   "store.history-elsewhere": {
     severity: "block",
     allowable: false,
@@ -751,6 +758,13 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 6,
     summary: "A .plainport stub file does not match the stub schema",
+  },
+  "trash.conflict-retained": {
+    severity: "warn",
+    allowable: false,
+    exitCode: 8,
+    summary:
+      "A released folder's trash is kept because a fork names its snapshot (Q16): once resolve settles it, onload renames it back when its snapshot is kept, and gc deletes it after the grace otherwise",
   },
   "usage.dry-run-unsupported": {
     severity: "block",

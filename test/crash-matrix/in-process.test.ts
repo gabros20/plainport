@@ -343,6 +343,12 @@ const OFFLOAD_SCENARIOS: Record<ScenarioOf<typeof OFFLOAD_BRANCH_KINDS>, Scenari
     };
     await crashOffload(row);
   },
+  held: async (row) => {
+    // A grace short enough that recover's checked read is taken after it, so the held trash settles (Q16).
+    config('[offload]\nconflictGrace = "1s"');
+    await crashOffload(row);
+    await Bun.sleep(1_100);
+  },
 };
 
 const ONLOAD_SCENARIOS: Record<ScenarioOf<typeof ONLOAD_BRANCH_KINDS>, Scenario> = {

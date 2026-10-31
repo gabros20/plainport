@@ -55,6 +55,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { HostPorts } from "../ports/host.ts";
 import { SECRET_DEADLINE_MS } from "../ports/secrets.ts";
 import type { OpenedStore, StoreCredentials, StoreOpener } from "../ports/store.ts";
+import { conflictRetained, isHeld } from "../recover/held.ts";
 import { claimedReason, treeBytes } from "../recover/trash.ts";
 import { type RegistryEntry, readRegistry } from "../registry.ts";
 import { listRoots, type RootView } from "../roots/roots.ts";
@@ -167,6 +168,11 @@ export type ProjectStatus = {
     due: boolean;
     /** The delete guard's last refusal of it (D87, r3 #4): why it stays, and the way out. */
     refused?: Finding;
+    /**
+     * Held for Q16's checked read (offload.release.held): `grace` until keepUntil; `conflict-retained` while a fork
+     * names its snapshot (the last checked read saw one, or this view's catalog shows one).
+     */
+    held?: "grace" | "conflict-retained";
   }[];
   /** Journals this version cannot read that name it, or name no project (journal-unreadable). */
   unreadableJournals?: string[];
@@ -662,12 +668,22 @@ export const loadProjects = async (deps: ViewDeps): Promise<Result<ProjectSet>> 
     for (const j of open) {
       if (j.kind !== "offload" || holdsProjectBack(j)) continue;
       const at = j.trash ?? offloadTrashOf(j as OffloadJournal);
+      const forked = catalog?.conflicts.some((f) => f.includes(j.op)) === true;
+      const held = isHeld(j)
+        ? conflictRetained(j) || forked
+          ? ("conflict-retained" as const)
+          : ("grace" as const)
+        : undefined;
       trash.push({
         op: j.op,
         path: at,
         ...(j.keepUntil === undefined ? {} : { keepUntil: j.keepUntil }),
         deleting: (await claimedReason(io, at, device.id)) !== undefined,
-        due: j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime(),
+        // A conflict-retained trash is not due: only a resolution and a checked read move it on.
+        due:
+          held !== "conflict-retained" &&
+          (j.keepUntil === undefined || Date.parse(j.keepUntil) <= now.getTime()),
+        ...(held === undefined ? {} : { held }),
       });
       const refused = await readRefusal(io, at);
       if (refused !== undefined) (trash.at(-1) as ProjectStatus["trash"][number]).refused = refused;

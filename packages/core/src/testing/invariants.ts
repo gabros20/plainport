@@ -12,7 +12,8 @@
 //    or rejecting resolution naming its snapshot that its release's catalog read could have seen. The test names
 //    the events that read could not have seen (`unseen`: appended after it, Q16's residual, or not yet listed by a
 //    store whose listings lag); any other is a violation. With a conflict grace (`store.conflictGraceMs`, Task 24) the
-//    copy is also not deleted before the grace has passed since its commit.
+//    copy is also not deleted before the grace has passed since its commit, and a resolution that rejected its
+//    snapshot at least the grace before `now` no longer counts: the held trash goes after a fresh grace (Task 24).
 // 2. Per device: a stub exists if and only if this device's own last completed operation shelved the project: the
 //    newest of this device's offloaded and onloaded events for the project is an offloaded one, and the folder is gone.
 //    The stub names that event's snapshot. The global catalog status is not read: another device's later fork makes it
@@ -286,7 +287,24 @@ export const invariantViolations = async (subject: InvariantSubject): Promise<st
     ) {
       // The grace clause (Q16): deleted, so its release read showed no fork naming the snapshot.
       const unseen = new Set(subject.unseen ?? []);
-      const seen = namingEvents(read.value.events, project, event.snapshot).filter((e) => !unseen.has(e));
+      // A held trash goes after a resolution that rejected its snapshot, once a fresh grace has passed since it (Task 24's
+      // held(conflict) → held(grace) → deleted): with a conflict grace, such a resolution names it no longer.
+      const graceMs = subject.store.conflictGraceMs ?? 0;
+      const settledBy = new Set(
+        graceMs === 0
+          ? []
+          : read.value.events
+              .filter(
+                (e) =>
+                  e.type === "resolved" &&
+                  e.over.includes(event.snapshot) &&
+                  Date.parse(e.at) + graceMs <= subject.now.getTime(),
+              )
+              .map((e) => e.id),
+      );
+      const seen = namingEvents(read.value.events, project, event.snapshot).filter(
+        (e) => !unseen.has(e) && !settledBy.has(e),
+      );
       if (seen.length > 0)
         problems.push(
           `invariant 1: ${dir} was deleted, but ${seen.join(", ")} forked or rejected its snapshot ${event.snapshot} before its release read the catalog (Q16)`,
