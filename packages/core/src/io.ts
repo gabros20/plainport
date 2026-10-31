@@ -11,6 +11,8 @@ export interface LocalFs {
   writeTextDurable(path: string, text: string): Promise<void>;
   /** The file's bytes; rejects with ENOENT when it does not exist. */
   readBytes(path: string): Promise<Uint8Array>;
+  /** Whether two files hold the same bytes, read side by side in bounded chunks, never whole; rejects like open(2). */
+  sameBytes(a: string, b: string): Promise<boolean>;
   /**
    * Writes the bytes and fsyncs them before resolving. It creates or truncates the file; with `exclusive` it opens
    * with O_CREAT|O_EXCL instead and rejects with EEXIST if anything is there (create-if-absent where hard links are
