@@ -361,17 +361,23 @@ export const headCheck = (
       }),
     };
   }
-  const moved = (detail: string) => ({
+  const moved = (detail: string, fix: string) => ({
     kind: "moved" as const,
     finding: finding("catalog.head-moved", {
       message: `${address} ${detail}; nothing local was deleted`,
-      fix: `keep this folder; plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side (settling which copy wins arrives in M2)`,
+      fix,
     }),
   });
-  if (project.conflicts.length > 0 || project.head === null) return moved("is conflicted in the catalog");
+  const side = `plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side`;
+  if (project.conflicts.length > 0 || project.head === null)
+    return moved(
+      "is conflicted in the catalog",
+      `keep this folder; plainport status ${shellWord(address)} lists the live tips, and plainport resolve ${shellWord(address)} --keep ${base !== undefined && project.heads.includes(base) ? base : "<snapshot>"} --yes keeps one; ${side}`,
+    );
   if (project.head !== base)
     return moved(
       `was offloaded from another copy since this one was made: the head is ${project.head}, this copy came from ${base ?? "no snapshot"}`,
+      `keep this folder; ${side}`,
     );
   return { kind: "ok" };
 };

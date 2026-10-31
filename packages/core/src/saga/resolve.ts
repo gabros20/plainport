@@ -177,7 +177,7 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
   }
   const projectId = id;
   const gate = { io, paths, clock, log: deps.log };
-  return withProjectLock(gate, { id: projectId, address: ref.address }, async (lock) => {
+  return withProjectLock<ResolveOutcome>(gate, { id: projectId, address: ref.address }, async (lock) => {
     // The fresh read, under the lock: what it saw is what the event is made from.
     const read = await reader();
     if (!read.ok) return read;
@@ -323,7 +323,11 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
     try {
       there = await kindAt(io, folder);
     } catch (error) {
-      return unreadable(folder, error, "whether this device holds a working copy is unknown; nothing was resolved");
+      return unreadable(
+        folder,
+        error,
+        "whether this device holds a working copy is unknown; nothing was resolved",
+      );
     }
     if (there !== "dir" || base === keep) return undefined;
     const tip = base !== undefined && heads.includes(base) ? base : undefined;
@@ -333,7 +337,7 @@ export const runResolve = async (deps: ResolveDeps, req: ResolveRequest): Promis
         fix:
           tip !== undefined
             ? `${command(tip)} keeps this copy's snapshot; to keep ${keep}, run that resolve on a device that holds no working copy of ${ref.address}, or on the one whose copy is on ${keep}`
-          : `this copy is on no live tip: keep it as it is and run ${command(keep)} on a device that holds no working copy of ${ref.address}; this copy's next offload is then live work on top of the kept line's history, which conflicts again`,
+            : `this copy is on no live tip: keep it as it is and run ${command(keep)} on a device that holds no working copy of ${ref.address}; this copy's next offload is then live work on top of the kept line's history, which conflicts again`,
         paths: [folder],
       }),
     );

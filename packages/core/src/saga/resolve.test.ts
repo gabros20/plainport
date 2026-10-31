@@ -111,7 +111,10 @@ const fork = async (w: World) => {
   const aSnap = (byA.ok ? undefined : (byA.data as OffloadConflict))?.snapshot as string;
   const project = await foldOf(w);
   const bSnap = project?.heads.find((s) => s !== aSnap) as string;
-  expect([project?.status, [...(project?.heads ?? [])].sort()]).toEqual(["conflicted", [aSnap, bSnap].sort()]);
+  expect([project?.status, [...(project?.heads ?? [])].sort()]).toEqual([
+    "conflicted",
+    [aSnap, bSnap].sort(),
+  ]);
   expect((await w.a.entry())?.base).toBe(aSnap);
   expect(existsSync(w.a.dir())).toBe(true);
   expect(existsSync(w.b.dir())).toBe(false);
@@ -198,7 +201,9 @@ describe("resolve: the gate and the rules", () => {
       6,
       "store.needs-upgrade",
     ]);
-    expect(refused.ok ? "" : refused.finding.fix).toContain("plainport store upgrade ssd --others-stopped --yes");
+    expect(refused.ok ? "" : refused.finding.fix).toContain(
+      "plainport store upgrade ssd --others-stopped --yes",
+    );
     expect(await resolvedEvents(w)).toEqual([]);
   });
 
@@ -210,7 +215,9 @@ describe("resolve: the gate and the rules", () => {
       6,
       "resolve.copy-here",
     ]);
-    expect(refused.ok ? "" : refused.finding.fix).toStartWith(`plainport resolve work:web --keep ${aSnap} --yes`);
+    expect(refused.ok ? "" : refused.finding.fix).toStartWith(
+      `plainport resolve work:web --keep ${aSnap} --yes`,
+    );
     expect(refused.ok ? [] : refused.finding.paths).toEqual([w.a.dir()]);
     expect(await resolvedEvents(w)).toEqual([]);
     // dev-b holds no copy (its stub): it may keep either side.
@@ -252,7 +259,10 @@ describe("resolve: the gate and the rules", () => {
     expect(byB.ok ? "released" : byB.finding.code).toBe("store.unreachable");
     w.store.setDown(false);
     const pending = await w.b.resolve(aSnap);
-    expect(pending.ok ? "resolved" : [pending.exitCode, pending.finding.code]).toEqual([6, "journal.pending"]);
+    expect(pending.ok ? "resolved" : [pending.exitCode, pending.finding.code]).toEqual([
+      6,
+      "journal.pending",
+    ]);
     expect(pending.ok ? "" : pending.finding.fix).toContain("plainport recover");
   });
 
@@ -296,7 +306,9 @@ describe("resolve: the gate and the rules", () => {
           env: { HOME: d.box.home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
           device: d.device,
           loader: new ConfigLoader(testHost(), d.box.paths),
-          opener: { open: async () => ({ ok: true, value: { blob: w.store as BlobStore, engine: d.engine } }) },
+          opener: {
+            open: async () => ({ ok: true, value: { blob: w.store as BlobStore, engine: d.engine } }),
+          },
           openMirror: async () => ({ ok: true, value: d.mirror }),
         }),
       ).projects.find((p) => p.address === "work:web");

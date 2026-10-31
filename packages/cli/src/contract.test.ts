@@ -249,6 +249,20 @@ const FAILURES: Record<string, FailureCase[]> = {
       data: false,
     },
   ],
+  resolve: [
+    {
+      argv: ["resolve", "work:clients/acme/api", "--keep", "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB"],
+      exit: 3,
+      code: "risk.needs-yes",
+      data: false,
+    },
+    {
+      argv: ["resolve", "work:nosuch", "--keep", "01K7Q2VJ4ZQ8N6X3M5R2T9W1YB", "--yes"],
+      exit: 4,
+      code: "project.not-found",
+      data: false,
+    },
+  ],
   recover: [
     {
       argv: ["recover"],
@@ -510,7 +524,7 @@ describe("what plainport tells people to run exists (I1)", () => {
         .map((m) => m[1] as string)
         .filter((word) => !registered.has(word)),
     );
-    expect(planned.has("doctor") && planned.has("resolve")).toBe(true);
+    expect(planned.has("doctor") && planned.has("move")).toBe(true);
     const named: string[] = [];
     for (const { file, text } of sources()) {
       for (const m of text.matchAll(/\bplainport ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?/g)) {
@@ -937,6 +951,7 @@ describe("completions", () => {
           "hydrate",
           "dehydrate",
           "restore",
+          "resolve",
           "recover",
           "gc",
           "root",

@@ -3,7 +3,7 @@
 
 # Candidates for the next word of a command name, given the name's words typed so far.
 _plainport_names() {
-  if [[ $# -eq 0 ]]; then echo 'help init ls status offload onload hydrate dehydrate restore recover gc root store version'; return; fi
+  if [[ $# -eq 0 ]]; then echo 'help init ls status offload onload hydrate dehydrate restore resolve recover gc root store version'; return; fi
   if [[ $# -eq 1 ]]; then
     case "$1" in
     root) echo 'add bind list scan' ;;
@@ -25,7 +25,7 @@ _plainport() {
     case "${typed[0]} ${typed[1]}" in 'root add'|'root bind'|'root list'|'root scan'|'store add'|'store list'|'store test'|'store upgrade'|'store remove') cmd="${typed[0]} ${typed[1]}"; used=2 ;; esac
   fi
   if [[ -z $cmd && ${#typed[@]} -ge 1 ]]; then
-    case "${typed[0]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|recover|gc|version) cmd="${typed[0]}"; used=1 ;; esac
+    case "${typed[0]}" in help|init|ls|status|offload|onload|hydrate|dehydrate|restore|resolve|recover|gc|version) cmd="${typed[0]}"; used=1 ;; esac
   fi
   local opts=''
   if [[ -n $cmd ]]; then case "$cmd" in
@@ -38,6 +38,7 @@ _plainport() {
     'hydrate') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'dehydrate') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'restore') opts='--to --snapshot --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'resolve') opts='--keep --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'recover') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'gc') opts='--now --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'root add') opts='--label --create --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
