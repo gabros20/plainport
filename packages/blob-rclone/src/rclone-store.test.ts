@@ -580,6 +580,15 @@ describe("reads", () => {
     ]);
   });
 
+  test("getMany names the store's root as a folder too, so its copy never asks whether the root is a file (Task 27)", async () => {
+    const { store, specs } = scripted(() => outcome(0, { stdout: "" }));
+    value(await store.getMany(["meta/v1/a.json", "meta/v1/b.json"]));
+    const copy = specs.find((spec) => commandOf(spec) === "copy") as RunSpec;
+    expect(copy.args).toContain("--files-from-raw");
+    // Source, then the local folder it copies into.
+    expect((copy.args ?? []).at(-2)).toBe(`${RCLONE_REMOTE}:plainport/`);
+  });
+
   test("an empty result is an empty value only when stat finds the file", async () => {
     const { store } = scripted((spec) =>
       commandOf(spec) === "cat"

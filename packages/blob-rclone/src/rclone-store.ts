@@ -354,7 +354,8 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
   /**
    * The rclone path of a folder, with its trailing slash: rclone's S3 backend asks with a HEAD whether a root without one
    * is a file, and when that HEAD cannot reach the store it takes the root for a file, so a filtered read of it fails
-   * with "can't limit to single files when using filters" and the connection error is never said (Task 27).
+   * with "can't limit to single files when using filters" and the connection error is never said (Task 27). cat and
+   * copy both read through a filter, so both name their root this way.
    */
   const folderPath = (relative: string): string => {
     const path = remotePath(relative);
@@ -730,7 +731,7 @@ export const rcloneBlobStore = (options: RcloneBlobStoreOptions): RcloneBlobStor
     } catch (error) {
       return failed(`a temporary folder could not be made at ${folder}`, `${systemErrorCode(error)}`);
     }
-    const ran = await run(call, "copy", ["--files-from-raw", "-", "--no-traverse", remotePath(""), folder], {
+    const ran = await run(call, "copy", ["--files-from-raw", "-", "--no-traverse", folderPath(""), folder], {
       stdin: `${batch.join("\n")}\n`,
     });
     let result: Result<Map<string, Uint8Array>> | undefined;
