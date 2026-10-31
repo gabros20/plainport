@@ -99,7 +99,7 @@ export const conflictFinding = (journal: OffloadJournal): Finding => {
   const address = journal.project.address;
   return finding("trash.conflict-retained", {
     message: `the trash ${trash} of ${address}'s offload ${journal.op} is kept: a fork names its snapshot ${journal.op} (Q16)`,
-    fix: `plainport status ${shellWord(address)} shows both sides; once plainport resolve ${shellWord(address)} --keep <snapshot> settles it, plainport onload ${shellWord(address)} renames this folder back when its snapshot is kept, and plainport gc deletes it after the grace otherwise`,
+    fix: `plainport status ${shellWord(address)} shows both sides; once a resolution settles the fork, plainport onload ${shellWord(address)} renames this folder back when its snapshot is kept, and plainport gc deletes it after the grace otherwise`,
     paths: [trash],
   });
 };
