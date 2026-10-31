@@ -10,9 +10,13 @@
 // Sibling leaves only, so every ref coexists with the others (a branch named `index` is heads/index); no ref is named
 // refs/plainport/theirs/<snapshot> itself. Objects are built first and the refs published last:
 //
-// 1. Objects. Everything their HEAD and branches reach (rev-list --objects) and every blob their index names, staged-
-//    only blobs no commit reaches included, go as one pack from `pack-objects` in their copy into `unpack-objects`
-//    here. Nothing is fetched by ref, so no ref appears yet.
+// 0. Refusals (compare.unsupported-repo), before anything is written: two object formats (sha1 and sha256), their copy
+//    shallow, either a partial clone, their copy with replace refs or a grafts file, or files their index tracks with
+//    Git LFS (its pointers and its smudged files would not match, and its contents do not belong in this object store).
+// 1. Objects. Everything their HEAD and branches reach and every blob their index names (staged-only blobs no commit
+//    reaches included), less what this repository's refs already reach, is packed by `pack-objects --revs` here with
+//    their object store as an alternate, into a file in plainport's staging, and that file is fed to `unpack-objects`:
+//    the pack is never held in memory. Nothing is fetched by ref, so no ref appears yet.
 // 2. Index. A temporary index (GIT_INDEX_FILE, never this repository's own) is seeded from their index's entries, so
 //    staged state and tracked-but-now-ignored files stay tracked. Without unmerged entries its tree is committed for
 //    `index`; with them `index` is left out, the unmerged paths are listed, and each one is taken from the working
@@ -21,21 +25,27 @@
 //    `hash-object --no-filters -w` and entered with `update-index --index-info`, so no clean or smudge filter or
 //    attribute driver ever runs; the tree is committed for `worktree` with their HEAD as its parent. Gitlinks stay as
 //    they are and are listed; ignored files are never committed, and those that differ from this copy are listed.
+//    Skip-worktree entries (a sparse checkout) keep their index entry, since git does not look for them in the working
+//    tree. Intent-to-add entries (git add -N) are no staged content: they are left out of `index` and listed, and
+//    their files go into `worktree`. Files that look like secrets (`.env*`, key files) are never hashed into this
+//    repository unless their index already holds those exact bytes: untracked ones are left out and listed, and
+//    tracked ones whose bytes differ keep their index entry and are listed (`withheld`).
 // 4. Publish. One `update-ref --stdin` transaction (start, each create, update or delete with its expected old
 //    value, prepare, commit) writes the whole set and removes the leaves of an earlier run this one did not produce.
 //    A crash before it leaves no new ref (only unreachable objects, which git gc prunes). git's files backend can
 //    still leave a set partly written when the process dies inside the commit: the worktree commit's message names
 //    every leaf of its set with its value, so a set that lacks one, holds another or has no worktree is incomplete,
-//    and the next run replaces it whole.
+//    and the next run replaces it whole. Before it, `rev-list --objects --quiet <leaves> --not --all` checks that every
+//    object the new leaves reach is here, so a ref never points at a history this repository cannot read.
 //
 // Every git call runs through the one runner with hooks off (core.hooksPath=/dev/null, also for update-ref's
 // reference-transaction hook), signing off, core.attributesFile=/dev/null, no system config or attributes, git-lfs's
-// filters off, no fsmonitor, no split index, no auto gc, and GIT_CEILING_DIRECTORIES at the folder's parent (D33,
-// D34). Their copy is read with GIT_DIR and GIT_WORK_TREE set, so a core.worktree in their config points nowhere else.
+// filters off, no fsmonitor, no split index, no auto gc, no lazy fetch of a promisor's objects (GIT_NO_LAZY_FETCH), no
+// replace refs (GIT_NO_REPLACE_OBJECTS), and GIT_CEILING_DIRECTORIES at the folder's parent (D33, D34). Their copy is read with GIT_DIR and GIT_WORK_TREE set, so a core.worktree in their config points nowhere else.
 // The commits carry plainport as author and committer at the snapshot's time, so a rerun of the same snapshot makes
 // the same commits, and a rerun with nothing changed publishes nothing.
 
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { type Failure, fail, finding, ok, type Result, shellWord } from "@plainport/contract";
 import { systemErrorCode } from "../io.ts";
 import type { Env } from "../paths.ts";
@@ -65,6 +75,10 @@ export interface TheirsInput {
   at: string;
   /** A file path for the temporary index, in plainport's staging; it must not exist yet. */
   index: string;
+  /** A folder for the pack, in plainport's staging; made when needed. */
+  spool: string;
+  /** The project's address, for the fix of a refusal. */
+  address: string;
 }
 
 export type TheirsSet = {
@@ -87,6 +101,13 @@ export type TheirsSet = {
   submodules: string[];
   /** Untracked repositories inside their copy, not committed, sorted. */
   nested: string[];
+  /** Intent-to-add entries (git add -N): not in `index`, their files in `worktree`, sorted. */
+  intentToAdd: string[];
+  /**
+   * Files that look like secrets (`.env*`, key files) in their working tree whose bytes their index does not hold:
+   * never committed, listed, sorted.
+   */
+  withheld: string[];
   /**
    * Ignored files that differ between the two copies (only in one, or other contents; a wholly ignored folder only
    * here as `dir/`): listed, never committed. The first 100, sorted.
@@ -144,13 +165,18 @@ const FLAGS = [
   "filter.lfs.required=false",
 ];
 const PASSED = ["PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR"];
-/** A pack of everything their refs reach is held in memory between the two gits. */
-const PACK_BYTES = 2 * 1024 * 1024 * 1024;
 const CAPTURE_BYTES = 256 * 1024 * 1024;
 const IGNORED_LISTED = 100;
 const NUL = 0;
 const NL = 10;
-const ZERO = "0".repeat(40);
+/** Git LFS pointer files are small: a version line, an oid and a size (the spec caps them at 1024 bytes). */
+const POINTER_MIN = 100;
+const POINTER_MAX = 1024;
+const POINTER = /^version https:\/\/(git-lfs|hawser)\.github\.com\/spec\/v1\n/;
+/** CE_INTENT_TO_ADD in the flags `ls-files --debug` prints. */
+const INTENT_TO_ADD = 0x20000000;
+/** Names that look like secrets: never hashed into this repository from their working tree. */
+const SECRET = /^(\.env.*|.*\.(pem|key|p12|pfx)|id_(rsa|dsa|ecdsa|ed25519)(\..*)?)$/;
 const IDENTITY = { name: "plainport", email: "plainport@plainport.invalid" };
 const decoder = new TextDecoder();
 const text = (bytes: Uint8Array): string => decoder.decode(bytes);
@@ -171,6 +197,8 @@ interface GitCall {
   /** Added to the environment: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, the identity. */
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
+  /** The child reads its stdin from this file instead (a pack). */
+  stdinFile?: string;
   /** An exit code that means "nothing" (rev-parse -q --verify's 1): an empty answer. */
   noneExit?: number;
   maxBytes?: number;
@@ -204,12 +232,15 @@ const git = async (ctx: CompareGitContext, call: GitCall): Promise<Result<Uint8A
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_ATTR_NOSYSTEM: "1",
       GIT_CEILING_DIRECTORIES: ceiling,
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_NO_REPLACE_OBJECTS: "1",
       ...call.env,
     },
     capture: { maxBytes: call.maxBytes ?? CAPTURE_BYTES },
     idleTimeoutMs: 600_000,
     timeoutMs: 3_600_000,
     ...(call.stdin === undefined ? {} : { stdin: call.stdin }),
+    ...(call.stdinFile === undefined ? {} : { stdinFile: call.stdinFile }),
     ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   if (!ran.ok) return ran;
@@ -245,8 +276,10 @@ const realOf = async (ctx: CompareGitContext, dir: string): Promise<Result<strin
   }
 };
 
-/** One index entry, as `ls-files -s` prints it. */
+/** One index entry, as `ls-files -s -t` prints it. */
 interface IndexEntry {
+  /** ls-files -t's tag: S for skip-worktree (a sparse checkout), H for cached, M for unmerged. */
+  tag: string;
   mode: string;
   oid: string;
   stage: number;
@@ -256,9 +289,49 @@ interface IndexEntry {
 const parseIndex = (bytes: Uint8Array): IndexEntry[] =>
   records(bytes, NUL).map((record) => {
     const tab = record.indexOf("\t");
-    const [mode, oid, stage] = record.slice(0, tab).split(" ");
-    return { mode: mode as string, oid: oid as string, stage: Number(stage), path: record.slice(tab + 1) };
+    const [tag, mode, oid, stage] = record.slice(0, tab).split(" ");
+    return {
+      tag: tag as string,
+      mode: mode as string,
+      oid: oid as string,
+      stage: Number(stage),
+      path: record.slice(tab + 1),
+    };
   });
+
+/** The paths `ls-files --debug -z` reports with the intent-to-add flag. */
+const intentToAddIn = (bytes: Uint8Array): string[] => {
+  // path NUL, then its debug lines, the last "  size: N\tflags: X\n", then the next path NUL.
+  const chunks = text(bytes).split("\0");
+  const out: string[] = [];
+  let path = chunks[0] ?? "";
+  for (const chunk of chunks.slice(1)) {
+    const match = /\tflags: ([0-9a-f]+)\n/.exec(chunk);
+    if (match === null) break;
+    if ((Number.parseInt(match[1] as string, 16) & INTENT_TO_ADD) !== 0) out.push(path);
+    path = chunk.slice(match.index + match[0].length);
+  }
+  return out;
+};
+
+/** `cat-file --batch` output: each object's bytes, by oid. */
+const batchContents = (bytes: Uint8Array): Map<string, Uint8Array> => {
+  const out = new Map<string, Uint8Array>();
+  let at = 0;
+  while (at < bytes.length) {
+    const end = bytes.indexOf(NL, at);
+    if (end === -1) break;
+    const [oid, type, size] = text(bytes.subarray(at, end)).split(" ");
+    if (type === "missing" || size === undefined) {
+      at = end + 1;
+      continue;
+    }
+    const length = Number(size);
+    out.set(oid as string, bytes.subarray(end + 1, end + 1 + length));
+    at = end + 1 + length + 1;
+  }
+  return out;
+};
 
 const lines = (bytes: Uint8Array): string[] => records(bytes, NL);
 
@@ -410,6 +483,58 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
   const here = (args: readonly string[], extra: Omit<GitCall, "cwd" | "args"> = {}) =>
     git(ctx, { cwd: R, args, ...extra });
 
+  const refuse = (reason: string, paths: readonly string[] = []): Failure =>
+    fail(
+      finding("compare.unsupported-repo", {
+        message: `${reason}, so no refs were written for snapshot ${input.snapshot}`,
+        fix: `read the other copy side by side: plainport restore ${shellWord(input.address)} --snapshot ${input.snapshot} --to <path>`,
+        paths: paths.length === 0 ? [input.repo] : paths.map((p) => join(input.repo, p)),
+      }),
+    );
+
+  // 0. What compare cannot carry as refs: refused before anything is written.
+  const formats: string[] = [];
+  for (const read of [there, here]) {
+    const format = await read(["rev-parse", "--show-object-format"]);
+    if (!format.ok) return format;
+    formats.push(text(format.value).trim() || "sha1");
+  }
+  const [theirFormat, ourFormat] = formats as [string, string];
+  if (theirFormat !== ourFormat)
+    return refuse(
+      `their copy's repository names objects with ${theirFormat} and this one with ${ourFormat}, and git cannot hold one in the other`,
+    );
+  const shallow = await there(["rev-parse", "--is-shallow-repository"]);
+  if (!shallow.ok) return shallow;
+  if (text(shallow.value).trim() === "true")
+    return refuse(
+      "their copy is a shallow clone: its oldest commits name parents it does not hold, which this repository's git gc, fsck and log --all would then fail on",
+    );
+  for (const [read, who] of [
+    [there, "their copy"],
+    [here, "this repository"],
+  ] as const) {
+    const partial = await read(["config", "--get", "extensions.partialClone"], { noneExit: 1 });
+    if (!partial.ok) return partial;
+    const remote = text(partial.value).trim();
+    if (remote !== "")
+      return refuse(
+        `${who} is a partial clone (extensions.partialClone = ${remote}): the objects it lacks would be fetched from that remote`,
+      );
+  }
+  const replaced = await there(["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"]);
+  if (!replaced.ok) return replaced;
+  if (text(replaced.value).trim() !== "")
+    return refuse("their copy has replace refs (refs/replace/), which change what its history shows");
+  try {
+    await host.fs.lstat(join(S, ".git", "info", "grafts"));
+    return refuse("their copy has a grafts file (.git/info/grafts), which changes what its history shows");
+  } catch (error) {
+    const code = systemErrorCode(error);
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+  }
+  const zero = "0".repeat(ourFormat === "sha256" ? 64 : 40);
+
   // Their HEAD and branches.
   const headRead = await there(["rev-parse", "-q", "--verify", "HEAD^{commit}"], { noneExit: 1 });
   if (!headRead.ok) return headRead;
@@ -429,57 +554,84 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
     if (type === "commit" && ref !== undefined) branches.set(ref.slice("refs/heads/".length), oid as string);
   }
 
-  // Their index, every stage.
-  const indexRead = await there(["ls-files", "-s", "-z"]);
+  // Their index, every stage, with ls-files -t's tags.
+  const indexRead = await there(["ls-files", "-s", "-t", "-z"]);
   if (!indexRead.ok) return indexRead;
   const entries = parseIndex(indexRead.value);
   const unmerged = [...new Set(entries.filter((e) => e.stage > 0).map((e) => e.path))].sort();
   const staged = entries.filter((e) => e.stage === 0);
   const gitlinks = staged.filter((e) => e.mode === "160000");
 
-  // 1. Objects: what the refs reach, and every blob the index names that their copy holds, as one pack.
-  const tips = [...new Set([...(head === undefined ? [] : [head]), ...branches.values()])];
-  const wanted: string[] = [];
-  const seen = new Set<string>();
-  if (tips.length > 0) {
-    const reached = await there(["rev-list", "--objects", ...tips]);
-    if (!reached.ok) return reached;
-    for (const line of lines(reached.value)) {
-      const oid = line.split(" ", 1)[0] as string;
-      if (seen.has(oid)) continue;
-      seen.add(oid);
-      wanted.push(line);
-    }
-  }
-  const blobs = [...new Set(entries.filter((e) => e.mode !== "160000").map((e) => e.oid))].filter(
-    (oid) => !seen.has(oid),
-  );
+  // The blobs their index names: which their copy holds, and which are Git LFS pointers.
+  const blobs = [...new Set(entries.filter((e) => e.mode !== "160000").map((e) => e.oid))];
+  const held = new Set<string>();
+  const small: string[] = [];
   if (blobs.length > 0) {
     // An entry whose blob their copy lacks (git add -N's empty blob) is not packed; the empty blob is made here.
-    const present = await there(["cat-file", "--batch-check=%(objectname) %(objecttype)"], {
+    const present = await there(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], {
       stdin: `${blobs.join("\n")}\n`,
     });
     if (!present.ok) return present;
     for (const line of lines(present.value)) {
-      const [oid, type] = line.split(" ");
-      if (type === "missing" || oid === undefined || seen.has(oid)) continue;
-      seen.add(oid);
-      wanted.push(oid);
+      const [oid, type, size] = line.split(" ");
+      if (type !== "blob" || oid === undefined) continue;
+      held.add(oid);
+      if (Number(size) >= POINTER_MIN && Number(size) < POINTER_MAX) small.push(oid);
     }
   }
-  if (wanted.length > 0) {
-    const pack = await there(["pack-objects", "--stdout", "-q"], {
-      stdin: `${wanted.join("\n")}\n`,
-      maxBytes: PACK_BYTES,
-    });
-    if (!pack.ok) return pack;
-    const unpacked = await here(["unpack-objects", "-q"], { stdin: pack.value });
-    if (!unpacked.ok) return unpacked;
+  if (small.length > 0) {
+    const read = await there(["cat-file", "--batch"], { stdin: `${small.join("\n")}\n` });
+    if (!read.ok) return read;
+    const pointers = new Set(
+      [...batchContents(read.value)].filter(([, bytes]) => POINTER.test(text(bytes))).map(([oid]) => oid),
+    );
+    const lfs = [...new Set(staged.filter((e) => pointers.has(e.oid)).map((e) => e.path))].sort();
+    if (lfs.length > 0)
+      return refuse(
+        `their copy tracks ${lfs.length} file${lfs.length === 1 ? "" : "s"} with Git LFS (${lfs.slice(0, 5).join(", ")}${lfs.length > 5 ? ", …" : ""}), whose contents compare does not write as refs`,
+        lfs.slice(0, 100),
+      );
   }
+
+  // Intent-to-add entries hold the empty blob; the flag says which of those are not staged content.
   const empty = await here(["hash-object", "-w", "--stdin"], { stdin: "" });
   if (!empty.ok) return empty;
+  const emptyBlob = text(empty.value).trim();
+  const emptyPaths = staged.filter((e) => e.oid === emptyBlob).map((e) => e.path);
+  let intentToAdd: string[] = [];
+  if (emptyPaths.length > 0) {
+    const flagged = await git(ctx, {
+      cwd: S,
+      args: ["ls-files", "--debug", "-z", "--", ...emptyPaths],
+      env: { GIT_DIR: join(S, ".git"), GIT_WORK_TREE: S, GIT_LITERAL_PATHSPECS: "1" },
+    });
+    if (!flagged.ok) return flagged;
+    intentToAdd = intentToAddIn(flagged.value).sort();
+  }
+  const intended = new Set(intentToAdd);
 
-  // 2. The temporary index, seeded from theirs: stage 0 only, so unmerged paths come from the working tree.
+  // 1. Objects: what their refs reach and every blob their index names that their copy holds, less what this
+  // repository's refs reach, packed here with their objects as an alternate into a file, then unpacked from it.
+  const tips = [...new Set([...(head === undefined ? [] : [head]), ...branches.values()])];
+  const wanted = [...tips, ...blobs.filter((oid) => held.has(oid))];
+  if (wanted.length > 0) {
+    const ours = await here(["for-each-ref", "--format=%(objectname)"]);
+    if (!ours.ok) return ours;
+    const reached = [...new Set(lines(ours.value))].map((oid) => `^${oid}`);
+    await host.fs.mkdirp(input.spool);
+    const packed = await here(["pack-objects", "--revs", "-q", join(input.spool, "pack")], {
+      env: { GIT_ALTERNATE_OBJECT_DIRECTORIES: join(S, ".git", "objects") },
+      stdin: `${[...wanted, ...reached].join("\n")}\n`,
+    });
+    if (!packed.ok) return packed;
+    const unpacked = await here(["unpack-objects", "-q"], {
+      stdinFile: join(input.spool, `pack-${text(packed.value).trim()}.pack`),
+    });
+    if (!unpacked.ok) return unpacked;
+  }
+
+  // 2. The temporary index, seeded from theirs: stage 0 only, so unmerged paths come from the working tree, and no
+  // intent-to-add entry, which stages nothing.
   const scratch = { GIT_INDEX_FILE: input.index };
   const identity = {
     GIT_AUTHOR_NAME: IDENTITY.name,
@@ -489,10 +641,11 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
     GIT_COMMITTER_EMAIL: IDENTITY.email,
     GIT_COMMITTER_DATE: gitDate(input.at),
   };
-  if (staged.length > 0) {
+  const seeds = staged.filter((e) => !intended.has(e.path));
+  if (seeds.length > 0) {
     const seeded = await here(["update-index", "-z", "--index-info"], {
       env: scratch,
-      stdin: staged.map((e) => `${e.mode} ${e.oid}\t${e.path}\0`).join(""),
+      stdin: seeds.map((e) => `${e.mode} ${e.oid}\t${e.path}\0`).join(""),
     });
     if (!seeded.ok) return seeded;
   }
@@ -514,19 +667,28 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
     index = made.value.commit;
   }
 
-  // 3. The working tree: every tracked path (unmerged ones included) and every untracked one not ignored.
+  // 3. The working tree: every tracked path (unmerged ones included, skip-worktree ones not) and every untracked one
+  // not ignored, but no file that looks like a secret whose bytes their index does not hold.
   const othersRead = await there(["ls-files", "-z", "--others", "--exclude-standard"]);
   if (!othersRead.ok) return othersRead;
   const nested: string[] = [];
   const others: string[] = [];
+  const withheld: string[] = [];
   for (const path of records(othersRead.value, NUL)) {
     if (path.endsWith("/")) nested.push(path.slice(0, -1));
+    else if (SECRET.test(basename(path))) withheld.push(path);
     else others.push(path);
   }
   const linked = new Set(gitlinks.map((e) => e.path));
-  const tracked = new Set([...staged.filter((e) => !linked.has(e.path)).map((e) => e.path), ...unmerged]);
+  const sparse = new Set(staged.filter((e) => e.tag === "S").map((e) => e.path));
+  const indexed = new Map(staged.map((e) => [e.path, e.oid]));
+  const tracked = new Set([
+    ...staged.filter((e) => !linked.has(e.path) && !sparse.has(e.path)).map((e) => e.path),
+    ...unmerged,
+  ]);
   const removals: string[] = [];
   const files: { path: string; mode: string }[] = [];
+  const secrets: { path: string; mode: string }[] = [];
   const links: { path: string; target: string }[] = [];
   for (const path of [...tracked, ...others]) {
     let kind: string | undefined;
@@ -539,11 +701,28 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
       const code = systemErrorCode(error);
       if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     }
-    if (kind === "file") files.push({ path, mode: mode & 0o100 ? "100755" : "100644" });
+    const file = { path, mode: mode & 0o100 ? "100755" : "100644" };
+    if (kind === "file") (SECRET.test(basename(path)) ? secrets : files).push(file);
     else if (kind === "symlink") links.push({ path, target: await host.fs.readlink(join(S, path)) });
     else if (tracked.has(path)) removals.push(path);
   }
-  const info: string[] = removals.map((path) => `0 ${ZERO}\t${path}\0`);
+  const info: string[] = removals.map((path) => `0 ${zero}\t${path}\0`);
+  // A tracked secret-looking file goes in only when its bytes are the ones their index holds (hashed without -w, so
+  // nothing is written); otherwise it keeps its index entry, or stays out when it has none, and is listed.
+  const plain = secrets.filter((f) => !f.path.includes("\n"));
+  if (plain.length > 0) {
+    const hashed = await here(["hash-object", "--no-filters", "--stdin-paths"], {
+      stdin: `${plain.map((f) => join(S, f.path)).join("\n")}\n`,
+    });
+    if (!hashed.ok) return hashed;
+    const oids = lines(hashed.value);
+    plain.forEach((f, i) => {
+      if (!intended.has(f.path) && indexed.get(f.path) === oids[i])
+        info.push(`${f.mode} ${oids[i]}\t${f.path}\0`);
+      else withheld.push(f.path);
+    });
+  }
+  for (const f of secrets.filter((f) => f.path.includes("\n"))) withheld.push(f.path);
   // Paths are hashed by name, one per line; a name holding a newline is read here and hashed from stdin.
   const byName = files.filter((f) => !f.path.includes("\n"));
   if (byName.length > 0) {
@@ -607,6 +786,17 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
     if (old === undefined) commands.push(`create ${theirsRef(input.snapshot, leaf)} ${oid}`);
     else if (old !== oid) commands.push(`update ${theirsRef(input.snapshot, leaf)} ${oid} ${old}`);
   }
+  // Every object the new leaves reach is here (fetch's own connectivity check), before any ref points at them.
+  const connected = await here([
+    "rev-list",
+    "--objects",
+    "--quiet",
+    ...new Set(leaves.values()),
+    "--not",
+    "--all",
+  ]);
+  if (!connected.ok)
+    return refuse(`this repository would lack objects their history reaches (${connected.finding.message})`);
   host.faultAt("compare.publish");
   const published = await transact(ctx, R, commands);
   if (!published.ok) return published;
@@ -626,6 +816,8 @@ export const buildTheirs = async (ctx: CompareGitContext, input: TheirsInput): P
     unmerged,
     submodules: gitlinks.map((e) => e.path).sort(),
     nested: nested.sort(),
+    intentToAdd,
+    withheld: withheld.sort(),
     ignored: ignored.value.slice(0, IGNORED_LISTED),
     ignoredTotal: ignored.value.length,
     changed: commands.length > 0,

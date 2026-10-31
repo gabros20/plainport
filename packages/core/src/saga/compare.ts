@@ -418,6 +418,8 @@ export const runCompare = async (deps: CompareDeps, req: CompareRequest): Promis
         snapshot,
         at,
         index: join(staging, "index"),
+        spool: join(staging, "pack"),
+        address: ref.address,
       });
       if (!built.ok) return built;
       phase("commit", "end");
@@ -473,11 +475,8 @@ export const differingPaths = async (
           out.push(path);
       } else if (a === "file") {
         const [x, y] = [await io.fs.lstat(join(ours, path)), await io.fs.lstat(join(theirs, path))];
-        if (x.size !== y.size) out.push(path);
-        else {
-          const [p, q] = [await io.fs.readBytes(join(ours, path)), await io.fs.readBytes(join(theirs, path))];
-          if (!Buffer.from(p).equals(Buffer.from(q))) out.push(path);
-        }
+        if (x.size !== y.size || !(await io.fs.sameBytes(join(ours, path), join(theirs, path))))
+          out.push(path);
       }
     }
   };

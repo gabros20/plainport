@@ -4,7 +4,7 @@
 
 import { openEventMirror } from "@plainport/blob-fs";
 import { ok, shellWord } from "@plainport/contract";
-import { ConfigLoader, runCompare } from "@plainport/core";
+import { ConfigLoader, runCompare, shortDeviceId } from "@plainport/core";
 import { z } from "zod";
 import { defineCommand } from "../registry.ts";
 import { knownProjects, resolveKnown } from "./resolve.ts";
@@ -27,6 +27,13 @@ const SetSchema = z.looseObject({
   nested: z
     .array(z.string())
     .meta({ description: "Untracked repositories inside their copy, not committed" }),
+  intentToAdd: z.array(z.string()).meta({
+    description: "Intent-to-add entries (git add -N): not in index, their files in worktree",
+  }),
+  withheld: z.array(z.string()).meta({
+    description:
+      "Files that look like secrets (.env*, key files) whose bytes their index does not hold: never committed, listed",
+  }),
   ignored: z.array(z.string()).meta({
     description: "Ignored files that differ between the copies (the first 100): listed, never committed",
   }),
@@ -72,7 +79,9 @@ const human = (data: Output): string => {
   if (data.nothing !== undefined) lines.push(`nothing to compare: ${data.nothing}`);
   for (const s of data.sets) {
     const at = `refs/plainport/theirs/${s.snapshot}`;
-    lines.push(`${s.snapshot} from device ${s.device}, ${s.at}${s.changed ? "" : " (unchanged)"}`);
+    lines.push(
+      `${s.snapshot} from device ${shortDeviceId(s.device)}, ${s.at}${s.changed ? "" : " (unchanged)"}`,
+    );
     lines.push(`  ${at}/worktree  their working tree`);
     lines.push(
       s.index === undefined
@@ -83,6 +92,10 @@ const human = (data: Output): string => {
     if (s.branches.length > 0) lines.push(`  ${at}/heads/*   ${s.branches.join(", ")}`);
     if (s.submodules.length > 0) lines.push(`  submodules kept as gitlinks: ${s.submodules.join(", ")}`);
     if (s.nested.length > 0) lines.push(`  repositories inside, not committed: ${s.nested.join(", ")}`);
+    if (s.intentToAdd.length > 0)
+      lines.push(`  intent-to-add, in worktree only: ${s.intentToAdd.join(", ")}`);
+    if (s.withheld.length > 0)
+      lines.push(`  files that look like secrets, not committed: ${s.withheld.join(", ")}`);
     if (s.ignoredTotal > 0)
       lines.push(
         `  ignored files that differ, not committed: ${s.ignored.join(", ")}${s.ignoredTotal > s.ignored.length ? `, … (${s.ignoredTotal} in all)` : ""}`,
@@ -112,7 +125,7 @@ export const compare = defineCommand({
       "  refs/plainport/theirs/<snapshot>/index      a commit of their staged index (absent when it is unmerged)",
       "  refs/plainport/theirs/<snapshot>/worktree   a commit of their working tree, parent = their HEAD",
     ].join("\n"),
-    "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) are never committed, and those that differ are listed. Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead.",
+    "Compare them with git diff HEAD refs/plainport/theirs/<snapshot>/worktree, and take hunks with git checkout -p. Your index, branches, working tree and config are not touched, and no filter or hook of either copy runs; ignored files (.env) and files that look like secrets (.env*, key files) are never committed, and are listed. A shallow or partial clone, replace refs or a grafts file, two object formats, or files tracked with Git LFS are refused (compare.unsupported-repo). Each set is written in one ref transaction, so a rerun replaces it whole; --clean removes every ref under refs/plainport/theirs/ and nothing else. A project that is not a git repository gets the paths that differ instead.",
   ],
   risk: "safe_write",
   dryRun: false,
