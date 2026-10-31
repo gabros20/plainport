@@ -31,7 +31,9 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeRoot } from "../../packages/blob-rclone/src/testing/t2.ts";
 import { storeOpener } from "../../packages/cli/src/stores.ts";
+import { readStoreDescriptor } from "../../packages/core/src/catalog/identity.ts";
 import { appendEvent, storeEventLog } from "../../packages/core/src/catalog/index.ts";
+import { storedKey } from "../../packages/core/src/catalog/stored.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
 import type { RecoveryReport } from "../../packages/core/src/recover/recover.ts";
 import { openStore } from "../../packages/core/src/store.ts";
@@ -530,6 +532,11 @@ export class RowRun {
   /** Another copy's first offload of the project, appended to the row's store: with this one's, a fork. */
   async otherCopyOffloads(at = new Date().toISOString()): Promise<string> {
     const w = await this.world();
+    // Keyed as another device keys its one stored entry (Q11): by the store's id on a format-2 store, by its name on
+    // a format-1 one.
+    const descriptor = await readStoreDescriptor(w.store.blob);
+    if (!descriptor.ok || descriptor.value === null) throw new Error("the row's store has no identity");
+    const key = storedKey({ name: this.kind.store, id: descriptor.value.id }, descriptor.value.format);
     const s = ulid();
     const appended = await appendEvent(storeEventLog(w.store.blob, w.store.catalog), {
       v: 1,
@@ -542,7 +549,7 @@ export class RowRun {
       root: this.registry().roots.work,
       path: "web",
       snapshot: s,
-      stored: { [this.kind.store]: "c".repeat(64) },
+      stored: { [key]: "c".repeat(64) },
       stats: { files: 1, bytes: 1, strippedBytes: 0, ecosystems: [] },
     });
     if (!appended.ok) throw new Error(appended.finding.message);

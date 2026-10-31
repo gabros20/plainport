@@ -118,6 +118,9 @@ export const SAGA_POINTS: Readonly<Record<string, SagaPoint>> = {
   },
 };
 
+/** The one bootstrap point after which the attempt makes no store call: a fault there cannot stop it publishing. */
+const LAST_STORE_WRITE_PAST = "bootstrap.recorded";
+
 /** Bootstrap's fault rows: every plain bootstrap point (a rival's needs no store fault to reach its point). */
 const BOOTSTRAP_POINTS = BOOTSTRAP_ROWS.filter((row) => row.scenario === "plain");
 
@@ -247,8 +250,16 @@ const sagaFaultWork = async (r: RowRun, name: RemoteKind, point: string, fault: 
   const placed = placesOf(r);
   const down = await r.recover();
   problems.push(...downProblems(down), ...samePlaces(placed, placesOf(r)));
-  if (at.leaves !== undefined && !down.operations.some((o) => o.op === op && o.outcome === "pending"))
-    problems.push(`with the store down, recover did not report ${op} pending`);
+  // Pending because the store did not answer: recover asked it (the checked read, the re-read, the event's state),
+  // not for another reason (a held trash's grace still running would be pending too).
+  const heldBack = down.operations.find((o) => o.op === op);
+  if (
+    at.leaves !== undefined &&
+    (heldBack?.outcome !== "pending" || heldBack.finding?.code !== "store.unreachable")
+  )
+    problems.push(
+      `with the store down, recover reported ${op} ${heldBack?.outcome} (${heldBack?.finding?.code}), not pending with store.unreachable`,
+    );
 
   // The store back: recover settles it.
   await clear(name);
@@ -295,8 +306,12 @@ const bootstrapFaultWork = async (
   const blob = await rawBlob(r);
   const ran = await r.run(r.addArgs(), pauseAt(row.point), () => inject(name, fault));
   const outcome = envelopeOf(ran)?.data?.outcome;
-  // A fault after the attempt's last store write may still let it publish; otherwise it is store.unreachable.
-  if (!(ran.code === 0 && outcome === "published")) problems.push(...unreachableProblems(ran, "store add"));
+  // Only past the attempt's last store write (bootstrap.recorded) does the run publish despite the fault; anywhere
+  // else it meets the store and must say store.unreachable.
+  if (row.point === LAST_STORE_WRITE_PAST) {
+    if (ran.code !== 0 || outcome !== "published")
+      problems.push(`past its last store write, store add ended ${ran.code} (${outcome}), not published`);
+  } else problems.push(...unreachableProblems(ran, "store add"));
   // The step the attempt's journal reached before the store failed it: the run goes on past the paused point to its
   // next store call, journaling what comes first (elect.start before its candidacy is written).
   const [left] = [...bootstrapSteps(r).values()];

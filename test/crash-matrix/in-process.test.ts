@@ -794,4 +794,28 @@ describe("crash matrix, in-process: the checks catch damage", () => {
       const { problems } = await runRow(plainRowAt(point), { damage: done });
       expect(problems.some((p) => p.includes(expected))).toBe(true);
     });
+
+  // F2's rows: a recover that released the fork would pass every check but these, so they are shown to bite.
+  const forked = ALL_ROWS.find((r) => r.scenario === "forkedAfterCommit") as Row;
+  const forkCases: [string, (w: World) => void, string][] = [
+    [
+      "the registry's base taken back",
+      (w) => {
+        const registry = JSON.parse(readFileSync(w.paths.registryFile, "utf8"));
+        for (const entry of Object.values(registry.projects) as { base?: string }[]) delete entry.base;
+        writeFileSync(w.paths.registryFile, JSON.stringify(registry));
+      },
+      "F2: the registry's base is undefined",
+    ],
+    [
+      "a stub beside the kept folder",
+      (w) => writeFileSync(`${w.dir}.plainport`, "{}\n"),
+      "F2: a stub was written",
+    ],
+  ];
+  for (const [harm, done, expected] of forkCases)
+    test(`${forked.point} · forkedAfterCommit: ${harm} is reported`, async () => {
+      const { problems } = await runRow(forked, { damage: done });
+      expect(problems.some((p) => p.includes(expected))).toBe(true);
+    });
 });
