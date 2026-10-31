@@ -5367,7 +5367,7 @@
           "name": "quiet-window",
           "type": "string",
           "multiple": false,
-          "summary": "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m"
+          "summary": "How long the catalog must show no other device's activity, before and during; default 15m, never 0"
         },
         {
           "name": "clear-marker",
@@ -5390,7 +5390,7 @@
             "type": "boolean"
           },
           "quiet-window": {
-            "description": "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m",
+            "description": "How long the catalog must show no other device's activity, before and during; default 15m, never 0",
             "type": "string",
             "pattern": "^(0|[1-9][0-9]*[smhdw])$"
           },

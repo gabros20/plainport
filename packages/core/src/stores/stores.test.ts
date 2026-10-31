@@ -827,16 +827,16 @@ describe("store upgrade", () => {
     expect(failed(await upgrade(d)).finding.code).toBe("store.not-quiescent");
   });
 
-  test("a quiet window under a minute is refused: Q2's window is never a single re-read (review phase 5 r2 M2)", async () => {
+  test("a quiet window of 0 is refused: Q2's window is never a single re-read (review phase 5 r2 M2)", async () => {
     const world = storeWorld();
     const { d, blob } = await m1Store(world);
-    for (const windowMs of [0, 59_000]) {
+    for (const windowMs of [0, 999]) {
       const refused = failed(await upgrade(d, { windowMs }));
       expect(refused.finding.code).toBe("usage.invalid");
       expect(refused.finding.fix).toContain("--quiet-window");
     }
     expect(blob.data.has(UPGRADE_INTENT_KEY)).toBe(false);
-    expect(value(await upgrade(d, { windowMs: 60_000 }))).toMatchObject({ upgraded: true });
+    expect(value(await upgrade(d, { windowMs: 1_000 }))).toMatchObject({ upgraded: true });
   });
 
   test("this device's own activity during the window aborts it too: its events, an open journal (review phase 5 r2 M1)", async () => {

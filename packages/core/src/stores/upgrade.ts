@@ -49,8 +49,11 @@ import { notConfigured, reachStore } from "./reach.ts";
 export const UPGRADE_INTENT_KEY = "meta/v1/upgrade-intent.json";
 /** How long the catalog must show no other device's event before and during an upgrade (Q2). */
 export const QUIET_WINDOW_MS = 15 * 60_000;
-/** The shortest quiet window an upgrade takes: a window of 0 would be a single re-read (review phase 5 r2 M2). */
-export const QUIET_WINDOW_MIN_MS = 60_000;
+/**
+ * The shortest quiet window an upgrade takes (D112, review phase 5 r2 M2): a window of 0 would be a single re-read, so
+ * it is refused. A short window an owner names on purpose is theirs (the T1 compat row runs one of a second).
+ */
+export const QUIET_WINDOW_MIN_MS = 1_000;
 
 export const UpgradeIntentSchema = z
   .strictObject({
@@ -316,8 +319,8 @@ export const upgradeStore = async (
   if ((options.windowMs ?? QUIET_WINDOW_MS) < QUIET_WINDOW_MIN_MS)
     return fail(
       finding("usage.invalid", {
-        message: `a quiet window of ${Math.round((options.windowMs ?? 0) / 1000)} seconds is too short: Q2's window must let another device's activity show, so it is at least ${QUIET_WINDOW_MIN_MS / 60_000} minute; nothing was changed`,
-        fix: `re-run with --quiet-window 15m (the default), or at least --quiet-window 1m`,
+        message: `a quiet window of ${options.windowMs ?? 0} ms is no window: Q2's window must let another device's activity show between the two reads, so it is at least 1 second; nothing was changed`,
+        fix: "re-run without --quiet-window (15m, the default), or with a window such as --quiet-window 15m",
       }),
     );
   const store = config.stores[name];

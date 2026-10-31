@@ -442,7 +442,7 @@ export const storeUpgrade = defineCommand({
     }),
     "quiet-window": DurationSchema.optional().meta({
       description:
-        "How long the catalog must show no other device's activity, before and during; default 15m, at least 1m",
+        "How long the catalog must show no other device's activity, before and during; default 15m, never 0",
     }),
     "clear-marker": z.boolean().optional().meta({
       description:
