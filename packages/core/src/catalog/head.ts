@@ -366,7 +366,7 @@ export const headCheck = (
     kind: "moved" as const,
     finding: finding("catalog.head-moved", {
       message: `${address} ${detail}; nothing local was deleted`,
-      fix: `keep this folder; plainport restore ${shellWord(address)} --snapshot <id> --to <path> reads the other copy side by side (settling which copy wins arrives in M2)`,
+      fix: `keep this folder; plainport offload ${shellWord(address)} --fork --yes uploads it as a fork and leaves the project conflicted, so plainport compare ${shellWord(address)} shows the two copies side by side (D114)`,
     }),
   });
   if (project.conflicts.length > 0 || project.head === null) return moved("is conflicted in the catalog");

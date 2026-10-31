@@ -131,7 +131,9 @@ disk image it makes with `hdiutil` and deletes afterwards.
 
 The subprocess variant drives the compiled binary through a test hook, not configuration: `PLAINPORT_TEST_FAULT_AT`
 (with `PLAINPORT_TEST_FAULT_OCCURRENCE`) makes it SIGKILL itself at a step, and `PLAINPORT_TEST_PAUSE_AT` with
-`PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed. Only a binary compiled with
+`PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed; `PLAINPORT_TEST_TRACE_FILE` makes it
+append each step and seam it reaches, with the time, so a race schedule derives what a release's catalog read could
+have seen. Only a binary compiled with
 `--define globalThis.PLAINPORT_TEST_HOOKS=true` reads them; the matrix builds its own. `scripts/build.ts` (so
 `bun run build` and every release) defines it false, the hook is compiled out, and `scripts/build.test.ts` checks the
 release binary holds none of these names (D67). In a matrix build, `PLAINPORT_TRIPWIRE_REAL_HOME` must name the real

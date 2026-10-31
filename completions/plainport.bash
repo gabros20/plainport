@@ -33,7 +33,7 @@ _plainport() {
     'init') opts='--root --store-path --store-secret --device --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'ls') opts='--root --local --shelved --sort --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'status') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
-    'offload') opts='--plan --keep-deps --allow --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
+    'offload') opts='--plan --keep-deps --allow --fork --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'onload') opts='--to --snapshot --no-hydrate --json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'hydrate') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;
     'dehydrate') opts='--json --yes --no-input --dry-run --store --config --quiet --verbose --help' ;;

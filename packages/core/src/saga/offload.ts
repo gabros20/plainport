@@ -110,7 +110,7 @@ import type { EcosystemPlugin } from "../ports/ecosystem.ts";
 import type { RunContext } from "../ports/engine.ts";
 import type { HostPorts } from "../ports/host.ts";
 import type { StoreOpener } from "../ports/store.ts";
-import { ensureRegistered, updateRegistry } from "../registry.ts";
+import { ensureRegistered, readRegistry, updateRegistry } from "../registry.ts";
 import type { ProjectRef } from "../roots/address.ts";
 import { FINGERPRINT_VERSION, includedFingerprint, scanTree } from "../scan/walk.ts";
 import { type ConfiguredStore, openStore } from "../store.ts";
@@ -170,6 +170,7 @@ export const OFFLOAD_AFTER_EFFECT = {
   "offload.release.reread": "offload.release.trash",
   "offload.snapshot.discarded.appended": "offload.snapshot.discarded",
   "offload.diverged.appended": "offload.diverged",
+  "offload.diverged.based": "offload.diverged",
   "offload.commit.appended": "offload.commit.start",
   "offload.release.renamed": "offload.release.trash",
   "offload.release.stub-placed": "offload.release.moved",
@@ -202,7 +203,7 @@ export const OFFLOAD_BRANCHES = {
   },
   diverged: {
     when: "another copy moves the project's head during the upload",
-    reaches: ["offload.diverged", "offload.diverged.appended"],
+    reaches: ["offload.diverged", "offload.diverged.appended", "offload.diverged.based"],
   },
   retry: {
     when: "a file changes during the upload, once",
@@ -301,6 +302,11 @@ export interface OffloadRequest {
   keepDeps?: boolean;
   /** --store: overrides the root's store and the default one. */
   store?: string;
+  /**
+   * --fork (D114): a copy whose base is behind the head is uploaded and kept as a fork at the commit (F1), leaving the
+   * project conflicted, instead of being refused before the upload with catalog.head-moved.
+   */
+  fork?: boolean;
 }
 
 export interface OffloadOutcome {
@@ -448,6 +454,86 @@ const sameVolume = async (io: LocalIo, folder: string, rootFolder: string): Prom
   );
 };
 
+/**
+ * lease.held when another device holds the project's lease and its onload is not behind this copy (leaseAhead): its
+ * copy and this one now differ, and the first of the two offloaded becomes the head. Where that onload sits is read
+ * from its event in the mirror the catalog read just brought up to the store. A warning only (Q17, D114).
+ */
+export const leaseHeld = async (
+  project: CatalogProject | undefined,
+  mirror: BlobStore,
+  copy: { device: string; base: string | undefined; address: string },
+): Promise<Finding | undefined> => {
+  const held = project?.lease ?? null;
+  if (held === null || held.device === copy.device) return undefined;
+  const read = await eventAt(mirrorEventLog(mirror), held.event);
+  const opened = read.ok && read.value !== null && "event" in read.value ? read.value.event : undefined;
+  const over = opened?.type === "onloaded" ? (opened.over ?? opened.base) : undefined;
+  const lease = leaseAhead(project, copy.device, copy.base, over);
+  if (lease === undefined) return undefined;
+  return finding("lease.held", {
+    message: `${copy.address} is onloaded on device ${lease.device} since ${lease.at}, level with or further along than this copy; if this copy is offloaded first, that one becomes a fork when it is offloaded`,
+    fix: "offload it on that device first if its copy should be the head",
+  });
+};
+
+/**
+ * The dry run's lease check (D114): lease.held as the real run would warn it, from the store's catalog, so a plan never
+ * previews clean and then warns at its run. The plan needs no store, so this is best effort: a project this device
+ * never registered has no lease to name, and a store or mirror that cannot be read leaves it unsaid, with a log line.
+ */
+export const previewLease = async (
+  deps: Pick<
+    OffloadDeps,
+    "host" | "paths" | "device" | "env" | "loader" | "opener" | "openMirror" | "log" | "now"
+  >,
+  req: Pick<OffloadRequest, "project" | "store">,
+): Promise<Finding | undefined> => {
+  const { host, paths } = deps;
+  const ref = req.project;
+  const clock = (): Date => deps.now?.() ?? host.clock.now();
+  const unsaid = (why: string) => {
+    deps.log("info", `whether another device holds the lease of ${ref.address} was not checked: ${why}`);
+    return undefined;
+  };
+  const registry = await readRegistry(host, paths);
+  if (!registry.ok) return unsaid(registry.finding.message);
+  const id =
+    ref.id ??
+    Object.entries(registry.value.projects).find(([, e]) => e.root === ref.root && e.path === ref.path)?.[0];
+  if (id === undefined) return undefined;
+  const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
+  if (!loaded.ok) return unsaid(loaded.finding.message);
+  const name = req.store ?? loaded.value.config.roots[ref.root]?.store ?? loaded.value.config.defaultStore;
+  if (name === undefined) return undefined;
+  const opened = await openStore(host, {
+    paths,
+    env: deps.env,
+    name,
+    config: loaded.value.config,
+    opener: deps.opener,
+    now: clock,
+  });
+  if (!opened.ok) return unsaid(opened.finding.message);
+  const mirror = await deps.openMirror(opened.value.id);
+  if (!mirror.ok) return unsaid(mirror.finding.message);
+  const read = await catalogReader({
+    store: opened.value.blob,
+    mirror: mirror.value,
+    storeId: opened.value.id,
+    storeName: opened.value.name,
+    now: clock,
+    ...(opened.value.catalog === undefined ? {} : { policy: opened.value.catalog }),
+    report: (f) => deps.log("info", `${f.code}: ${f.message}`),
+  })();
+  if (!read.ok) return unsaid(read.finding.message);
+  return leaseHeld(read.value.projects[id], mirror.value, {
+    device: deps.device.id,
+    base: registry.value.projects[id]?.base,
+    address: ref.address,
+  });
+};
+
 /** Runs the offload; see the file comment. A failure before the commit changed nothing local. */
 export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promise<Result<OffloadOutcome>> => {
   const { host, paths, device, signal } = deps;
@@ -469,7 +555,6 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
 
   const loaded = await deps.loader.load({ env: deps.env, root: ref.root });
   if (!loaded.ok) return loaded;
-  const strictLeases = loaded.value.config.onload.leases === "strict";
   // The local stores release never moves a folder holding (D83), read again right before the rename (F2).
   // A fresh, clean read: never the loader's last good copy (astra r2 finding 5).
   const stores = (): Promise<Result<ProtectedStore[]>> => freshStores(io, paths, deps.env);
@@ -524,31 +609,6 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
     related: nested,
   });
 
-  /**
-   * lease.held when another device holds the project's lease and its onload is not behind this copy (leaseAhead): its
-   * copy and this one now differ, and the first of the two offloaded becomes the head. Where that onload sits is read
-   * from its event in the mirror the catalog read just brought up to the store.
-   */
-  async function leaseHeld(
-    project: CatalogProject | undefined,
-    mirror: BlobStore,
-    strict: boolean,
-  ): Promise<Finding | undefined> {
-    const held = project?.lease ?? null;
-    if (held === null || held.device === device.id) return undefined;
-    const read = await eventAt(mirrorEventLog(mirror), held.event);
-    const opened = read.ok && read.value !== null && "event" in read.value ? read.value.event : undefined;
-    const over = opened?.type === "onloaded" ? (opened.over ?? opened.base) : undefined;
-    const lease = leaseAhead(project, device.id, base, over);
-    if (lease === undefined) return undefined;
-    return finding("lease.held", {
-      message: `${ref.address} is onloaded on device ${lease.device} since ${lease.at}, level with or further along than this copy; ${strict ? "nothing was uploaded" : "if this copy is offloaded first, that one becomes a fork when it is offloaded"}`,
-      fix: strict
-        ? `offload it on that device first, or set onload.leases = "warn" to offload it here anyway`
-        : "offload it on that device first if its copy should be the head",
-    });
-  }
-
   async function offloadLocked(lock: ProjectLock): Promise<Result<OffloadOutcome>> {
     // A registered project inside the folder that is here would be offloaded inside this one (D53).
     const inside = await nestedHere(io, nested);
@@ -594,20 +654,22 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
             }),
           };
     const early = headCheck(before.value, projectId, base, ref.address, home);
-    // A copy on a line a resolution rejected is live work (D103): it is uploaded and kept as a fork at the commit (F1),
-    // so it conflicts again and never vanishes, instead of being refused here with nothing uploaded.
-    const rejectedLine =
+    // A copy on a line a resolution rejected is live work (D103), and --fork asks for a copy behind the head to be
+    // kept (D114): either is uploaded and kept as a fork at the commit (F1), so it conflicts and never vanishes,
+    // instead of being refused here with nothing uploaded.
+    const forkAtCommit =
       early.kind === "moved" &&
-      base !== undefined &&
-      before.value.projects[projectId]?.rejected.includes(base);
-    if (early.kind !== "ok" && !rejectedLine) return fail(early.finding);
-    // Another device's working copy, onloaded further along the chain (Q17: advisory): a warning, and under
-    // leases = "strict" a refusal with exit 8, before anything is uploaded.
-    const lease = await leaseHeld(before.value.projects[projectId], mirror.value, strictLeases);
-    if (lease !== undefined) {
-      if (strictLeases) return fail(lease, 8);
-      report(lease);
-    }
+      (req.fork === true ||
+        (base !== undefined && before.value.projects[projectId]?.rejected.includes(base) === true));
+    if (early.kind !== "ok" && !forkAtCommit) return fail(early.finding);
+    // Another device's working copy, onloaded further along the chain (Q17: advisory): a warning, never a refusal;
+    // onload.leases = "strict" governs onload only (D114).
+    const lease = await leaseHeld(before.value.projects[projectId], mirror.value, {
+      device: device.id,
+      base,
+      address: ref.address,
+    });
+    if (lease !== undefined) report(lease);
     const ctx: RunContext = {
       op,
       ...(signal === undefined ? {} : { signal }),
@@ -926,8 +988,11 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
         if (!kept.ok) return saga.keep(kept);
         saga.after("offload.diverged.appended");
         // F1: the folder stays, on its own snapshot: the next offload builds on it, and resolve --keep names it.
+        // The registry's base must name the fork, or resolve --keep refuses this copy: a write that fails keeps the
+        // journal at diverged, and recover writes it again.
         const based = await recordBase({ host, paths }, saga.journal);
-        if (!based.ok) deps.log("warn", `registry.json was not updated: ${based.finding.message}`);
+        if (!based.ok) return saga.keep(based);
+        saga.after("offload.diverged.based");
         const conflict: OffloadConflict = {
           op,
           exitCode: 8,
@@ -937,7 +1002,12 @@ export const runOffload = async (deps: OffloadDeps, req: OffloadRequest): Promis
           store: store.name,
           stored: verified.snapshot,
         };
-        return failWith(head.finding, conflict, 8);
+        // The fork is made: the fix is what to do with it, not --fork again.
+        const made = {
+          ...head.finding,
+          fix: `this folder stays on its own snapshot ${op}, kept as a fork; plainport compare ${shellWord(ref.address)} writes the other copy into its repository beside it`,
+        };
+        return failWith(made, conflict, 8);
       }
       host.faultAt("offload.head-checked");
       // lock.ts's known limit: a run that lost its lock to a breaker never commits.

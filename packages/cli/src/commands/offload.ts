@@ -17,6 +17,7 @@ import {
   planBlocker,
   planCommand,
   planOffload,
+  previewLease,
   readRegistry,
   resolveProject,
   runOffload,
@@ -147,7 +148,7 @@ const OffloadOutputSchema = z.union([
       exitCode: z.literal(8),
       kind: z.enum(["fork", "diverged-after-commit"]).meta({
         description:
-          "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
+          "fork: the head moved during the upload, or --fork kept a copy that was behind it; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)",
       }),
       detail: z.enum(["after-commit"]).optional().meta({
         description:
@@ -191,6 +192,10 @@ export const offload = defineCommand({
     allow: z.array(z.string()).optional().meta({
       description: "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)",
     }),
+    fork: z.boolean().optional().meta({
+      description:
+        "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)",
+    }),
   }),
   output: OffloadOutputSchema,
   examples: [
@@ -199,6 +204,10 @@ export const offload = defineCommand({
       summary: "Plan offloading a project; --plan <id> then runs that plan, instead of --yes",
     },
     { argv: ["offload", "work:clients/acme/web", "--yes"], summary: "Offload a project without a prompt" },
+    {
+      argv: ["offload", "work:clients/acme/web", "--fork", "--yes"],
+      summary: "Keep this copy as a fork when another copy was offloaded since it came",
+    },
   ],
   human: (data) => {
     if ("fingerprint" in data) return renderPlan(data as Plan);
@@ -264,6 +273,7 @@ export const offload = defineCommand({
             ...(args.plan === undefined ? {} : { plan: args.plan }),
             ...(args.allow === undefined ? {} : { allow: args.allow }),
             ...(args["keep-deps"] === true ? { keepDeps: true } : {}),
+            ...(args.fork === true ? { fork: true } : {}),
             ...(ctx.store === undefined ? {} : { store: ctx.store }),
           },
         );
@@ -300,6 +310,23 @@ export const offload = defineCommand({
       onFinding: (f) => ctx.output.emit({ type: "finding", op, finding: f }),
     });
     if (!planned.ok) return planned;
+    // The lease the real run would warn of (D114), streamed beside the plan, never part of it: an approval binds the
+    // folder, not who else has a working copy.
+    const lease = await previewLease(
+      {
+        host: ctx.system,
+        paths,
+        device,
+        env: ctx.env,
+        loader: new ConfigLoader(ctx.io, paths),
+        opener: ctx.stores,
+        openMirror: (storeId) => openEventMirror(ctx.io, paths, storeId),
+        log: (level, message) => ctx.output.log(level, message),
+        now: () => ctx.clock.now(),
+      },
+      { project: ref, ...(ctx.store === undefined ? {} : { store: ctx.store }) },
+    );
+    if (lease !== undefined) ctx.output.emit({ type: "finding", op, finding: lease });
     let saved = true;
     try {
       await savePlan(ctx.io, paths, planned.value);

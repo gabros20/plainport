@@ -749,6 +749,11 @@ export const nextStep = (p: ProjectStatus): { command: string; reason: string } 
       command: `plainport offload ${address} --yes`,
       reason: `a resolution rejected snapshot ${p.base}, which this copy is on: the offload keeps its work as live work, which conflicts again and can then be resolved`,
     };
+  if (p.conditions.includes("head-moved"))
+    return {
+      command: `plainport offload ${address} --fork --yes`,
+      reason: `another copy was offloaded since this one came: this uploads it as a fork, so the project is conflicted and compare can show the two copies side by side (D114)`,
+    };
   if (p.conditions.includes("incomplete"))
     return {
       command: `plainport restore ${address} --snapshot <id> --to <path>`,

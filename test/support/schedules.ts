@@ -52,25 +52,19 @@ const projectId = async (world: Devices): Promise<string> => {
 };
 
 /**
- * Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. `unseen`
- * names, by device, the events its release's catalog read could not have seen (Q16's residual), for invariant 1;
- * `strict` names the onloads run under onload.leases = "strict", for invariant 5.
+ * Invariants 1–3 on every device and 4–6 on the store, given what the store held before the race began. Invariant 1's
+ * `unseen` (the events a device's release read could not have seen, Q16's residual) is derived from each device's
+ * trace, never written by hand; `strict` names the onloads run under onload.leases = "strict", for invariant 5.
  */
 export const expectInvariants = async (
   world: Devices,
   before: { events: Awaited<ReturnType<Devices["events"]>>; snapshots: readonly string[] },
-  {
-    unseen = {},
-    strict = [],
-  }: {
-    unseen?: Readonly<Record<string, readonly string[]>>;
-    strict?: CatalogInvariantSubject["strictOnloads"];
-  } = {},
+  { strict = [] }: { strict?: CatalogInvariantSubject["strictOnloads"] } = {},
 ): Promise<void> => {
   const id = await projectId(world);
   for (const d of world.devices) {
     await d.settled();
-    const subject = { ...(await d.subject(id)), unseen: unseen[d.name] ?? [] };
+    const subject = { ...(await d.subject(id)), unseen: await d.unseen() };
     expect({ device: d.name, problems: await invariantViolations(subject) }).toEqual({
       device: d.name,
       problems: [],
@@ -98,15 +92,6 @@ const bothOnloaded = async (world: Devices, a: Device, b: Device): Promise<void>
   expectCode(await b.run(ONLOAD()), 0, `${b.name}: onload`);
   // The default leases ("warn") let the second working copy happen, with lease.held.
   expectCode(await a.run(ONLOAD()), 0, `${a.name}: onload`);
-};
-
-/** The id of the offloaded event `d` wrote for `snapshot`. */
-const eventOf = async (world: Devices, d: Device, snapshot: string): Promise<string> => {
-  const event = (await world.events()).find(
-    (e) => e.type === "offloaded" && e.snapshot === snapshot && e.device === d.id,
-  );
-  if (event === undefined) throw new Error(`${d.name} wrote no offloaded event for ${snapshot}`);
-  return event.id;
 };
 
 /** A device's registry entry for the web project: its base is the snapshot its copy is on. */
@@ -145,12 +130,11 @@ export const streamedCodes = (ran: Ran): string[] =>
     });
 
 /**
- * S4: two strict onloads stand at onload.lease-checked together, each having observed no holder at its fresh read, and
- * both onload (Q17: a lease is advisory). The fold names one holder. The other's strict offload then refuses (lease.held,
- * exit 8) with nothing uploaded; once its owner turns leases to "warn" it offloads first, and the holder's offload,
- * verified and standing at its commit meanwhile, forks: both snapshots are kept and nothing is lost.
+ * Two strict onloads stand at onload.lease-checked together, each having observed no holder at its fresh read, and
+ * both onload (Q17: a lease is advisory). The fold names one holder; each device's status says whose it is. Returns
+ * the holder, the other, the store before the race and the onloads for invariant 5.
  */
-const strictOnloads = async (world: Devices): Promise<void> => {
+const strictRace = async (world: Devices) => {
   const a = world.device("dev-a");
   const b = world.device("dev-b");
   world.project(a);
@@ -180,7 +164,7 @@ const strictOnloads = async (world: Devices): Promise<void> => {
     });
     expect(await Bun.file(`${d.dir()}/src/main.ts`).exists()).toBe(true);
   }
-  const ops = [
+  const strict = [
     { device: a.id, op: envelope(byA)?.data?.op as string, before: before.events.map((e) => e.id) },
     { device: b.id, op: envelope(byB)?.data?.op as string, before: before.events.map((e) => e.id) },
   ];
@@ -209,25 +193,28 @@ const strictOnloads = async (world: Devices): Promise<void> => {
 
   await Bun.write(`${holder.dir()}/src/held.ts`, "export const held = 1;\n");
   await Bun.write(`${other.dir()}/src/other.ts`, "export const other = 1;\n");
-  // The non-holding copy's strict offload refuses: nothing uploaded, its folder as it was.
-  const backups = () =>
-    world.recorded().filter((c) => c.tool === "restic" && c.args.includes("backup")).length;
-  const uploaded = backups();
-  const refused = await other.run(OFFLOAD());
-  expectCode(refused, 8, `${other.name}: strict offload of the non-holding copy`);
-  expect(envelope(refused)?.error?.finding?.code).toBe("lease.held");
-  expect(backups()).toBe(uploaded);
-  expect(await Bun.file(`${other.dir()}/src/other.ts`).text()).toBe("export const other = 1;\n");
+  return { id, holder, other, before, strict };
+};
 
-  // The holder uploads and verifies, and stands at its commit while the other, now under "warn", offloads first.
+/** The restic backups the binaries ran so far. */
+const backups = (world: Devices) =>
+  world.recorded().filter((c) => c.tool === "restic" && c.args.includes("backup")).length;
+
+/**
+ * S4: after the strict race, strict governs onload only (D114): the non-holder's dry run previews lease.held, and its
+ * offload warns lease.held and goes on, first, while the holder's offload, verified, stands at its commit. The
+ * holder's then forks: both snapshots are kept, the project is conflicted, nothing is lost.
+ */
+const strictOnloads = async (world: Devices): Promise<void> => {
+  const { id, holder, other, before, strict } = await strictRace(world);
+  const previewed = await other.run(["offload", "work:web", "--dry-run", "--json"]);
+  expectCode(previewed, 0, `${other.name}: offload --dry-run`);
+  expect(streamedCodes(previewed)).toContain("lease.held");
+
   const offloadHolder = holder.start(OFFLOAD(), { pauseAt: "offload.verified" });
   await offloadHolder.paused();
-  writeFileSync(
-    other.paths.configFile,
-    readFileSync(other.paths.configFile, "utf8").replace('leases = "strict"', 'leases = "warn"'),
-  );
   const first = await other.run(OFFLOAD());
-  expectCode(first, 0, `${other.name}: offload under warn`);
+  expectCode(first, 0, `${other.name}: strict offload of the non-holding copy`);
   expect(streamedCodes(first)).toContain("lease.held");
   const committed = envelope(first)?.data;
   offloadHolder.resume();
@@ -243,11 +230,53 @@ const strictOnloads = async (world: Devices): Promise<void> => {
   expect(project?.conflicts.flat().sort()).toEqual(
     [committed?.snapshot as string, forked?.snapshot as string].sort(),
   );
-  // The holder's event came after the other's release read the catalog: Q16's residual for the other.
-  await expectInvariants(world, before, {
-    strict: ops,
-    unseen: { [other.name]: [await eventOf(world, holder, forked?.snapshot as string)] },
-  });
+  // The holder's event came after the other's release read the catalog: Q16's residual, read from the traces.
+  await expectInvariants(world, before, { strict });
+};
+
+/**
+ * S4b: after the strict race, the holder offloads first. The non-holder's offload is behind the head: refused with
+ * catalog.head-moved before anything is uploaded, its fix the exact command; offload --fork --yes then uploads it and
+ * keeps it as a fork (F1), so the project is conflicted with both snapshots kept and compare reaches the other copy.
+ */
+const holderFirst = async (world: Devices): Promise<void> => {
+  const { id, holder, other, before, strict } = await strictRace(world);
+  const first = await holder.run(OFFLOAD());
+  expectCode(first, 0, `${holder.name}: the holder's offload`);
+  const committed = envelope(first)?.data?.snapshot as string;
+  await holder.settled();
+
+  const uploaded = backups(world);
+  const refused = await other.run(OFFLOAD());
+  expectCode(refused, 8, `${other.name}: offload behind the head`);
+  expect(envelope(refused)?.error?.finding?.code).toBe("catalog.head-moved");
+  expect(envelope(refused)?.error?.finding?.fix).toContain("plainport offload work:web --fork --yes");
+  expect(backups(world)).toBe(uploaded);
+  expect((await other.run(["status", "work:web", "--json"])).out).toContain(
+    '"command":"plainport offload work:web --fork --yes"',
+  );
+
+  const kept = await other.run(["offload", "work:web", "--fork", "--yes", "--json"]);
+  expectCode(kept, 8, `${other.name}: offload --fork`);
+  const forked = envelope(kept)?.data;
+  expect([forked?.kind, forked?.detail, forked?.project]).toEqual(["fork", undefined, "work:web"]);
+  expect(await Bun.file(`${other.dir()}/src/other.ts`).text()).toBe("export const other = 1;\n");
+  expect(await Bun.file(`${other.dir()}.plainport`).exists()).toBe(false);
+  expect(baseOf(other)).toBe(forked?.snapshot as string);
+  const project = foldCatalog(await world.events()).projects[id];
+  expect(project?.status).toBe("conflicted");
+  expect(project?.conflicts.flat().sort()).toEqual([committed, forked?.snapshot as string].sort());
+  // The conflict is reachable: compare writes the holder's copy beside this one.
+  const compared = await other.run(["compare", "work:web", "--json"]);
+  expectCode(compared, 0, `${other.name}: compare`);
+  const sets = envelope(compared)?.data?.sets as { snapshot: string }[];
+  expect(sets.map((s) => s.snapshot)).toEqual([committed]);
+  expectCode(
+    await other.run(["compare", "work:web", "--clean", "--json"]),
+    0,
+    `${other.name}: compare --clean`,
+  );
+  await expectInvariants(world, before, { strict });
 };
 
 /**
@@ -393,8 +422,8 @@ const delayedVisibility = async (seen: "at-commit" | "never", durable = false): 
           ...(d.released === undefined ? {} : { released: d.released }),
           stripped: ["node_modules"],
           // What each release read could not see (Q16): B's event came after A's release, and A's was not listed yet
-          // when B's release read the catalog.
-          unseen: d === a ? (ofB === undefined ? [] : [ofB.id]) : [eventA.id],
+          // when B's release read the catalog; derived from what each re-read listed.
+          unseen: await d.unseen(),
         }),
       }).toEqual({ device: d.name, problems: [] });
     }
@@ -575,10 +604,8 @@ export const SCHEDULES: readonly Schedule[] = [
       expect(project?.conflicts.flat().sort()).toEqual(
         [committed?.snapshot as string, forked?.snapshot as string].sort(),
       );
-      // dev-b's fork was appended after dev-a's release read the catalog: Q16's residual for dev-a.
-      await expectInvariants(world, before, {
-        unseen: { "dev-a": [await eventOf(world, b, forked?.snapshot as string)] },
-      });
+      // dev-b's fork was appended after dev-a's release read the catalog: Q16's residual, read from the traces.
+      await expectInvariants(world, before);
     },
   },
   {
@@ -654,7 +681,7 @@ export const SCHEDULES: readonly Schedule[] = [
       expect(project?.status).toBe("conflicted");
       expect(project?.conflicts.flat().sort()).toEqual([released?.snapshot as string, snapB].sort());
       // dev-b's event came after dev-a's release read the catalog: Q16's residual for dev-a.
-      await expectInvariants(world, before, { unseen: { "dev-a": [await eventOf(world, b, snapB)] } });
+      await expectInvariants(world, before);
     },
   },
   {
@@ -664,9 +691,21 @@ export const SCHEDULES: readonly Schedule[] = [
     outcomes: {
       "dev-a": "may onload: it observed no holder at its fresh read",
       "dev-b":
-        "may onload too when it observed none; the fold names one holder, and the race ends at offload in a fork, never a lost update",
+        "may onload too when it observed none; the fold names one holder. The non-holder's offload warns lease.held (also in its dry run) and goes on, since strict governs onload only (D114), and the race ends at offload in a fork, never a lost update",
     },
     run: strictOnloads,
+  },
+  {
+    id: "S4b",
+    title: "strict onloads, the holder offloads first: the other copy forks with --fork (D114)",
+    devices: ["dev-a", "dev-b"],
+    outcomes: {
+      "dev-a":
+        "whichever device holds the lease offloads first, and its snapshot is the head; its folder is released",
+      "dev-b":
+        "the other copy's offload is refused with catalog.head-moved before anything is uploaded, its fix naming offload --fork --yes; with --fork it is uploaded and kept as a fork, its folder on its own snapshot, the project conflicted with both snapshots kept, and compare reaches the other copy",
+    },
+    run: holderFirst,
   },
   {
     id: "S5",

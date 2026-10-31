@@ -131,8 +131,11 @@ const rowOf = async (d: FakeDevice) => {
   };
 };
 
-/** Invariants 1–3 on each device (with what its release could not have seen) and 4–6 on the store. */
-const expectInvariants = async (w: World, unseen: Partial<Record<"dev-a" | "dev-b", string[]>> = {}) => {
+/**
+ * Invariants 1–3 on each device and 4–6 on the store. What each device's release could not have seen (Q16's residual)
+ * is derived from what its re-read listed, never written by hand.
+ */
+const expectInvariants = async (w: World) => {
   for (const d of [w.a, w.b]) {
     await settled(d);
     expect({
@@ -146,9 +149,7 @@ const expectInvariants = async (w: World, unseen: Partial<Record<"dev-a" | "dev-
         store: { name: "ssd", blob: w.store, engine: d.engine },
         ...(d.released === undefined ? {} : { released: d.released }),
         stripped: ["node_modules"],
-        ...(unseen[d.name as "dev-a" | "dev-b"] === undefined
-          ? {}
-          : { unseen: unseen[d.name as "dev-a" | "dev-b"] as string[] }),
+        unseen: await d.unseen(),
       }),
     }).toEqual({ device: d.name, problems: [] });
   }
@@ -189,7 +190,7 @@ describe("forks F1: the fork is seen at the commit's head check", () => {
     await settled(w.b);
     expect(await rowOf(w.b)).toEqual({ folder: false, stub: bSnap, base: bSnap, journals: [] });
     // dev-b released before dev-a's fork was appended: Q16's residual for dev-b.
-    await expectInvariants(w, { "dev-b": [(await ownEvent(w, w.a, data.snapshot))?.id as string] });
+    await expectInvariants(w);
   });
 
   test("after recover: a crash after the fork's event leaves the journal at diverged; recover keeps the same row", async () => {
@@ -203,7 +204,7 @@ describe("forks F1: the fork is seen at the commit's head check", () => {
     const [op] = reportOf(await w.a.recover()).operations;
     expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
     expect(await rowOf(w.a)).toEqual({ folder: true, stub: null, base: op?.snapshot, journals: [] });
-    await expectInvariants(w, { "dev-b": [(await ownEvent(w, w.a, op?.snapshot as string))?.id as string] });
+    await expectInvariants(w);
   });
 });
 
@@ -244,7 +245,7 @@ describe("forks F2: the fork is seen after the commit, before the rename", () =>
     );
     await settled(w.a);
     expect(await rowOf(w.a)).toMatchObject({ folder: false, stub: byA.snapshot, base: byA.snapshot });
-    await expectInvariants(w, { "dev-a": [fork.id] });
+    await expectInvariants(w);
   });
 
   test("the invariant catches a release that went on although the fork was there to see", async () => {
@@ -329,6 +330,96 @@ describe("forks F2: the fork is seen after the commit, before the rename", () =>
       base: done?.snapshot,
       journals: expect.any(Array),
     });
+    await expectInvariants(w);
+  });
+});
+
+/** Makes a device's registry.json unreadable from a synchronous seam, and gives back a way to restore it. */
+const breakRegistry = (d: FakeDevice) => {
+  const file = d.box.paths.registryFile;
+  const kept = readFileSync(file, "utf8");
+  writeFileSync(file, "{ not a registry\n");
+  return () => writeFileSync(file, kept);
+};
+
+describe("forks: the base write that names the fork (review r1 #11)", () => {
+  test("F1: a registry write that fails keeps the journal at diverged; recover writes the base, then closes it", async () => {
+    const w = await world();
+    w.a.engine.hooks.duringSnapshot = async () => {
+      w.a.engine.hooks.duringSnapshot = undefined;
+      value(await w.b.offload());
+    };
+    let restore = () => {};
+    const byA = await w.a.offload("web", {
+      onStep: (step) => {
+        if (step === "offload.diverged.appended") restore = breakRegistry(w.a);
+      },
+    });
+    expect(byA.ok ? "released" : byA.finding.code).toBe("registry.invalid");
+    expect(journalsOf(w.a).map((j) => j.step)).toEqual(["offload.diverged"]);
+    restore();
+    const [op] = reportOf(await w.a.recover()).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect(await rowOf(w.a)).toEqual({ folder: true, stub: null, base: op?.snapshot, journals: [] });
+    await expectInvariants(w);
+  });
+
+  test("F1: a crash right after the base write (offload.diverged.based) leaves the journal at diverged; recover keeps the row", async () => {
+    const w = await world();
+    w.a.engine.hooks.duringSnapshot = async () => {
+      w.a.engine.hooks.duringSnapshot = undefined;
+      value(await w.b.offload());
+    };
+    await expect(w.a.offload("web", { at: "offload.diverged.based" })).rejects.toThrow();
+    expect(journalsOf(w.a).map((j) => j.step)).toEqual(["offload.diverged"]);
+    const [op] = reportOf(await w.a.recover()).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect(await rowOf(w.a)).toEqual({ folder: true, stub: null, base: op?.snapshot, journals: [] });
+    await expectInvariants(w);
+  });
+
+  test("F2: a registry write that fails keeps the journal at release.trash with the folder in place; recover writes the base", async () => {
+    const w = await world();
+    const fork = forkOf(w);
+    let restore = () => {};
+    const byA = await w.a.offload("web", {
+      onStep: (step) => {
+        if (step === "offload.committed") landNow(w, fork);
+        if (step === "offload.release.trash") restore = breakRegistry(w.a);
+      },
+    });
+    expect(byA.ok ? "released" : byA.finding.code).toBe("registry.invalid");
+    restore();
+    expect(await rowOf(w.a)).toMatchObject({ folder: true, stub: null, journals: ["offload.release.trash"] });
+    const [op] = reportOf(await w.a.recover()).operations;
+    expect([op?.outcome, op?.state, op?.conflict?.detail]).toEqual(["forked", "conflicted", "after-commit"]);
+    expect(await rowOf(w.a)).toEqual({ folder: true, stub: null, base: op?.snapshot, journals: [] });
+    await expectInvariants(w);
+  });
+});
+
+describe("forks F2: recover labels a fork by the verdict release acted on (review r1 #10)", () => {
+  test("a fork found by the sibling rule (its own event not listed yet) is reported conflicted, not local", async () => {
+    const w = await world();
+    await expect(w.a.offload("web", { at: "offload.committed" })).rejects.toThrow();
+    const own = (await allEvents(w.store)).find(
+      (e) => e.type === "offloaded" && e.device === w.a.device.id && e.base === w.base,
+    );
+    if (own === undefined) throw new Error("dev-a's event is not on the store");
+    // A store whose listings lag: dev-a's own event is not listed yet (a get still reads it), a sibling made from the
+    // same base is.
+    const key = storeEventKey(own.id);
+    const list = w.store.list;
+    w.store.list = async (prefix) => {
+      const listed = await list(prefix);
+      return listed.ok ? { ...listed, value: listed.value.filter((e) => e.key !== key) } : listed;
+    };
+    for (const k of [...w.a.mirror.data.keys()]) if (k.includes(own.id)) w.a.mirror.data.delete(k);
+    value(await appendEvent(storeEventLog(w.store), forkOf(w)));
+    const [op] = reportOf(await w.a.recover()).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect(await rowOf(w.a)).toEqual({ folder: true, stub: null, base: op?.snapshot, journals: [] });
+    w.store.list = list;
     await expectInvariants(w);
   });
 });
@@ -427,7 +518,7 @@ describe("forks F3: the fork is seen after the rename, which is never undone", (
       journals: expect.any(Array),
     });
     expect((await foldOf(w))?.status).toBe("conflicted");
-    await expectInvariants(w, { "dev-a": [fork.id] });
+    await expectInvariants(w);
   });
 
   test("after recover: the release.moved write lost, the folder in the trash; recover decides from the world and goes on", async () => {
@@ -445,7 +536,7 @@ describe("forks F3: the fork is seen after the rename, which is never undone", (
       base: op?.snapshot,
       journals: expect.any(Array),
     });
-    await expectInvariants(w, { "dev-a": [fork.id] });
+    await expectInvariants(w);
   });
 
   test("after recover: the rename not done (release.trash on the journal, the folder in place): the re-read decides F2", async () => {

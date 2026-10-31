@@ -198,8 +198,10 @@ const keptAsFork = async (rc: ReleaseContext, why: "forked" | "rejected"): Promi
   const { saga } = rc;
   const { project, op } = saga.journal;
   const folder = project.dir;
+  // The registry's base must name the fork, or resolve --keep refuses this copy: a write that fails keeps the journal at
+  // release.trash with the folder in place, and recover reads the catalog again and writes it.
   const based = await recordBase(rc, saga.journal);
-  if (!based.ok) rc.log("warn", `registry.json was not updated: ${based.finding.message}`);
+  if (!based.ok) return based;
   await saga.close();
   const data: OffloadConflict = {
     op,

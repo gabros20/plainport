@@ -104,7 +104,7 @@ plainkeep.
 | 5 | `denied` | Denied by policy: a root not allowed on this device, untrusted hooks, a key without permission |
 | 6 | `blocked` | Blocked by a preflight finding, or the plan is stale |
 | 7 | `verifyFailed` | Verification failed |
-| 8 | `conflict` | Conflict, or a strict lease held elsewhere |
+| 8 | `conflict` | Conflict: a fork, a copy behind the head, or a strict onload's lease held elsewhere |
 | 9 | `unreachable` | Store or peer unreachable |
 | 10 | `unhydrated` | Restored but not hydrated |
 | 11 | `locked` | Another operation holds the lock |
@@ -181,7 +181,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | Code | Severity | Allowable | Exit | Meaning |
 | --- | --- | --- | --- | --- |
 | `catalog.event-skipped` | warn | no | 6 | A catalog event file is not JSON, does not match its schema, is named for another id, has a type this version does not know, names its snapshot's location in zero or several stores (stored-multiple, Q11), or was listed by the store and not returned by the read; it is left out of the fold and never changed |
-| `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted |
+| `catalog.head-moved` | block | no | 8 | The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded, and the fix is offload --fork --yes, which keeps the copy as a fork (D114); found at the commit (or with --fork), the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted |
 | `catalog.head-uncertain` | block | no | 6 | The catalog left out an event it could not read or use that may change the project's head: one whose project cannot be told or authenticated (it may be any project's) or one of this project's, whatever its id's time says (a writer's clock may run slow), so the head may be older than the newest snapshot; nothing is restored or offloaded. When this device knows a snapshot no readable event names (its stub's or its registry's), the fix names it: onload or restore --snapshot <it> restores it from the repository by its tag, and any other snapshot is refused; otherwise onload or restore --snapshot <id> takes the snapshot named. The doubt ends when the event reads again (D86, Task 21) |
 | `catalog.incomplete` | block | no | 6 | The catalog names a snapshot of the project it does not hold (a partial mirror), so its head is unknown; connect or sync the store that holds every snapshot |
 | `catalog.seal-failed` | block | no | 6 | A sealed catalog event cannot be sealed or opened: its envelope or key derivation is a version this build does not know, its key id is not this store's, or it fails authentication (changed, or moved to another event key or store). Nothing is guessed and no key is substituted; the event is left unread (Catalog seal v1) |
@@ -224,7 +224,7 @@ when it drifts); a test also fails when the sources emit a code the catalogue la
 | `hydrate.failed` | block | no | 10 | The files are restored but installing the dependencies failed (restored-unhydrated). The error's data is the command's output with the install that failed (onload's also names the snapshot, D14), and fix is plainport hydrate <project> |
 | `internal.unexpected` | block | no | 1 | A bug: an exception escaped a command; the message names it |
 | `journal.pending` | block | no | 6 | An earlier operation on the project was interrupted and its journal is still open; fix is plainport recover. From recover itself: a journal file this version cannot read, left as it is |
-| `lease.held` | warn | no | 8 | Another device holds the project's lease; a warning, or a refusal with exit 8 when onload.leases = "strict" |
+| `lease.held` | warn | no | 8 | Another device holds the project's lease; a warning, or a refusal of the onload with exit 8 when onload.leases = "strict". At offload (and its --dry-run) it is only ever a warning (D114) |
 | `offload.diverged-after-commit` | block | no | 8 | Raised by offload (an edit between verification and the rename) and by plainport recover (an edit since the crash): the snapshot is committed and is the project's head, but the folder changed after the commit. The folder is kept with its edits, no stub is written, the device's base becomes that snapshot, and the next offload builds on it; no resolve is needed. The error's data has kind: "diverged-after-commit", where a fork (catalog.head-moved) has kind: "fork" (D51, D52); from recover, data is its report, and the operation's conflict holds that kind |
 | `operation.cancelled` | block | no | 130 | A signal (Ctrl-C, a closed terminal) stopped the operation at a safe point: before it changed anything local, or, for onload and hydrate, during the install after a good restore, when the project is restored-unhydrated and plainport hydrate retries (D56). Also the envelope of a command a signal ended before it reported, under --json: one that runs no operation, or a second signal while an operation wound down, when plainport recover settles what it journaled (D81) |
 | `path.occupied` | block | no | 6 | Something already stands where onload or restore would put the project; it never merges, and fix names --to <path> (or, for the folder offload.diverged-after-commit kept, says to keep working in it). Also from an offload's release, finished by recover, when a folder stands at the project's place after the project folder was moved aside: neither is touched and no stub is written |
@@ -327,7 +327,7 @@ and why, the snapshot and the head it goes over, the landing folder, the space i
 hydrate plan, and `pending` (`op`, `step`, `action`: `resume` or `roll-back`) when an earlier onload stopped before
 its swap. The hydrate plan comes from the snapshot's file list, so it has no `untrusted` list: `untrustedKnown` is
 `false`, which is not the same as none. A live lock or a journal that holds the project back refuses with the run's
-own finding (`project.locked` exit 11, `journal.pending` exit 6). `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. A command that has no preview refuses
+own finding (`project.locked` exit 11, `journal.pending` exit 6). `lease.held` is a warning there, and under `leases = "strict"` a refusal with exit 8. `offload --dry-run` streams `lease.held` beside its plan when the real run would warn of it; offload never refuses on a lease, whatever `onload.leases` says (D114). A command that has no preview refuses
 `--dry-run` with exit 2 before doing anything (§4); `plainport.json` says which commands support it.
 
 ## 7. Stability policy

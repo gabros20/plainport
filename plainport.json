@@ -1619,7 +1619,7 @@
     {
       "name": "offload",
       "summary": "Snapshot a project, verify it, then remove its folder: deleted at once, or kept for keepLocalFor until gc frees it",
-      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...]",
+      "usage": "plainport offload <project...> [--plan <value>] [--keep-deps] [--allow <value>...] [--fork]",
       "risk": "confirm",
       "dryRun": true,
       "acceptsPlan": true,
@@ -1650,6 +1650,12 @@
           "type": "string",
           "multiple": true,
           "summary": "Override an allowable blocker by its code, e.g. --allow git.locked (repeatable)"
+        },
+        {
+          "name": "fork",
+          "type": "boolean",
+          "multiple": false,
+          "summary": "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)"
         }
       ],
       "arguments": {
@@ -1679,6 +1685,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "fork": {
+            "description": "When another copy was offloaded since this one came (catalog.head-moved), upload this copy anyway and keep it as a fork: the folder stays on its own snapshot and the project is conflicted, so compare and resolve can reach it (exit 8, kind fork). Without it that offload is refused before anything is uploaded (D114)",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1779,7 +1789,7 @@
                   "fork",
                   "diverged-after-commit"
                 ],
-                "description": "fork: the head moved during the upload; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)"
+                "description": "fork: the head moved during the upload, or --fork kept a copy that was behind it; the snapshot is kept as a fork and the folder stays (catalog.head-moved). diverged-after-commit: the snapshot is committed and is the head, but the folder changed after the commit; it stays here with its edits and the next offload builds on the snapshot (offload.diverged-after-commit, D52)"
               },
               "detail": {
                 "description": "kind fork only (Q6): after-commit when the fork was seen after the commit and before the rename, by release's catalog read (another copy offloaded from the same snapshot, or a resolution rejected this one); the snapshot is committed and the folder stays on it. Absent when the head check at the commit saw it",
@@ -2674,6 +2684,15 @@
             "--yes"
           ],
           "summary": "Offload a project without a prompt"
+        },
+        {
+          "argv": [
+            "offload",
+            "work:clients/acme/web",
+            "--fork",
+            "--yes"
+          ],
+          "summary": "Keep this copy as a fork when another copy was offloaded since it came"
         }
       ]
     },
@@ -5988,7 +6007,7 @@
       "severity": "block",
       "allowable": false,
       "exitCode": 8,
-      "summary": "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted"
+      "summary": "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded, and the fix is offload --fork --yes, which keeps the copy as a fork (D114); found at the commit (or with --fork), the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted"
     },
     {
       "code": "catalog.event-skipped",
@@ -6786,7 +6805,7 @@
       "severity": "warn",
       "allowable": false,
       "exitCode": 8,
-      "summary": "Another device holds the project's lease; a warning, or a refusal with exit 8 when onload.leases = \"strict\""
+      "summary": "Another device holds the project's lease; a warning, or a refusal of the onload with exit 8 when onload.leases = \"strict\". At offload (and its --dry-run) it is only ever a warning (D114)"
     },
     {
       "code": "path.occupied",

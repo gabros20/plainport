@@ -88,6 +88,7 @@ import {
   withProjectLock,
 } from "../saga/project-gate.ts";
 import {
+  forkAfterCommit,
   type OffloadConflict,
   offloadTrashOf,
   recordBase,
@@ -758,7 +759,8 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     // Forked only when the fold's conflicts name this snapshot (D61): the event keeps it as a fork, as
     // offload.diverged does, and the folder stays.
     if (folded?.conflicts.some((fork) => fork.includes(journal.op))) {
-      await forkBase(journal);
+      const based = await forkBase(journal);
+      if (!based.ok) return pending(journal, based);
       const closed = await close(journal);
       return closed ?? { op: entry(journal, "forked", "conflicted") };
     }
@@ -914,8 +916,10 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
     const conflict = released.data as OffloadConflict | undefined;
     if (released.finding.code === "catalog.head-moved" && conflict?.detail === "after-commit") {
       // F2: kept as a fork, the journal closed. Conflicted while a fork names it; on a rejected line, local.
-      const forked =
-        reread?.projects[journal.project.id]?.conflicts.some((f) => f.includes(journal.op)) ?? true;
+      // forkAfterCommit's own verdict, the one release acted on: a fork found by its sibling rule (this snapshot's own
+      // event not listed yet) is conflicted too.
+      const verdict = reread === undefined ? undefined : forkAfterCommit(reread, journal);
+      const forked = verdict?.ok !== true || verdict.value !== "rejected";
       return {
         op: {
           ...entry(journal, "forked", forked ? "conflicted" : "local"),
@@ -1005,15 +1009,18 @@ export const recover = async (deps: RecoverDeps): Promise<Result<RecoveryReport>
         if (!appended.ok) return pending(journal, appended);
       }
     }
-    await forkBase(journal);
+    const based = await forkBase(journal);
+    if (!based.ok) return pending(journal, based);
     const closed = await close(journal);
     return closed ?? { op: entry(journal, "forked", "conflicted") };
   }
 
-  /** F1: the folder kept as a fork is on its own snapshot (registry.json's base), as the live offload records. */
-  async function forkBase(journal: OffloadJournal): Promise<void> {
-    const based = await recordBase({ host, paths }, journal);
-    if (!based.ok) deps.log("warn", `registry.json was not updated: ${based.finding.message}`);
+  /**
+   * F1: the folder kept as a fork is on its own snapshot (registry.json's base), as the live offload records. A write
+   * that fails leaves the operation pending, so the next recover writes it again (resolve --keep needs it).
+   */
+  async function forkBase(journal: OffloadJournal): Promise<Result<unknown>> {
+    return recordBase({ host, paths }, journal);
   }
 
   /**

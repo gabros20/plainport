@@ -17,11 +17,13 @@
 //   PLAINPORT_TEST_FAULT_AT=<step>         SIGKILL this process at the step (a saga step or after-effect seam),
 //   PLAINPORT_TEST_FAULT_OCCURRENCE=<n>    the nth time it is reached (default 1);
 //   PLAINPORT_TEST_PAUSE_AT=<step>         the first time the step is reached, create PLAINPORT_TEST_PAUSE_FILE and
-//   PLAINPORT_TEST_PAUSE_FILE=<path>       block until it is removed (two minutes at most), then go on.
+//   PLAINPORT_TEST_PAUSE_FILE=<path>       block until it is removed (two minutes at most), then go on;
+//   PLAINPORT_TEST_TRACE_FILE=<path>       append "<epoch ms> <step>" for every step and seam reached, so a race
+//                                          schedule can tell which events a release's catalog read could have seen.
 // They are documented here and in CONTRIBUTING.md, never in DESIGN.md's configuration. The detached delete's child gets
 // them too (testHookEnv), so a test can pause or kill it at trash.delete.checked.
 
-import { existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { FAULT_STEP, type FaultPlan, type GuardPolicy, PathGuard } from "@plainport/core";
 
@@ -49,7 +51,8 @@ export const testFaultPlan = async (
   const at = env.PLAINPORT_TEST_FAULT_AT;
   const pauseAt = env.PLAINPORT_TEST_PAUSE_AT;
   const pauseFile = env.PLAINPORT_TEST_PAUSE_FILE;
-  if (at === undefined && pauseAt === undefined) return undefined;
+  const traceFile = env.PLAINPORT_TEST_TRACE_FILE;
+  if (at === undefined && pauseAt === undefined && traceFile === undefined) return undefined;
   if (at !== undefined && !FAULT_STEP.test(at)) return undefined;
   const occurrence = Number(env.PLAINPORT_TEST_FAULT_OCCURRENCE ?? "1");
   if (!Number.isInteger(occurrence) || occurrence < 1) return undefined;
@@ -61,10 +64,19 @@ export const testFaultPlan = async (
       return undefined;
     }
   }
+  if (traceFile !== undefined) {
+    if (!inside(resolve(traceFile), home)) return undefined;
+    try {
+      await new PathGuard(guard).check("write the trace file", traceFile, true);
+    } catch {
+      return undefined;
+    }
+  }
   let paused = false;
   return {
     ...(at === undefined ? {} : { at, action: "kill" as const, occurrence }),
     onStep: (step) => {
+      if (traceFile !== undefined) appendFileSync(traceFile, `${Date.now()} ${step}\n`);
       if (step !== pauseAt || paused || pauseFile === undefined) return;
       paused = true;
       // faultAt is synchronous, so the pause is too: the saga stands still at its step, children included.
@@ -80,6 +92,7 @@ const HOOK_VARIABLES = [
   "PLAINPORT_TEST_FAULT_OCCURRENCE",
   "PLAINPORT_TEST_PAUSE_AT",
   "PLAINPORT_TEST_PAUSE_FILE",
+  "PLAINPORT_TEST_TRACE_FILE",
 ] as const;
 
 /** The hook's variables this process has, for the detached delete's child (whose environment is otherwise scrubbed). */

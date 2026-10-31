@@ -6,6 +6,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Finding } from "../../packages/contract/src/index.ts";
+import { STORE_EVENTS_PREFIX } from "../../packages/core/src/catalog/codec.ts";
 import type { CatalogEvent } from "../../packages/core/src/catalog/events.ts";
 import { readEvents, storeEventLog } from "../../packages/core/src/catalog/log.ts";
 import { ConfigLoader } from "../../packages/core/src/config/load.ts";
@@ -15,7 +16,12 @@ import type { StoreOpener } from "../../packages/core/src/ports/store.ts";
 import { type RecoverDeps, recover } from "../../packages/core/src/recover/recover.ts";
 import { type RegistryEntry, readRegistry } from "../../packages/core/src/registry.ts";
 import { resolveProject } from "../../packages/core/src/roots/address.ts";
-import { type OffloadDeps, runOffload } from "../../packages/core/src/saga/offload.ts";
+import {
+  type OffloadDeps,
+  type OffloadRequest,
+  previewLease,
+  runOffload,
+} from "../../packages/core/src/saga/offload.ts";
 import { type OnloadDeps, runOnload } from "../../packages/core/src/saga/onload.ts";
 import { type ProjectStatus, projectViews } from "../../packages/core/src/status/projects.ts";
 import { setUpStore } from "../../packages/core/src/store.ts";
@@ -50,9 +56,19 @@ export interface FakeDevice {
   released?: TreeCapture;
   /** Every finding its offloads and onloads streamed, oldest first. */
   findings: Finding[];
+  /** The events its last release's catalog read saw (the offload.release.reread seam, live or in recover). */
+  seenAtReread?: Set<string>;
+  /** Invariant 1's `unseen`, derived (Q16's residual): the store's events its last release read did not see. */
+  unseen(): Promise<string[]>;
   /** The project folder at `path` in this device's root. */
   dir(path?: string): string;
-  offload(path?: string, faults?: RunFaults): ReturnType<typeof runOffload>;
+  offload(
+    path?: string,
+    faults?: RunFaults,
+    req?: Omit<OffloadRequest, "project">,
+  ): ReturnType<typeof runOffload>;
+  /** The lease.held its offload's dry run would stream (D114), or nothing. */
+  previewLease(path?: string): ReturnType<typeof previewLease>;
   onload(path?: string): ReturnType<typeof runOnload>;
   recover(faults?: RunFaults): ReturnType<typeof recover>;
   /** This device's registry entry for the project at `path`. */
@@ -94,7 +110,18 @@ export const fakeDevices = async (
     if (!made.ok) throw new Error(made.finding.message);
     const engine = fakeEngine(repository);
     const mirror = memoryBlobStore({ createIfAbsent: true });
-    const opener: StoreOpener = { open: async () => ({ ok: true, value: { blob: store, engine } }) };
+    // The event keys the store last listed to this device, so the release's re-read is known by what it saw.
+    let listed: string[] = [];
+    const blob: SemanticBlobStore = {
+      ...store,
+      list: async (prefix, opts) => {
+        const got = await store.list(prefix, opts);
+        if (got.ok && STORE_EVENTS_PREFIX.startsWith(prefix.slice(0, STORE_EVENTS_PREFIX.length)))
+          listed = got.value.map((e) => e.key).filter((k) => k.startsWith(STORE_EVENTS_PREFIX));
+        return got;
+      },
+    };
+    const opener: StoreOpener = { open: async () => ({ ok: true, value: { blob, engine } }) };
     const env = { HOME: box.home, PATH, PLAINPORT_STORE_PASSWORD: "pw" };
     const setUp = await setUpStore(testHost(), {
       paths: box.paths,
@@ -115,6 +142,9 @@ export const fakeDevices = async (
           onStep: (step) => {
             const web = join(box.home, "work", "web");
             if (step === "offload.release.trash" && existsSync(web)) device.released = captureTree(web);
+            // What the release's catalog read saw: the store's listing and this device's mirror.
+            if (step === "offload.release.reread")
+              device.seenAtReread = new Set([...listed, ...mirror.data.keys()].flatMap(eventIdOf));
             faults.onStep?.(step);
           },
         },
@@ -156,16 +186,24 @@ export const fakeDevices = async (
         engine,
         mirror,
         dir: (path = "web") => join(box.home, "work", path),
-        offload: async (path = "web", faults?: RunFaults) =>
+        offload: async (path = "web", faults?: RunFaults, req: Omit<OffloadRequest, "project"> = {}) =>
           runOffload(faults === undefined ? offloadDeps : { ...offloadDeps, host: hostFor(faults) }, {
+            ...req,
             project: await ref(path),
           }),
+        previewLease: async (path = "web") => previewLease(offloadDeps, { project: await ref(path) }),
         onload: async (path = "web") => runOnload(onloadDeps, { project: await ref(path), hydrate: false }),
         recover: (faults?: RunFaults) => recover(recoverDeps(faults)),
         entry: async (path = "web") => {
           const registry = await readRegistry(testHost(), box.paths);
           if (!registry.ok) throw new Error(registry.finding.message);
           return Object.values(registry.value.projects).find((e) => e.path === path);
+        },
+        unseen: async () => {
+          const seen = device.seenAtReread;
+          return seen === undefined
+            ? []
+            : (await allEvents(store)).map((e) => e.id).filter((id) => !seen.has(id));
         },
         view: async (path = "web") => {
           const views = await projectViews({ ...common, io: testHost() });
@@ -176,6 +214,12 @@ export const fakeDevices = async (
     );
   }
   return devices;
+};
+
+/** The event id a store or mirror key names, if any. */
+const eventIdOf = (key: string): string[] => {
+  const id = /([0-9A-HJKMNP-TV-Z]{26})\.json$/.exec(key)?.[1];
+  return id === undefined ? [] : [id];
 };
 
 /** Every event the store holds, whatever its listings show now. */

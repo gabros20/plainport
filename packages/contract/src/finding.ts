@@ -38,7 +38,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded; found at the commit, the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted",
+      "The store's latest snapshot of the project is not the one this copy came from (another copy was offloaded since, or the project is conflicted). Found before the upload, nothing is uploaded, and the fix is offload --fork --yes, which keeps the copy as a fork (D114); found at the commit (or with --fork), the snapshot is kept as a fork and the error's data names it (D14). Nothing local is deleted",
   },
   "catalog.event-skipped": {
     severity: "warn",
@@ -792,7 +792,7 @@ export const FINDINGS = Object.freeze({
     allowable: false,
     exitCode: 8,
     summary:
-      'Another device holds the project\'s lease; a warning, or a refusal with exit 8 when onload.leases = "strict"',
+      'Another device holds the project\'s lease; a warning, or a refusal of the onload with exit 8 when onload.leases = "strict". At offload (and its --dry-run) it is only ever a warning (D114)',
   },
   "path.occupied": {
     severity: "block",

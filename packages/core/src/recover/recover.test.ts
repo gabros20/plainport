@@ -431,6 +431,17 @@ describe("recover: an offload, at every journal step", () => {
     await expectLocalUntouched();
     await expectInvariants();
   });
+
+  test("a crash after the fork's base was written (offload.diverged.based) keeps the folder (conflicted)", async () => {
+    await registerFirst();
+    await otherCopyDuringUpload();
+    await crashOffloadAt("offload.diverged.based");
+    const [op] = reportOf(await recover(recoverDeps())).operations;
+    expect([op?.outcome, op?.state]).toEqual(["forked", "conflicted"]);
+    expect((await storeEvents()).filter((e) => e.type === "offloaded")).toHaveLength(2);
+    await expectLocalUntouched();
+    await expectInvariants();
+  });
 });
 
 describe("recover: an offload, at every after-effect seam (D52)", () => {
@@ -494,6 +505,7 @@ describe("recover: an offload, at every after-effect seam (D52)", () => {
         "offload.root-created",
         "offload.snapshot.discarded.appended",
         "offload.diverged.appended",
+        "offload.diverged.based",
       ].sort(),
     );
     expect(OFFLOAD_STEPS.length).toBe(16);
