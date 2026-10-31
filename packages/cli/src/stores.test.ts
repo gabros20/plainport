@@ -116,7 +116,7 @@ describe("the opener: an sftp store", () => {
     expect(value(await opened.engine.list({}))).toEqual([]);
 
     const rclone = calls.find((c) => c.command.endsWith("/rclone"));
-    expect(rclone?.args?.at(-1)).toBe("PLAINPORT:/volume1/plainport/meta/v1");
+    expect(rclone?.args?.at(-1)).toBe("PLAINPORT:/volume1/plainport/meta/v1/");
     expect(rclone?.env).toMatchObject({
       RCLONE_CONFIG_PLAINPORT_TYPE: "sftp",
       SSH_AUTH_SOCK: "/tmp/agent.sock",
@@ -247,7 +247,7 @@ describe("the opener: an s3 store", () => {
     expect(opened.location).toBe("s3:https://s3.example.eu/plainport/macs");
     value(await opened.engine.list({}));
     const rclone = calls.find((c) => c.command.endsWith("/rclone"));
-    expect(rclone?.args?.at(-1)).toBe("PLAINPORT:plainport/macs/meta/v1");
+    expect(rclone?.args?.at(-1)).toBe("PLAINPORT:plainport/macs/meta/v1/");
     expect(rclone?.env).toMatchObject({
       RCLONE_CONFIG_PLAINPORT_TYPE: "s3",
       RCLONE_CONFIG_PLAINPORT_PROVIDER: "Other",

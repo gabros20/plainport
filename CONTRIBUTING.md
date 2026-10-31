@@ -129,6 +129,15 @@ rows by itself; a new branch must say how each variant reaches it. The in-proces
 the SIGKILL subprocess variant runs in `bun run test:t1` and, on macOS, puts the project on a case-sensitive APFS
 disk image it makes with `hdiutil` and deletes afterwards.
 
+`bun run test:t2` adds the store dimension and the fault dimension, on the containers `scripts/testenv up` brings up
+(macOS only until the Linux host, M3, since the binary's preflight needs it). `remote.t2.test.ts` runs every saga row
+and every bootstrap row on an SFTP store and on an S3 store (SeaweedFS), each row with its own store under a fresh
+prefix, set up by `store add`. `faults.t2.test.ts` puts a Toxiproxy fault in where it hurts most (the offload's
+commit and event append, release's catalog re-read, the held trash's checked read, onload's restore, every bootstrap
+step): `cut` on both stores, `lost-ack` on S3 (on SFTP it acts like `cut`). Each fault row runs `recover` once with the
+fault still in (pending, nothing moved) and once without it. One proxy serves each store kind, so its fault rows run
+one at a time.
+
 The subprocess variant drives the compiled binary through a test hook, not configuration: `PLAINPORT_TEST_FAULT_AT`
 (with `PLAINPORT_TEST_FAULT_OCCURRENCE`) makes it SIGKILL itself at a step, and `PLAINPORT_TEST_PAUSE_AT` with
 `PLAINPORT_TEST_PAUSE_FILE` makes it wait at a step until the file is removed; `PLAINPORT_TEST_TRACE_FILE` makes it
@@ -141,8 +150,9 @@ home and `HOME` lie outside it, and the pause file must lie under `HOME` and pas
 (`packages/cli/src/test-hooks.ts`).
 
 Two more knobs for the matrix itself: `PLAINPORT_CRASH_PARALLEL` sets how many subprocess rows run at once (default 6,
-3 under CI, never more than the cores), and `PLAINPORT_CRASH_MATRIX_DAMAGE=1` runs every row of both variants with
-harm done after recover (a deleted `.env` or stub) and passes only if each row reports it, which proves the checks
+3 under CI, never more than the cores; 3 on an SFTP store and 4 on S3), and `PLAINPORT_CRASH_MATRIX_DAMAGE=1` runs
+every row of both variants, on every store kind and under every fault, with harm done after recover (a deleted `.env`
+or stub, a bootstrap's pin taken away or made up) and passes only if each row reports it, which proves the checks
 still bite.
 
 ### The compatibility matrix
